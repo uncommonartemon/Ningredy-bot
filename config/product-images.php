@@ -1,0 +1,35 @@
+<?php
+
+return [
+    // Public catalog limits. The original files are stored locally as WebP.
+    'max_images' => 3,
+    'max_images_by_type' => [
+        'laptop' => 5,
+        'desktop' => 5,
+    ],
+    'download_limit' => 20,
+    'download_candidates' => 8,
+    // Some official product galleries (for example ARTLINE) expose only a
+    // clean 220px catalog image. Vision still has to approve it.
+    'minimum_side' => 200,
+    'minimum_ratio' => 0.28,
+    'maximum_ratio' => 3.5,
+    'public_source_target' => 6,
+
+    // Vision receives candidates in small batches and stops after enough
+    // publication images are selected.
+    'vision_candidates' => 4,
+    'vision_max_batches' => 2,
+    'vision_min_score' => 60,
+    'vision_official_min_score' => 55,
+
+    // Near-duplicate photos (same shot with a different crop or compression)
+    // are dropped after Vision when their 64-bit perceptual hash distance is
+    // within this threshold. 0 means pixel-identical, ~6 catches near-copies.
+    'duplicate_hash_threshold' => 6,
+
+    // Run a separate web image search only when the research result produced
+    // no downloadable candidate, or every downloaded candidate was rejected.
+    'fallback_discovery' => true,
+    'discover_after_rejection' => true,
+];
