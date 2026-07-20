@@ -58,6 +58,7 @@ class ProductImageVisionVerifier
                 'images.*.exact_match' => ['required', 'boolean'],
                 'images.*.publishable' => ['required', 'boolean'],
                 'images.*.kind' => ['required', 'in:product,packaging,detail,logo,banner,screenshot,unrelated,uncertain'],
+                'images.*.view' => ['required', 'in:front,angle,side,back,detail,packaging,other'],
                 'images.*.score' => ['required', 'integer', 'between:0,100'],
                 'images.*.reason' => ['required', 'string', 'max:1000'],
             ])->validate();
@@ -76,6 +77,8 @@ class ProductImageVisionVerifier
 
                     return [
                         ...$review,
+                        'hero' => $review['kind'] === 'product'
+                            && in_array($review['view'], ['front', 'angle'], true),
                         'source_supported' => $this->sourceSupportsIdentity($draft, (string) ($candidate['source_url'] ?? '')),
                         'official_source' => ($candidate['source_priority'] ?? null) === 'official',
                         'source_rank' => match ($candidate['source_priority'] ?? null) {
@@ -90,6 +93,7 @@ class ProductImageVisionVerifier
                     && $review['score'] >= ($review['official_source'] ? $officialMinimumScore : $minimumScore)
                     && ($review['exact_match'] || $review['source_supported'] || $review['official_source']))
                 ->sortByDesc(fn (array $review): array => [
+                    $review['hero'] ? 1 : 0,
                     $review['source_rank'],
                     $review['exact_match'] ? 1 : 0,
                     $review['kind'] === 'product' ? 1 : 0,

@@ -56,7 +56,11 @@ class StoreProductImages implements ShouldQueue
 
         if ($chatId) {
             $media = $stored > 0
-                ? $product->media()->whereIn('verification_status', ['verified', 'manual'])->latest('id')->first()
+                ? $product->media()
+                    ->whereIn('verification_status', ['verified', 'manual'])
+                    ->orderByDesc('is_primary')
+                    ->orderBy('sort_order')
+                    ->first()
                 : null;
 
             if ($media?->disk && $media?->path) {
@@ -106,6 +110,8 @@ class StoreProductImages implements ShouldQueue
         $paths = $product->media()
             ->where('type', 'image')
             ->whereIn('verification_status', ['verified', 'manual'])
+            ->orderByDesc('is_primary')
+            ->orderBy('sort_order')
             ->get()
             ->filter(fn ($media): bool => filled($media->disk) && filled($media->path))
             ->map(fn ($media): string => Storage::disk($media->disk)->path($media->path))

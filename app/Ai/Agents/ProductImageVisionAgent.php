@@ -42,6 +42,12 @@ class ProductImageVisionAgent implements Agent, HasStructuredOutput
             images, and pages/screenshots. Prefer a clean product hero as primary, then packaging and
             meaningful details. Prefer a useful, source-supported close match over returning nothing,
             but never accept a visibly conflicting model or a non-product graphic.
+
+            Also classify the camera view of each image: front (straight-on hero shot of the whole
+            product), angle (three-quarter view), side, back (rear panel, ports, connectors,
+            interface diagrams), detail (close-up of a part), packaging, or other. The best primary
+            catalog image is a clean front or angle view of the whole product; back panels, port
+            diagrams, and close-ups are supporting material, never the hero shot.
             Review all attachments and return exactly one result for each numbered image.
             PROMPT;
     }
@@ -55,6 +61,9 @@ class ProductImageVisionAgent implements Agent, HasStructuredOutput
                 'publishable' => $schema->boolean()->required(),
                 'kind' => $schema->string()->enum([
                     'product', 'packaging', 'detail', 'logo', 'banner', 'screenshot', 'unrelated', 'uncertain',
+                ])->required(),
+                'view' => $schema->string()->enum([
+                    'front', 'angle', 'side', 'back', 'detail', 'packaging', 'other',
                 ])->required(),
                 'score' => $schema->integer()->min(0)->max(100)->required(),
                 'reason' => $schema->string()->required(),
