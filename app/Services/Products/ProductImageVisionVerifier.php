@@ -59,6 +59,7 @@ class ProductImageVisionVerifier
                 'images.*.publishable' => ['required', 'boolean'],
                 'images.*.kind' => ['required', 'in:product,packaging,detail,logo,banner,screenshot,unrelated,uncertain'],
                 'images.*.view' => ['required', 'in:front,angle,side,back,detail,packaging,other'],
+                'images.*.gallery_rank' => ['required', 'integer', 'between:1,'.count($candidates), 'distinct'],
                 'images.*.score' => ['required', 'integer', 'between:0,100'],
                 'images.*.reason' => ['required', 'string', 'max:1000'],
             ])->validate();
@@ -77,27 +78,19 @@ class ProductImageVisionVerifier
 
                     return [
                         ...$review,
-                        'hero' => $review['kind'] === 'product'
-                            && in_array($review['view'], ['front', 'angle'], true),
                         'source_supported' => $this->sourceSupportsIdentity($draft, (string) ($candidate['source_url'] ?? '')),
                         'official_source' => ($candidate['source_priority'] ?? null) === 'official',
-                        'source_rank' => match ($candidate['source_priority'] ?? null) {
-                            'official' => 2,
-                            'amazon' => 1,
-                            default => 0,
-                        },
                     ];
                 })
                 ->filter(fn (array $review): bool => $review['publishable']
                     && in_array($review['kind'], ['product', 'packaging', 'detail'], true)
                     && $review['score'] >= ($review['official_source'] ? $officialMinimumScore : $minimumScore)
                     && ($review['exact_match'] || $review['source_supported'] || $review['official_source']))
-                ->sortByDesc(fn (array $review): array => [
-                    $review['hero'] ? 1 : 0,
-                    $review['source_rank'],
-                    $review['exact_match'] ? 1 : 0,
-                    $review['kind'] === 'product' ? 1 : 0,
-                    $review['score'],
+                // The model orders the publishable images as a catalog gallery:
+                // rank 1 is the primary hero shot, details and packaging come last.
+                ->sortBy(fn (array $review): array => [
+                    $review['gallery_rank'],
+                    -$review['score'],
                 ])
                 ->values();
 

@@ -45,9 +45,13 @@ class ProductImageVisionAgent implements Agent, HasStructuredOutput
 
             Also classify the camera view of each image: front (straight-on hero shot of the whole
             product), angle (three-quarter view), side, back (rear panel, ports, connectors,
-            interface diagrams), detail (close-up of a part), packaging, or other. The best primary
-            catalog image is a clean front or angle view of the whole product; back panels, port
-            diagrams, and close-ups are supporting material, never the hero shot.
+            interface diagrams), detail (close-up of a part), packaging, or other.
+
+            Finally, order the publishable images as a catalog gallery by assigning each image a
+            unique gallery_rank starting at 1: rank 1 is the best primary hero shot (a clean front
+            or three-quarter view of the whole product), followed by other angles, then detail
+            close-ups, back panels, and packaging last. Give every image a distinct rank, even
+            rejected ones (rank those last, in any order).
             Review all attachments and return exactly one result for each numbered image.
             PROMPT;
     }
@@ -65,6 +69,7 @@ class ProductImageVisionAgent implements Agent, HasStructuredOutput
                 'view' => $schema->string()->enum([
                     'front', 'angle', 'side', 'back', 'detail', 'packaging', 'other',
                 ])->required(),
+                'gallery_rank' => $schema->integer()->min(1)->max(4)->required(),
                 'score' => $schema->integer()->min(0)->max(100)->required(),
                 'reason' => $schema->string()->required(),
             ])->withoutAdditionalProperties())->required(),
