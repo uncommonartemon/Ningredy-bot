@@ -23,6 +23,14 @@ return [
     'vision_min_score' => 60,
     'vision_official_min_score' => 55,
 
+    // How the publishable images are ordered into a gallery:
+    // "heuristic" - code rules (front hero shot first, then official source,
+    //               exact match, kind, score). Predictable, but rigid.
+    // "model"     - the Vision model itself assigns a unique gallery_rank and
+    //               the code trusts that order. Flexible, but depends on the
+    //               model's stability.
+    'ranking' => env('PRODUCT_IMAGE_RANKING', 'heuristic'),
+
     // Near-duplicate photos (same shot with a different crop or compression)
     // are dropped after Vision when their 64-bit perceptual hash distance is
     // within this threshold. 0 means pixel-identical, ~6 catches near-copies.

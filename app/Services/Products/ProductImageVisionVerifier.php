@@ -59,6 +59,7 @@ class ProductImageVisionVerifier
                 'images.*.publishable' => ['required', 'boolean'],
                 'images.*.kind' => ['required', 'in:product,packaging,detail,logo,banner,screenshot,unrelated,uncertain'],
                 'images.*.view' => ['required', 'in:front,angle,side,back,detail,packaging,other'],
+                'images.*.gallery_rank' => ['required', 'integer', 'between:1,'.count($candidates), 'distinct'],
                 'images.*.score' => ['required', 'integer', 'between:0,100'],
                 'images.*.reason' => ['required', 'string', 'max:1000'],
             ])->validate();
@@ -92,13 +93,23 @@ class ProductImageVisionVerifier
                     && in_array($review['kind'], ['product', 'packaging', 'detail'], true)
                     && $review['score'] >= ($review['official_source'] ? $officialMinimumScore : $minimumScore)
                     && ($review['exact_match'] || $review['source_supported'] || $review['official_source']))
-                ->sortByDesc(fn (array $review): array => [
-                    $review['hero'] ? 1 : 0,
-                    $review['source_rank'],
-                    $review['exact_match'] ? 1 : 0,
-                    $review['kind'] === 'product' ? 1 : 0,
-                    $review['score'],
-                ])
+                ->when(
+                    config('product-images.ranking', 'heuristic') === 'model',
+                    // The model orders the gallery itself via gallery_rank.
+                    fn ($query) => $query->sortBy(fn (array $review): array => [
+                        $review['gallery_rank'],
+                        -$review['score'],
+                    ]),
+                    // Code heuristics: front hero first, then official source,
+                    // exact match, product kind, score.
+                    fn ($query) => $query->sortByDesc(fn (array $review): array => [
+                        $review['hero'] ? 1 : 0,
+                        $review['source_rank'],
+                        $review['exact_match'] ? 1 : 0,
+                        $review['kind'] === 'product' ? 1 : 0,
+                        $review['score'],
+                    ]),
+                )
                 ->values();
 
             return $reviews->take($limit)->map(function (array $review) use ($candidates, $model): array {

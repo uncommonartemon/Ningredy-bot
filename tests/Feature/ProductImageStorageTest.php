@@ -42,6 +42,7 @@ class ProductImageStorageTest extends TestCase
                     'publishable' => true,
                     'kind' => $index === 0 ? 'product' : 'detail',
                     'view' => $index === 0 ? 'front' : 'detail',
+                    'gallery_rank' => $index + 1,
                     'score' => 95 - $index,
                     'reason' => 'Exact clean product image.',
                 ])->all(),
@@ -100,6 +101,7 @@ class ProductImageStorageTest extends TestCase
                     'publishable' => false,
                     'kind' => 'logo',
                     'view' => 'other',
+                    'gallery_rank' => $index + 1,
                     'score' => 10,
                     'reason' => 'Brand logo, not the physical product.',
                 ])->all(),
@@ -128,6 +130,7 @@ class ProductImageStorageTest extends TestCase
                 'publishable' => true,
                 'kind' => $index === 0 ? 'product' : 'detail',
                 'view' => $index === 0 ? 'front' : 'detail',
+                'gallery_rank' => $index + 1,
                 'score' => 95 - $index,
                 'reason' => 'Exact clean component image.',
             ])->all(),
@@ -161,6 +164,7 @@ class ProductImageStorageTest extends TestCase
                 'publishable' => true,
                 'kind' => 'packaging',
                 'view' => 'packaging',
+                'gallery_rank' => 1,
                 'score' => 66,
                 'reason' => 'The exact suffix is not visible on the front of the box.',
             ]],
@@ -208,6 +212,7 @@ class ProductImageStorageTest extends TestCase
                     'publishable' => $index === 0,
                     'kind' => $index === 0 ? 'product' : 'unrelated',
                     'view' => $index === 0 ? 'front' : 'other',
+                    'gallery_rank' => $index + 1,
                     'score' => $index === 0 ? 55 : 5,
                     'reason' => $index === 0 ? 'Physical product is visually consistent.' : 'Unrelated image.',
                 ])->all(),
@@ -252,6 +257,7 @@ class ProductImageStorageTest extends TestCase
                     'publishable' => true,
                     'kind' => 'detail',
                     'view' => 'back',
+                    'gallery_rank' => 2,
                     'score' => 90,
                     'reason' => 'Rear panel with labeled ports.',
                 ],
@@ -261,6 +267,7 @@ class ProductImageStorageTest extends TestCase
                     'publishable' => true,
                     'kind' => 'product',
                     'view' => 'front',
+                    'gallery_rank' => 1,
                     'score' => 85,
                     'reason' => 'Clean front hero shot.',
                 ],
@@ -296,6 +303,63 @@ class ProductImageStorageTest extends TestCase
         $this->assertSame('https://www.lenovo.com/catalog/back-panel.jpg', $media->last()->source_url);
     }
 
+    public function test_it_trusts_the_models_gallery_rank_when_model_ranking_is_enabled(): void
+    {
+        Storage::fake('public');
+        config()->set('product-images.discover_after_rejection', false);
+        config()->set('product-images.ranking', 'model');
+        ProductImageVisionAgent::fake(fn (): array => [
+            'images' => [
+                [
+                    'index' => 1,
+                    'exact_match' => true,
+                    'publishable' => true,
+                    'kind' => 'detail',
+                    'view' => 'back',
+                    'gallery_rank' => 1,
+                    'score' => 90,
+                    'reason' => 'Rear panel the model wants first.',
+                ],
+                [
+                    'index' => 2,
+                    'exact_match' => true,
+                    'publishable' => true,
+                    'kind' => 'product',
+                    'view' => 'front',
+                    'gallery_rank' => 2,
+                    'score' => 85,
+                    'reason' => 'Front shot ranked second by the model.',
+                ],
+            ],
+        ])->preventStrayPrompts();
+        Http::fake(fn (Request $request) => Http::response(
+            $this->jpeg(str_contains($request->url(), 'lenovo.com') ? 41 : 42),
+            200,
+            ['Content-Type' => 'image/jpeg'],
+        ));
+        [$product, $variant, $draft] = $this->records();
+        $draft->update([
+            'brand' => 'Lenovo',
+            'model' => 'Example 9000',
+            'sources' => [[
+                'title' => 'Lenovo product page',
+                'url' => 'https://www.lenovo.com/product/example-9000',
+                'type' => 'manufacturer',
+            ]],
+            'image_urls' => [
+                'https://www.lenovo.com/catalog/back-panel.jpg',
+                'https://93.184.216.34/front-hero.jpg',
+            ],
+        ]);
+
+        app(ProductImageStorage::class)->store($product, $variant, $draft->fresh());
+
+        $media = $product->media()->orderBy('sort_order')->get();
+        $this->assertCount(2, $media);
+        $this->assertSame('https://www.lenovo.com/catalog/back-panel.jpg', $media->first()->source_url);
+        $this->assertTrue((bool) $media->first()->is_primary);
+    }
+
     public function test_it_checks_a_second_vision_batch_when_the_first_batch_is_rejected(): void
     {
         Storage::fake('public');
@@ -311,6 +375,7 @@ class ProductImageStorageTest extends TestCase
                     'publishable' => $calls === 2 && $index === 0,
                     'kind' => $calls === 2 && $index === 0 ? 'product' : 'logo',
                     'view' => $calls === 2 && $index === 0 ? 'front' : 'other',
+                    'gallery_rank' => $index + 1,
                     'score' => $calls === 2 && $index === 0 ? 92 : 5,
                     'reason' => $calls === 2 && $index === 0 ? 'Exact product.' : 'Not a product photo.',
                 ])->all(),
@@ -374,6 +439,7 @@ class ProductImageStorageTest extends TestCase
                     'publishable' => true,
                     'kind' => $index === 0 ? 'product' : 'detail',
                     'view' => $index === 0 ? 'front' : 'detail',
+                    'gallery_rank' => $index + 1,
                     'score' => 96 - $index,
                     'reason' => 'Exact publishable product view.',
                 ])->all(),
@@ -417,6 +483,7 @@ class ProductImageStorageTest extends TestCase
                 'publishable' => true,
                 'kind' => 'product',
                 'view' => 'front',
+                'gallery_rank' => 1,
                 'score' => 96,
                 'reason' => 'Exact physical product.',
             ]],
@@ -452,6 +519,7 @@ class ProductImageStorageTest extends TestCase
                 'publishable' => true,
                 'kind' => $index === 0 ? 'product' : 'detail',
                 'view' => $index === 0 ? 'front' : 'detail',
+                'gallery_rank' => $index + 1,
                 'score' => 95 - $index,
                 'reason' => 'Exact clean product image.',
             ])->all(),
