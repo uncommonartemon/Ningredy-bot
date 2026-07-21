@@ -45,6 +45,11 @@ const { t, productCount } = useI18n();
                 <option value="price_desc">{{ t('sortPriceDesc') }}</option>
                 <option value="title">{{ t('sortTitle') }}</option>
             </select>
+            <select v-model.number="model.per_page" :aria-label="t('perPage')" @change="$emit('apply')">
+                <option :value="12">12 {{ t('perPage') }}</option>
+                <option :value="24">24 {{ t('perPage') }}</option>
+                <option :value="50">50 {{ t('perPage') }}</option>
+            </select>
             <div class="view-switcher">
                 <button type="button" :class="{ active: view === 'grid' }" :aria-label="t('grid')" @click="$emit('change-view', 'grid')">
                     <svg viewBox="0 0 20 20"><rect x="2" y="2" width="6" height="6" /><rect x="12" y="2" width="6" height="6" /><rect x="2" y="12" width="6" height="6" /><rect x="12" y="12" width="6" height="6" /></svg>

@@ -38,6 +38,7 @@ class CatalogController extends Controller
             'max_price' => ['nullable', 'numeric', 'min:0'],
             'sort' => ['nullable', 'string', 'in:newest,price_asc,price_desc,title'],
             'page' => ['nullable', 'integer', 'min:1'],
+            'per_page' => ['nullable', 'integer', 'min:1', 'max:50'],
         ]);
 
         $query = Product::query()->visibleInCatalog()->with([
@@ -51,7 +52,9 @@ class CatalogController extends Controller
         $this->applyFilters($query, $filters);
         $this->applySort($query, $filters['sort'] ?? 'newest');
 
-        $products = $query->paginate(12)->withQueryString()
+        $perPage = min((int) ($filters['per_page'] ?? 12), 50);
+
+        $products = $query->paginate($perPage)->withQueryString()
             ->through(fn (Product $product): array => $this->productPayload($product));
 
         return Inertia::render('Catalog/Index', [
@@ -135,6 +138,7 @@ class CatalogController extends Controller
             'min_price' => $filters['min_price'] ?? null,
             'max_price' => $filters['max_price'] ?? null,
             'sort' => $filters['sort'] ?? 'newest',
+            'per_page' => min((int) ($filters['per_page'] ?? 12), 50),
         ];
     }
 

@@ -16,7 +16,7 @@ const props = defineProps({
 
 const initialFilters = () => ({
     search: '', category: '', brands: [], types: [], countries: [], colors: [], stock: [],
-    attributes: {}, min_price: null, max_price: null, sort: 'newest',
+    attributes: {}, min_price: null, max_price: null, sort: 'newest', per_page: 12,
     ...props.filters,
     attributes: Object.fromEntries(props.facets.attributes.map((facet) => [
         facet.key, props.filters.attributes?.[facet.key] || [],
@@ -71,7 +71,7 @@ const changeView = async (nextView) => {
 const resetFilters = () => {
     Object.assign(form, initialFilters(), {
         search: '', category: '', brands: [], types: [], countries: [], colors: [], stock: [],
-        min_price: null, max_price: null, sort: 'newest',
+        min_price: null, max_price: null, sort: 'newest', per_page: 12,
     });
     Object.keys(form.attributes).forEach((key) => { form.attributes[key] = []; });
     mobileFiltersOpen.value = false;
@@ -83,15 +83,12 @@ watch(() => form.search, () => {
     searchTimer = setTimeout(applyFilters, 400);
 });
 
-const beforeEnter = (element) => gsap.set(element, { opacity: 0, y: 24, scale: .965, filter: 'blur(5px)' });
-const enter = (element, done) => gsap.to(element, {
-    opacity: 1, y: 0, scale: 1, filter: 'blur(0px)', duration: .58,
-    delay: Math.min(Number(element.dataset.index) * .055, .32),
-    ease: 'power3.out', onComplete: done,
-});
-const leave = (element, done) => gsap.to(element, {
-    opacity: 0, y: -12, scale: .97, filter: 'blur(4px)', duration: .24, ease: 'power2.in', onComplete: done,
-});
+// leaving cards are absolutely positioned by the CSS transition,
+// so freeze their box to keep the grid from jumping
+const freezeLeavingCard = (element) => {
+    element.style.width = `${element.offsetWidth}px`;
+    element.style.height = `${element.offsetHeight}px`;
+};
 
 onMounted(() => {
     context = gsap.context(() => {
@@ -146,17 +143,15 @@ onBeforeUnmount(() => {
             <section class="products-stage" :class="{ loading }">
                 <TransitionGroup
                     v-if="products.data.length"
+                    name="products"
                     tag="div"
                     :class="['products-grid', `products-grid--${view}`]"
-                    :css="false"
-                    @before-enter="beforeEnter"
-                    @enter="enter"
-                    @leave="leave"
+                    @leave="freezeLeavingCard"
                 >
                     <ProductCard
                         v-for="(product, index) in products.data"
                         :key="product.id"
-                        :data-index="index"
+                        :style="{ '--stagger': Math.min(index, 10) }"
                         :product="product"
                         :view="view"
                     />
