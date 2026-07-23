@@ -152,11 +152,20 @@ class ProcessTelegramMessage implements ShouldQueue
             $update->update(['status' => 'failed', 'error' => mb_substr($exception->getMessage(), 0, 5000)]);
             $presented = $errors->present($exception, $run->id);
 
+            // Notify on every attempt, not just the final one - the user
+            // should never be left wondering why nothing is happening while
+            // a retryable error (rate limit, timeout, network) is silently
+            // retried in the background.
+            try {
+                $telegram->sendMessage($update->chat_id, $presented['message']);
+            } catch (Throwable $notifyException) {
+                report($notifyException);
+            }
+
             if ($presented['retryable']) {
                 throw $exception;
             }
 
-            $telegram->sendMessage($update->chat_id, $presented['message']);
             $update->update(['processed_at' => now()]);
         }
     }
