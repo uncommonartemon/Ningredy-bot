@@ -14,6 +14,10 @@ use Throwable;
 
 class ProductImageVisionVerifier
 {
+    public function __construct(
+        private readonly ProductIdentityMatcher $identityMatcher,
+    ) {}
+
     /**
      * @param  array<int, array<string, mixed>>  $candidates
      * @return array<int, array<string, mixed>>
@@ -81,7 +85,7 @@ class ProductImageVisionVerifier
                         ...$review,
                         'hero' => $review['kind'] === 'product'
                             && in_array($review['view'], ['front', 'angle'], true),
-                        'source_supported' => $this->sourceSupportsIdentity($draft, (string) ($candidate['source_url'] ?? '')),
+                        'source_supported' => $this->identityMatcher->supports($draft, (string) ($candidate['source_url'] ?? '')),
                         'official_source' => ($candidate['source_priority'] ?? null) === 'official',
                         'source_rank' => match ($candidate['source_priority'] ?? null) {
                             'official' => 3,
@@ -163,40 +167,6 @@ class ProductImageVisionVerifier
             'not a product', 'accessory',
         ]);
     }
-    private function sourceSupportsIdentity(ProductDraft $draft, string $sourceUrl): bool
-    {
-        if ($sourceUrl === '') {
-            return false;
-        }
-
-        $source = Str::lower(Str::ascii(urldecode($sourceUrl)));
-        $identity = Str::lower(Str::ascii((string) ($draft->model ?: $draft->title)));
-        $tokens = collect(preg_split('/[^a-z0-9]+/', $identity) ?: [])
-            ->filter(fn (string $token): bool => strlen($token) >= 2)
-            ->reject(fn (string $token): bool => in_array($token, [
-                'product', 'processor', 'laptop', 'notebook', 'tablet', 'graphics', 'card', 'edition',
-            ], true))
-            ->unique()
-            ->values();
-
-        if ($tokens->contains(fn (string $token): bool => strlen($token) >= 3
-            && preg_match('/[a-z]/', $token) === 1
-            && preg_match('/\d/', $token) === 1
-            && str_contains($source, $token))) {
-            return true;
-        }
-
-        if ($tokens->contains(fn (string $token): bool => strlen($token) >= 4
-            && ctype_digit($token)
-            && str_contains($source, $token))) {
-            return true;
-        }
-
-        return $tokens
-            ->filter(fn (string $token): bool => strlen($token) >= 3 && str_contains($source, $token))
-            ->count() >= 2;
-    }
-
     /** @param array<int, array<string, mixed>> $candidates */
     private function prompt(ProductDraft $draft, array $candidates): string
     {

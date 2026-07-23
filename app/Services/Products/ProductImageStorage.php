@@ -20,6 +20,7 @@ class ProductImageStorage
         private readonly ProductSourcePriority $sourcePriority,
         private readonly ImagePerceptualHash $perceptualHash,
         private readonly ProductImageEncoder $encoder,
+        private readonly ProductIdentityMatcher $identityMatcher,
     ) {}
 
     public function store(Product $product, ProductVariant $variant, ProductDraft $draft): int
@@ -353,7 +354,7 @@ class ProductImageStorage
 
     private function sourceVerificationRank(ProductDraft $draft, string $url): int
     {
-        if ($url === '' || $this->looksLikeJunk($url) || ! $this->sourceSupportsIdentity($draft, $url)) {
+        if ($url === '' || $this->looksLikeJunk($url) || ! $this->identityMatcher->supports($draft, $url)) {
             return 0;
         }
 
@@ -383,49 +384,6 @@ class ProductImageStorage
         }
 
         return null;
-    }
-
-    private function sourceSupportsIdentity(ProductDraft $draft, string $sourceUrl): bool
-    {
-        $source = Str::lower(Str::ascii(urldecode($sourceUrl)));
-        $tokens = $this->identityTokens($draft);
-
-        if ($tokens === []) {
-            return false;
-        }
-
-        if (collect($tokens)->contains(fn (string $token): bool => strlen($token) >= 5
-            && preg_match('/[a-z]/', $token) === 1
-            && preg_match('/\d/', $token) === 1
-            && str_contains($source, $token))) {
-            return true;
-        }
-
-        return collect($tokens)
-            ->filter(fn (string $token): bool => strlen($token) >= 3 && str_contains($source, $token))
-            ->count() >= 2;
-    }
-
-    /** @return array<int, string> */
-    private function identityTokens(ProductDraft $draft): array
-    {
-        return collect([
-            $draft->model,
-            $draft->title,
-            $draft->color,
-            ...collect($draft->specifications ?? [])
-                ->filter(fn (mixed $item): bool => is_array($item) && in_array($item['key'] ?? null, ['model', 'mpn', 'color'], true))
-                ->map(fn (array $item): string => (string) ($item['value'] ?? ''))
-                ->all(),
-        ])
-            ->flatMap(fn (mixed $value): array => preg_split('/[^a-z0-9]+/', Str::lower(Str::ascii((string) $value))) ?: [])
-            ->filter(fn (string $token): bool => strlen($token) >= 3 && ! in_array($token, [
-                'asus', 'acer', 'apple', 'dell', 'hp', 'intel', 'amd', 'lenovo', 'laptop', 'notebook',
-                'product', 'processor', 'graphics', 'memory', 'storage', 'quiet', 'blue',
-            ], true))
-            ->unique()
-            ->values()
-            ->all();
     }
 
     private function looksLikeTrustedDirectImage(string $url): bool
