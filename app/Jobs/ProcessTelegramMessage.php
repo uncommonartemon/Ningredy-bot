@@ -177,8 +177,18 @@ class ProcessTelegramMessage implements ShouldQueue
             return;
         }
 
+        $run = $update->aiRuns()->latest('id')->first();
+
+        // handle()'s catch block already notifies on every attempt, including
+        // the final one that lands here when retries are exhausted - skip a
+        // duplicate send when this exact failure was already reported.
+        if ($exception && $run && $run->error === mb_substr($exception->getMessage(), 0, 5000)) {
+            $update->update(['processed_at' => now()]);
+
+            return;
+        }
+
         try {
-            $run = $update->aiRuns()->latest('id')->first();
             $message = app(AiErrorPresenter::class)->present($exception ?: $run?->error, $run?->id)['message'];
             app(TelegramClient::class)->sendMessage($update->chat_id, $message);
             $update->update(['processed_at' => now()]);

@@ -90,6 +90,31 @@ class ProcessTelegramMessageTest extends TestCase
         $this->assertDatabaseHas('telegram_updates', ['id' => $update->id, 'status' => 'completed']);
     }
 
+    public function test_failed_hook_does_not_duplicate_the_notification_handle_already_sent(): void
+    {
+        // Real production bug (2026-07-23): on the final retry attempt,
+        // handle()'s catch block notifies the user and re-throws (tries
+        // exhausted), then Laravel calls failed() with that same exception -
+        // which used to notify a second time for the identical failure.
+        config(['services.telegram.bot_token' => 'test-token']);
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []])]);
+        ServerAssistantAgent::fake(fn () => throw new \RuntimeException('Request timed out.'))
+            ->preventStrayPrompts();
+        $update = $this->update();
+        $job = new ProcessTelegramMessage($update->id);
+
+        try {
+            $job->handle(app(TelegramClient::class), app(AiErrorPresenter::class));
+            $this->fail('Retryable error should have been re-thrown.');
+        } catch (\RuntimeException $exception) {
+            $job->failed($exception);
+        }
+
+        Http::assertSentCount(1);
+        Http::assertSent(fn (HttpRequest $request): bool => str_ends_with($request->url(), '/sendMessage')
+            && str_contains((string) $request['text'], 'Повторю запрос автоматически'));
+    }
+
     public function test_research_tool_creates_an_audited_pending_draft(): void
     {
         ProductResearchAgent::fake([[
