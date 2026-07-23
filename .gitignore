@@ -25,3 +25,4 @@ Thumbs.db
 /database/*.sqlite*
 /output
 /.playwright-cli
+/graphify-out

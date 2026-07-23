@@ -3,7 +3,9 @@
 namespace Tests\Feature;
 
 use App\Ai\Tools\GetSystemStatus;
+use App\Models\AiRun;
 use App\Models\AppSetting;
+use App\Models\TelegramUpdate;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Laravel\Ai\Tools\Request as ToolRequest;
 use Tests\TestCase;

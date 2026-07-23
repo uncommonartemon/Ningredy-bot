@@ -19,6 +19,7 @@ class ProductImageStorage
         private readonly ProductImageVisionVerifier $visionVerifier,
         private readonly ProductSourcePriority $sourcePriority,
         private readonly ImagePerceptualHash $perceptualHash,
+        private readonly ProductImageEncoder $encoder,
     ) {}
 
     public function store(Product $product, ProductVariant $variant, ProductDraft $draft): int
@@ -56,7 +57,7 @@ class ProductImageStorage
             );
         }
 
-        $selected = $this->verify($draft, $candidates, $remaining);
+        $selected = $this->selectFromCandidates($draft, $candidates, $remaining);
 
         if (
             count($selected) < $remaining
@@ -69,20 +70,8 @@ class ProductImageStorage
                     $draft,
                     array_values(array_unique([...$knownUrls, ...$existingSourceUrls])),
                 );
-            } catch (Throwable $exception) {
-                $this->destroy($candidates);
-
-                throw $exception;
-            }
-
-            $additionalCandidates = $this->removeDuplicateCandidates($candidates, $additionalCandidates);
-
-            try {
-                $additionalSelected = $this->verify(
-                    $draft,
-                    $additionalCandidates,
-                    $remaining - count($selected),
-                );
+                $additionalCandidates = $this->removeDuplicateCandidates($candidates, $additionalCandidates);
+                $additionalSelected = $this->selectFromCandidates($draft, $additionalCandidates, $remaining - count($selected));
             } catch (Throwable $exception) {
                 $this->destroy($candidates);
 
@@ -116,7 +105,7 @@ class ProductImageStorage
             $path = null;
 
             try {
-                $converted = $this->toWebp($candidate['image']);
+                $converted = $this->encoder->toWebp($candidate['image']);
                 $encoded = $converted['bytes'];
                 $checksum = hash('sha256', $encoded);
 
@@ -145,10 +134,12 @@ class ProductImageStorage
                     'height' => $converted['height'],
                     'file_size' => strlen($encoded),
                     'checksum' => $checksum,
-                    'verification_status' => 'verified',
-                    'verification_score' => $candidate['vision_score'] / 100,
-                    'verification_model' => $candidate['vision_model'],
-                    'verification_notes' => $candidate['vision_reason'],
+                    'verification_status' => $candidate['verification_status'] ?? 'verified',
+                    'verification_score' => isset($candidate['vision_score'])
+                        ? $candidate['vision_score'] / 100
+                        : ($candidate['verification_score'] ?? null),
+                    'verification_model' => $candidate['vision_model'] ?? $candidate['verification_model'] ?? null,
+                    'verification_notes' => $candidate['vision_reason'] ?? $candidate['verification_notes'] ?? null,
                     'verified_at' => now(),
                     'sort_order' => $existing + $stored,
                     'is_primary' => $existing === 0 && $stored === 0,
@@ -175,7 +166,9 @@ class ProductImageStorage
         $limit = (int) config('product-images.download_limit', 8);
 
         return collect($urls)
-            ->filter(fn (mixed $url): bool => is_string($url) && ! $this->looksLikeJunk($url))
+            ->filter(fn (mixed $url): bool => is_string($url))
+            ->map(fn (string $url): string => $this->normalizeCandidateUrl($url))
+            ->filter(fn (string $url): bool => $url !== '' && ! $this->looksLikeJunk($url))
             ->unique()
             ->take($limit)
             ->values()
@@ -198,6 +191,16 @@ class ProductImageStorage
             $download = $this->resolver->download($url);
 
             if (! $download || ! $this->hasUsefulDimensions($download['width'], $download['height'])) {
+                continue;
+            }
+
+            if (! $this->encoder->isSafeToDecode($download['width'], $download['height'])) {
+                Log::warning('Product image candidate skipped: too large to safely decode.', [
+                    'source_url' => $download['source_url'],
+                    'width' => $download['width'],
+                    'height' => $download['height'],
+                ]);
+
                 continue;
             }
 
@@ -224,6 +227,7 @@ class ProductImageStorage
                 'source_priority' => match ($classification) {
                     'official_english', 'official_localized' => 'official',
                     'amazon' => 'amazon',
+                    'trusted_retailer' => 'trusted_retailer',
                     default => 'standard',
                 },
             ];
@@ -247,6 +251,30 @@ class ProductImageStorage
         }
 
         return [$this->downloadCandidates($newUrls, $draft), true];
+    }
+
+    /**
+     * Prefer trusted-source images (skip Vision entirely) and only spend a
+     * Vision review on the remaining slots. Used both for the initial batch
+     * of candidates and again for whatever discovery finds afterward, so the
+     * two callers never need to duplicate this sequence.
+     *
+     * @param array<int, array<string, mixed>> $candidates
+     * @return array<int, array<string, mixed>>
+     */
+    private function selectFromCandidates(ProductDraft $draft, array $candidates, int $remaining): array
+    {
+        $selected = $this->sourceVerified($draft, $candidates, $remaining);
+        $needsVision = $this->removeSelectedCandidates($candidates, $selected);
+
+        if (count($selected) < $remaining) {
+            $selected = [
+                ...$selected,
+                ...$this->verify($draft, $needsVision, $remaining - count($selected)),
+            ];
+        }
+
+        return $selected;
     }
 
     /** @param array<int, array<string, mixed>> $candidates @return array<int, array<string, mixed>> */
@@ -282,6 +310,146 @@ class ProductImageStorage
         }
     }
 
+    /** @param array<int, array<string, mixed>> $candidates @return array<int, array<string, mixed>> */
+    private function sourceVerified(ProductDraft $draft, array $candidates, int $limit): array
+    {
+        if ($limit <= 0 || $candidates === []) {
+            return [];
+        }
+
+        return collect($candidates)
+            ->map(fn (array $candidate): array => [
+                'candidate' => $candidate,
+                'rank' => $this->sourceVerificationRank($draft, (string) ($candidate['source_url'] ?? '')),
+            ])
+            ->filter(fn (array $item): bool => $item['rank'] > 0
+                && $this->looksLikeProductPhotoShape($item['candidate']['width'], $item['candidate']['height']))
+            ->sortByDesc('rank')
+            ->take($limit)
+            ->map(function (array $item): array {
+                return [
+                    ...$item['candidate'],
+                    'verification_status' => 'source_verified',
+                    'verification_score' => min(0.99, 0.80 + ($item['rank'] * 0.03)),
+                    'verification_model' => null,
+                    'verification_notes' => 'Source-verified product image from a trusted exact product source.',
+                ];
+            })
+            ->values()
+            ->all();
+    }
+
+
+    /** @param array<int, array<string, mixed>> $candidates @param array<int, array<string, mixed>> $selected @return array<int, array<string, mixed>> */
+    private function removeSelectedCandidates(array $candidates, array $selected): array
+    {
+        $selectedIds = array_map(fn (array $candidate): int => spl_object_id($candidate['image']), $selected);
+
+        return array_values(array_filter(
+            $candidates,
+            fn (array $candidate): bool => ! in_array(spl_object_id($candidate['image']), $selectedIds, true),
+        ));
+    }
+
+    private function sourceVerificationRank(ProductDraft $draft, string $url): int
+    {
+        if ($url === '' || $this->looksLikeJunk($url) || ! $this->sourceSupportsIdentity($draft, $url)) {
+            return 0;
+        }
+
+        $sourceType = $this->sourceTypeForUrl($url, $draft->sources ?? []);
+
+        return match ($sourceType) {
+            'retailer', 'marketplace' => 5,
+            'manufacturer' => 4,
+            'database' => 3,
+            default => $this->looksLikeTrustedDirectImage($url) ? 3 : 0,
+        };
+    }
+
+    /** @param array<int, mixed> $sources */
+    private function sourceTypeForUrl(string $url, array $sources): ?string
+    {
+        $host = $this->host($url);
+
+        foreach ($sources as $source) {
+            if (! is_array($source) || ! is_string($source['url'] ?? null)) {
+                continue;
+            }
+
+            if ($this->hostsMatch($host, $this->host($source['url']))) {
+                return is_string($source['type'] ?? null) ? $source['type'] : null;
+            }
+        }
+
+        return null;
+    }
+
+    private function sourceSupportsIdentity(ProductDraft $draft, string $sourceUrl): bool
+    {
+        $source = Str::lower(Str::ascii(urldecode($sourceUrl)));
+        $tokens = $this->identityTokens($draft);
+
+        if ($tokens === []) {
+            return false;
+        }
+
+        if (collect($tokens)->contains(fn (string $token): bool => strlen($token) >= 5
+            && preg_match('/[a-z]/', $token) === 1
+            && preg_match('/\d/', $token) === 1
+            && str_contains($source, $token))) {
+            return true;
+        }
+
+        return collect($tokens)
+            ->filter(fn (string $token): bool => strlen($token) >= 3 && str_contains($source, $token))
+            ->count() >= 2;
+    }
+
+    /** @return array<int, string> */
+    private function identityTokens(ProductDraft $draft): array
+    {
+        return collect([
+            $draft->model,
+            $draft->title,
+            $draft->color,
+            ...collect($draft->specifications ?? [])
+                ->filter(fn (mixed $item): bool => is_array($item) && in_array($item['key'] ?? null, ['model', 'mpn', 'color'], true))
+                ->map(fn (array $item): string => (string) ($item['value'] ?? ''))
+                ->all(),
+        ])
+            ->flatMap(fn (mixed $value): array => preg_split('/[^a-z0-9]+/', Str::lower(Str::ascii((string) $value))) ?: [])
+            ->filter(fn (string $token): bool => strlen($token) >= 3 && ! in_array($token, [
+                'asus', 'acer', 'apple', 'dell', 'hp', 'intel', 'amd', 'lenovo', 'laptop', 'notebook',
+                'product', 'processor', 'graphics', 'memory', 'storage', 'quiet', 'blue',
+            ], true))
+            ->unique()
+            ->values()
+            ->all();
+    }
+
+    private function looksLikeTrustedDirectImage(string $url): bool
+    {
+        $host = $this->host($url);
+
+        return $host !== ''
+            && filter_var($host, FILTER_VALIDATE_IP) === false
+            && preg_match('#\.(?:jpe?g|png|webp|avif)(?:\?|$)#i', (string) parse_url($url, PHP_URL_PATH)) === 1;
+    }
+
+    private function hostsMatch(string $left, string $right): bool
+    {
+        return $left !== '' && $right !== '' && (
+            $left === $right
+            || str_ends_with($left, '.'.$right)
+            || str_ends_with($right, '.'.$left)
+        );
+    }
+
+    private function host(string $url): string
+    {
+        return Str::lower((string) parse_url($url, PHP_URL_HOST));
+    }
     /** @param array<int, array<string, mixed>> $candidates */
     private function destroy(array $candidates): void
     {
@@ -365,12 +533,24 @@ class ProductImageStorage
         }));
     }
 
+    private function normalizeCandidateUrl(string $url): string
+    {
+        $url = trim($url);
+        $host = Str::lower((string) parse_url($url, PHP_URL_HOST));
+
+        if (str_contains($host, 'dlcdnwebimgs.asus.com')) {
+            return preg_replace('#//w(?:48|64|96|184)(?:\?|$)#i', '//w800', $url) ?: $url;
+        }
+
+        return $url;
+    }
+
     private function looksLikeJunk(string $url): bool
     {
         return Str::contains(Str::lower($url), [
-            'logo', 'favicon', 'sprite', 'placeholder', 'avatar', 'icon-', '/icon/', '/icons/',
-            '/flags/', 'locale-flag', '/blogs/', '/category/icons/', '.svg',
-            'banner', 'tracking', 'pixel.',
+            'logo', 'favicon', 'sprite', 'placeholder', 'thumb', 'thumbnail', '/small/', '_small',
+            'avatar', 'icon-', '/icon/', '/icons/', '/flags/', 'locale-flag', '/blogs/',
+            '/category/icons/', '.svg', 'banner', 'tracking', 'pixel.', '/header/', '/w48', '/w64', '/w96', '/w184',
         ]);
     }
 
@@ -391,34 +571,17 @@ class ProductImageStorage
             && $ratio <= (float) config('product-images.maximum_ratio', 3.5);
     }
 
-    /** @return array{bytes: string, width: int, height: int} */
-    private function toWebp(GdImage $image): array
+    /**
+     * Trusted-source candidates skip Vision entirely, so unlike the loose
+     * bounds in hasUsefulDimensions() (which Vision still reviews), this is
+     * the last line of defense against banner/swatch-strip images from
+     * manufacturer spec pages (e.g. a 738x270 color-swatch banner, ratio
+     * 2.73 - well inside the general 0.28-3.5 bound but not a product shot).
+     */
+    private function looksLikeProductPhotoShape(int $width, int $height): bool
     {
-        $output = $image;
+        $ratio = $width / max($height, 1);
 
-        if (imagesx($image) > 1600 || imagesy($image) > 1600) {
-            $ratio = min(1600 / imagesx($image), 1600 / imagesy($image));
-            $output = imagescale($image, (int) round(imagesx($image) * $ratio), (int) round(imagesy($image) * $ratio));
-        }
-
-        ob_start();
-        imagewebp($output, null, 84);
-        $encoded = ob_get_clean();
-
-        if (! is_string($encoded) || $encoded === '') {
-            throw new \RuntimeException('GD could not encode the product image as WebP.');
-        }
-
-        $result = [
-            'bytes' => $encoded,
-            'width' => imagesx($output),
-            'height' => imagesy($output),
-        ];
-
-        if ($output !== $image) {
-            imagedestroy($output);
-        }
-
-        return $result;
+        return $ratio >= 0.5 && $ratio <= 2.2;
     }
 }

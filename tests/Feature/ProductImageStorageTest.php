@@ -153,6 +153,41 @@ class ProductImageStorageTest extends TestCase
         $this->assertSame(3, $product->media()->count());
     }
 
+    public function test_it_stores_source_verified_retailer_images_without_vision(): void
+    {
+        Storage::fake('public');
+        ProductImageVisionAgent::fake(fn () => throw new \RuntimeException('Vision should not run for source-verified images'))
+            ->preventStrayPrompts();
+        Http::fake(fn (Request $request) => Http::response(
+            $this->jpeg(77),
+            200,
+            ['Content-Type' => 'image/jpeg'],
+        ));
+        [$product, $variant, $draft] = $this->records();
+        $draft->update([
+            'brand' => 'ASUS',
+            'model' => 'X1504VA-BQ4485',
+            'sources' => [[
+                'title' => 'Retailer exact ASUS Vivobook 15 X1504VA-BQ4485',
+                'url' => 'https://93.184.216.34/products/asus-vivobook-15-x1504va-bq4485',
+                'type' => 'retailer',
+            ]],
+            'image_urls' => ['https://93.184.216.34/images/asus-vivobook-15-x1504va-bq4485-quiet-blue-front.jpg'],
+        ]);
+
+        app(ProductImageStorage::class)->store($product, $variant, $draft->fresh());
+
+        $this->assertDatabaseHas('product_media', [
+            'product_id' => $product->id,
+            'source_url' => 'https://93.184.216.34/images/asus-vivobook-15-x1504va-bq4485-quiet-blue-front.jpg',
+            'verification_status' => 'source_verified',
+            'verification_model' => null,
+        ]);
+        $this->assertDatabaseMissing('ai_runs', [
+            'telegram_update_id' => $draft->telegram_update_id,
+            'model' => 'gpt-5.4-mini',
+        ]);
+    }
     public function test_it_accepts_a_publishable_image_when_the_exact_model_is_supported_by_its_source(): void
     {
         Storage::fake('public');
@@ -195,6 +230,47 @@ class ProductImageStorageTest extends TestCase
         );
     }
 
+    public function test_it_accepts_an_official_product_image_when_vision_only_lacks_visible_sku_evidence(): void
+    {
+        Storage::fake('public');
+        config()->set('product-images.discover_after_rejection', false);
+        ProductImageVisionAgent::fake(fn (): array => [
+            'images' => [[
+                'index' => 1,
+                'exact_match' => false,
+                'publishable' => false,
+                'kind' => 'product',
+                'view' => 'front',
+                'gallery_rank' => 1,
+                'score' => 4,
+                'reason' => 'Official product render, but the exact regional SKU is not visible.',
+            ]],
+        ])->preventStrayPrompts();
+        Http::fake(fn (Request $request) => Http::response(
+            $this->jpeg(55),
+            200,
+            ['Content-Type' => 'image/jpeg'],
+        ));
+        [$product, $variant, $draft] = $this->records();
+        $draft->update([
+            'brand' => 'ASUS',
+            'model' => 'X1504VA-BQ4485',
+            'sources' => [[
+                'title' => 'ASUS product page',
+                'url' => 'https://www.asus.com/laptops/for-home/vivobook/asus-vivobook-15-x1504/',
+                'type' => 'manufacturer',
+            ]],
+            'image_urls' => ['https://dlcdnwebimgs.asus.com/gain/a57df082-80c1-4b35-9493-ff9727e4e7a4//w800'],
+        ]);
+
+        app(ProductImageStorage::class)->store($product, $variant, $draft->fresh());
+
+        $this->assertDatabaseHas('product_media', [
+            'product_id' => $product->id,
+            'source_url' => 'https://dlcdnwebimgs.asus.com/gain/a57df082-80c1-4b35-9493-ff9727e4e7a4//w800',
+            'verification_status' => 'verified',
+        ]);
+    }
     public function test_it_reviews_and_selects_an_official_manufacturer_image_first(): void
     {
         Storage::fake('public');
@@ -473,6 +549,46 @@ class ProductImageStorageTest extends TestCase
         ], $product->media()->pluck('source_url')->all());
     }
 
+    public function test_it_upgrades_asus_cdn_thumbnails_before_downloading(): void
+    {
+        Storage::fake('public');
+        config()->set('product-images.discover_after_rejection', false);
+        ProductImageVisionAgent::fake(fn (): array => [
+            'images' => [[
+                'index' => 1,
+                'exact_match' => false,
+                'publishable' => true,
+                'kind' => 'product',
+                'view' => 'front',
+                'gallery_rank' => 1,
+                'score' => 58,
+                'reason' => 'Official product family image.',
+            ]],
+        ])->preventStrayPrompts();
+        Http::fake(function (Request $request) {
+            $this->assertStringEndsWith('//w800', $request->url());
+
+            return Http::response($this->jpeg(44), 200, ['Content-Type' => 'image/jpeg']);
+        });
+        [$product, $variant, $draft] = $this->records();
+        $draft->update([
+            'brand' => 'ASUS',
+            'sources' => [[
+                'title' => 'ASUS product page',
+                'url' => 'https://www.asus.com/laptops/for-home/vivobook/asus-vivobook-15-x1504/',
+                'type' => 'manufacturer',
+            ]],
+            'image_urls' => ['https://dlcdnwebimgs.asus.com/gain/a57df082-80c1-4b35-9493-ff9727e4e7a4//w48'],
+        ]);
+
+        app(ProductImageStorage::class)->store($product, $variant, $draft->fresh());
+
+        $this->assertDatabaseHas('product_media', [
+            'product_id' => $product->id,
+            'source_url' => 'https://dlcdnwebimgs.asus.com/gain/a57df082-80c1-4b35-9493-ff9727e4e7a4//w800',
+            'verification_status' => 'verified',
+        ]);
+    }
     public function test_it_uses_fallback_discovery_when_research_only_returns_logos(): void
     {
         Storage::fake('public');
@@ -560,6 +676,45 @@ class ProductImageStorageTest extends TestCase
         $this->assertSame($first, $second);
         $this->assertSame(['https://93.184.216.34/exact-product.jpg'], $second);
         $this->assertDatabaseCount('ai_runs', 2);
+    }
+
+    public function test_image_discovery_ignores_official_header_assets_before_short_circuiting(): void
+    {
+        Http::fake([
+            'commons.wikimedia.org/*' => Http::response(['query' => ['pages' => []]]),
+        ]);
+        ProductImageDiscoveryAgent::fake([[
+            'image_urls' => ['https://dlcdnwebimgs.asus.com/gain/exact-product/w800'],
+            'page_urls' => [],
+        ]])->preventStrayPrompts();
+        $resolver = $this->mock(\App\Services\Products\ProductImageResolver::class);
+        $resolver->shouldReceive('resolve')->once()->andReturn([
+            'https://www.asus.com/media/Odin/images/header/ROG_normal.svg',
+            'https://www.asus.com/media/Odin/images/header/ProArt_hover.svg',
+            'https://dlcdnwebimgs.asus.com/gain/a57df082-80c1-4b35-9493-ff9727e4e7a4//w48',
+            'https://dlcdnwebimgs.asus.com/gain/a57df082-80c1-4b35-9493-ff9727e4e7a4//w184',
+            'https://dlcdnwebimgs.asus.com/gain/7fb77e0a-97ef-4be0-babd-22892330add9//w48',
+            'https://dlcdnwebimgs.asus.com/gain/7fb77e0a-97ef-4be0-babd-22892330add9//w184',
+        ]);
+        $resolver->shouldReceive('resolve')->once()->andReturn([]);
+        [, , $draft] = $this->records();
+        $draft->update([
+            'brand' => 'ASUS',
+            'model' => 'X1504VA-BQ4485',
+            'sources' => [[
+                'title' => 'ASUS Vivobook 15 (X1504)',
+                'url' => 'https://www.asus.com/laptops/for-home/vivobook/asus-vivobook-15-x1504/',
+                'type' => 'manufacturer',
+            ]],
+        ]);
+
+        $images = app(ProductImageCandidateDiscovery::class)->find($draft->fresh());
+
+        $this->assertContains('https://dlcdnwebimgs.asus.com/gain/exact-product/w800', $images);
+        $this->assertDatabaseHas('ai_runs', [
+            'telegram_update_id' => $draft->telegram_update_id,
+            'status' => 'completed',
+        ]);
     }
 
     public function test_wikimedia_search_returns_only_relevant_physical_product_images(): void

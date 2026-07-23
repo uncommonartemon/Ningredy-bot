@@ -1,0 +1,127 @@
+<?php
+
+namespace App\Services\Ai;
+
+use App\Models\AiRun;
+use Illuminate\Support\Collection;
+
+class AiUsageReporter
+{
+    /** @return array<string, mixed> */
+    public function summary(): array
+    {
+        return [
+            'last_24h' => $this->period(now()->subDay()),
+            'last_7d' => $this->period(now()->subDays(7)),
+            'last_30d' => $this->period(now()->subDays(30)),
+            'all_time' => $this->period(null),
+            'currency' => 'USD',
+            'cost_note' => 'Estimated from configured per-million-token prices; null means pricing is not configured for that provider/model.',
+        ];
+    }
+
+    /** @return array<string, mixed> */
+    private function period($from): array
+    {
+        $query = AiRun::query()->whereNotNull('usage');
+
+        if ($from !== null) {
+            $query->where('created_at', '>=', $from);
+        }
+
+        $runs = $query->get(['provider', 'model', 'usage']);
+        $byModel = $runs
+            ->groupBy(fn (AiRun $run): string => $run->provider.':'.$run->model)
+            ->map(fn (Collection $items): array => $this->modelSummary($items))
+            ->values()
+            ->all();
+        $totals = $this->totals($runs);
+        $knownCosts = collect($byModel)->pluck('estimated_cost_usd')->filter(fn ($value): bool => $value !== null);
+
+        return [
+            'runs' => $runs->count(),
+            'tokens' => $totals,
+            'estimated_cost_usd' => $knownCosts->isNotEmpty() ? round((float) $knownCosts->sum(), 6) : null,
+            'by_model' => $byModel,
+        ];
+    }
+
+    /** @param Collection<int, AiRun> $runs @return array<string, mixed> */
+    private function modelSummary(Collection $runs): array
+    {
+        $first = $runs->first();
+        $totals = $this->totals($runs);
+
+        return [
+            'provider' => $first?->provider,
+            'model' => $first?->model,
+            'runs' => $runs->count(),
+            'tokens' => $totals,
+            'estimated_cost_usd' => $this->estimateCost((string) $first?->provider, (string) $first?->model, $totals),
+        ];
+    }
+
+    /** @param Collection<int, AiRun> $runs @return array<string, int> */
+    private function totals(Collection $runs): array
+    {
+        $totals = [
+            'input' => 0,
+            'cached_input' => 0,
+            'output' => 0,
+            'reasoning' => 0,
+            'total' => 0,
+        ];
+
+        foreach ($runs as $run) {
+            $usage = is_array($run->usage) ? $run->usage : [];
+            $input = $this->integer($usage['prompt_tokens'] ?? $usage['input_tokens'] ?? 0);
+            $cachedInput = $this->integer($usage['cache_read_input_tokens'] ?? $usage['cached_input_tokens'] ?? 0);
+            $output = $this->integer($usage['completion_tokens'] ?? $usage['output_tokens'] ?? 0);
+            $reasoning = $this->integer($usage['reasoning_tokens'] ?? 0);
+
+            $totals['input'] += max(0, $input - $cachedInput);
+            $totals['cached_input'] += $cachedInput;
+            $totals['output'] += $output;
+            $totals['reasoning'] += $reasoning;
+            $totals['total'] += $input + $output + $reasoning;
+        }
+
+        return $totals;
+    }
+
+    /** @param array<string, int> $tokens */
+    private function estimateCost(string $provider, string $model, array $tokens): ?float
+    {
+        $prices = config("services.ai_usage.prices.{$provider}.{$model}");
+
+        if (! is_array($prices)) {
+            return null;
+        }
+
+        $cost = 0.0;
+        $hasAnyPrice = false;
+
+        foreach ([
+            'input' => 'input_per_million',
+            'cached_input' => 'cached_input_per_million',
+            'output' => 'output_per_million',
+            'reasoning' => 'reasoning_per_million',
+        ] as $tokenKey => $priceKey) {
+            $price = $prices[$priceKey] ?? null;
+
+            if ($price === null || $price === '') {
+                continue;
+            }
+
+            $hasAnyPrice = true;
+            $cost += ($tokens[$tokenKey] ?? 0) * ((float) $price) / 1_000_000;
+        }
+
+        return $hasAnyPrice ? round($cost, 6) : null;
+    }
+
+    private function integer(mixed $value): int
+    {
+        return is_numeric($value) ? max(0, (int) $value) : 0;
+    }
+}

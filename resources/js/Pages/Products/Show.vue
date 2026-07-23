@@ -143,12 +143,6 @@ onBeforeUnmount(() => context?.revert());
                     </div>
                 </dl>
             </section>
-            <section v-if="product.sources.length" class="product-show__section product-show__section--wide">
-                <h2>{{ copy.sources }}</h2>
-                <div class="product-show__sources">
-                    <a v-for="source in product.sources" :key="source.id" :href="source.url" target="_blank" rel="noopener noreferrer"><span>{{ source.title }}</span><small>{{ source.domain || source.source_type }} ↗</small></a>
-                </div>
-            </section>
         </div>
     </main>
 </template>

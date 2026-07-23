@@ -4,6 +4,7 @@ namespace App\Ai\Tools;
 
 use App\Ai\Agents\ProductResearchAgent;
 use App\Ai\Tools\Concerns\RecordsOperations;
+use App\Services\Ai\AiSettings;
 use App\Models\AiRun;
 use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
@@ -36,8 +37,8 @@ class ResearchProduct implements Tool
     public function handle(Request $request): Stringable|string
     {
         $query = trim((string) $request->string('query'));
-        $provider = (string) config('services.product_research.provider', 'openai');
-        $model = (string) config('services.product_research.model', 'gpt-5.4');
+        $provider = app(AiSettings::class)->providerFor('product_research');
+        $model = app(AiSettings::class)->modelFor('product_research');
         $run = AiRun::query()->create([
             'telegram_update_id' => $this->update->id,
             'provider' => $provider,
@@ -55,6 +56,7 @@ class ResearchProduct implements Tool
                 'title' => ['nullable', 'string', 'max:255'],
                 'brand' => ['nullable', 'string', 'max:255'],
                 'model' => ['nullable', 'string', 'max:255'],
+                'product_type' => ['nullable', 'in:laptop,desktop,component,other'],
                 'color' => ['nullable', 'string', 'max:255'],
                 'description' => ['nullable', 'string', 'max:5000'],
                 'research_notes' => ['nullable', 'string', 'max:5000'],
@@ -116,6 +118,7 @@ class ResearchProduct implements Tool
                         'title' => $data['title'],
                         'brand' => $data['brand'],
                         'model' => $data['model'],
+                        'product_type' => $data['product_type'] ?? null,
                         'color' => $data['color'],
                         'description' => $data['description'],
                         'research_notes' => $data['research_notes'],

@@ -29,6 +29,33 @@ class ProductImageResolverTest extends TestCase
         ], $images);
     }
 
+    public function test_it_extracts_images_from_image_objects_itemprop_and_script_state(): void
+    {
+        Http::fake([
+            'https://93.184.216.34/modern-product' => Http::response(<<<'HTML'
+                <html><head>
+                    <meta itemprop="image" content="/cdn/itemprop-product.webp">
+                    <script type="application/ld+json">
+                        {"@type":"Product","image":[{"@type":"ImageObject","url":"/cdn/jsonld-object.jpg"}]}
+                    </script>
+                    <script type="application/json">
+                        {"gallery":["https:\/\/93.184.216.34\/cdn\/script-front.png?width=1200","https:\/\/93.184.216.34\/cdn\/brand-logo.png"]}
+                    </script>
+                </head></html>
+                HTML, 200, ['Content-Type' => 'text/html']),
+        ]);
+
+        $images = app(ProductImageResolver::class)->resolve([
+            ['url' => 'https://93.184.216.34/modern-product'],
+        ], 10);
+
+        $this->assertSame([
+            'https://93.184.216.34/cdn/itemprop-product.webp',
+            'https://93.184.216.34/cdn/jsonld-object.jpg',
+            'https://93.184.216.34/cdn/script-front.png?width=1200',
+        ], $images);
+    }
+
     public function test_it_blocks_private_source_addresses(): void
     {
         Http::fake();

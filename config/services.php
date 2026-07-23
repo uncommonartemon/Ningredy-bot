@@ -46,32 +46,59 @@ return [
     ],
 
     'product_research' => [
-        'provider' => env('AI_PRODUCT_RESEARCH_PROVIDER', 'openai'),
+        'provider' => 'openai',
         'model' => env('AI_PRODUCT_RESEARCH_MODEL', 'gpt-5.4'),
     ],
 
     'product_image_vision' => [
-        'provider' => env('AI_PRODUCT_IMAGE_VISION_PROVIDER', 'openai'),
+        'provider' => 'openai',
         'model' => env('AI_PRODUCT_IMAGE_VISION_MODEL', 'gpt-5.4-mini'),
         'timeout' => (int) env('AI_PRODUCT_IMAGE_VISION_TIMEOUT', 45),
     ],
 
     'product_image_discovery' => [
-        'provider' => env('AI_PRODUCT_IMAGE_DISCOVERY_PROVIDER', 'openai'),
+        'provider' => 'openai',
         'model' => env('AI_PRODUCT_IMAGE_DISCOVERY_MODEL', 'gpt-5.4'),
         'timeout' => (int) env('AI_PRODUCT_IMAGE_DISCOVERY_TIMEOUT', 75),
     ],
 
     'server_assistant' => [
-        'provider' => env('AI_SERVER_ASSISTANT_PROVIDER', 'openai'),
+        'provider' => 'openai',
         'model' => env('AI_SERVER_ASSISTANT_MODEL', 'gpt-5.4'),
     ],
 
     'voice_transcription' => [
-        'provider' => env('AI_TRANSCRIPTION_PROVIDER', 'openai'),
+        'provider' => 'openai',
         'model' => env('AI_TRANSCRIPTION_MODEL', 'gpt-4o-transcribe'),
         'max_seconds' => (int) env('TELEGRAM_VOICE_MAX_SECONDS', 300),
         'max_bytes' => (int) env('TELEGRAM_VOICE_MAX_BYTES', 20971520),
+    ],
+
+    'ai_usage' => [
+        'prices' => [
+            'openai' => [
+                'gpt-5.4' => [
+                    'input_per_million' => env('AI_PRICE_OPENAI_GPT_5_4_INPUT_PER_1M'),
+                    'cached_input_per_million' => env('AI_PRICE_OPENAI_GPT_5_4_CACHED_INPUT_PER_1M'),
+                    'output_per_million' => env('AI_PRICE_OPENAI_GPT_5_4_OUTPUT_PER_1M'),
+                    'reasoning_per_million' => env('AI_PRICE_OPENAI_GPT_5_4_REASONING_PER_1M'),
+                ],
+                'gpt-5.4-mini' => [
+                    'input_per_million' => env('AI_PRICE_OPENAI_GPT_5_4_MINI_INPUT_PER_1M'),
+                    'cached_input_per_million' => env('AI_PRICE_OPENAI_GPT_5_4_MINI_CACHED_INPUT_PER_1M'),
+                    'output_per_million' => env('AI_PRICE_OPENAI_GPT_5_4_MINI_OUTPUT_PER_1M'),
+                    'reasoning_per_million' => env('AI_PRICE_OPENAI_GPT_5_4_MINI_REASONING_PER_1M'),
+                ],
+            ],
+            'deepseek' => [
+                'deepseek-v4-flash' => [
+                    'input_per_million' => env('AI_PRICE_DEEPSEEK_V4_FLASH_INPUT_PER_1M'),
+                    'cached_input_per_million' => env('AI_PRICE_DEEPSEEK_V4_FLASH_CACHED_INPUT_PER_1M'),
+                    'output_per_million' => env('AI_PRICE_DEEPSEEK_V4_FLASH_OUTPUT_PER_1M'),
+                    'reasoning_per_million' => env('AI_PRICE_DEEPSEEK_V4_FLASH_REASONING_PER_1M'),
+                ],
+            ],
+        ],
     ],
 
     'admin' => [

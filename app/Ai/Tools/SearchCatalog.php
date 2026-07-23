@@ -44,7 +44,7 @@ class SearchCatalog implements Tool
         $products = Product::query()
             ->with([
                 'brand:id,name', 'category:id,name,slug',
-                'defaultVariant.attributes.definition:id,key,label', 'catalogMedia',
+                'defaultVariant.attributes.definition:id,key,label',
             ])
             ->when($activeOnly, fn (Builder $builder) => $builder->visibleInCatalog())
             ->when($productType !== '', fn (Builder $builder) => $builder->where('product_type', $productType))
@@ -108,7 +108,6 @@ class SearchCatalog implements Tool
                 'currency' => $product->defaultVariant?->currency,
                 'stock_status' => $product->defaultVariant?->stock_status,
                 'color' => $product->defaultVariant?->color,
-                'image' => $product->catalogMedia?->url,
                 'attributes' => $product->defaultVariant?->attributes->mapWithKeys(
                     fn ($value) => [$value->definition?->key ?? 'attribute' => $value->value]
                 )->all() ?? [],

@@ -93,7 +93,7 @@ class Product extends Model
     public function catalogMedia(): HasOne
     {
         return $this->hasOne(ProductMedia::class)
-            ->whereIn('verification_status', ['verified', 'manual'])
+            ->whereIn('verification_status', ['verified', 'source_verified', 'manual'])
             ->orderByDesc('is_primary')
             ->orderBy('sort_order');
     }

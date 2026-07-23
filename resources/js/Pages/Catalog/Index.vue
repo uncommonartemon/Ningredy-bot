@@ -83,13 +83,6 @@ watch(() => form.search, () => {
     searchTimer = setTimeout(applyFilters, 400);
 });
 
-// leaving cards are absolutely positioned by the CSS transition,
-// so freeze their box to keep the grid from jumping
-const freezeLeavingCard = (element) => {
-    element.style.width = `${element.offsetWidth}px`;
-    element.style.height = `${element.offsetHeight}px`;
-};
-
 onMounted(() => {
     context = gsap.context(() => {
         const timeline = gsap.timeline({ defaults: { ease: 'power3.out' } });
@@ -146,7 +139,6 @@ onBeforeUnmount(() => {
                     name="products"
                     tag="div"
                     :class="['products-grid', `products-grid--${view}`]"
-                    @leave="freezeLeavingCard"
                 >
                     <ProductCard
                         v-for="(product, index) in products.data"

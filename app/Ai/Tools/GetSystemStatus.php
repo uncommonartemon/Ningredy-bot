@@ -3,6 +3,7 @@
 namespace App\Ai\Tools;
 
 use App\Models\AiRun;
+use App\Services\Ai\AiUsageReporter;
 use App\Models\AppSetting;
 use App\Models\Product;
 use App\Models\ProductDraft;
@@ -43,6 +44,7 @@ class GetSystemStatus implements Tool
                 'failed' => DB::table('failed_jobs')->count(),
             ],
             'ai_failures_last_24h' => AiRun::query()->where('status', 'failed')->where('created_at', '>=', now()->subDay())->count(),
+            'ai_usage' => app(AiUsageReporter::class)->summary(),
         ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     }
 

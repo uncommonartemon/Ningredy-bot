@@ -33,6 +33,12 @@ class StoreProductImages implements ShouldQueue
 
     public function handle(ProductImageStorage $storage, TelegramClient $telegram): void
     {
+        // Decoding several full-size candidate images into GD bitmaps in the
+        // same pass can exceed the default 128M CLI limit even after
+        // filtering absurdly large ones; give this job more headroom so a
+        // memory spike fails the job cleanly instead of killing the worker.
+        ini_set('memory_limit', '512M');
+
         $product = Product::query()->find($this->productId);
         $variant = ProductVariant::query()->find($this->variantId);
         $draft = ProductDraft::query()->with('telegramUpdate')->find($this->draftId);
@@ -57,7 +63,7 @@ class StoreProductImages implements ShouldQueue
         if ($chatId) {
             $media = $stored > 0
                 ? $product->media()
-                    ->whereIn('verification_status', ['verified', 'manual'])
+                    ->whereIn('verification_status', ['verified', 'source_verified', 'manual'])
                     ->orderByDesc('is_primary')
                     ->orderBy('sort_order')
                     ->first()
@@ -109,7 +115,7 @@ class StoreProductImages implements ShouldQueue
     {
         $paths = $product->media()
             ->where('type', 'image')
-            ->whereIn('verification_status', ['verified', 'manual'])
+            ->whereIn('verification_status', ['verified', 'source_verified', 'manual'])
             ->orderByDesc('is_primary')
             ->orderBy('sort_order')
             ->get()

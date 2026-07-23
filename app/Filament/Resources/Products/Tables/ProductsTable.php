@@ -41,9 +41,9 @@ class ProductsTable
                 TextColumn::make('image_verification')->label('Проверка фото')
                     ->state(fn ($record): ?string => ($record->primaryMedia ?: $record->media->firstWhere('type', 'image'))?->verification_status)
                     ->badge()->formatStateUsing(fn (?string $state): string => match ($state) {
-                        'verified' => 'Vision', 'manual' => 'Вручную', 'rejected' => 'Отклонено', default => 'Не проверено',
+                        'verified' => 'Vision', 'source_verified' => '��������', 'manual' => 'Вручную', 'rejected' => 'Отклонено', default => 'Не проверено',
                     })->color(fn (?string $state): string => match ($state) {
-                        'verified' => 'success', 'manual' => 'info', 'rejected' => 'danger', default => 'warning',
+                        'verified' => 'success', 'source_verified' => 'success', 'manual' => 'info', 'rejected' => 'danger', default => 'warning',
                     })->toggleable(),
                 TextColumn::make('id')->label('#')->sortable(),
                 TextColumn::make('title')->label('Название')->searchable(['title', 'model', 'description'])->sortable()->wrap()->limit(70),

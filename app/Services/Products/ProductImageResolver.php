@@ -158,12 +158,29 @@ class ProductImageResolver
         }
 
         $xpath = new DOMXPath($document);
+        $galleryScope = '//*[contains(translate(concat(" ", @class, " ", @id, " "), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "gallery") or contains(translate(concat(" ", @class, " ", @id, " "), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "slider") or contains(translate(concat(" ", @class, " ", @id, " "), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "swiper") or contains(translate(concat(" ", @class, " ", @id, " "), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "carousel") or contains(translate(concat(" ", @class, " ", @id, " "), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "product-image") or contains(translate(concat(" ", @class, " ", @id, " "), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "product-media")]';
         $directQueries = [
+            $galleryScope.'//img/@data-zoom-image',
+            $galleryScope.'//img/@data-large_image',
+            $galleryScope.'//img/@data-full',
+            $galleryScope.'//img/@data-full-src',
+            $galleryScope.'//img/@data-hires',
+            $galleryScope.'//img/@data-original',
+            $galleryScope.'//img/@data-image',
+            $galleryScope.'//img/@data-src',
+            $galleryScope.'//source/@src',
+            $galleryScope.'//img/@src',
             '//meta[@property="og:image"]/@content',
+            '//meta[@property="og:image:url"]/@content',
             '//meta[@property="og:image:secure_url"]/@content',
             '//meta[@name="twitter:image"]/@content',
             '//meta[@name="twitter:image:src"]/@content',
+            '//meta[@itemprop="image"]/@content',
             '//link[@rel="image_src"]/@href',
+            '//img/@data-full',
+            '//img/@data-full-src',
+            '//img/@data-hires',
+            '//img/@data-image',
             '//img/@data-zoom-image',
             '//img/@data-large_image',
             '//img/@data-original',
@@ -173,6 +190,9 @@ class ProductImageResolver
             '//source/@src',
         ];
         $srcsetQueries = [
+            $galleryScope.'//img/@srcset',
+            $galleryScope.'//img/@data-srcset',
+            $galleryScope.'//source/@srcset',
             '//img/@srcset',
             '//img/@data-srcset',
             '//source/@srcset',
@@ -201,6 +221,10 @@ class ProductImageResolver
             if (is_array($structuredData)) {
                 $this->collectStructuredImageUrls($structuredData, $images);
             }
+        }
+
+        foreach ($xpath->query('//script[not(@type) or @type="application/json" or @type="text/javascript" or @type="application/javascript"]') ?: [] as $node) {
+            $images = [...$images, ...$this->scriptImageUrls($node->nodeValue)];
         }
 
         return collect($images)
@@ -236,13 +260,52 @@ class ProductImageResolver
 
             if (
                 is_string($item)
-                && in_array($normalizedKey, ['image', 'contenturl', 'thumbnailurl'], true)
+                && (
+                    in_array($normalizedKey, ['image', 'contenturl', 'thumbnailurl'], true)
+                    || ($parentKey === 'image' && in_array($normalizedKey, ['url', 'src'], true))
+                )
             ) {
                 $images[] = $item;
             } elseif (is_array($item)) {
                 $this->collectStructuredImageUrls($item, $images, $normalizedKey);
             }
         }
+    }
+
+    /** @return array<int, string> */
+    private function scriptImageUrls(string $script): array
+    {
+        if ($script === '' || strlen($script) > 2_000_000) {
+            return [];
+        }
+
+        $decoded = str_replace(['\\/', '\u002F'], '/', html_entity_decode($script, ENT_QUOTES | ENT_HTML5));
+        preg_match_all(
+            "#https?:\\\\?/\\\\?/[^\"'<>\s\\\\]+?\\.(?:jpe?g|png|webp|avif)(?:\\?[^\"'<>\s\\\\]*)?#i",
+            $decoded,
+            $matches,
+        );
+
+        return collect($matches[0] ?? [])
+            ->map(fn (string $url): string => str_replace(['\/', '\\/'], '/', $url))
+            ->filter(fn (string $url): bool => $this->looksLikeImageUrl($url))
+            ->unique()
+            ->values()
+            ->all();
+    }
+
+    private function looksLikeImageUrl(string $url): bool
+    {
+        $lower = strtolower($url);
+
+        return preg_match('#^https?://#i', $url) === 1
+            && preg_match('#\.(?:jpe?g|png|webp|avif)(?:\?|$)#i', $url) === 1
+            && ! str_contains($lower, 'favicon')
+            && ! str_contains($lower, 'logo')
+            && ! str_contains($lower, 'sprite')
+            && ! str_contains($lower, 'placeholder')
+            && ! str_contains($lower, 'tracking')
+            && ! str_contains($lower, 'pixel.');
     }
 
     private function normalizeImageCandidate(string $candidate, string $pageUrl): ?string
@@ -259,6 +322,10 @@ class ProductImageResolver
             || str_contains($lower, 'logo')
             || str_contains($lower, 'sprite')
             || str_contains($lower, 'placeholder')
+            || str_contains($lower, 'thumb')
+            || str_contains($lower, 'thumbnail')
+            || str_contains($lower, '/small/')
+            || str_contains($lower, '_small')
             || str_contains($lower, 'tracking')
             || str_contains($lower, 'pixel.')
         ) {

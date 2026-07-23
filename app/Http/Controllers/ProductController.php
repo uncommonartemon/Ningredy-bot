@@ -44,7 +44,7 @@ class ProductController extends Controller
                 'featured' => $product->is_featured,
                 'published_at' => $product->published_at?->toIso8601String(),
                 'media' => $product->media->where('type', 'image')
-                    ->whereIn('verification_status', ['verified', 'manual'])->map(fn (ProductMedia $media) => [
+                    ->whereIn('verification_status', ['verified', 'source_verified', 'manual'])->map(fn (ProductMedia $media) => [
                         'id' => $media->id,
                         'url' => $this->mediaUrl($media),
                         'alt' => $media->alt ?: $product->title,

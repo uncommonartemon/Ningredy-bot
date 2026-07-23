@@ -3,6 +3,7 @@
 namespace App\Services\Products;
 
 use App\Ai\Agents\ProductImageVisionAgent;
+use App\Services\Ai\AiSettings;
 use App\Models\AiRun;
 use App\Models\ProductDraft;
 use GdImage;
@@ -27,8 +28,8 @@ class ProductImageVisionVerifier
         $minimumScore = (int) config('product-images.vision_min_score', 70);
         $officialMinimumScore = (int) config('product-images.vision_official_min_score', 55);
         $candidates = array_slice($candidates, 0, $maxCandidates);
-        $provider = (string) config('services.product_image_vision.provider', 'openai');
-        $model = (string) config('services.product_image_vision.model', 'gpt-5.4-mini');
+        $provider = app(AiSettings::class)->providerFor('product_image_vision');
+        $model = app(AiSettings::class)->modelFor('product_image_vision');
         $prompt = $this->prompt($draft, $candidates);
         $run = AiRun::query()->create([
             'telegram_update_id' => $draft->telegram_update_id,
@@ -72,7 +73,7 @@ class ProductImageVisionVerifier
                 'completed_at' => now(),
             ]);
 
-            $reviews = collect($data['images'])
+            $reviewed = collect($data['images'])
                 ->map(function (array $review) use ($draft, $candidates): array {
                     $candidate = $candidates[$review['index'] - 1] ?? [];
 
@@ -83,34 +84,24 @@ class ProductImageVisionVerifier
                         'source_supported' => $this->sourceSupportsIdentity($draft, (string) ($candidate['source_url'] ?? '')),
                         'official_source' => ($candidate['source_priority'] ?? null) === 'official',
                         'source_rank' => match ($candidate['source_priority'] ?? null) {
-                            'official' => 2,
-                            'amazon' => 1,
+                            'official' => 3,
+                            'amazon' => 2,
+                            'trusted_retailer' => 1,
                             default => 0,
                         },
                     ];
-                })
-                ->filter(fn (array $review): bool => $review['publishable']
-                    && in_array($review['kind'], ['product', 'packaging', 'detail'], true)
-                    && $review['score'] >= ($review['official_source'] ? $officialMinimumScore : $minimumScore)
-                    && ($review['exact_match'] || $review['source_supported'] || $review['official_source']))
-                ->when(
-                    config('product-images.ranking', 'heuristic') === 'model',
-                    // The model orders the gallery itself via gallery_rank.
-                    fn ($query) => $query->sortBy(fn (array $review): array => [
-                        $review['gallery_rank'],
-                        -$review['score'],
-                    ]),
-                    // Code heuristics: front hero first, then official source,
-                    // exact match, product kind, score.
-                    fn ($query) => $query->sortByDesc(fn (array $review): array => [
-                        $review['hero'] ? 1 : 0,
-                        $review['source_rank'],
-                        $review['exact_match'] ? 1 : 0,
-                        $review['kind'] === 'product' ? 1 : 0,
-                        $review['score'],
-                    ]),
-                )
-                ->values();
+                });
+
+            $reviews = $this->rankReviews($reviewed->filter(fn (array $review): bool => $review['publishable']
+                && in_array($review['kind'], ['product', 'packaging', 'detail'], true)
+                && $review['score'] >= ($review['official_source'] ? $officialMinimumScore : $minimumScore)
+                && ($review['exact_match'] || $review['source_supported'] || $review['official_source'])));
+
+            if ($reviews->isEmpty()) {
+                $reviews = $this->rankReviews($reviewed->filter(
+                    fn (array $review): bool => $this->isAcceptableOfficialFallback($review),
+                ));
+            }
 
             return $reviews->take($limit)->map(function (array $review) use ($candidates, $model): array {
                 return [
@@ -137,6 +128,41 @@ class ProductImageVisionVerifier
         }
     }
 
+    private function rankReviews($reviews)
+    {
+        return $reviews
+            ->when(
+                config('product-images.ranking', 'heuristic') === 'model',
+                fn ($query) => $query->sortBy(fn (array $review): array => [
+                    $review['gallery_rank'],
+                    -$review['score'],
+                ]),
+                fn ($query) => $query->sortByDesc(fn (array $review): array => [
+                    $review['hero'] ? 1 : 0,
+                    $review['exact_match'] ? 1 : 0,
+                    $review['source_supported'] ? 1 : 0,
+                    $review['kind'] === 'product' ? 1 : 0,
+                    $review['score'],
+                    $review['source_rank'],
+                ]),
+            )
+            ->values();
+    }
+
+    private function isAcceptableOfficialFallback(array $review): bool
+    {
+        if (! $review['official_source'] || ! in_array($review['kind'], ['product', 'packaging', 'detail'], true)) {
+            return false;
+        }
+
+        $reason = Str::lower((string) $review['reason']);
+
+        return ! Str::contains($reason, [
+            'conflict', 'conflicting', 'another model', 'different model', 'unrelated',
+            'logo', 'banner', 'screenshot', 'watermark', 'collage', 'distorted',
+            'not a product', 'accessory',
+        ]);
+    }
     private function sourceSupportsIdentity(ProductDraft $draft, string $sourceUrl): bool
     {
         if ($sourceUrl === '') {
@@ -182,6 +208,7 @@ class ProductImageVisionVerifier
             fn (array $candidate, int $index): string => '#'.($index + 1)
                 .(($candidate['source_priority'] ?? null) === 'official' ? ' [OFFICIAL MANUFACTURER]' : '')
                 .(($candidate['source_priority'] ?? null) === 'amazon' ? ' [AMAZON]' : '')
+                .(($candidate['source_priority'] ?? null) === 'trusted_retailer' ? ' [TRUSTED RETAILER]' : '')
                 .' source: '.($candidate['source_url'] ?? 'unknown'),
         )->implode("\n");
 

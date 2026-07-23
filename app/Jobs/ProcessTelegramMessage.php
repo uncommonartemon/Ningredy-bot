@@ -5,15 +5,19 @@ namespace App\Jobs;
 use App\Ai\Agents\ServerAssistantAgent;
 use App\Models\AiOperation;
 use App\Models\AiRun;
+use App\Models\AppSetting;
+use App\Models\Product;
 use App\Models\ProductDraft;
 use App\Models\TelegramChatState;
 use App\Models\TelegramUpdate;
 use App\Models\User;
 use App\Services\Ai\AiErrorPresenter;
+use App\Services\Ai\AiSettings;
 use App\Services\Telegram\TelegramClient;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
 use Illuminate\Queue\Middleware\WithoutOverlapping;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Validator;
 use Throwable;
 
@@ -40,8 +44,14 @@ class ProcessTelegramMessage implements ShouldQueue
     public function handle(TelegramClient $telegram, AiErrorPresenter $errors): void
     {
         $update = TelegramUpdate::query()->findOrFail($this->telegramUpdateId);
-        $provider = (string) config('services.server_assistant.provider', 'openai');
-        $model = (string) config('services.server_assistant.model', 'gpt-5.4');
+
+        if ($update->processed_at) {
+            return;
+        }
+
+        $aiSettings = app(AiSettings::class);
+        $provider = $aiSettings->providerFor('server_assistant');
+        $model = $aiSettings->modelFor('server_assistant');
         $run = AiRun::query()->create([
             'telegram_update_id' => $update->id,
             'provider' => $provider,
@@ -104,8 +114,8 @@ class ProcessTelegramMessage implements ShouldQueue
             if ($draft) {
                 $telegram->sendMessage($update->chat_id, $this->draftSummary($draft), [
                     'inline_keyboard' => [[
-                        ['text' => '➕ Добавить товар в каталог', 'callback_data' => "draft:add:{$draft->id}"],
-                        ['text' => '✖ Не добавлять', 'callback_data' => "draft:reject:{$draft->id}"],
+                        ['text' => 'Добавить товар в каталог', 'callback_data' => "draft:add:{$draft->id}"],
+                        ['text' => 'Не добавлять', 'callback_data' => "draft:reject:{$draft->id}"],
                     ]],
                 ]);
             } elseif ($deletion) {
@@ -113,11 +123,11 @@ class ProcessTelegramMessage implements ShouldQueue
                 $productId = (int) $deletion->target_id;
                 $telegram->sendMessage(
                     $update->chat_id,
-                    "⚠️ Подтвердите безвозвратное удаление:\n\n#{$productId} · {$productTitle}\n\nБудут удалены товар, варианты, характеристики и локальные фотографии.",
+                    "Подтвердите безвозвратное удаление:\n\n#{$productId} · {$productTitle}\n\nБудут удалены товар, варианты, характеристики и локальные фотографии.",
                     [
                         'inline_keyboard' => [[
                             [
-                                'text' => '🗑 Удалить навсегда',
+                                'text' => 'Удалить навсегда',
                                 'callback_data' => "product:delete:confirm:{$deletion->id}",
                             ],
                             [
@@ -127,6 +137,9 @@ class ProcessTelegramMessage implements ShouldQueue
                         ]],
                     ],
                 );
+            } elseif ($data['response_type'] === 'catalog_results' && ! empty($data['product_ids'])) {
+                $telegram->sendMessage($update->chat_id, $data['message']);
+                $this->sendProductCards($telegram, $update->chat_id, $data['product_ids']);
             } else {
                 $telegram->sendMessage($update->chat_id, $data['message']);
             }
@@ -140,10 +153,6 @@ class ProcessTelegramMessage implements ShouldQueue
             $presented = $errors->present($exception, $run->id);
 
             if ($presented['retryable']) {
-                if ($this->attempts() < $this->tries) {
-                    $telegram->sendMessage($update->chat_id, $presented['message']);
-                }
-
                 throw $exception;
             }
 
@@ -167,6 +176,63 @@ class ProcessTelegramMessage implements ShouldQueue
         } catch (Throwable $notificationError) {
             report($notificationError);
         }
+    }
+
+    /** @param array<int, int> $productIds */
+    private function sendProductCards(TelegramClient $telegram, string $chatId, array $productIds): void
+    {
+        $productIds = array_slice($productIds, 0, 10);
+        $products = Product::query()
+            ->with(['brand:id,name', 'defaultVariant', 'catalogMedia'])
+            ->whereIn('id', $productIds)
+            ->get()
+            ->sortBy(fn (Product $product): int => (int) array_search($product->id, $productIds, true));
+
+        foreach ($products as $product) {
+            try {
+                $caption = $this->productCardCaption($product);
+                $media = $product->catalogMedia;
+                $path = ($media?->disk && $media?->path)
+                    ? Storage::disk($media->disk)->path($media->path)
+                    : null;
+
+                if ($path && is_file($path) && is_readable($path)) {
+                    $telegram->sendPhotoFile($chatId, $path, $caption);
+                } else {
+                    $telegram->sendMessage($chatId, $caption);
+                }
+            } catch (Throwable $exception) {
+                report($exception);
+            }
+        }
+    }
+
+    private function productCardCaption(Product $product): string
+    {
+        $product->loadMissing('brand', 'defaultVariant');
+        $variant = $product->defaultVariant;
+        $identity = collect([$product->brand?->name, $product->model])->filter()->unique()->implode(' · ');
+        $price = $variant?->price !== null
+            ? trim(number_format((float) $variant->price, 0, '.', ' ').' '.(string) ($variant->currency ?? ''))
+            : null;
+        $stock = match ($variant?->stock_status) {
+            'in_stock' => 'В наличии',
+            'out_of_stock' => 'Нет в наличии',
+            'preorder' => 'Предзаказ',
+            default => null,
+        };
+        $publicUrl = rtrim((string) AppSetting::valueFor(
+            AppSetting::TELEGRAM_PROXY_URL,
+            (string) config('services.telegram.proxy_url'),
+        ), '/');
+        $link = $publicUrl !== '' ? "{$publicUrl}/products/{$product->slug}" : null;
+
+        return mb_substr(implode("\n", array_filter([
+            "#{$product->id} · {$product->title}",
+            $identity !== '' && $identity !== $product->title ? $identity : null,
+            implode(' · ', array_filter([$price, $stock])) ?: null,
+            $link,
+        ])), 0, 1024);
     }
 
     private function draftSummary(ProductDraft $draft): string

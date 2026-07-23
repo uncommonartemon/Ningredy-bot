@@ -58,6 +58,11 @@ class ProductResearchAgent implements Agent, HasStructuredOutput, HasTools
             For each specification, also return a stable lowercase key. Use the
             canonical keys cpu, gpu, ram, storage, display, screen_size and refresh_rate when applicable;
             use a short snake_case key for other facts.
+
+            Always classify the product: product_type is laptop for notebooks and portable computers
+            (IdeaPad, ThinkPad, MacBook, VivoBook, Aspire, Pavilion and similar lines), desktop for
+            complete stationary PCs and workstations, component for individual parts (GPU, CPU, RAM,
+            SSD, motherboard, PSU, case, cooler, monitor, peripherals), other for everything else.
             PROMPT;
     }
 
@@ -69,7 +74,7 @@ class ProductResearchAgent implements Agent, HasStructuredOutput, HasTools
     public function tools(): iterable
     {
         return [
-            (new WebSearch)->max(6),
+            (new WebSearch)->max(6)->location(country: 'US'),
         ];
     }
 
@@ -86,6 +91,9 @@ class ProductResearchAgent implements Agent, HasStructuredOutput, HasTools
             'title' => $schema->string()->nullable()->required(),
             'brand' => $schema->string()->nullable()->required(),
             'model' => $schema->string()->nullable()->required(),
+            'product_type' => $schema->string()
+                ->enum(['laptop', 'desktop', 'component', 'other'])
+                ->nullable()->required(),
             'color' => $schema->string()->nullable()->required(),
             'description' => $schema->string()->nullable()->required(),
             'research_notes' => $schema->string()->nullable()->required(),

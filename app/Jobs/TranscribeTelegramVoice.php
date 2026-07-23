@@ -4,6 +4,7 @@ namespace App\Jobs;
 
 use App\Models\TelegramUpdate;
 use App\Services\Ai\AiErrorPresenter;
+use App\Services\Ai\AiSettings;
 use App\Services\Telegram\TelegramClient;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
@@ -60,8 +61,8 @@ class TranscribeTelegramVoice implements ShouldQueue
             $transcription = Transcription::fromPath($path, 'audio/ogg')
                 ->timeout(120)
                 ->generate(
-                    (string) config('services.voice_transcription.provider', 'openai'),
-                    (string) config('services.voice_transcription.model', 'gpt-4o-transcribe'),
+                    app(AiSettings::class)->providerFor('voice_transcription'),
+                    app(AiSettings::class)->modelFor('voice_transcription'),
                 );
             $text = trim($transcription->text);
             throw_if($text === '', RuntimeException::class, 'Voice transcription is empty.');

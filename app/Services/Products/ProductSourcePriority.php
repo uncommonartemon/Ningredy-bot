@@ -54,6 +54,10 @@ class ProductSourcePriority
             return 'amazon';
         }
 
+        if ($this->isTrustedRetailer($url)) {
+            return 'trusted_retailer';
+        }
+
         return 'standard';
     }
 
@@ -72,6 +76,10 @@ class ProductSourcePriority
 
         if ($classification === 'amazon') {
             return 400;
+        }
+
+        if ($classification === 'trusted_retailer') {
+            return 380;
         }
 
         $type = is_string($explicitType) ? $explicitType : $this->matchingSourceType($url, $sources);
@@ -147,6 +155,21 @@ class ProductSourcePriority
             || str_contains($host, 'media-amazon.')
             || str_contains($host, 'images-amazon.')
             || str_contains($host, 'ssl-images-amazon.');
+    }
+
+    /**
+     * Major English-language electronics retailers/marketplaces that are as
+     * reliable as Amazon for exact-product photos and listings, ranked just
+     * below it.
+     */
+    private function isTrustedRetailer(string $url): bool
+    {
+        $host = $this->host($url);
+
+        return collect([
+            'ebay.', 'newegg.', 'bestbuy.', 'walmart.', 'target.',
+            'bhphotovideo.', 'adorama.', 'costco.', 'samsclub.', 'microcenter.',
+        ])->contains(fn (string $needle): bool => str_contains($host, $needle));
     }
 
     /** @param array<int, mixed> $sources */

@@ -20,13 +20,14 @@ class ProductImageDiscoveryAgent implements Agent, HasStructuredOutput, HasTools
             Find candidate publication images for the exact physical product named by the user.
             Run multiple web searches using the quoted model, important part/model identifiers, and
             terms such as product, gallery, front, rear, and packaging. Search a live English/US official
-            manufacturer gallery first, Amazon.com second, and then reputable retailers, distributors,
-            product databases, and useful archive/reference pages. Prefer the English/US manufacturer
-            page over localized regional versions such as UA when both exist. Return current product page
-            URLs from several domains so the server can extract their galleries. Prefer page URLs over
-            fragile CDN URLs. Return direct JPG, PNG, or WebP URLs only when the current search result
-            actually exposes the complete URL. Skip unavailable or mismatched pages and continue down
-            the source priority list.
+            manufacturer product/gallery HTML page first, Amazon.com second, and then reputable retailer
+            or distributor HTML product pages. Prefer the English/US manufacturer page over localized
+            regional versions such as UA when both exist. Return current product page URLs from several
+            domains so the server can extract their galleries. Prefer page URLs over fragile CDN URLs.
+            Return direct JPG, PNG, or WebP URLs only when the current search result actually exposes
+            the complete URL. Skip PDFs, PSREF/spec sheets, support/download/manual pages,
+            certification pages, unavailable pages, generic family pages without a product gallery,
+            and mismatched pages; continue down the source priority list.
 
             Do not return logos, icons, banners, category artwork, charts, screenshots, unrelated
             accessories, or another model/suffix. Retail packaging is acceptable only for the exact
@@ -38,7 +39,7 @@ class ProductImageDiscoveryAgent implements Agent, HasStructuredOutput, HasTools
 
     public function tools(): iterable
     {
-        return [(new WebSearch)->max(6)];
+        return [(new WebSearch)->max(6)->location(country: 'US')];
     }
 
     public function schema(JsonSchema $schema): array

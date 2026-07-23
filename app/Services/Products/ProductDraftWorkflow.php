@@ -38,7 +38,9 @@ class ProductDraftWorkflow
                 'specifications' => $draft->specifications,
             ]);
             $draft->update($normalizedDescription);
-            $productType = $this->guessProductType($draft);
+            $productType = in_array($draft->product_type, ['laptop', 'desktop', 'component', 'other'], true)
+                ? $draft->product_type
+                : $this->guessProductType($draft);
             $category = Category::query()->where('slug', match ($productType) {
                 'laptop' => 'laptops',
                 'desktop' => 'computers',
@@ -230,11 +232,17 @@ class ProductDraftWorkflow
     private function guessProductType(ProductDraft $draft): string
     {
         $haystack = Str::lower($draft->title.' '.$draft->model.' '.json_encode($draft->specifications));
+        // Component keywords (cpu, ram, ssd…) appear in laptop/desktop specs too,
+        // so they are matched against the identity only, not the specifications.
+        $identity = Str::lower($draft->title.' '.$draft->model);
 
         return match (true) {
-            Str::contains($haystack, ['laptop', 'notebook', 'ноутбук', 'macbook', 'legion']) => 'laptop',
-            Str::contains($haystack, ['desktop', 'workstation', 'компьютер', 'готовый пк', 'mini pc']) => 'desktop',
             Str::contains($haystack, [
+                'laptop', 'notebook', 'ноутбук', 'macbook', 'legion', 'ideapad', 'thinkpad',
+                'vivobook', 'zenbook', 'pavilion', 'aspire', 'inspiron', 'surface laptop',
+            ]) => 'laptop',
+            Str::contains($haystack, ['desktop', 'workstation', 'компьютер', 'готовый пк', 'mini pc']) => 'desktop',
+            Str::contains($identity, [
                 'gpu', 'cpu', 'видеокарт', 'процессор', 'motherboard', 'материн', 'ram', 'оператив',
                 'ssd', 'hdd', 'накопител', 'power supply', 'блок питания', 'cooler', 'кулер',
                 'корпус', 'case', 'monitor', 'монитор', 'keyboard', 'клавиатур', 'mouse', 'мыш',

@@ -32,6 +32,15 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
 
     public function __construct(private readonly TelegramUpdate $update) {}
 
+    /**
+     * Keep the replayed history short: tool results are large JSON payloads,
+     * so the default of 100 messages makes every prompt re-send old searches.
+     */
+    protected function maxConversationMessages(): int
+    {
+        return 12;
+    }
+
     public function instructions(): Stringable|string
     {
         return <<<'PROMPT'
@@ -43,12 +52,19 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
               active_only only when the user explicitly asks what is currently visible on the public site.
             - Do not start web research when a suitable local result exists. For ordinary conversation that does
               not require catalog facts or a server action, answer normally without calling tools.
+            - When the user asks to show or list products ("покажи товары", "что есть в каталоге" and similar),
+              use response_type catalog_results and put the matching product IDs into product_ids. The system
+              automatically posts one photo card per product to the chat, so keep the message to a one-line
+              intro and do not list the products inside it.
             - When asked for the current site, proxy, public or ngrok URL, call GetSystemStatus and return the
               public_url exactly as provided. Never guess an address from conversation history.
 
             Ты — оператор каталога электроники Ningredy внутри Telegram. Отвечай администратору
             кратко и по-русски. Используй инструменты для фактов и действий; никогда не утверждай,
             что действие выполнено, пока инструмент не вернул ok=true.
+            Если спрашивают, кто ты или какая ты модель — отвечай просто, что ты AI-оператор
+            каталога Ningredy. Никогда не называй себя Claude, ChatGPT, DeepSeek или другой
+            моделью и не рассуждай о своей технической реализации.
 
             Правила поиска:
             - Если пользователь просто говорит «найди», сначала ищи в локальном каталоге.
