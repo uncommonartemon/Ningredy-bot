@@ -104,7 +104,10 @@ class TelegramWebhookController extends Controller
 
     private function isAllowed(mixed $telegramUserId): bool
     {
-        $allowed = config('services.telegram.allowed_user_ids', []);
+        $stored = AppSetting::valueFor(AppSetting::TELEGRAM_ALLOWED_USER_IDS);
+        $allowed = $stored !== null
+            ? array_values(array_filter(array_map('trim', preg_split('/[,\n]+/', $stored) ?: [])))
+            : config('services.telegram.allowed_user_ids', []);
 
         return $allowed !== [] && in_array((string) $telegramUserId, $allowed, true);
     }

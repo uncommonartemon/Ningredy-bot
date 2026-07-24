@@ -6,6 +6,7 @@ use App\Models\AppSetting;
 use App\Services\Telegram\TelegramWebhookManager;
 use BackedEnum;
 use Filament\Actions\Action;
+use Filament\Forms\Components\Textarea;
 use Filament\Forms\Components\TextInput;
 use Filament\Forms\Concerns\InteractsWithForms;
 use Filament\Forms\Contracts\HasForms;
@@ -38,6 +39,8 @@ class TelegramSettings extends Page implements HasForms
     {
         $this->form->fill([
             'proxy_url' => $manager->configuredProxyUrl(),
+            'allowed_user_ids' => AppSetting::valueFor(AppSetting::TELEGRAM_ALLOWED_USER_IDS)
+                ?? implode("\n", config('services.telegram.allowed_user_ids', [])),
         ]);
     }
 
@@ -60,6 +63,11 @@ class TelegramSettings extends Page implements HasForms
                             ->button()
                             ->action('setWebhook'),
                     ),
+                Textarea::make('allowed_user_ids')
+                    ->label('Разрешённые Telegram ID')
+                    ->placeholder("123456789\n987654321")
+                    ->helperText('По одному ID на строку (или через запятую). Пусто — никто не сможет писать боту.')
+                    ->rows(4),
             ])
             ->statePath('data');
     }
@@ -68,11 +76,17 @@ class TelegramSettings extends Page implements HasForms
     {
         $data = $this->form->getState();
         AppSetting::put(AppSetting::TELEGRAM_PROXY_URL, rtrim(trim($data['proxy_url']), '/'));
+        AppSetting::put(AppSetting::TELEGRAM_ALLOWED_USER_IDS, $this->normalizedUserIds($data['allowed_user_ids'] ?? ''));
 
         Notification::make()
-            ->title('Proxy URL сохранён')
+            ->title('Настройки сохранены')
             ->success()
             ->send();
+    }
+
+    private function normalizedUserIds(string $raw): string
+    {
+        return implode("\n", array_values(array_filter(array_map('trim', preg_split('/[,\n]+/', $raw) ?: []))));
     }
 
     public function setWebhook(TelegramWebhookManager $manager): void
