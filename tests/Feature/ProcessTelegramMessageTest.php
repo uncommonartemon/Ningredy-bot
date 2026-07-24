@@ -125,6 +125,69 @@ class ProcessTelegramMessageTest extends TestCase
         $this->assertDatabaseHas('telegram_updates', ['id' => $update->id, 'status' => 'completed']);
     }
 
+    public function test_catalog_card_sends_every_stored_photo_as_one_album(): void
+    {
+        Storage::fake('public');
+        config(['services.telegram.bot_token' => 'test-token']);
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []])]);
+        $category = Category::query()->where('slug', 'laptops')->firstOrFail();
+        $brand = Brand::query()->firstOrCreate(['slug' => 'lenovo'], ['name' => 'Lenovo', 'is_active' => true]);
+        $product = Product::query()->create([
+            'category_id' => $category->id,
+            'brand_id' => $brand->id,
+            'canonical_key' => 'lenovo-gallery-test',
+            'product_type' => 'laptop',
+            'status' => 'published',
+            'slug' => 'lenovo-gallery-test',
+            'title' => 'Lenovo Gallery Test',
+            'is_active' => true,
+            'published_at' => now(),
+        ]);
+        $variant = ProductVariant::query()->create([
+            'product_id' => $product->id,
+            'fingerprint' => 'lenovo-gallery-test-variant',
+            'name' => 'Default',
+            'is_default' => true,
+            'is_active' => true,
+        ]);
+        foreach (range(0, 2) as $index) {
+            Storage::disk('public')->put("products/{$product->id}/photo-{$index}.webp", "bytes-{$index}");
+            $product->media()->create([
+                'product_variant_id' => $variant->id,
+                'type' => 'image',
+                'disk' => 'public',
+                'path' => "products/{$product->id}/photo-{$index}.webp",
+                'verification_status' => 'verified',
+                'is_primary' => $index === 0,
+                'sort_order' => $index,
+            ]);
+        }
+        ServerAssistantAgent::fake([[
+            'response_type' => 'catalog_results',
+            'message' => 'Вот товар:',
+            'draft_id' => null,
+            'product_ids' => [$product->id],
+            'operation_ids' => [],
+        ]]);
+        $update = $this->update();
+
+        (new ProcessTelegramMessage($update->id))->handle(
+            app(TelegramClient::class),
+            app(AiErrorPresenter::class),
+        );
+
+        Http::assertSent(function (HttpRequest $request): bool {
+            if (! str_ends_with($request->url(), '/sendMediaGroup')) {
+                return false;
+            }
+            $parts = collect($request->data())->keyBy('name');
+            $media = json_decode((string) ($parts->get('media')['contents'] ?? ''), true) ?? [];
+
+            return count($media) === 3;
+        });
+        Http::assertNotSent(fn (HttpRequest $request): bool => str_ends_with($request->url(), '/sendPhoto'));
+    }
+
     public function test_failed_hook_does_not_duplicate_the_notification_handle_already_sent(): void
     {
         // Real production bug (2026-07-23): on the final retry attempt,

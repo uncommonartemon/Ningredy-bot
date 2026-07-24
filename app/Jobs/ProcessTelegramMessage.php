@@ -223,7 +223,7 @@ class ProcessTelegramMessage implements ShouldQueue
     {
         $productIds = array_slice($productIds, 0, 10);
         $products = Product::query()
-            ->with(['brand:id,name', 'defaultVariant', 'catalogMedia'])
+            ->with(['brand:id,name', 'defaultVariant'])
             ->whereIn('id', $productIds)
             ->get()
             ->sortBy(fn (Product $product): int => (int) array_search($product->id, $productIds, true));
@@ -231,13 +231,21 @@ class ProcessTelegramMessage implements ShouldQueue
         foreach ($products as $product) {
             try {
                 $caption = $this->productCardCaption($product);
-                $media = $product->catalogMedia;
-                $path = ($media?->disk && $media?->path)
-                    ? Storage::disk($media->disk)->path($media->path)
-                    : null;
+                $paths = $product->media()
+                    ->where('type', 'image')
+                    ->whereIn('verification_status', ['verified', 'source_verified', 'manual'])
+                    ->orderByDesc('is_primary')
+                    ->orderBy('sort_order')
+                    ->get()
+                    ->filter(fn ($item): bool => filled($item->disk) && filled($item->path))
+                    ->map(fn ($item): string => Storage::disk($item->disk)->path($item->path))
+                    ->filter(fn (string $path): bool => is_file($path) && is_readable($path))
+                    ->take(10)
+                    ->values()
+                    ->all();
 
-                if ($path && is_file($path) && is_readable($path)) {
-                    $telegram->sendPhotoFile($chatId, $path, $caption);
+                if ($paths !== []) {
+                    $telegram->sendMediaGroupFiles($chatId, $paths, $caption);
                 } else {
                     $telegram->sendMessage($chatId, $caption);
                 }
