@@ -56,6 +56,12 @@ return [
         'timeout' => (int) env('AI_PRODUCT_IMAGE_VISION_TIMEOUT', 45),
     ],
 
+    'image_upscale' => [
+        'provider' => 'openai',
+        'model' => env('AI_IMAGE_UPSCALE_MODEL', 'gpt-image-1-mini'),
+        'timeout' => (int) env('AI_IMAGE_UPSCALE_TIMEOUT', 90),
+    ],
+
     'product_image_discovery' => [
         'provider' => 'openai',
         'model' => env('AI_PRODUCT_IMAGE_DISCOVERY_MODEL', 'gpt-5.4'),

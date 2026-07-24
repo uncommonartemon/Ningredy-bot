@@ -50,8 +50,11 @@ class AiSettings
 
     public function modelFor(string $role): string
     {
-        if ($role === 'voice_transcription') {
-            return (string) config('services.voice_transcription.model');
+        // The admin's global model override is a chat/vision-capable model
+        // choice; roles with a fundamentally different model family (voice
+        // transcription, image generation) must never inherit it.
+        if (in_array($role, ['voice_transcription', 'image_upscale'], true)) {
+            return (string) config("services.{$role}.model");
         }
 
         return $this->model() ?: (string) config("services.{$role}.model");

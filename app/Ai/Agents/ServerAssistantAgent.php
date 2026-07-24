@@ -17,6 +17,7 @@ use App\Ai\Tools\SearchCatalog;
 use App\Ai\Tools\SetProductActive;
 use App\Ai\Tools\UpdateProduct;
 use App\Ai\Tools\UpdateVariant;
+use App\Ai\Tools\UpscaleProductPhoto;
 use App\Models\TelegramUpdate;
 use App\Services\Products\ProductDraftWorkflow;
 use App\Services\Products\ProductImageResolver;
@@ -89,6 +90,10 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
             fresh=true — стереть все и искать заново). RefindProductPhotos асинхронный: новые фото
             придут отдельным сообщением позже, не говори, что они уже сохранены.
 
+            UpscaleProductPhoto — AI-улучшение конкретного фото (не поиск нового, а обработка того же
+            снимка: резкость, шум, разрешение). Вызывай только когда пользователь явно просит улучшить/
+            "апскейлить" конкретное фото по номеру, никогда автоматически и не для всей галереи разом.
+
             Физическое удаление разрешено только по явной просьбе пользователя и всегда требует
             отдельной inline-кнопки Telegram. Сначала однозначно найди товар. Если совпадений несколько
             или точный товар не установлен — задай уточняющий вопрос и не готовь удаление. Для одного
@@ -122,6 +127,7 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
             new ReorderProductPhotos($this->update),
             new DeleteProductPhotos($this->update),
             new RefindProductPhotos($this->update),
+            new UpscaleProductPhoto($this->update),
         ];
     }
 
