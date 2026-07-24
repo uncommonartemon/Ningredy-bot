@@ -257,7 +257,9 @@ class ProcessTelegramMessage implements ShouldQueue
 
     private function productCardCaption(Product $product): string
     {
-        $product->loadMissing('brand', 'defaultVariant');
+        $product->loadMissing([
+            'brand', 'defaultVariant.attributes.definition', 'attributes.definition', 'sources',
+        ]);
         $variant = $product->defaultVariant;
         $identity = collect([$product->brand?->name, $product->model])->filter()->unique()->implode(' · ');
         $price = $variant?->price !== null
@@ -275,10 +277,31 @@ class ProcessTelegramMessage implements ShouldQueue
         ), '/');
         $link = $publicUrl !== '' ? "{$publicUrl}/products/{$product->slug}" : null;
 
-        return mb_substr(implode("\n", array_filter([
+        $header = implode("\n", array_filter([
             "#{$product->id} · {$product->title}",
             $identity !== '' && $identity !== $product->title ? $identity : null,
             implode(' · ', array_filter([$price, $stock])) ?: null,
+        ]));
+
+        $specs = collect($product->attributes)
+            ->merge($variant?->attributes ?? [])
+            ->filter(fn ($attribute): bool => $attribute->definition !== null && filled($attribute->value))
+            ->map(fn ($attribute): string => "• {$attribute->definition->label}: {$attribute->value}".($attribute->unit ? " {$attribute->unit}" : ''))
+            ->implode("\n");
+        $sources = $product->sources->pluck('url')->filter()->take(3)
+            ->map(fn (string $url): string => "• {$url}")->implode("\n");
+        // Telegram caps photo/album captions at 1024 chars (vs 4096 for plain
+        // text messages), so specs/sources are clipped to whatever fits after
+        // the header and link - same budget technique as draftSummary().
+        $body = implode("\n\n", array_filter([
+            $specs !== '' ? "Характеристики:\n{$specs}" : null,
+            $sources !== '' ? "Источники:\n{$sources}" : null,
+        ]));
+        $available = max(0, 1024 - mb_strlen($header."\n\n".($link ?? '')) - 8);
+
+        return mb_substr(implode("\n\n", array_filter([
+            $header,
+            mb_substr($body, 0, $available),
             $link,
         ])), 0, 1024);
     }

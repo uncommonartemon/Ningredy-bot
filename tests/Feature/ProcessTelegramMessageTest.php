@@ -188,6 +188,59 @@ class ProcessTelegramMessageTest extends TestCase
         Http::assertNotSent(fn (HttpRequest $request): bool => str_ends_with($request->url(), '/sendPhoto'));
     }
 
+    public function test_catalog_card_includes_specifications_and_sources(): void
+    {
+        Storage::fake('public');
+        config(['services.telegram.bot_token' => 'test-token']);
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []])]);
+        $category = Category::query()->where('slug', 'laptops')->firstOrFail();
+        $brand = Brand::query()->firstOrCreate(['slug' => 'lenovo'], ['name' => 'Lenovo', 'is_active' => true]);
+        $product = Product::query()->create([
+            'category_id' => $category->id,
+            'brand_id' => $brand->id,
+            'canonical_key' => 'lenovo-specs-test',
+            'product_type' => 'laptop',
+            'status' => 'published',
+            'slug' => 'lenovo-specs-test',
+            'title' => 'Lenovo Specs Test',
+            'is_active' => true,
+            'published_at' => now(),
+        ]);
+        $variant = ProductVariant::query()->create([
+            'product_id' => $product->id,
+            'fingerprint' => 'lenovo-specs-test-variant',
+            'name' => 'Default',
+            'is_default' => true,
+            'is_active' => true,
+        ]);
+        $ram = \App\Models\AttributeDefinition::query()->firstOrCreate(
+            ['key' => 'ram'],
+            ['label' => 'RAM', 'data_type' => 'text', 'is_filterable' => true, 'is_variant' => true],
+        );
+        $variant->attributes()->create(['attribute_definition_id' => $ram->id, 'value' => '32', 'unit' => 'GB']);
+        $product->sources()->create([
+            'title' => 'Lenovo store', 'url' => 'https://www.lenovo.com/specs-test', 'domain' => 'lenovo.com',
+            'source_type' => 'manufacturer',
+        ]);
+        ServerAssistantAgent::fake([[
+            'response_type' => 'catalog_results',
+            'message' => 'Вот товар:',
+            'draft_id' => null,
+            'product_ids' => [$product->id],
+            'operation_ids' => [],
+        ]]);
+        $update = $this->update();
+
+        (new ProcessTelegramMessage($update->id))->handle(
+            app(TelegramClient::class),
+            app(AiErrorPresenter::class),
+        );
+
+        Http::assertSent(fn (HttpRequest $request): bool => str_ends_with($request->url(), '/sendMessage')
+            && str_contains((string) ($request['text'] ?? ''), 'Оперативная память: 32 GB')
+            && str_contains((string) ($request['text'] ?? ''), 'lenovo.com/specs-test'));
+    }
+
     public function test_failed_hook_does_not_duplicate_the_notification_handle_already_sent(): void
     {
         // Real production bug (2026-07-23): on the final retry attempt,
