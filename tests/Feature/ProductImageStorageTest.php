@@ -188,6 +188,37 @@ class ProductImageStorageTest extends TestCase
             'model' => 'gpt-5.4-mini',
         ]);
     }
+    public function test_it_prefers_completing_the_gallery_from_one_trusted_source_over_mixing_hosts(): void
+    {
+        Storage::fake('public');
+        ProductImageVisionAgent::fake(fn () => throw new \RuntimeException('Vision should not run for source-verified images'))
+            ->preventStrayPrompts();
+        Http::fake(fn (Request $request) => Http::response($this->jpeg(90), 200, ['Content-Type' => 'image/jpeg']));
+        [$product, $variant, $draft] = $this->records();
+        $draft->update([
+            'brand' => 'ASUS',
+            'model' => 'X1504VA-BQ4485',
+            'sources' => [
+                ['title' => 'Amazon listing', 'url' => 'https://www.amazon.com/dp/x1504va-bq4485', 'type' => 'marketplace'],
+                ['title' => 'Other retailer', 'url' => 'https://www.lenovo.com/other-retailer/x1504va-bq4485', 'type' => 'retailer'],
+            ],
+            'image_urls' => [
+                'https://m.media-amazon.com/images/x1504va-bq4485-1.jpg',
+                'https://m.media-amazon.com/images/x1504va-bq4485-2.jpg',
+                'https://m.media-amazon.com/images/x1504va-bq4485-3.jpg',
+                'https://www.lenovo.com/other-retailer/x1504va-bq4485-photo.jpg',
+            ],
+        ]);
+
+        app(ProductImageStorage::class)->store($product, $variant, $draft->fresh());
+
+        $media = $product->media()->get();
+        $this->assertNotEmpty($media);
+        foreach ($media as $item) {
+            $this->assertStringContainsString('media-amazon.com', (string) $item->source_url);
+        }
+    }
+
     public function test_it_accepts_a_publishable_image_when_the_exact_model_is_supported_by_its_source(): void
     {
         Storage::fake('public');

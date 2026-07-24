@@ -265,6 +265,7 @@ class ProductImageStorage
      */
     private function selectFromCandidates(ProductDraft $draft, array $candidates, int $remaining): array
     {
+        $candidates = $this->preferSingleSourceGallery($candidates);
         $selected = $this->sourceVerified($draft, $candidates, $remaining);
         $needsVision = $this->removeSelectedCandidates($candidates, $selected);
 
@@ -309,6 +310,50 @@ class ProductImageStorage
 
             throw $exception;
         }
+    }
+
+    /**
+     * When one trusted source (official manufacturer, Amazon, a trusted
+     * retailer) has its own multi-shot gallery, build the whole public
+     * gallery from that single listing instead of mixing angles scraped
+     * from several different sites - stops "the same shot, but a
+     * smaller/worse copy from another site" from ever entering the pool.
+     * A host only wins this way if it is actually trusted and has at least
+     * two candidates; a single stray image never triggers the restriction,
+     * so a lone official shot can still be topped up from elsewhere.
+     *
+     * @param array<int, array<string, mixed>> $candidates
+     * @return array<int, array<string, mixed>>
+     */
+    private function preferSingleSourceGallery(array $candidates): array
+    {
+        if (count($candidates) < 2) {
+            return $candidates;
+        }
+
+        $priorityRank = ['official' => 3, 'amazon' => 2, 'trusted_retailer' => 1, 'standard' => 0];
+
+        $groups = collect($candidates)
+            ->groupBy(fn (array $candidate): string => $this->host((string) ($candidate['source_url'] ?? '')))
+            ->filter(fn ($group, string $host): bool => $host !== '');
+
+        if ($groups->isEmpty()) {
+            return $candidates;
+        }
+
+        $best = $groups->sortByDesc(function ($group) use ($priorityRank): array {
+            $priority = $priorityRank[$group->first()['source_priority'] ?? 'standard'] ?? 0;
+
+            return [$priority, $group->count()];
+        })->first();
+
+        $bestPriority = $priorityRank[$best->first()['source_priority'] ?? 'standard'] ?? 0;
+
+        if ($bestPriority === 0 || $best->count() < 2) {
+            return $candidates;
+        }
+
+        return $best->values()->all();
     }
 
     /** @param array<int, array<string, mixed>> $candidates @return array<int, array<string, mixed>> */
