@@ -5,7 +5,7 @@
     "scripts": {
         "build": "vite build",
         "dev": "vite",
-        "start": "concurrently -n web,queue,ngrok,webhook -c blue,green,yellow,magenta --restart-tries -1 --restart-after 5000 \"php artisan serve --host=127.0.0.1 --port=8000\" \"php artisan queue:work --queue=assistant,voice,media,default --sleep=2 --timeout=300 --max-time=3600\" \"ngrok http 8000\" \"php artisan telegram:sync-ngrok --watch\""
+        "start": "concurrently -n web,queue,ngrok,webhook,scheduler -c blue,green,yellow,magenta,cyan --restart-tries -1 --restart-after 5000 \"php artisan serve --host=127.0.0.1 --port=8000\" \"php artisan queue:work --queue=assistant,voice,media,default --sleep=2 --timeout=300 --max-time=86400\" \"ngrok http 8000\" \"php artisan telegram:sync-ngrok --watch\" \"php artisan schedule:work\""
     },
     "devDependencies": {
         "@tailwindcss/vite": "^4.0.0",

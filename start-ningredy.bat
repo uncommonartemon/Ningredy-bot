@@ -35,6 +35,7 @@ title Ningredy
 echo Starting Ningredy in a single window...
 echo   Web:      http://127.0.0.1:8000
 echo   Queues:   assistant, voice, media, default
+echo   Scheduler: queue health-check every 2 min (Telegram alert if stuck)
 echo   Ngrok UI: http://127.0.0.1:4040
 echo   Webhook:  automatic ngrok synchronization
 echo.
