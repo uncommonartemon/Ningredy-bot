@@ -55,4 +55,34 @@ class AiSettingsTest extends TestCase
 
         $this->assertSame('gpt-4o', $settings->modelFor('server_assistant'));
     }
+
+    public function test_selected_image_model_overrides_env_default(): void
+    {
+        config()->set('services.image_upscale.model', 'gpt-image-2');
+
+        $settings = app(AiSettings::class);
+        $settings->saveImageModel('gpt-image-1-mini');
+
+        $this->assertSame('gpt-image-1-mini', $settings->imageModel());
+        $this->assertSame('gpt-image-1-mini', $settings->modelFor('image_upscale'));
+    }
+
+    public function test_blank_image_selection_uses_env_default(): void
+    {
+        config()->set('services.image_upscale.model', 'gpt-image-2');
+
+        $settings = app(AiSettings::class);
+        $settings->saveImageModel(null);
+
+        $this->assertNull($settings->imageModel());
+        $this->assertSame('gpt-image-2', $settings->modelFor('image_upscale'));
+    }
+
+    public function test_invalid_image_model_is_not_saved(): void
+    {
+        $settings = app(AiSettings::class);
+        $settings->saveImageModel('some-random-model');
+
+        $this->assertNull($settings->imageModel());
+    }
 }

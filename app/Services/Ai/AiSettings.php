@@ -25,6 +25,12 @@ class AiSettings
         'o4-mini' => 'o4-mini',
     ];
 
+    /** @var array<string, string> */
+    public const IMAGE_MODELS = [
+        'gpt-image-2' => 'GPT Image 2 (лучшее качество, по умолчанию)',
+        'gpt-image-1-mini' => 'GPT Image 1 Mini (дешевле, ниже качество)',
+    ];
+
     public function model(): ?string
     {
         $model = AppSetting::valueFor('ai.model');
@@ -43,6 +49,18 @@ class AiSettings
         AppSetting::put('ai.model', $selectedModel);
     }
 
+    public function imageModel(): ?string
+    {
+        $model = AppSetting::valueFor('ai.image_model');
+
+        return array_key_exists($model, self::IMAGE_MODELS) ? $model : null;
+    }
+
+    public function saveImageModel(?string $model): void
+    {
+        AppSetting::put('ai.image_model', array_key_exists($model, self::IMAGE_MODELS) ? $model : null);
+    }
+
     public function providerFor(string $role): string
     {
         return 'openai';
@@ -50,10 +68,13 @@ class AiSettings
 
     public function modelFor(string $role): string
     {
-        // The admin's global model override is a chat/vision-capable model
-        // choice; roles with a fundamentally different model family (voice
-        // transcription, image generation) must never inherit it.
-        if (in_array($role, ['voice_transcription', 'image_upscale'], true)) {
+        if ($role === 'image_upscale') {
+            return $this->imageModel() ?: (string) config('services.image_upscale.model');
+        }
+
+        // The admin's global chat-model override must never apply to a
+        // fundamentally different model family (voice transcription).
+        if ($role === 'voice_transcription') {
             return (string) config("services.{$role}.model");
         }
 

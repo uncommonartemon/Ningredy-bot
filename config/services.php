@@ -58,7 +58,7 @@ return [
 
     'image_upscale' => [
         'provider' => 'openai',
-        'model' => env('AI_IMAGE_UPSCALE_MODEL', 'gpt-image-1-mini'),
+        'model' => env('AI_IMAGE_UPSCALE_MODEL', 'gpt-image-2'),
         'timeout' => (int) env('AI_IMAGE_UPSCALE_TIMEOUT', 90),
     ],
 

@@ -38,6 +38,7 @@ class AiSettingsPage extends Page implements HasForms
     {
         $this->form->fill([
             'model' => $settings->model(),
+            'image_model' => $settings->imageModel(),
         ]);
     }
 
@@ -55,6 +56,16 @@ class AiSettingsPage extends Page implements HasForms
                             ->helperText('Пусто — используются модели, заданные в .env.')
                             ->searchable(),
                     ]),
+                Section::make('Улучшение фото')
+                    ->description('Модель для команды "апскейл фото". По умолчанию используется самая качественная модель.')
+                    ->schema([
+                        Select::make('image_model')
+                            ->label('Модель изображений')
+                            ->options(AiSettings::IMAGE_MODELS)
+                            ->placeholder('Из .env')
+                            ->helperText('Пусто — используется модель, заданная в .env.')
+                            ->searchable(),
+                    ]),
             ])
             ->statePath('data');
     }
@@ -63,6 +74,7 @@ class AiSettingsPage extends Page implements HasForms
     {
         $data = $this->form->getState();
         $settings->saveModel($data['model'] ?? null);
+        $settings->saveImageModel($data['image_model'] ?? null);
 
         try {
             Artisan::call('queue:restart');
