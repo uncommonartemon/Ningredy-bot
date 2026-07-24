@@ -20,6 +20,27 @@ class AiUsageReporter
         ];
     }
 
+    /**
+     * Usage for one Telegram interaction - the top-level agent call plus
+     * every nested tool-invoked AiRun it triggered (research, image
+     * discovery, vision...), all sharing the same telegram_update_id.
+     * Pass $since to scope to only runs created from that point on (e.g.
+     * a job's own start time), so a later step doesn't double-count an
+     * earlier one's tokens.
+     *
+     * @return array<string, mixed>
+     */
+    public function forTelegramUpdate(int $telegramUpdateId, ?\DateTimeInterface $since = null): array
+    {
+        $query = AiRun::query()->where('telegram_update_id', $telegramUpdateId)->whereNotNull('usage');
+
+        if ($since !== null) {
+            $query->where('created_at', '>=', $since);
+        }
+
+        return $this->summarizeRuns($query->get(['provider', 'model', 'usage']));
+    }
+
     /** @return array<string, mixed> */
     private function period($from): array
     {
@@ -29,7 +50,12 @@ class AiUsageReporter
             $query->where('created_at', '>=', $from);
         }
 
-        $runs = $query->get(['provider', 'model', 'usage']);
+        return $this->summarizeRuns($query->get(['provider', 'model', 'usage']));
+    }
+
+    /** @param Collection<int, AiRun> $runs @return array<string, mixed> */
+    private function summarizeRuns(Collection $runs): array
+    {
         $byModel = $runs
             ->groupBy(fn (AiRun $run): string => $run->provider.':'.$run->model)
             ->map(fn (Collection $items): array => $this->modelSummary($items))

@@ -13,6 +13,7 @@ use App\Models\TelegramUpdate;
 use App\Models\User;
 use App\Services\Ai\AiErrorPresenter;
 use App\Services\Ai\AiSettings;
+use App\Services\Ai\AiUsageReporter;
 use App\Services\Telegram\TelegramClient;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
@@ -111,8 +112,10 @@ class ProcessTelegramMessage implements ShouldQueue
                 ->latest('id')
                 ->first();
 
+            $usageFootnote = $this->usageFootnote($update->id);
+
             if ($draft) {
-                $telegram->sendMessage($update->chat_id, $this->draftSummary($draft), [
+                $telegram->sendMessage($update->chat_id, $this->draftSummary($draft).$usageFootnote, [
                     'inline_keyboard' => [[
                         ['text' => 'Добавить товар в каталог', 'callback_data' => "draft:add:{$draft->id}"],
                         ['text' => 'Не добавлять', 'callback_data' => "draft:reject:{$draft->id}"],
@@ -123,7 +126,7 @@ class ProcessTelegramMessage implements ShouldQueue
                 $productId = (int) $deletion->target_id;
                 $telegram->sendMessage(
                     $update->chat_id,
-                    "Подтвердите безвозвратное удаление:\n\n#{$productId} · {$productTitle}\n\nБудут удалены товар, варианты, характеристики и локальные фотографии.",
+                    "Подтвердите безвозвратное удаление:\n\n#{$productId} · {$productTitle}\n\nБудут удалены товар, варианты, характеристики и локальные фотографии.".$usageFootnote,
                     [
                         'inline_keyboard' => [[
                             [
@@ -138,10 +141,10 @@ class ProcessTelegramMessage implements ShouldQueue
                     ],
                 );
             } elseif ($data['response_type'] === 'catalog_results' && ! empty($data['product_ids'])) {
-                $telegram->sendMessage($update->chat_id, $data['message']);
+                $telegram->sendMessage($update->chat_id, $data['message'].$usageFootnote);
                 $this->sendProductCards($telegram, $update->chat_id, $data['product_ids']);
             } else {
-                $telegram->sendMessage($update->chat_id, $data['message']);
+                $telegram->sendMessage($update->chat_id, $data['message'].$usageFootnote);
             }
         } catch (Throwable $exception) {
             $run->update([
@@ -195,6 +198,24 @@ class ProcessTelegramMessage implements ShouldQueue
         } catch (Throwable $notificationError) {
             report($notificationError);
         }
+    }
+
+    private function usageFootnote(int $telegramUpdateId): string
+    {
+        $usage = app(AiUsageReporter::class)->forTelegramUpdate($telegramUpdateId);
+        $tokens = (int) ($usage['tokens']['total'] ?? 0);
+
+        if ($tokens <= 0) {
+            return '';
+        }
+
+        $line = "\n\n🔢 Токены: ".number_format($tokens, 0, '.', ' ');
+
+        if ($usage['estimated_cost_usd'] !== null) {
+            $line .= sprintf(' (~$%s)', number_format((float) $usage['estimated_cost_usd'], 4));
+        }
+
+        return $line;
     }
 
     /** @param array<int, int> $productIds */

@@ -6,6 +6,7 @@ use App\Models\Product;
 use App\Models\AppSetting;
 use App\Models\ProductDraft;
 use App\Models\ProductVariant;
+use App\Services\Ai\AiUsageReporter;
 use App\Services\Products\ProductImageStorage;
 use App\Services\Telegram\TelegramClient;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -47,12 +48,16 @@ class StoreProductImages implements ShouldQueue
             return;
         }
 
+        $searchStartedAt = now();
         $stored = $storage->store($product, $variant, $draft);
         $chatId = $draft->telegramUpdate?->chat_id;
+        $usageFootnote = $draft->telegram_update_id
+            ? $this->usageFootnote($draft->telegram_update_id, $searchStartedAt)
+            : '';
 
         if ($chatId) {
             try {
-                if ($this->sendProductPost($telegram, $chatId, $product)) {
+                if ($this->sendProductPost($telegram, $chatId, $product, $usageFootnote)) {
                     return;
                 }
             } catch (Throwable $exception) {
@@ -84,8 +89,26 @@ class StoreProductImages implements ShouldQueue
             $message = $stored > 0
                 ? "Фото проверены Vision и сохранены: {$stored}."
                 : 'Подходящие фото товара не найдены. Товар сохранён без изображения; фото можно добавить вручную в Filament.';
-            $this->notify($telegram, $chatId, $message);
+            $this->notify($telegram, $chatId, $message.$usageFootnote);
         }
+    }
+
+    private function usageFootnote(int $telegramUpdateId, \DateTimeInterface $since): string
+    {
+        $usage = app(AiUsageReporter::class)->forTelegramUpdate($telegramUpdateId, $since);
+        $tokens = (int) ($usage['tokens']['total'] ?? 0);
+
+        if ($tokens <= 0) {
+            return '';
+        }
+
+        $line = "\n\n🔢 Токены на поиск фото: ".number_format($tokens, 0, '.', ' ');
+
+        if ($usage['estimated_cost_usd'] !== null) {
+            $line .= sprintf(' (~$%s)', number_format((float) $usage['estimated_cost_usd'], 4));
+        }
+
+        return $line;
     }
 
     public function failed(?Throwable $exception): void
@@ -111,31 +134,33 @@ class StoreProductImages implements ShouldQueue
         }
     }
 
-    private function sendProductPost(TelegramClient $telegram, string $chatId, Product $product): bool
+    private function sendProductPost(TelegramClient $telegram, string $chatId, Product $product, string $usageFootnote = ''): bool
     {
-        $paths = $product->media()
+        $media = $product->media()
             ->where('type', 'image')
             ->whereIn('verification_status', ['verified', 'source_verified', 'manual'])
             ->orderByDesc('is_primary')
             ->orderBy('sort_order')
             ->get()
-            ->filter(fn ($media): bool => filled($media->disk) && filled($media->path))
-            ->map(fn ($media): string => Storage::disk($media->disk)->path($media->path))
-            ->filter(fn (string $path): bool => is_file($path) && is_readable($path))
+            ->filter(fn ($item): bool => filled($item->disk) && filled($item->path))
+            ->filter(fn ($item): bool => is_file(Storage::disk($item->disk)->path($item->path))
+                && is_readable(Storage::disk($item->disk)->path($item->path)))
             ->take(10)
-            ->values()
-            ->all();
+            ->values();
 
-        if ($paths === []) {
+        if ($media->isEmpty()) {
             return false;
         }
 
-        $telegram->sendMediaGroupFiles($chatId, $paths, $this->caption($product));
+        $paths = $media->map(fn ($item): string => Storage::disk($item->disk)->path($item->path))->all();
+        $caption = $this->caption($product, $media->pluck('source_url')->filter()->all()).$usageFootnote;
+        $telegram->sendMediaGroupFiles($chatId, $paths, $caption);
 
         return true;
     }
 
-    private function caption(Product $product): string
+    /** @param array<int, string> $photoSourceUrls */
+    private function caption(Product $product, array $photoSourceUrls = []): string
     {
         $product->loadMissing('brand');
         $identity = collect([$product->brand?->name, $product->model])->filter()->unique()->implode(' · ');
@@ -150,9 +175,23 @@ class StoreProductImages implements ShouldQueue
             (string) config('services.telegram.proxy_url'),
         ), '/');
         $footer = $publicUrl !== '' ? "\n\n{$publicUrl}/products/{$product->slug}" : '';
+        $sourcesLine = $this->photoSourcesLine($photoSourceUrls);
+        $footer .= $sourcesLine !== '' ? "\n\n{$sourcesLine}" : '';
         $description = trim((string) $product->description);
         $available = max(0, 1024 - mb_strlen($header.$footer) - 4);
 
         return $header.($description !== '' ? "\n\n".mb_substr($description, 0, $available) : '').$footer;
+    }
+
+    /** @param array<int, string> $sourceUrls */
+    private function photoSourcesLine(array $sourceUrls): string
+    {
+        $hosts = collect($sourceUrls)
+            ->map(fn (string $url): string => (string) parse_url($url, PHP_URL_HOST))
+            ->filter()
+            ->unique()
+            ->values();
+
+        return $hosts->isEmpty() ? '' : '📷 Фото с: '.$hosts->implode(', ');
     }
 }
