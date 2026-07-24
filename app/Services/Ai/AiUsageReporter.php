@@ -118,7 +118,13 @@ class AiUsageReporter
     /** @param array<string, int> $tokens */
     private function estimateCost(string $provider, string $model, array $tokens): ?float
     {
-        $prices = config("services.ai_usage.prices.{$provider}.{$model}");
+        // Model names like "gpt-5.4" contain a dot, which config()'s
+        // dot-notation would otherwise parse as a nested key
+        // (prices.openai.gpt-5.4 -> ['gpt-5']['4']) and never find a match.
+        // Index into the provider's array directly with the literal model
+        // string instead.
+        $providerPrices = config("services.ai_usage.prices.{$provider}");
+        $prices = is_array($providerPrices) ? ($providerPrices[$model] ?? null) : null;
 
         if (! is_array($prices)) {
             return null;

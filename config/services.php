@@ -89,6 +89,10 @@ return [
                     'output_per_million' => env('AI_PRICE_OPENAI_GPT_5_4_MINI_OUTPUT_PER_1M'),
                     'reasoning_per_million' => env('AI_PRICE_OPENAI_GPT_5_4_MINI_REASONING_PER_1M'),
                 ],
+                'gpt-4o-transcribe' => [
+                    'input_per_million' => env('AI_PRICE_OPENAI_GPT_4O_TRANSCRIBE_INPUT_PER_1M'),
+                    'output_per_million' => env('AI_PRICE_OPENAI_GPT_4O_TRANSCRIBE_OUTPUT_PER_1M'),
+                ],
             ],
             'deepseek' => [
                 'deepseek-v4-flash' => [
