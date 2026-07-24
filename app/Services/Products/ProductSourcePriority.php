@@ -158,17 +158,22 @@ class ProductSourcePriority
     }
 
     /**
-     * Major English-language electronics retailers/marketplaces that are as
+     * Major US and Czech/EU electronics retailers/marketplaces that are as
      * reliable as Amazon for exact-product photos and listings, ranked just
-     * below it.
+     * below it. Deliberately no Ukrainian retailers here (e.g. Rozetka) -
+     * their product photos frequently carry Ukrainian text/watermarks, so
+     * they stay a source_verified fallback only, never an equal trust tier.
      */
     private function isTrustedRetailer(string $url): bool
     {
         $host = $this->host($url);
 
         return collect([
+            // US
             'ebay.', 'newegg.', 'bestbuy.', 'walmart.', 'target.',
             'bhphotovideo.', 'adorama.', 'costco.', 'samsclub.', 'microcenter.',
+            // Czech / EU
+            'alza.', 'czc.cz', 'datart.cz', 'mediamarkt.', 'saturn.de',
         ])->contains(fn (string $needle): bool => str_contains($host, $needle));
     }
 
