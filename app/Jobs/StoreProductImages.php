@@ -155,6 +155,14 @@ class StoreProductImages implements ShouldQueue
         $paths = $media->map(fn ($item): string => Storage::disk($item->disk)->path($item->path))->all();
         $caption = $this->caption($product, $media->pluck('source_url')->filter()->all()).$usageFootnote;
         $telegram->sendMediaGroupFiles($chatId, $paths, $caption);
+        // sendMediaGroup has no reply_markup support, so the "redo" action
+        // has to be a short follow-up message instead of an inline button
+        // on the album itself.
+        $telegram->sendMessage($chatId, 'Фото не подошли?', [
+            'inline_keyboard' => [[
+                ['text' => '🔄 Найти фото заново', 'callback_data' => "photos:refind:{$product->id}"],
+            ]],
+        ]);
 
         return true;
     }

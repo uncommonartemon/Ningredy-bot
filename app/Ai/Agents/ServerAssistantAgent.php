@@ -2,11 +2,14 @@
 
 namespace App\Ai\Agents;
 
+use App\Ai\Tools\DeleteProductPhotos;
 use App\Ai\Tools\GetProduct;
 use App\Ai\Tools\GetRecentErrors;
 use App\Ai\Tools\GetSystemStatus;
 use App\Ai\Tools\ListPendingDrafts;
 use App\Ai\Tools\PrepareProductDeletion;
+use App\Ai\Tools\RefindProductPhotos;
+use App\Ai\Tools\ReorderProductPhotos;
 use App\Ai\Tools\ResearchProduct;
 use App\Ai\Tools\RetryFailedJob;
 use App\Ai\Tools\ReviewProductDraft;
@@ -78,6 +81,14 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
             активировать/деактивировать его и повторять конкретную упавшую job. Каждое изменение
             записывается в аудит; обязательно сообщай результат после действия.
 
+            Фото уже опубликованного товара: пользователь ссылается на них по номеру места в галерее
+            (1 — первое/главное фото и т.д.), а не по ID. «Поменяй местами 1 и 3» / «сделай вторую
+            главной» → ReorderProductPhotos. «Удали четвёртую» → DeleteProductPhotos. «Замени 1 и 3 на
+            другие», «найди третье фото», «найди всё заново» → RefindProductPhotos (без
+            replace_positions — просто дополнить до нормы; с replace_positions — заменить конкретные;
+            fresh=true — стереть все и искать заново). RefindProductPhotos асинхронный: новые фото
+            придут отдельным сообщением позже, не говори, что они уже сохранены.
+
             Физическое удаление разрешено только по явной просьбе пользователя и всегда требует
             отдельной inline-кнопки Telegram. Сначала однозначно найди товар. Если совпадений несколько
             или точный товар не установлен — задай уточняющий вопрос и не готовь удаление. Для одного
@@ -108,6 +119,9 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
             new ReviewProductDraft($this->update, app(ProductDraftWorkflow::class)),
             new PrepareProductDeletion($this->update),
             new RetryFailedJob($this->update),
+            new ReorderProductPhotos($this->update),
+            new DeleteProductPhotos($this->update),
+            new RefindProductPhotos($this->update),
         ];
     }
 

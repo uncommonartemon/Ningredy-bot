@@ -11,6 +11,7 @@ use App\Models\ProductDraft;
 use App\Models\TelegramChatState;
 use App\Models\TelegramUpdate;
 use App\Services\Products\ProductDraftWorkflow;
+use App\Services\Products\ProductPhotoManager;
 use App\Services\Telegram\TelegramClient;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -187,6 +188,12 @@ class TelegramWebhookController extends Controller
         $chatId = (string) data_get($callback, 'message.chat.id');
         $messageId = data_get($callback, 'message.message_id');
 
+        if (preg_match('/^photos:refind:(\d+)$/', $data, $refindMatches) === 1) {
+            $this->handlePhotoRefind((int) $refindMatches[1], $callbackId, $chatId);
+
+            return;
+        }
+
         if (preg_match('/^product:delete:(confirm|cancel):(\d+)$/', $data, $deleteMatches) === 1) {
             $this->handleProductDeletion(
                 action: $deleteMatches[1],
@@ -257,6 +264,23 @@ class TelegramWebhookController extends Controller
         if ($chatId !== '' && ! $approved) {
             $this->telegram->sendMessage($chatId, $result, $this->mainKeyboard());
         }
+    }
+
+    private function handlePhotoRefind(int $productId, string $callbackId, string $chatId): void
+    {
+        $product = Product::query()->find($productId);
+
+        if (! $product) {
+            $this->telegram->answerCallbackQuery($callbackId, 'Товар не найден.');
+
+            return;
+        }
+
+        $started = app(ProductPhotoManager::class)->refind($product, fresh: true);
+        $this->telegram->answerCallbackQuery(
+            $callbackId,
+            $started ? 'Ищу фото заново, придут отдельным сообщением.' : 'Не удалось запустить поиск: нет исходного черновика.',
+        );
     }
 
     private function handleProductDeletion(
