@@ -305,6 +305,53 @@ class ProcessTelegramMessageTest extends TestCase
         ]);
     }
 
+    public function test_research_recognizes_a_product_already_in_the_catalog_instead_of_duplicating_it(): void
+    {
+        // Real production bug (2026-07-24): a later message about a product
+        // that was already researched and approved re-triggered
+        // ResearchProduct, creating a duplicate draft instead of being
+        // recognized as the existing catalog entry.
+        $category = Category::query()->where('slug', 'laptops')->firstOrFail();
+        $brand = Brand::query()->firstOrCreate(['slug' => 'lenovo'], ['name' => 'Lenovo', 'is_active' => true]);
+        $existing = Product::query()->create([
+            'category_id' => $category->id,
+            'brand_id' => $brand->id,
+            'canonical_key' => \App\Services\Products\ProductIdentityKey::for('Lenovo', 'Legion 5 16IRX9', 'Lenovo Legion 5 16IRX9'),
+            'product_type' => 'laptop',
+            'status' => 'published',
+            'slug' => 'lenovo-legion-5-16irx9',
+            'title' => 'Lenovo Legion 5 16IRX9',
+            'is_active' => true,
+            'published_at' => now(),
+        ]);
+        ProductResearchAgent::fake([[
+            'status' => 'found',
+            'clarification_question' => null,
+            'title' => 'Lenovo Legion 5 16IRX9',
+            'brand' => 'Lenovo',
+            'model' => 'Legion 5 16IRX9',
+            'category' => 'laptops',
+            'color' => 'Luna Grey',
+            'description' => 'Игровой ноутбук.',
+            'specifications' => [['key' => 'ram', 'name' => 'RAM', 'value' => '32 GB']],
+            'sources' => [['title' => 'Lenovo', 'url' => 'https://www.lenovo.com/example']],
+            'image_urls' => [],
+            'confidence' => 0.95,
+        ]]);
+        $update = $this->update();
+        $resolver = $this->mock(ProductImageResolver::class);
+        $resolver->shouldReceive('resolve')->once()->andReturn([]);
+
+        $result = json_decode((new ResearchProduct($update, $resolver))->handle(new Request([
+            'query' => 'Lenovo Legion 5 32 GB',
+        ])), true, flags: JSON_THROW_ON_ERROR);
+
+        $this->assertTrue($result['ok']);
+        $this->assertSame('already_in_catalog', $result['status']);
+        $this->assertSame($existing->id, $result['product_id']);
+        $this->assertSame(0, \App\Models\ProductDraft::query()->count());
+    }
+
     /** @return array{Product, Product} */
     private function products(): array
     {

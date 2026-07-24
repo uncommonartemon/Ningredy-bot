@@ -10,6 +10,7 @@ use App\Models\Product;
 use App\Models\ProductDraft;
 use App\Models\ProductVariant;
 use App\Models\User;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 
@@ -27,6 +28,22 @@ class ProductDraftWorkflow
         ProductDraft $draft,
         ?User $reviewer = null,
         ?string $telegramReviewerId = null,
+    ): Product {
+        try {
+            return $this->doApprove($draft, $reviewer, $telegramReviewerId);
+        } catch (UniqueConstraintViolationException) {
+            // Two approvals for the same product raced (near-simultaneous
+            // double-click/retry): the other one committed first, so
+            // canonical_key now exists. Retry once - firstOrNew() will find
+            // it and update instead of trying to insert a duplicate again.
+            return $this->doApprove($draft, $reviewer, $telegramReviewerId);
+        }
+    }
+
+    private function doApprove(
+        ProductDraft $draft,
+        ?User $reviewer,
+        ?string $telegramReviewerId,
     ): Product {
         return DB::transaction(function () use ($draft, $reviewer, $telegramReviewerId): Product {
             $normalizedDescription = $this->publicDescription->normalize([
@@ -121,9 +138,7 @@ class ProductDraftWorkflow
 
     private function canonicalProductKey(ProductDraft $draft): string
     {
-        $identity = implode(' ', array_filter([$draft->brand, $draft->model ?: $draft->title]));
-
-        return Str::slug($identity) ?: 'product-'.sha1(Str::lower($draft->title));
+        return ProductIdentityKey::for($draft->brand, $draft->model, $draft->title);
     }
 
     private function uniqueSlug(ProductDraft $draft): string

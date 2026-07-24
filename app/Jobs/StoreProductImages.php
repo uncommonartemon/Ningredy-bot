@@ -88,7 +88,7 @@ class StoreProductImages implements ShouldQueue
 
             $message = $stored > 0
                 ? "Фото проверены Vision и сохранены: {$stored}."
-                : 'Подходящие фото товара не найдены. Товар сохранён без изображения; фото можно добавить вручную в Filament.';
+                : 'Подходящие фото товара не найдены. Товар сохранён без изображения; напишите "найди фото заново" или добавьте вручную в Filament.';
             $this->notify($telegram, $chatId, $message.$usageFootnote);
         }
     }
@@ -120,7 +120,7 @@ class StoreProductImages implements ShouldQueue
             $this->notify(
                 app(TelegramClient::class),
                 $chatId,
-                'Не удалось обработать фотографии после повторной попытки. Товар сохранён; фото можно добавить вручную в Filament.',
+                'Не удалось обработать фотографии после повторной попытки. Товар сохранён; напишите "найди фото заново" или добавьте вручную в Filament.',
             );
         }
     }

@@ -7,8 +7,10 @@ use App\Ai\Tools\Concerns\RecordsOperations;
 use App\Services\Ai\AiSettings;
 use App\Models\AiRun;
 use App\Models\Category;
+use App\Models\Product;
 use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
+use App\Services\Products\ProductIdentityKey;
 use App\Services\Products\ProductImageResolver;
 use App\Services\Products\ProductPublicDescription;
 use App\Services\Products\ProductSourcePriority;
@@ -107,6 +109,24 @@ class ResearchProduct implements Tool
                 'title' => ['required', 'string'],
                 'sources' => ['required', 'array', 'min:1'],
             ])->validate();
+
+            // Prevents the exact duplicate-draft bug seen in production: a
+            // later message about a product that was already researched and
+            // approved re-triggers ResearchProduct instead of being
+            // recognized as referring to the existing catalog entry.
+            $existingProduct = Product::query()
+                ->where('canonical_key', ProductIdentityKey::for($data['brand'], $data['model'], $data['title']))
+                ->first();
+
+            if ($existingProduct) {
+                return $this->json([
+                    'ok' => true,
+                    'status' => 'already_in_catalog',
+                    'product_id' => $existingProduct->id,
+                    'title' => $existingProduct->title,
+                    'active' => $existingProduct->is_active,
+                ]);
+            }
 
             $result = $this->recordOperation(
                 $this->update,
