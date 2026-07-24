@@ -77,7 +77,10 @@ class ProcessTelegramMessage implements ShouldQueue
                 $agent->forUser($user);
             }
 
-            $response = $agent->prompt((string) $update->text, provider: $provider, model: $model, timeout: 210);
+            $prompt = $update->reply_to_text
+                ? "[Пользователь ответил (Reply) на сообщение бота: \"{$update->reply_to_text}\"]\n{$update->text}"
+                : (string) $update->text;
+            $response = $agent->prompt($prompt, provider: $provider, model: $model, timeout: 210);
             $data = Validator::make($response->toArray(), [
                 'response_type' => ['required', 'string'],
                 'message' => ['required', 'string', 'max:12000'],

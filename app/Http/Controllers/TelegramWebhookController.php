@@ -41,6 +41,10 @@ class TelegramWebhookController extends Controller
         $messageId = data_get($payload, $isCallback ? 'callback_query.message.message_id' : 'message.message_id');
         $username = data_get($payload, $isCallback ? 'callback_query.from.username' : 'message.from.username');
         $text = data_get($payload, $isCallback ? 'callback_query.data' : 'message.text');
+        $replyToText = $isCallback ? null : (
+            data_get($payload, 'message.reply_to_message.text')
+            ?? data_get($payload, 'message.reply_to_message.caption')
+        );
         $hasVoice = is_array(data_get($payload, 'message.voice'));
         $isAllowed = $this->isAllowed($telegramUserId);
 
@@ -52,6 +56,7 @@ class TelegramWebhookController extends Controller
                 'message_id' => is_int($messageId) ? $messageId : null,
                 'username' => $username,
                 'text' => is_string($text) ? $text : null,
+                'reply_to_text' => is_string($replyToText) ? mb_substr($replyToText, 0, 4096) : null,
                 'payload' => $payload,
                 'status' => $isAllowed ? 'received' : 'rejected',
             ],

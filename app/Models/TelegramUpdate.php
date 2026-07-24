@@ -9,7 +9,7 @@ class TelegramUpdate extends Model
 {
     protected $fillable = [
         'update_id', 'telegram_user_id', 'chat_id', 'message_id', 'username',
-        'text', 'payload', 'status', 'error', 'processed_at',
+        'text', 'reply_to_text', 'payload', 'status', 'error', 'processed_at',
     ];
 
     protected function casts(): array

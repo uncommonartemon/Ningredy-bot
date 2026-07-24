@@ -47,6 +47,7 @@ class TelegramWebhookTest extends TestCase
             'update_id' => 1001,
             'telegram_user_id' => '12345',
             'chat_id' => '98765',
+            'reply_to_text' => null,
             'text' => 'Найди Lenovo Legion 5 серого цвета с 32 ГБ RAM',
             'status' => 'received',
         ]);
@@ -86,6 +87,44 @@ class TelegramWebhookTest extends TestCase
 
         Queue::assertPushed(TranscribeTelegramVoice::class, 1);
         Queue::assertNotPushed(ProcessTelegramMessage::class);
+    }
+
+    public function test_it_stores_the_replied_to_message_text(): void
+    {
+        Queue::fake();
+        $payload = $this->messagePayload(updateId: 1002);
+        $payload['message']['text'] = 'апскейль второе фото';
+        $payload['message']['reply_to_message'] = [
+            'message_id' => 40,
+            'text' => "#28 · ROG NUC (2025) Gaming Mini PC\nASUS ROG · NUC15JNK",
+        ];
+
+        $this->postJson('/api/telegram/webhook', $payload, ['X-Telegram-Bot-Api-Secret-Token' => 'test-secret'])
+            ->assertOk();
+
+        $this->assertDatabaseHas('telegram_updates', [
+            'update_id' => 1002,
+            'text' => 'апскейль второе фото',
+            'reply_to_text' => "#28 · ROG NUC (2025) Gaming Mini PC\nASUS ROG · NUC15JNK",
+        ]);
+    }
+
+    public function test_it_falls_back_to_the_replied_to_photo_caption(): void
+    {
+        Queue::fake();
+        $payload = $this->messagePayload(updateId: 1003);
+        $payload['message']['reply_to_message'] = [
+            'message_id' => 41,
+            'caption' => '#28 · ROG NUC (2025) Gaming Mini PC',
+        ];
+
+        $this->postJson('/api/telegram/webhook', $payload, ['X-Telegram-Bot-Api-Secret-Token' => 'test-secret'])
+            ->assertOk();
+
+        $this->assertDatabaseHas('telegram_updates', [
+            'update_id' => 1003,
+            'reply_to_text' => '#28 · ROG NUC (2025) Gaming Mini PC',
+        ]);
     }
 
     private function messagePayload(int $updateId, int $userId = 12345): array

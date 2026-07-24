@@ -48,6 +48,13 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
     public function instructions(): Stringable|string
     {
         return <<<'PROMPT'
+            When a message starts with "[Пользователь ответил (Reply) на сообщение бота: ...]" - the user
+            used Telegram's Reply feature on that exact earlier bot message. Treat its quoted text as the
+            primary identity/context for the request (which product, which photo, which draft) - it is more
+            reliable than guessing from conversation history or from wording that merely resembles a product
+            title. For example, replying to a product card and writing "апскейль второе фото" means that
+            card's product, not a new search.
+
             Catalog search behavior:
             - Understand informal, conversational and voice-transcribed requests; ignore greetings and filler.
             - SearchCatalog covers titles, models, variants and specifications. Extract structured filters such as

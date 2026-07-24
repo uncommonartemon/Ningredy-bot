@@ -50,6 +50,42 @@ class ProcessTelegramMessageTest extends TestCase
             && $request['text'] === 'Сервер работает нормально.');
     }
 
+    public function test_reply_to_text_is_prepended_as_context_for_the_agent(): void
+    {
+        config(['services.telegram.bot_token' => 'test-token']);
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []])]);
+        $seenPrompt = null;
+        ServerAssistantAgent::fake(function (string $prompt) use (&$seenPrompt): array {
+            $seenPrompt = $prompt;
+
+            return [
+                'response_type' => 'answer',
+                'message' => 'ок',
+                'draft_id' => null,
+                'product_ids' => [],
+                'operation_ids' => [],
+            ];
+        });
+        $update = TelegramUpdate::query()->create([
+            'update_id' => random_int(2000, 9000),
+            'telegram_user_id' => '12345',
+            'chat_id' => '98765',
+            'message_id' => 55,
+            'text' => 'апскейль второе фото',
+            'reply_to_text' => "#28 · ROG NUC (2025) Gaming Mini PC\nASUS ROG · NUC15JNK",
+            'payload' => [],
+            'status' => 'received',
+        ]);
+
+        (new ProcessTelegramMessage($update->id))->handle(
+            app(TelegramClient::class),
+            app(AiErrorPresenter::class),
+        );
+
+        $this->assertStringContainsString('ROG NUC (2025) Gaming Mini PC', (string) $seenPrompt);
+        $this->assertStringContainsString('апскейль второе фото', (string) $seenPrompt);
+    }
+
     public function test_reply_includes_a_token_usage_footnote_when_tokens_were_spent(): void
     {
         config(['services.telegram.bot_token' => 'test-token']);
