@@ -6,6 +6,7 @@ use App\Ai\Agents\ProductResearchAgent;
 use App\Ai\Tools\Concerns\RecordsOperations;
 use App\Services\Ai\AiSettings;
 use App\Models\AiRun;
+use App\Models\Category;
 use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
 use App\Services\Products\ProductImageResolver;
@@ -13,6 +14,7 @@ use App\Services\Products\ProductPublicDescription;
 use App\Services\Products\ProductSourcePriority;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
 use Illuminate\Support\Facades\Validator;
+use Illuminate\Validation\Rule;
 use Laravel\Ai\Contracts\Tool;
 use Laravel\Ai\Tools\Request;
 use Stringable;
@@ -57,6 +59,7 @@ class ResearchProduct implements Tool
                 'brand' => ['nullable', 'string', 'max:255'],
                 'model' => ['nullable', 'string', 'max:255'],
                 'product_type' => ['nullable', 'in:laptop,desktop,component,other'],
+                'category' => ['nullable', 'string', Rule::in(Category::query()->where('is_active', true)->pluck('slug'))],
                 'color' => ['nullable', 'string', 'max:255'],
                 'description' => ['nullable', 'string', 'max:5000'],
                 'research_notes' => ['nullable', 'string', 'max:5000'],
@@ -119,6 +122,7 @@ class ResearchProduct implements Tool
                         'brand' => $data['brand'],
                         'model' => $data['model'],
                         'product_type' => $data['product_type'] ?? null,
+                        'category' => $data['category'] ?? null,
                         'color' => $data['color'],
                         'description' => $data['description'],
                         'research_notes' => $data['research_notes'],
@@ -134,6 +138,7 @@ class ResearchProduct implements Tool
                         'title' => $draft->title,
                         'brand' => $draft->brand,
                         'model' => $draft->model,
+                        'category' => $draft->category,
                         'color' => $draft->color,
                         'description' => $draft->description,
                         'research_notes' => $draft->research_notes,

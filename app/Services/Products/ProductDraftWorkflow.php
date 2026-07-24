@@ -41,12 +41,13 @@ class ProductDraftWorkflow
             $productType = in_array($draft->product_type, ['laptop', 'desktop', 'component', 'other'], true)
                 ? $draft->product_type
                 : $this->guessProductType($draft);
-            $category = Category::query()->where('slug', match ($productType) {
-                'laptop' => 'laptops',
-                'desktop' => 'computers',
-                'component' => 'components',
-                default => 'other-tech',
-            })->firstOrFail();
+            $category = ($draft->category ? Category::query()->where('slug', $draft->category)->first() : null)
+                ?? Category::query()->where('slug', match ($productType) {
+                    'laptop' => 'laptops',
+                    'desktop' => 'computers',
+                    'component' => 'components',
+                    default => 'other-tech',
+                })->firstOrFail();
 
             $brand = $this->resolveBrand($draft->brand);
             $canonicalKey = $this->canonicalProductKey($draft);

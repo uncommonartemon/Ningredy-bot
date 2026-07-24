@@ -2,6 +2,7 @@
 
 namespace App\Ai\Agents;
 
+use App\Models\Category;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
 use Laravel\Ai\Contracts\Agent;
 use Laravel\Ai\Contracts\HasStructuredOutput;
@@ -18,6 +19,19 @@ class ProductResearchAgent implements Agent, HasStructuredOutput, HasTools
      * Get the instructions that the agent should follow.
      */
     public function instructions(): Stringable|string
+    {
+        $categories = $this->categoryList();
+
+        return <<<PROMPT
+            Always classify the product into exactly one category from this exact list (return its
+            slug in the "category" field, never invent a new one - pick the closest match):
+            {$categories}
+
+            {$this->researchInstructions()}
+            PROMPT;
+    }
+
+    private function researchInstructions(): string
     {
         return <<<'PROMPT'
             You research products requested by an administrator and return a factual catalog draft.
@@ -66,6 +80,22 @@ class ProductResearchAgent implements Agent, HasStructuredOutput, HasTools
             PROMPT;
     }
 
+    private function categoryList(): string
+    {
+        return Category::query()
+            ->where('is_active', true)
+            ->orderBy('sort_order')
+            ->get(['slug', 'name'])
+            ->map(fn (Category $category): string => "- {$category->slug}: {$category->name}")
+            ->implode("\n            ");
+    }
+
+    /** @return array<int, string> */
+    private function categorySlugs(): array
+    {
+        return Category::query()->where('is_active', true)->pluck('slug')->all();
+    }
+
     /**
      * Get the tools available to the agent.
      *
@@ -93,6 +123,9 @@ class ProductResearchAgent implements Agent, HasStructuredOutput, HasTools
             'model' => $schema->string()->nullable()->required(),
             'product_type' => $schema->string()
                 ->enum(['laptop', 'desktop', 'component', 'other'])
+                ->nullable()->required(),
+            'category' => $schema->string()
+                ->enum($this->categorySlugs())
                 ->nullable()->required(),
             'color' => $schema->string()->nullable()->required(),
             'description' => $schema->string()->nullable()->required(),

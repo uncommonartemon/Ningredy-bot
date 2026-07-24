@@ -11,7 +11,7 @@ class ProductDraft extends Model
         'telegram_update_id', 'ai_run_id', 'status', 'reviewed_at', 'reviewed_by_user_id',
         'reviewed_by_telegram_user_id', 'rejection_reason', 'requested_by_telegram_user_id',
         'approved_product_id', 'approved_variant_id',
-        'title', 'brand', 'model', 'product_type', 'color', 'description', 'research_notes', 'specifications',
+        'title', 'brand', 'model', 'product_type', 'category', 'color', 'description', 'research_notes', 'specifications',
         'sources', 'image_urls', 'confidence',
     ];
 

@@ -123,6 +123,7 @@ class ProcessTelegramMessageTest extends TestCase
             'title' => 'Lenovo Legion 5 16IRX9',
             'brand' => 'Lenovo',
             'model' => 'Legion 5 16IRX9',
+            'category' => 'laptops',
             'color' => 'Luna Grey',
             'description' => 'Игровой ноутбук.',
             'specifications' => [['key' => 'ram', 'name' => 'RAM', 'value' => '32 GB']],
@@ -143,6 +144,7 @@ class ProcessTelegramMessageTest extends TestCase
         $this->assertDatabaseHas('product_drafts', [
             'telegram_update_id' => $update->id,
             'title' => 'Lenovo Legion 5 16IRX9',
+            'category' => 'laptops',
             'status' => 'pending_review',
         ]);
         $this->assertDatabaseHas('ai_operations', [

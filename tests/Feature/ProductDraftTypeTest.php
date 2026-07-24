@@ -41,7 +41,29 @@ class ProductDraftTypeTest extends TestCase
         $this->assertSame('laptop', $product->product_type);
     }
 
-    private function draft(string $title, string $model, ?string $productType): ProductDraft
+    public function test_draft_category_wins_over_the_product_type_mapping(): void
+    {
+        // The AI now picks the category directly from our live category list;
+        // it should be trusted over the legacy product_type -> slug mapping
+        // even when the two disagree (e.g. a monitor tagged product_type
+        // "other" but correctly categorized as "components").
+        $product = app(ProductDraftWorkflow::class)->approve(
+            $this->draft('Dell UltraSharp U2723QE Monitor', 'U2723QE', 'other', 'components'),
+        );
+
+        $this->assertSame('components', $product->category->slug);
+    }
+
+    public function test_an_invalid_category_falls_back_to_the_product_type_mapping(): void
+    {
+        $product = app(ProductDraftWorkflow::class)->approve(
+            $this->draft('Lenovo IdeaPad Slim 3 15AMN8', 'IdeaPad Slim 3 15AMN8', 'laptop', 'not-a-real-slug'),
+        );
+
+        $this->assertSame('laptops', $product->category->slug);
+    }
+
+    private function draft(string $title, string $model, ?string $productType, ?string $category = null): ProductDraft
     {
         $update = TelegramUpdate::query()->create([
             'update_id' => random_int(2000, 90000),
@@ -69,6 +91,7 @@ class ProductDraftTypeTest extends TestCase
             'brand' => 'Lenovo',
             'model' => $model,
             'product_type' => $productType,
+            'category' => $category,
             'description' => 'Описание товара.',
             'specifications' => [
                 ['key' => 'cpu', 'name' => 'CPU', 'value' => 'AMD Ryzen 5'],
