@@ -25,8 +25,9 @@ class RefindProductPhotos implements Tool
             .'never claim the new photos are already saved. Three uses: leave replace_positions empty and '
             .'fresh=false to just fill the gallery up to its normal target (e.g. "find a third photo"); '
             .'set replace_positions to specific 1-based positions to swap only those out for new ones '
-            .'(e.g. "replace photos 1 and 3" -> [1,3]); set fresh=true to wipe every current photo and '
-            .'search from scratch ("find all photos again").';
+            .'(e.g. "replace photos 1 and 3" -> [1,3]); set fresh=true to search replacements for the '
+            .'whole gallery ("find all photos again"). Existing photos stay visible until actual new, '
+            .'non-duplicate replacements pass identity, color, and Vision checks.';
     }
 
     public function handle(Request $request): Stringable|string

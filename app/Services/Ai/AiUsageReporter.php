@@ -7,6 +7,8 @@ use Illuminate\Support\Collection;
 
 class AiUsageReporter
 {
+    public function __construct(private readonly AiModelCatalog $models) {}
+
     /** @return array<string, mixed> */
     public function summary(): array
     {
@@ -16,17 +18,14 @@ class AiUsageReporter
             'last_30d' => $this->period(now()->subDays(30)),
             'all_time' => $this->period(null),
             'currency' => 'USD',
-            'cost_note' => 'Estimated from configured per-million-token prices; null means pricing is not configured for that provider/model.',
+            'cost_note' => 'Estimated from the checked-in official standard-tier rate card; null means the provider/model is absent from the catalog.',
         ];
     }
 
     /**
      * Usage for one Telegram interaction - the top-level agent call plus
-     * every nested tool-invoked AiRun it triggered (research, image
-     * discovery, vision...), all sharing the same telegram_update_id.
-     * Pass $since to scope to only runs created from that point on (e.g.
-     * a job's own start time), so a later step doesn't double-count an
-     * earlier one's tokens.
+     * every nested tool-invoked AiRun it triggered, all sharing the same
+     * telegram_update_id.
      *
      * @return array<string, mixed>
      */
@@ -105,11 +104,17 @@ class AiUsageReporter
             $output = $this->integer($usage['completion_tokens'] ?? $usage['output_tokens'] ?? 0);
             $reasoning = $this->integer($usage['reasoning_tokens'] ?? 0);
 
-            $totals['input'] += max(0, $input - $cachedInput);
+            // Laravel AI already removes cached input from OpenAI's promptTokens.
+            // OpenAI outputTokens already includes its reasoning-token detail.
+            $uncachedInput = $run->provider === 'openai'
+                ? $input
+                : max(0, $input - $cachedInput);
+
+            $totals['input'] += $uncachedInput;
             $totals['cached_input'] += $cachedInput;
             $totals['output'] += $output;
             $totals['reasoning'] += $reasoning;
-            $totals['total'] += $input + $output + $reasoning;
+            $totals['total'] += $uncachedInput + $cachedInput + $output;
         }
 
         return $totals;
@@ -118,38 +123,29 @@ class AiUsageReporter
     /** @param array<string, int> $tokens */
     private function estimateCost(string $provider, string $model, array $tokens): ?float
     {
-        // Model names like "gpt-5.4" contain a dot, which config()'s
-        // dot-notation would otherwise parse as a nested key
-        // (prices.openai.gpt-5.4 -> ['gpt-5']['4']) and never find a match.
-        // Index into the provider's array directly with the literal model
-        // string instead.
-        $providerPrices = config("services.ai_usage.prices.{$provider}");
-        $prices = is_array($providerPrices) ? ($providerPrices[$model] ?? null) : null;
+        $prices = $this->models->pricing($provider, $model);
 
-        if (! is_array($prices)) {
+        if ($prices === null) {
             return null;
         }
 
         $cost = 0.0;
-        $hasAnyPrice = false;
 
         foreach ([
             'input' => 'input_per_million',
             'cached_input' => 'cached_input_per_million',
             'output' => 'output_per_million',
-            'reasoning' => 'reasoning_per_million',
         ] as $tokenKey => $priceKey) {
             $price = $prices[$priceKey] ?? null;
 
-            if ($price === null || $price === '') {
-                continue;
+            if (! is_numeric($price)) {
+                return null;
             }
 
-            $hasAnyPrice = true;
             $cost += ($tokens[$tokenKey] ?? 0) * ((float) $price) / 1_000_000;
         }
 
-        return $hasAnyPrice ? round($cost, 6) : null;
+        return round($cost, 6);
     }
 
     private function integer(mixed $value): int

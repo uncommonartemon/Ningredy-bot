@@ -8,39 +8,23 @@ use App\Models\TelegramChatState;
 class AiSettings
 {
     /** @var array<string, string> */
-    public const MODELS = [
-        'gpt-5.4' => 'GPT-5.4',
-        'gpt-5.4-mini' => 'GPT-5.4 mini',
-        'gpt-5.4-nano' => 'GPT-5.4 nano',
-        'gpt-5.1' => 'GPT-5.1',
-        'gpt-5' => 'GPT-5',
-        'gpt-5-mini' => 'GPT-5 mini',
-        'gpt-5-nano' => 'GPT-5 nano',
-        'gpt-4.1' => 'GPT-4.1',
-        'gpt-4.1-mini' => 'GPT-4.1 mini',
-        'gpt-4.1-nano' => 'GPT-4.1 nano',
-        'gpt-4o' => 'GPT-4o',
-        'gpt-4o-mini' => 'GPT-4o mini',
-        'o3' => 'o3',
-        'o4-mini' => 'o4-mini',
-    ];
-
-    /** @var array<string, string> */
     public const IMAGE_MODELS = [
         'gpt-image-2' => 'GPT Image 2 (лучшее качество, по умолчанию)',
         'gpt-image-1-mini' => 'GPT Image 1 Mini (дешевле, ниже качество)',
     ];
 
+    public function __construct(private readonly AiModelCatalog $models) {}
+
     public function model(): ?string
     {
         $model = AppSetting::valueFor('ai.model');
 
-        return array_key_exists($model, self::MODELS) ? $model : null;
+        return $this->models->has('openai', $model) ? $model : null;
     }
 
     public function saveModel(?string $model): void
     {
-        $selectedModel = array_key_exists($model, self::MODELS) ? $model : null;
+        $selectedModel = $this->models->has('openai', $model) ? $model : null;
 
         if ($this->model() !== $selectedModel) {
             TelegramChatState::query()->update(['conversation_id' => null]);

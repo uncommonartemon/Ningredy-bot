@@ -88,7 +88,7 @@ onMounted(() => {
         const timeline = gsap.timeline({ defaults: { ease: 'power3.out' } });
         timeline
             .from('.catalog-toolbar__title > *', { opacity: 0, x: -20, duration: .55, stagger: .07 })
-            .from('.catalog-search', { opacity: 0, y: -12, scale: .98, duration: .5 }, '-=.38')
+            .from('.catalog-search', { opacity: 0, duration: .45 }, '-=.38')
             .from('.catalog-toolbar__actions > *', { opacity: 0, x: 15, duration: .45, stagger: .08 }, '-=.4')
             .from('.filters-panel', { opacity: 0, x: -24, duration: .62, clearProps: 'transform' }, '-=.25');
 

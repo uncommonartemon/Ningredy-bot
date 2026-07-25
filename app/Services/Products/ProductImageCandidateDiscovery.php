@@ -3,9 +3,9 @@
 namespace App\Services\Products;
 
 use App\Ai\Agents\ProductImageDiscoveryAgent;
-use App\Services\Ai\AiSettings;
 use App\Models\AiRun;
 use App\Models\ProductDraft;
+use App\Services\Ai\AiSettings;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Validator;
 use Throwable;
@@ -19,18 +19,22 @@ class ProductImageCandidateDiscovery
     ) {}
 
     /** @return array<int, string> */
-    public function find(ProductDraft $draft): array
+    public function find(ProductDraft $draft, array $excludedUrls = []): array
     {
+        $excludedUrls = collect($excludedUrls)
+            ->filter(fn (mixed $url): bool => is_string($url) && $url !== '')
+            ->unique()
+            ->values()
+            ->all();
         $sources = $this->imageSources($this->sourcePriority->sortSources($draft->sources ?? [], $draft->brand));
         $knownSourceUrls = $this->resolver->resolve($sources, 16);
-        $preferredUrls = $this->sourcePriority->sortUrls(
+        $preferredUrls = $this->withoutExcluded($this->sourcePriority->sortUrls(
             $knownSourceUrls,
             $draft->brand,
             $sources,
-        );
+        ), $excludedUrls);
 
-        $trustedDirectUrls = array_values(array_filter($preferredUrls, fn (string $url): bool =>
-            $this->looksLikeCatalogImage($url)
+        $trustedDirectUrls = array_values(array_filter($preferredUrls, fn (string $url): bool => $this->looksLikeCatalogImage($url)
             && in_array(
                 $this->sourcePriority->classify($url, $draft->brand, $sources),
                 ['official_english', 'official_localized', 'amazon', 'trusted_retailer'],
@@ -43,15 +47,15 @@ class ProductImageCandidateDiscovery
         }
 
         $wikimediaUrls = $this->wikimedia->find($draft, 10);
-        $availableUrls = $this->sourcePriority->sortUrls(
+        $availableUrls = $this->withoutExcluded($this->sourcePriority->sortUrls(
             [...$preferredUrls, ...$wikimediaUrls],
             $draft->brand,
             $sources,
-        );
+        ), $excludedUrls);
 
         $provider = app(AiSettings::class)->providerFor('product_image_discovery');
         $model = app(AiSettings::class)->modelFor('product_image_discovery');
-        $prompt = $this->prompt($draft);
+        $prompt = $this->prompt($draft, $excludedUrls);
         $cached = AiRun::query()
             ->where('telegram_update_id', $draft->telegram_update_id)
             ->where('provider', $provider)
@@ -62,10 +66,10 @@ class ProductImageCandidateDiscovery
             ->first();
 
         if ($cached && is_array($cached->response)) {
-            return $this->sourcePriority->sortUrls([
+            return $this->withoutExcluded($this->sourcePriority->sortUrls([
                 ...$availableUrls,
                 ...$this->candidateUrls($cached->response, $draft, $sources),
-            ], $draft->brand, $sources);
+            ], $draft->brand, $sources), $excludedUrls);
         }
 
         $run = AiRun::query()->create([
@@ -98,10 +102,10 @@ class ProductImageCandidateDiscovery
                 'completed_at' => now(),
             ]);
 
-            return $this->sourcePriority->sortUrls([
+            return $this->withoutExcluded($this->sourcePriority->sortUrls([
                 ...$availableUrls,
                 ...$this->candidateUrls($data, $draft, $sources),
-            ], $draft->brand, $sources);
+            ], $draft->brand, $sources), $excludedUrls);
         } catch (Throwable $exception) {
             $run->update([
                 'status' => 'failed',
@@ -180,7 +184,8 @@ class ProductImageCandidateDiscovery
             || preg_match('#/(?:w[3-9]\d{2,}|h[3-9]\d{2,})(?:\?|/|$)#i', $lower) === 1;
     }
 
-    private function prompt(ProductDraft $draft): string
+    /** @param array<int, string> $excludedUrls */
+    private function prompt(ProductDraft $draft, array $excludedUrls = []): string
     {
         $specifications = collect($draft->specifications ?? [])
             ->map(fn (mixed $item): string => is_array($item)
@@ -194,26 +199,41 @@ class ProductImageCandidateDiscovery
             ->filter(fn (mixed $url): bool => is_string($url))
             ->take(8)
             ->implode("\n");
+        $excluded = collect($excludedUrls)->take(12)->implode("\n");
 
         return <<<PROMPT
-            [product-image-discovery:v5]
+            [product-image-discovery:v6]
             Find current, downloadable catalog image candidates for this exact product:
             Title: {$draft->title}
             Brand: {$draft->brand}
             Exact model: {$draft->model}
-            Color/version: {$draft->color}
+            Required color/version: {$draft->color}
             Identifying specifications: {$specifications}
             Already known product pages:
             {$knownPages}
+            Previously used image URLs that must not be returned again:
+            {$excluded}
 
-            Search the exact quoted model with terms such as product, gallery, front, rear, packaging,
-            and the strongest model/part identifiers. Also search the base family plus exact color/version when the suffix is a regional SKU, for example X1504VA Quiet Blue. Check a live English/US official manufacturer
-            product or gallery HTML page first, Amazon.com second, then reputable retailer HTML product
-            pages. Do not use PDF, PSREF/spec sheets, support/download/manual pages, certifications,
-            or generic family pages as image sources. Prefer working page URLs from several domains;
-            our server extracts their galleries. Return a direct image URL only when the current search
-            result actually exposes that exact URL. Do not reconstruct or guess CDN paths.
+            Search the exact quoted model and required color/version with terms such as product, gallery,
+            front, rear, packaging, and the strongest model/part identifiers. The visible product color
+            must match the required color when one is specified. Check a live English/US official
+            manufacturer product or gallery HTML page first, Amazon.com second, then reputable retailer
+            HTML product pages. Do not use PDF, PSREF/spec sheets, support/download/manual pages,
+            certifications, generic family pages, or any previously used image URL above. Prefer working
+            page URLs from several domains; our server extracts their galleries. Return a direct image URL
+            only when the current search result actually exposes that exact URL. Do not reconstruct or
+            guess CDN paths.
             PROMPT;
+    }
+
+    /** @param array<int, string> $urls @param array<int, string> $excludedUrls @return array<int, string> */
+    private function withoutExcluded(array $urls, array $excludedUrls): array
+    {
+        if ($excludedUrls === []) {
+            return array_values(array_unique($urls));
+        }
+
+        return array_values(array_diff(array_unique($urls), $excludedUrls));
     }
 
     /** @param array<string, mixed> $data @return array<int, string> */

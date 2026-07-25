@@ -32,6 +32,12 @@ class ProductImageVisionAgent implements Agent, HasStructuredOutput
             visibly printed when the physical product is consistent. Official provenance never makes
             a logo, banner, generic category graphic, or visibly conflicting model publishable.
 
+            The requested color/version in the prompt is a strict catalog constraint. Set color_match
+            to false when the visible product has a different chassis/case color. When no color is
+            requested, or the color genuinely cannot be observed in a packaging/detail shot, set it to
+            true unless there is visible evidence of a conflicting color. Official provenance proves
+            product identity but never overrides a visible color conflict.
+
             Reject brand marks, family logos, generic category art, banners, charts, screenshots,
             unrelated accessories, another model, and images containing only promotional text. If a
             visible model or suffix conflicts with the requested product, always reject it. A generic
@@ -62,6 +68,7 @@ class ProductImageVisionAgent implements Agent, HasStructuredOutput
             'images' => $schema->array()->items($schema->object([
                 'index' => $schema->integer()->min(1)->max(4)->required(),
                 'exact_match' => $schema->boolean()->required(),
+                'color_match' => $schema->boolean()->required(),
                 'publishable' => $schema->boolean()->required(),
                 'kind' => $schema->string()->enum([
                     'product', 'packaging', 'detail', 'logo', 'banner', 'screenshot', 'unrelated', 'uncertain',

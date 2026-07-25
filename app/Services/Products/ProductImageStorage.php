@@ -23,10 +23,19 @@ class ProductImageStorage
         private readonly ProductIdentityMatcher $identityMatcher,
     ) {}
 
-    public function store(Product $product, ProductVariant $variant, ProductDraft $draft): int
+    /** @param array<int, int> $replaceMediaIds */
+    public function store(Product $product, ProductVariant $variant, ProductDraft $draft, array $replaceMediaIds = []): int
     {
+        $replacementMedia = $replaceMediaIds === []
+            ? collect()
+            : $product->media()
+                ->where('type', 'image')
+                ->whereIn('id', $replaceMediaIds)
+                ->orderBy('sort_order')
+                ->get(['id', 'disk', 'path', 'source_url', 'checksum']);
         $existingMedia = $product->media()
             ->where('type', 'image')
+            ->when($replaceMediaIds !== [], fn ($query) => $query->whereNotIn('id', $replaceMediaIds))
             ->get(['source_url', 'checksum']);
         $existing = $existingMedia->count();
         $target = $this->targetImageCount($product);
@@ -37,8 +46,14 @@ class ProductImageStorage
         }
 
         $knownUrls = $this->cleanUrls($draft->image_urls ?? []);
-        $existingSourceUrls = $existingMedia->pluck('source_url')->filter()->values()->all();
-        $initialUrls = array_values(array_diff($knownUrls, $existingSourceUrls));
+        $excludedSourceUrls = collect([...$existingMedia, ...$replacementMedia])
+            ->pluck('source_url')
+            ->filter()
+            ->unique()
+            ->values()
+            ->all();
+        $replacementHashes = $this->perceptualHashesForMedia($replacementMedia);
+        $initialUrls = array_values(array_diff($knownUrls, $excludedSourceUrls));
         $candidates = $this->downloadCandidates($initialUrls, $draft);
         $usedDiscovery = false;
 
@@ -54,7 +69,7 @@ class ProductImageStorage
         if ($candidates === [] && config('product-images.fallback_discovery', true)) {
             [$candidates, $usedDiscovery] = $this->discoverCandidates(
                 $draft,
-                array_values(array_unique([...$knownUrls, ...$existingSourceUrls])),
+                array_values(array_unique([...$knownUrls, ...$excludedSourceUrls])),
             );
         }
 
@@ -69,7 +84,7 @@ class ProductImageStorage
             try {
                 [$additionalCandidates, $usedDiscovery] = $this->discoverCandidates(
                     $draft,
-                    array_values(array_unique([...$knownUrls, ...$existingSourceUrls])),
+                    array_values(array_unique([...$knownUrls, ...$excludedSourceUrls])),
                 );
                 $additionalCandidates = $this->removeDuplicateCandidates($candidates, $additionalCandidates);
                 $additionalSelected = $this->selectFromCandidates($draft, $additionalCandidates, $remaining - count($selected));
@@ -83,7 +98,7 @@ class ProductImageStorage
             $selected = [...$selected, ...$additionalSelected];
         }
 
-        $selected = $this->removeNearDuplicates($selected);
+        $selected = $this->removeNearDuplicates($selected, $replacementHashes);
 
         $this->destroyUnselected($candidates, $selected);
 
@@ -241,7 +256,7 @@ class ProductImageStorage
     /** @param array<int, string> $existingUrls @return array{array<int, array<string, mixed>>, bool} */
     private function discoverCandidates(ProductDraft $draft, array $existingUrls): array
     {
-        $discovered = $this->candidateDiscovery->find($draft);
+        $discovered = $this->candidateDiscovery->find($draft, $existingUrls);
         $newUrls = array_values(array_diff($this->cleanUrls($discovered), $existingUrls));
 
         if ($discovered !== []) {
@@ -260,7 +275,7 @@ class ProductImageStorage
      * of candidates and again for whatever discovery finds afterward, so the
      * two callers never need to duplicate this sequence.
      *
-     * @param array<int, array<string, mixed>> $candidates
+     * @param  array<int, array<string, mixed>>  $candidates
      * @return array<int, array<string, mixed>>
      */
     private function selectFromCandidates(ProductDraft $draft, array $candidates, int $remaining): array
@@ -322,7 +337,7 @@ class ProductImageStorage
      * two candidates; a single stray image never triggers the restriction,
      * so a lone official shot can still be topped up from elsewhere.
      *
-     * @param array<int, array<string, mixed>> $candidates
+     * @param  array<int, array<string, mixed>>  $candidates
      * @return array<int, array<string, mixed>>
      */
     private function preferSingleSourceGallery(array $candidates): array
@@ -359,6 +374,13 @@ class ProductImageStorage
     /** @param array<int, array<string, mixed>> $candidates @return array<int, array<string, mixed>> */
     private function sourceVerified(ProductDraft $draft, array $candidates, int $limit): array
     {
+        // A trusted URL proves product identity, but not that every gallery
+        // image shows the requested color. With an explicit color, Vision
+        // must inspect every candidate instead of taking this fast path.
+        if (filled($draft->color)) {
+            return [];
+        }
+
         if ($limit <= 0 || $candidates === []) {
             return [];
         }
@@ -384,7 +406,6 @@ class ProductImageStorage
             ->values()
             ->all();
     }
-
 
     /** @param array<int, array<string, mixed>> $candidates @param array<int, array<string, mixed>> $selected @return array<int, array<string, mixed>> */
     private function removeSelectedCandidates(array $candidates, array $selected): array
@@ -453,6 +474,7 @@ class ProductImageStorage
     {
         return Str::lower((string) parse_url($url, PHP_URL_HOST));
     }
+
     /** @param array<int, array<string, mixed>> $candidates */
     private function destroy(array $candidates): void
     {
@@ -475,18 +497,57 @@ class ProductImageStorage
         }
     }
 
+    /** @return array<int, string> */
+    private function perceptualHashesForMedia($media): array
+    {
+        $hashes = [];
+
+        foreach ($media as $item) {
+            if (! $item->disk || ! $item->path) {
+                continue;
+            }
+
+            try {
+                $disk = Storage::disk($item->disk);
+
+                if (! $disk->exists($item->path)) {
+                    continue;
+                }
+
+                $image = @imagecreatefromstring($disk->get($item->path));
+
+                if (! $image instanceof GdImage) {
+                    continue;
+                }
+
+                try {
+                    $hashes[] = $this->perceptualHash->hash($image);
+                } finally {
+                    imagedestroy($image);
+                }
+            } catch (Throwable $exception) {
+                Log::warning('Could not fingerprint an existing product image.', [
+                    'media_id' => $item->id,
+                    'error' => $exception->getMessage(),
+                ]);
+            }
+        }
+
+        return array_values(array_unique($hashes));
+    }
+
     /**
      * Vision-approved candidates are already sorted by source rank and score,
      * so the first occurrence of a near-duplicate set is the best one to keep.
      *
-     * @param array<int, array<string, mixed>> $candidates
+     * @param  array<int, array<string, mixed>>  $candidates
      * @return array<int, array<string, mixed>>
      */
-    private function removeNearDuplicates(array $candidates): array
+    private function removeNearDuplicates(array $candidates, array $excludedHashes = []): array
     {
         $threshold = (int) config('product-images.duplicate_hash_threshold', 6);
         $kept = [];
-        $hashes = [];
+        $hashes = array_values(array_filter($excludedHashes, fn (mixed $hash): bool => is_string($hash) && $hash !== ''));
 
         foreach ($candidates as $candidate) {
             $hash = $this->perceptualHash->hash($candidate['image']);
@@ -509,8 +570,8 @@ class ProductImageStorage
     }
 
     /**
-     * @param array<int, array<string, mixed>> $existing
-     * @param array<int, array<string, mixed>> $additional
+     * @param  array<int, array<string, mixed>>  $existing
+     * @param  array<int, array<string, mixed>>  $additional
      * @return array<int, array<string, mixed>>
      */
     private function removeDuplicateCandidates(array $existing, array $additional): array

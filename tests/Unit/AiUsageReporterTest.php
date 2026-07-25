@@ -2,6 +2,7 @@
 
 namespace Tests\Unit;
 
+use App\Models\AiModel;
 use App\Models\AiRun;
 use App\Models\TelegramUpdate;
 use App\Services\Ai\AiUsageReporter;
@@ -14,15 +15,15 @@ class AiUsageReporterTest extends TestCase
 
     public function test_it_estimates_cost_for_a_model_name_containing_a_dot(): void
     {
-        // Real bug: config('services.ai_usage.prices.openai.gpt-5.4...')
-        // parses every dot as a nested array key, so "gpt-5.4" (part of the
-        // actual model name) silently never matched and cost was always null.
-        config(['services.ai_usage.prices.openai' => [
-            'gpt-5.4' => [
+        AiModel::query()
+            ->where('provider', 'openai')
+            ->where('model', 'gpt-5.4')
+            ->update([
                 'input_per_million' => 2.50,
+                'cached_input_per_million' => 0.25,
                 'output_per_million' => 15.00,
-            ],
-        ]]);
+            ]);
+
         AiRun::query()->create([
             'telegram_update_id' => $this->update()->id,
             'provider' => 'openai',
@@ -36,6 +37,33 @@ class AiUsageReporterTest extends TestCase
         $summary = app(AiUsageReporter::class)->summary();
 
         $this->assertSame(17.5, $summary['all_time']['estimated_cost_usd']);
+    }
+
+    public function test_it_does_not_count_cached_or_reasoning_tokens_twice(): void
+    {
+        AiRun::query()->create([
+            'telegram_update_id' => $this->update()->id,
+            'provider' => 'openai',
+            'model' => 'gpt-5-mini',
+            'status' => 'completed',
+            'prompt' => 'test',
+            'usage' => [
+                'prompt_tokens' => 149,
+                'completion_tokens' => 129,
+                'cache_read_input_tokens' => 2432,
+                'reasoning_tokens' => 64,
+            ],
+            'started_at' => now(),
+        ]);
+
+        $summary = app(AiUsageReporter::class)->summary()['all_time'];
+
+        $this->assertSame(2710, $summary['tokens']['total']);
+        $this->assertSame(149, $summary['tokens']['input']);
+        $this->assertSame(2432, $summary['tokens']['cached_input']);
+        $this->assertSame(129, $summary['tokens']['output']);
+        $this->assertSame(64, $summary['tokens']['reasoning']);
+        $this->assertEqualsWithDelta(0.000356, $summary['estimated_cost_usd'], 0.0000001);
     }
 
     public function test_for_telegram_update_scopes_to_one_interaction_and_respects_since(): void

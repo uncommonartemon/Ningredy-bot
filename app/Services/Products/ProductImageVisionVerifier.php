@@ -3,9 +3,9 @@
 namespace App\Services\Products;
 
 use App\Ai\Agents\ProductImageVisionAgent;
-use App\Services\Ai\AiSettings;
 use App\Models\AiRun;
 use App\Models\ProductDraft;
+use App\Services\Ai\AiSettings;
 use GdImage;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
@@ -61,6 +61,7 @@ class ProductImageVisionVerifier
                 'images' => ['required', 'array', 'size:'.count($candidates)],
                 'images.*.index' => ['required', 'integer', 'between:1,'.count($candidates), 'distinct'],
                 'images.*.exact_match' => ['required', 'boolean'],
+                'images.*.color_match' => ['required', 'boolean'],
                 'images.*.publishable' => ['required', 'boolean'],
                 'images.*.kind' => ['required', 'in:product,packaging,detail,logo,banner,screenshot,unrelated,uncertain'],
                 'images.*.view' => ['required', 'in:front,angle,side,back,detail,packaging,other'],
@@ -97,6 +98,7 @@ class ProductImageVisionVerifier
                 });
 
             $reviews = $this->rankReviews($reviewed->filter(fn (array $review): bool => $review['publishable']
+                && (! filled($draft->color) || $review['color_match'])
                 && in_array($review['kind'], ['product', 'packaging', 'detail'], true)
                 && $review['score'] >= ($review['official_source'] ? $officialMinimumScore : $minimumScore)
                 && ($review['exact_match'] || $review['source_supported'] || $review['official_source'])));
@@ -155,6 +157,10 @@ class ProductImageVisionVerifier
 
     private function isAcceptableOfficialFallback(array $review): bool
     {
+        if (! ($review['color_match'] ?? false)) {
+            return false;
+        }
+
         if (! $review['official_source'] || ! in_array($review['kind'], ['product', 'packaging', 'detail'], true)) {
             return false;
         }
@@ -167,6 +173,7 @@ class ProductImageVisionVerifier
             'not a product', 'accessory',
         ]);
     }
+
     /** @param array<int, array<string, mixed>> $candidates */
     private function prompt(ProductDraft $draft, array $candidates): string
     {
@@ -187,7 +194,8 @@ class ProductImageVisionVerifier
             Exact requested product: {$draft->title}
             Brand: {$draft->brand}
             Model: {$draft->model}
-            Color/version: {$draft->color}
+            Required color/version: {$draft->color}
+            A visibly different product color must have color_match=false even on an official source.
             Key specifications: {$specifications}
             Numbering follows attachment order: first attachment is image 1, etc.
             Candidate source URLs (supporting evidence only; visible conflicts always win):

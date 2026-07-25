@@ -2,12 +2,13 @@
 
 namespace App\Jobs;
 
-use App\Models\Product;
 use App\Models\AppSetting;
+use App\Models\Product;
 use App\Models\ProductDraft;
 use App\Models\ProductVariant;
 use App\Services\Ai\AiUsageReporter;
 use App\Services\Products\ProductImageStorage;
+use App\Services\Products\ProductPhotoManager;
 use App\Services\Telegram\TelegramClient;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
@@ -28,6 +29,8 @@ class StoreProductImages implements ShouldQueue
         public int $productId,
         public int $variantId,
         public int $draftId,
+        /** @var array<int, int> */
+        public array $replaceMediaIds = [],
     ) {
         $this->onQueue('media');
     }
@@ -49,7 +52,13 @@ class StoreProductImages implements ShouldQueue
         }
 
         $searchStartedAt = now();
-        $stored = $storage->store($product, $variant, $draft);
+        $stored = $storage->store($product, $variant, $draft, $this->replaceMediaIds);
+
+        if ($this->replaceMediaIds !== []) {
+            app(ProductPhotoManager::class)->completeRefind($product, $this->replaceMediaIds, $stored);
+            $product->unsetRelation('media');
+        }
+
         $chatId = $draft->telegramUpdate?->chat_id;
         $usageFootnote = $draft->telegram_update_id
             ? $this->usageFootnote($draft->telegram_update_id, $searchStartedAt)

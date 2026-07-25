@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Ai\Agents\ProductImageDiscoveryAgent;
 use App\Ai\Agents\ProductImageVisionAgent;
+use App\Jobs\StoreProductImages;
 use App\Models\AiRun;
 use App\Models\Brand;
 use App\Models\Category;
@@ -12,11 +13,14 @@ use App\Models\ProductDraft;
 use App\Models\ProductVariant;
 use App\Models\TelegramUpdate;
 use App\Services\Products\ProductImageCandidateDiscovery;
+use App\Services\Products\ProductImageResolver;
 use App\Services\Products\ProductImageStorage;
+use App\Services\Products\ProductPhotoManager;
 use App\Services\Products\WikimediaImageSearch;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 
@@ -40,6 +44,7 @@ class ProductImageStorageTest extends TestCase
                     'index' => $index + 1,
                     'exact_match' => true,
                     'publishable' => true,
+                    'color_match' => true,
                     'kind' => $index === 0 ? 'product' : 'detail',
                     'view' => $index === 0 ? 'front' : 'detail',
                     'gallery_rank' => $index + 1,
@@ -99,6 +104,7 @@ class ProductImageStorageTest extends TestCase
                     'index' => $index + 1,
                     'exact_match' => false,
                     'publishable' => false,
+                    'color_match' => true,
                     'kind' => 'logo',
                     'view' => 'other',
                     'gallery_rank' => $index + 1,
@@ -128,6 +134,7 @@ class ProductImageStorageTest extends TestCase
                 'index' => $index + 1,
                 'exact_match' => true,
                 'publishable' => true,
+                'color_match' => true,
                 'kind' => $index === 0 ? 'product' : 'detail',
                 'view' => $index === 0 ? 'front' : 'detail',
                 'gallery_rank' => $index + 1,
@@ -188,6 +195,7 @@ class ProductImageStorageTest extends TestCase
             'model' => 'gpt-5.4-mini',
         ]);
     }
+
     public function test_it_prefers_completing_the_gallery_from_one_trusted_source_over_mixing_hosts(): void
     {
         Storage::fake('public');
@@ -228,6 +236,7 @@ class ProductImageStorageTest extends TestCase
                 'index' => 1,
                 'exact_match' => false,
                 'publishable' => true,
+                'color_match' => true,
                 'kind' => 'packaging',
                 'view' => 'packaging',
                 'gallery_rank' => 1,
@@ -270,6 +279,7 @@ class ProductImageStorageTest extends TestCase
                 'index' => 1,
                 'exact_match' => false,
                 'publishable' => false,
+                'color_match' => true,
                 'kind' => 'product',
                 'view' => 'front',
                 'gallery_rank' => 1,
@@ -302,6 +312,7 @@ class ProductImageStorageTest extends TestCase
             'verification_status' => 'verified',
         ]);
     }
+
     public function test_it_reviews_and_selects_an_official_manufacturer_image_first(): void
     {
         Storage::fake('public');
@@ -317,6 +328,7 @@ class ProductImageStorageTest extends TestCase
                     'index' => $index + 1,
                     'exact_match' => false,
                     'publishable' => $index === 0,
+                    'color_match' => true,
                     'kind' => $index === 0 ? 'product' : 'unrelated',
                     'view' => $index === 0 ? 'front' : 'other',
                     'gallery_rank' => $index + 1,
@@ -362,6 +374,7 @@ class ProductImageStorageTest extends TestCase
                     'index' => 1,
                     'exact_match' => true,
                     'publishable' => true,
+                    'color_match' => true,
                     'kind' => 'detail',
                     'view' => 'back',
                     'gallery_rank' => 2,
@@ -372,6 +385,7 @@ class ProductImageStorageTest extends TestCase
                     'index' => 2,
                     'exact_match' => true,
                     'publishable' => true,
+                    'color_match' => true,
                     'kind' => 'product',
                     'view' => 'front',
                     'gallery_rank' => 1,
@@ -421,6 +435,7 @@ class ProductImageStorageTest extends TestCase
                     'index' => 1,
                     'exact_match' => true,
                     'publishable' => true,
+                    'color_match' => true,
                     'kind' => 'detail',
                     'view' => 'back',
                     'gallery_rank' => 1,
@@ -431,6 +446,7 @@ class ProductImageStorageTest extends TestCase
                     'index' => 2,
                     'exact_match' => true,
                     'publishable' => true,
+                    'color_match' => true,
                     'kind' => 'product',
                     'view' => 'front',
                     'gallery_rank' => 2,
@@ -480,6 +496,7 @@ class ProductImageStorageTest extends TestCase
                     'index' => $index + 1,
                     'exact_match' => $calls === 2 && $index === 0,
                     'publishable' => $calls === 2 && $index === 0,
+                    'color_match' => true,
                     'kind' => $calls === 2 && $index === 0 ? 'product' : 'logo',
                     'view' => $calls === 2 && $index === 0 ? 'front' : 'other',
                     'gallery_rank' => $index + 1,
@@ -544,6 +561,7 @@ class ProductImageStorageTest extends TestCase
                     'index' => $index + 1,
                     'exact_match' => true,
                     'publishable' => true,
+                    'color_match' => true,
                     'kind' => $index === 0 ? 'product' : 'detail',
                     'view' => $index === 0 ? 'front' : 'detail',
                     'gallery_rank' => $index + 1,
@@ -589,6 +607,7 @@ class ProductImageStorageTest extends TestCase
                 'index' => 1,
                 'exact_match' => false,
                 'publishable' => true,
+                'color_match' => true,
                 'kind' => 'product',
                 'view' => 'front',
                 'gallery_rank' => 1,
@@ -620,6 +639,7 @@ class ProductImageStorageTest extends TestCase
             'verification_status' => 'verified',
         ]);
     }
+
     public function test_it_uses_fallback_discovery_when_research_only_returns_logos(): void
     {
         Storage::fake('public');
@@ -628,6 +648,7 @@ class ProductImageStorageTest extends TestCase
                 'index' => 1,
                 'exact_match' => true,
                 'publishable' => true,
+                'color_match' => true,
                 'kind' => 'product',
                 'view' => 'front',
                 'gallery_rank' => 1,
@@ -664,6 +685,7 @@ class ProductImageStorageTest extends TestCase
                 'index' => $index + 1,
                 'exact_match' => true,
                 'publishable' => true,
+                'color_match' => true,
                 'kind' => $index === 0 ? 'product' : 'detail',
                 'view' => $index === 0 ? 'front' : 'detail',
                 'gallery_rank' => $index + 1,
@@ -687,6 +709,110 @@ class ProductImageStorageTest extends TestCase
         $media = $product->media()->get();
         $this->assertCount(1, $media);
         $this->assertSame('https://93.184.216.34/original.jpg', $media->first()->source_url);
+    }
+
+    public function test_refind_keeps_current_photos_until_replacements_are_found(): void
+    {
+        Queue::fake();
+        [$product, $variant, $draft] = $this->records();
+        $draft->update([
+            'approved_product_id' => $product->id,
+            'approved_variant_id' => $variant->id,
+        ]);
+        $old = $product->media()->create([
+            'product_variant_id' => $variant->id,
+            'type' => 'image',
+            'url' => 'https://example.com/current.jpg',
+            'source_url' => 'https://example.com/current.jpg',
+            'verification_status' => 'verified',
+            'is_primary' => true,
+            'sort_order' => 0,
+        ]);
+
+        $started = app(ProductPhotoManager::class)->refind($product, fresh: true);
+
+        $this->assertTrue($started);
+        $this->assertDatabaseHas('product_media', ['id' => $old->id]);
+        Queue::assertPushed(StoreProductImages::class, fn (StoreProductImages $job): bool => $job->productId === $product->id && $job->replaceMediaIds === [$old->id]);
+    }
+
+    public function test_refind_rejects_a_previous_photo_even_when_bytes_and_url_change(): void
+    {
+        Storage::fake('public');
+        config()->set('product-images.discover_after_rejection', false);
+        ProductImageVisionAgent::fake(fn (string $prompt, $attachments): array => [
+            'images' => $attachments->keys()->map(fn (int $index): array => [
+                'index' => $index + 1,
+                'exact_match' => true,
+                'publishable' => true,
+                'color_match' => true,
+                'kind' => 'product',
+                'view' => 'front',
+                'gallery_rank' => $index + 1,
+                'score' => 95,
+                'reason' => 'Exact product image.',
+            ])->all(),
+        ])->preventStrayPrompts();
+        Http::fake(fn () => Http::response($this->jpegCopy(7), 200, ['Content-Type' => 'image/jpeg']));
+        [$product, $variant, $draft] = $this->records();
+        $path = "products/{$product->id}/old-photo.webp";
+        Storage::disk('public')->put($path, $this->jpeg(7));
+        $old = $product->media()->create([
+            'product_variant_id' => $variant->id,
+            'type' => 'image',
+            'disk' => 'public',
+            'path' => $path,
+            'source_url' => 'https://93.184.216.34/old-photo.jpg',
+            'verification_status' => 'verified',
+            'is_primary' => true,
+            'sort_order' => 0,
+        ]);
+        $draft->update(['image_urls' => ['https://93.184.216.34/same-photo-new-url.jpg']]);
+
+        $stored = app(ProductImageStorage::class)->store($product, $variant, $draft->fresh(), [$old->id]);
+
+        $this->assertSame(0, $stored);
+        $this->assertDatabaseHas('product_media', ['id' => $old->id]);
+        Storage::disk('public')->assertExists($path);
+    }
+
+    public function test_an_explicit_color_requires_vision_and_rejects_a_visible_mismatch(): void
+    {
+        Storage::fake('public');
+        config()->set('product-images.discover_after_rejection', false);
+        ProductImageVisionAgent::fake(function (string $prompt): array {
+            $this->assertStringContainsString('Required color/version: Black', $prompt);
+
+            return ['images' => [[
+                'index' => 1,
+                'exact_match' => true,
+                'publishable' => true,
+                'color_match' => false,
+                'kind' => 'product',
+                'view' => 'front',
+                'gallery_rank' => 1,
+                'score' => 96,
+                'reason' => 'Exact model, but the visible chassis is white.',
+            ]]];
+        })->preventStrayPrompts();
+        Http::fake(fn () => Http::response($this->jpeg(88), 200, ['Content-Type' => 'image/jpeg']));
+        [$product, $variant, $draft] = $this->records();
+        $draft->update([
+            'brand' => 'MSI',
+            'model' => 'C2NVR9-1452US',
+            'color' => 'Black',
+            'sources' => [[
+                'title' => 'Exact MSI retailer listing',
+                'url' => 'https://93.184.216.34/products/C2NVR9-1452US',
+                'type' => 'retailer',
+            ]],
+            'image_urls' => ['https://93.184.216.34/images/C2NVR9-1452US-white.jpg'],
+        ]);
+
+        $stored = app(ProductImageStorage::class)->store($product, $variant, $draft->fresh());
+
+        $this->assertSame(0, $stored);
+        $this->assertSame(0, $product->media()->count());
     }
 
     public function test_image_discovery_is_cached_for_queue_retries(): void
@@ -718,7 +844,7 @@ class ProductImageStorageTest extends TestCase
             'image_urls' => ['https://dlcdnwebimgs.asus.com/gain/exact-product/w800'],
             'page_urls' => [],
         ]])->preventStrayPrompts();
-        $resolver = $this->mock(\App\Services\Products\ProductImageResolver::class);
+        $resolver = $this->mock(ProductImageResolver::class);
         $resolver->shouldReceive('resolve')->once()->andReturn([
             'https://www.asus.com/media/Odin/images/header/ROG_normal.svg',
             'https://www.asus.com/media/Odin/images/header/ProArt_hover.svg',

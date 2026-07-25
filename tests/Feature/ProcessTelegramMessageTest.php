@@ -6,12 +6,16 @@ use App\Ai\Agents\ProductResearchAgent;
 use App\Ai\Agents\ServerAssistantAgent;
 use App\Ai\Tools\ResearchProduct;
 use App\Jobs\ProcessTelegramMessage;
+use App\Models\AiRun;
+use App\Models\AttributeDefinition;
 use App\Models\Brand;
 use App\Models\Category;
 use App\Models\Product;
+use App\Models\ProductDraft;
 use App\Models\ProductVariant;
 use App\Models\TelegramUpdate;
 use App\Services\Ai\AiErrorPresenter;
+use App\Services\Products\ProductIdentityKey;
 use App\Services\Products\ProductImageResolver;
 use App\Services\Telegram\TelegramClient;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -100,7 +104,7 @@ class ProcessTelegramMessageTest extends TestCase
         $update = $this->update();
         // Simulates a nested tool call (e.g. ResearchProduct) having already
         // spent real tokens earlier in this same Telegram interaction.
-        \App\Models\AiRun::query()->create([
+        AiRun::query()->create([
             'telegram_update_id' => $update->id,
             'provider' => 'openai',
             'model' => 'gpt-5.4',
@@ -118,7 +122,8 @@ class ProcessTelegramMessageTest extends TestCase
 
         Http::assertSent(fn (HttpRequest $request): bool => str_ends_with($request->url(), '/sendMessage')
             && str_contains((string) $request['text'], 'Сервер работает нормально.')
-            && str_contains((string) $request['text'], 'Токены: 1 200'));
+            && str_contains((string) $request['text'], 'Токены: 1 200')
+            && str_contains((string) $request['text'], '(~$0.0068)'));
     }
 
     public function test_catalog_results_are_sent_as_photo_cards(): void
@@ -249,7 +254,7 @@ class ProcessTelegramMessageTest extends TestCase
             'is_default' => true,
             'is_active' => true,
         ]);
-        $ram = \App\Models\AttributeDefinition::query()->firstOrCreate(
+        $ram = AttributeDefinition::query()->firstOrCreate(
             ['key' => 'ram'],
             ['label' => 'RAM', 'data_type' => 'text', 'is_filterable' => true, 'is_variant' => true],
         );
@@ -352,7 +357,7 @@ class ProcessTelegramMessageTest extends TestCase
         $existing = Product::query()->create([
             'category_id' => $category->id,
             'brand_id' => $brand->id,
-            'canonical_key' => \App\Services\Products\ProductIdentityKey::for('Lenovo', 'Legion 5 16IRX9', 'Lenovo Legion 5 16IRX9'),
+            'canonical_key' => ProductIdentityKey::for('Lenovo', 'Legion 5 16IRX9', 'Lenovo Legion 5 16IRX9'),
             'product_type' => 'laptop',
             'status' => 'published',
             'slug' => 'lenovo-legion-5-16irx9',
@@ -385,7 +390,7 @@ class ProcessTelegramMessageTest extends TestCase
         $this->assertTrue($result['ok']);
         $this->assertSame('already_in_catalog', $result['status']);
         $this->assertSame($existing->id, $result['product_id']);
-        $this->assertSame(0, \App\Models\ProductDraft::query()->count());
+        $this->assertSame(0, ProductDraft::query()->count());
     }
 
     /** @return array{Product, Product} */

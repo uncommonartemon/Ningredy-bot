@@ -38,7 +38,7 @@ class ProductPhotoManager
     }
 
     /**
-     * @param array<int, int> $positions 1-based
+     * @param  array<int, int>  $positions  1-based
      * @return int how many photos were actually deleted
      */
     public function delete(Product $product, array $positions): int
@@ -59,17 +59,19 @@ class ProductPhotoManager
      * Delete the given positions (or everything, if $fresh) and dispatch a
      * fresh search to fill the gallery back up to its target count.
      *
-     * @param array<int, int> $replacePositions 1-based
+     * @param  array<int, int>  $replacePositions  1-based
      */
     public function refind(Product $product, array $replacePositions = [], bool $fresh = false): bool
     {
-        if ($fresh) {
-            foreach ($product->media()->get() as $item) {
-                $item->delete();
-            }
-        } elseif ($replacePositions !== []) {
-            $this->delete($product, $replacePositions);
-        }
+        $media = $product->media()->where('type', 'image')->orderBy('sort_order')->get();
+        $replaceMediaIds = $fresh
+            ? $media->pluck('id')->all()
+            : collect($replacePositions)
+                ->unique()
+                ->map(fn (int $position): ?int => $media->get($position - 1)?->id)
+                ->filter()
+                ->values()
+                ->all();
 
         $draft = ProductDraft::query()->where('approved_product_id', $product->id)->latest('id')->first();
         $variant = $product->defaultVariant ?? $product->variants()->first();
@@ -78,9 +80,36 @@ class ProductPhotoManager
             return false;
         }
 
-        StoreProductImages::dispatch($product->id, $variant->id, $draft->id)->afterCommit();
+        StoreProductImages::dispatch($product->id, $variant->id, $draft->id, $replaceMediaIds)->afterCommit();
 
         return true;
+    }
+
+    /**
+     * Remove only as many requested old photos as were successfully replaced.
+     * If discovery finds nothing, the existing gallery remains untouched.
+     *
+     * @param  array<int, int>  $replaceMediaIds
+     */
+    public function completeRefind(Product $product, array $replaceMediaIds, int $stored): int
+    {
+        if ($stored <= 0 || $replaceMediaIds === []) {
+            return 0;
+        }
+
+        $toDelete = $product->media()
+            ->whereIn('id', $replaceMediaIds)
+            ->orderBy('sort_order')
+            ->limit($stored)
+            ->get();
+
+        foreach ($toDelete as $item) {
+            $item->delete();
+        }
+
+        $this->renumber($product);
+
+        return $toDelete->count();
     }
 
     private function renumber(Product $product): void
