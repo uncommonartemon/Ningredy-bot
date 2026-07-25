@@ -9,6 +9,7 @@ use Filament\Actions\EditAction;
 use Filament\Actions\ViewAction;
 use Filament\Forms\Components\Textarea;
 use Filament\Notifications\Notification;
+use Filament\Tables\Columns\ImageColumn;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Filters\SelectFilter;
 use Filament\Tables\Table;
@@ -18,8 +19,14 @@ class ProductDraftsTable
     public static function configure(Table $table): Table
     {
         return $table
+            ->modifyQueryUsing(fn ($query) => $query->with('media'))
             ->defaultSort('id', 'desc')
             ->columns([
+                ImageColumn::make('preview')
+                    ->label('Фото')
+                    ->state(fn (ProductDraft $record): ?string => $record->media->first()?->path)
+                    ->disk('public')
+                    ->square(),
                 TextColumn::make('id')->label('#')->sortable(),
                 TextColumn::make('title')->label('Название')->searchable()->sortable()->wrap(),
                 TextColumn::make('brand')->label('Бренд')->searchable(),

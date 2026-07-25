@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class ProductDraft extends Model
 {
@@ -12,7 +13,7 @@ class ProductDraft extends Model
         'reviewed_by_telegram_user_id', 'rejection_reason', 'requested_by_telegram_user_id',
         'approved_product_id', 'approved_variant_id',
         'title', 'brand', 'model', 'product_type', 'category', 'color', 'description', 'research_notes', 'specifications',
-        'sources', 'image_urls', 'confidence',
+        'sources', 'primary_source_url', 'official_source_url', 'image_urls', 'images_staged_at', 'confidence',
     ];
 
     protected function casts(): array
@@ -21,6 +22,7 @@ class ProductDraft extends Model
             'specifications' => 'array', 'sources' => 'array', 'image_urls' => 'array',
             'confidence' => 'decimal:4',
             'reviewed_at' => 'datetime',
+            'images_staged_at' => 'datetime',
         ];
     }
 
@@ -47,5 +49,10 @@ class ProductDraft extends Model
     public function variant(): BelongsTo
     {
         return $this->belongsTo(ProductVariant::class, 'approved_variant_id');
+    }
+
+    public function media(): HasMany
+    {
+        return $this->hasMany(ProductDraftMedia::class)->orderByDesc('is_primary')->orderBy('sort_order');
     }
 }

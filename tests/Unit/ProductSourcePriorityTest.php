@@ -7,7 +7,7 @@ use Tests\TestCase;
 
 class ProductSourcePriorityTest extends TestCase
 {
-    public function test_it_prioritizes_english_official_then_localized_official_then_amazon(): void
+    public function test_it_prioritizes_amazon_then_official_sources(): void
     {
         $priority = app(ProductSourcePriority::class);
         $sources = [
@@ -21,9 +21,9 @@ class ProductSourcePriorityTest extends TestCase
         $sorted = $priority->sortSources($sources, 'Apple');
 
         $this->assertSame([
+            'Amazon',
             'Apple US',
             'Apple UA',
-            'Amazon',
             'Store',
             'Review',
         ], array_column($sorted, 'title'));
@@ -43,9 +43,9 @@ class ProductSourcePriorityTest extends TestCase
         ];
 
         $this->assertSame([
+            'https://m.media-amazon.com/images/I/product.jpg',
             'https://www.apple.com/v/iphone-17/images/product.jpg',
             'https://www.apple.com/ua/images/product.jpg',
-            'https://m.media-amazon.com/images/I/product.jpg',
             'https://upload.wikimedia.org/product.jpg',
         ], $priority->sortUrls($urls, 'Apple', $sources));
     }

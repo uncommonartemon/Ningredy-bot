@@ -4,14 +4,15 @@ namespace App\Ai\Tools;
 
 use App\Ai\Agents\ProductResearchAgent;
 use App\Ai\Tools\Concerns\RecordsOperations;
-use App\Services\Ai\AiSettings;
 use App\Models\AiRun;
 use App\Models\Category;
 use App\Models\Product;
 use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
+use App\Services\Ai\AiSettings;
 use App\Services\Products\ProductIdentityKey;
 use App\Services\Products\ProductImageResolver;
+use App\Services\Products\ProductImageStorage;
 use App\Services\Products\ProductPublicDescription;
 use App\Services\Products\ProductSourcePriority;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
@@ -31,6 +32,7 @@ class ResearchProduct implements Tool
         private readonly ProductImageResolver $imageResolver,
         private readonly ?ProductSourcePriority $sourcePriority = null,
         private readonly ?ProductPublicDescription $publicDescription = null,
+        private readonly ?ProductImageStorage $imageStorage = null,
     ) {}
 
     public function description(): Stringable|string
@@ -73,6 +75,8 @@ class ResearchProduct implements Tool
                 'sources.*.title' => ['required', 'string', 'max:500'],
                 'sources.*.url' => ['required', 'url:http,https', 'max:2048'],
                 'sources.*.type' => ['nullable', 'in:manufacturer,retailer,marketplace,review,database,web'],
+                'primary_source_url' => ['nullable', 'url:http,https', 'max:2048'],
+                'official_source_url' => ['nullable', 'url:http,https', 'max:2048'],
                 'image_urls' => ['present', 'array', 'max:10'],
                 'image_urls.*' => ['url:http,https', 'max:2048'],
                 'confidence' => ['required', 'numeric', 'between:0,1'],
@@ -84,10 +88,37 @@ class ResearchProduct implements Tool
             $data['research_notes'] = $normalizedDescription['research_notes'];
             $sourcePriority = $this->sourcePriority ?? app(ProductSourcePriority::class);
             $data['sources'] = $sourcePriority->sortSources($data['sources'], $data['brand']);
-            $data['image_urls'] = $sourcePriority->sortUrls([
-                ...$data['image_urls'],
-                ...$this->imageResolver->resolve($data['sources']),
-            ], $data['brand'], $data['sources']);
+
+            if ($data['status'] === 'found') {
+                Validator::make($data, [
+                    'title' => ['required', 'string'],
+                    'sources' => ['required', 'array', 'min:1'],
+                    'primary_source_url' => ['required', 'url:http,https'],
+                ])->validate();
+
+                $primarySource = collect($data['sources'])->first(
+                    fn (array $source): bool => ($source['url'] ?? null) === $data['primary_source_url'],
+                );
+
+                Validator::make(['primary_source' => $primarySource], [
+                    'primary_source' => ['required', 'array'],
+                    'primary_source.type' => ['required', 'in:retailer,marketplace'],
+                ])->validate();
+
+                $data['sources'] = collect($data['sources'])
+                    ->sortBy(fn (array $source): int => match ($source['url'] ?? null) {
+                        $data['primary_source_url'] => 0,
+                        $data['official_source_url'] => 1,
+                        default => 2,
+                    })
+                    ->values()
+                    ->all();
+                $resolvedGallery = $this->imageResolver->resolve([$primarySource], 10);
+                $data['image_urls'] = $sourcePriority->sortUrls([
+                    ...$data['image_urls'],
+                    ...$resolvedGallery,
+                ], $data['brand'], [$primarySource]);
+            }
 
             $run->update([
                 'invocation_id' => $response->invocationId,
@@ -105,15 +136,6 @@ class ResearchProduct implements Tool
                 ]);
             }
 
-            Validator::make($data, [
-                'title' => ['required', 'string'],
-                'sources' => ['required', 'array', 'min:1'],
-            ])->validate();
-
-            // Prevents the exact duplicate-draft bug seen in production: a
-            // later message about a product that was already researched and
-            // approved re-triggers ResearchProduct instead of being
-            // recognized as referring to the existing catalog entry.
             $existingProduct = Product::query()
                 ->where('canonical_key', ProductIdentityKey::for($data['brand'], $data['model'], $data['title']))
                 ->first();
@@ -148,6 +170,8 @@ class ResearchProduct implements Tool
                         'research_notes' => $data['research_notes'],
                         'specifications' => $data['specifications'],
                         'sources' => $data['sources'],
+                        'primary_source_url' => $data['primary_source_url'],
+                        'official_source_url' => $data['official_source_url'],
                         'image_urls' => $data['image_urls'],
                         'confidence' => $data['confidence'],
                     ]);
@@ -164,12 +188,40 @@ class ResearchProduct implements Tool
                         'research_notes' => $draft->research_notes,
                         'specifications' => $draft->specifications,
                         'sources' => $draft->sources,
+                        'primary_source_url' => $draft->primary_source_url,
+                        'official_source_url' => $draft->official_source_url,
                         'image_urls' => $draft->image_urls,
                         'confidence' => (float) $draft->confidence,
                     ];
                 },
                 ProductDraft::class,
             );
+
+            $draft = ProductDraft::query()->find($result['draft_id'] ?? null);
+
+            if ($draft && $draft->status === 'pending_review' && ! $draft->images_staged_at) {
+                $imageCount = ($this->imageStorage ?? app(ProductImageStorage::class))->stage($draft);
+            } else {
+                $imageCount = $draft?->media()->count() ?? 0;
+            }
+
+            if ($draft && $imageCount === 0) {
+                $draft->update([
+                    'status' => 'rejected',
+                    'reviewed_at' => now(),
+                    'rejection_reason' => 'Не удалось получить и проверить единую галерею из выбранной карточки товара.',
+                ]);
+
+                return $this->json([
+                    'ok' => true,
+                    'status' => 'gallery_not_found',
+                    'draft_id' => null,
+                    'title' => $draft->title,
+                    'message' => 'Точная информация найдена, но ни одна единая галерея магазина не прошла загрузку и проверку.',
+                ]);
+            }
+
+            $result['image_count'] = $imageCount;
 
             return $this->json($result);
         } catch (Throwable $exception) {

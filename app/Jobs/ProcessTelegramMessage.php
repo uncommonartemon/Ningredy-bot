@@ -118,12 +118,7 @@ class ProcessTelegramMessage implements ShouldQueue
             $usageFootnote = $this->usageFootnote($update->id);
 
             if ($draft) {
-                $telegram->sendMessage($update->chat_id, $this->draftSummary($draft).$usageFootnote, [
-                    'inline_keyboard' => [[
-                        ['text' => 'Добавить товар в каталог', 'callback_data' => "draft:add:{$draft->id}"],
-                        ['text' => 'Не добавлять', 'callback_data' => "draft:reject:{$draft->id}"],
-                    ]],
-                ]);
+                $this->sendDraftApproval($telegram, $update->chat_id, $draft, $usageFootnote);
             } elseif ($deletion) {
                 $productTitle = (string) data_get($deletion->payload, 'title', 'Товар');
                 $productId = (int) $deletion->target_id;
@@ -325,5 +320,65 @@ class ProcessTelegramMessage implements ShouldQueue
             $sources ? "Источники:\n{$sources}" : null,
             'Товар ещё не опубликован. Нажмите кнопку ниже, чтобы добавить его в каталог.',
         ])), 0, 4096);
+    }
+
+    private function sendDraftApproval(
+        TelegramClient $telegram,
+        string $chatId,
+        ProductDraft $draft,
+        string $usageFootnote,
+    ): void {
+        $replyMarkup = [
+            'inline_keyboard' => [[
+                ['text' => 'Добавить товар в каталог', 'callback_data' => "draft:add:{$draft->id}"],
+                ['text' => 'Не добавлять', 'callback_data' => "draft:reject:{$draft->id}"],
+            ]],
+        ];
+        $media = $draft->media()->first();
+
+        if ($media?->disk && $media?->path) {
+            $path = Storage::disk($media->disk)->path($media->path);
+
+            if (is_file($path) && is_readable($path)) {
+                $telegram->sendPhotoFile(
+                    $chatId,
+                    $path,
+                    $this->draftApprovalCaption($draft, $usageFootnote),
+                    $replyMarkup,
+                );
+
+                return;
+            }
+        }
+
+        $telegram->sendMessage($chatId, $this->draftSummary($draft).$usageFootnote, $replyMarkup);
+    }
+
+    private function draftApprovalCaption(ProductDraft $draft, string $usageFootnote): string
+    {
+        $specifications = collect($draft->specifications)->take(6)
+            ->map(fn (array $item): string => "• {$item['name']}: {$item['value']}")
+            ->implode("\n");
+        $galleryCount = $draft->media()->count();
+        $primaryHost = (string) parse_url((string) $draft->primary_source_url, PHP_URL_HOST);
+        $officialHost = (string) parse_url((string) $draft->official_source_url, PHP_URL_HOST);
+        $footer = implode("\n", array_filter([
+            "📷 Проверено фото: {$galleryCount}".($primaryHost !== '' ? " · {$primaryHost}" : ''),
+            $officialHost !== '' ? "✓ Характеристики сверены: {$officialHost}" : null,
+            'Нажмите кнопку, чтобы добавить готовый товар в каталог.',
+        ]));
+        $header = implode("\n", array_filter([
+            "Черновик #{$draft->id} готов к добавлению",
+            $draft->title,
+            implode(' · ', array_filter([$draft->brand, $draft->model, $draft->color])),
+        ]));
+        $fixed = $header."\n\n".$footer.$usageFootnote;
+        $available = max(0, 1024 - mb_strlen($fixed) - 8);
+        $body = implode("\n\n", array_filter([
+            mb_substr((string) $draft->description, 0, (int) floor($available * 0.55)),
+            $specifications !== '' ? "Характеристики:\n".$specifications : null,
+        ]));
+
+        return mb_substr($header."\n\n".mb_substr($body, 0, $available)."\n\n".$footer.$usageFootnote, 0, 1024);
     }
 }

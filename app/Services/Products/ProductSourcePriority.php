@@ -2,10 +2,15 @@
 
 namespace App\Services\Products;
 
+use App\Models\ImageSourcePriority;
+use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 
 class ProductSourcePriority
 {
+    private ?Collection $configuredRules = null;
+
     /** @param array<int, mixed> $sources @return array<int, array<string, mixed>> */
     public function sortSources(array $sources, ?string $brand): array
     {
@@ -17,8 +22,7 @@ class ProductSourcePriority
                 'index' => $index,
                 'score' => $this->score($source['url'], $brand, $sources, $source['type'] ?? null),
             ])
-            ->sort(fn (array $left, array $right): int =>
-                ($right['score'] <=> $left['score']) ?: ($left['index'] <=> $right['index']))
+            ->sort(fn (array $left, array $right): int => ($right['score'] <=> $left['score']) ?: ($left['index'] <=> $right['index']))
             ->pluck('source')
             ->values()
             ->all();
@@ -36,8 +40,7 @@ class ProductSourcePriority
                 'index' => $index,
                 'score' => $this->score($url, $brand, $sources),
             ])
-            ->sort(fn (array $left, array $right): int =>
-                ($right['score'] <=> $left['score']) ?: ($left['index'] <=> $right['index']))
+            ->sort(fn (array $left, array $right): int => ($right['score'] <=> $left['score']) ?: ($left['index'] <=> $right['index']))
             ->pluck('url')
             ->values()
             ->all();
@@ -46,6 +49,22 @@ class ProductSourcePriority
     /** @param array<int, mixed> $sources */
     public function classify(string $url, ?string $brand, array $sources = []): string
     {
+        $rule = $this->matchingConfiguredRule($url);
+
+        if ($rule) {
+            if ($rule->source_type === 'manufacturer') {
+                return $this->isEnglishOrUs($url) ? 'official_english' : 'official_localized';
+            }
+
+            if (Str::contains(Str::lower($rule->name.' '.$rule->domain), 'amazon')) {
+                return 'amazon';
+            }
+
+            if (in_array($rule->source_type, ['retailer', 'marketplace'], true)) {
+                return 'trusted_retailer';
+            }
+        }
+
         if ($this->isOfficial($url, $brand, $sources)) {
             return $this->isEnglishOrUs($url) ? 'official_english' : 'official_localized';
         }
@@ -61,37 +80,88 @@ class ProductSourcePriority
         return 'standard';
     }
 
+    public function preferredSourceInstructions(): string
+    {
+        $lines = $this->rules()
+            ->take(15)
+            ->map(fn (ImageSourcePriority $source): string => "- {$source->name} ({$source->domain}), priority {$source->priority}, type {$source->source_type}")
+            ->implode("\n");
+
+        return $lines !== '' ? $lines : '- Amazon, Best Buy, B&H Photo, Newegg, Walmart, Target';
+    }
+
     /** @param array<int, mixed> $sources */
     private function score(string $url, ?string $brand, array $sources, mixed $explicitType = null): int
     {
+        if ($rule = $this->matchingConfiguredRule($url)) {
+            return (int) $rule->priority;
+        }
+
         $classification = $this->classify($url, $brand, $sources);
 
         if ($classification === 'official_english') {
-            return 500;
+            return 820;
         }
 
         if ($classification === 'official_localized') {
-            return 450;
+            return 780;
         }
 
         if ($classification === 'amazon') {
-            return 400;
+            return 1000;
         }
 
         if ($classification === 'trusted_retailer') {
-            return 380;
+            return 760;
         }
 
         $type = is_string($explicitType) ? $explicitType : $this->matchingSourceType($url, $sources);
 
         return match ($type) {
-            'retailer' => 320,
-            'marketplace' => 300,
-            'database' => 260,
-            'review' => 220,
-            'web' => 180,
+            'retailer' => 700,
+            'marketplace' => 680,
+            'manufacturer' => 650,
+            'database' => 500,
+            'review' => 400,
+            'web' => 300,
             default => str_contains(Str::lower($url), 'wikimedia.org') ? 140 : 100,
         };
+    }
+
+    private function matchingConfiguredRule(string $url): ?ImageSourcePriority
+    {
+        $host = $this->host($url);
+
+        if ($host === '') {
+            return null;
+        }
+
+        return $this->rules()->first(function (ImageSourcePriority $source) use ($host): bool {
+            $domains = [$source->domain, ...($source->aliases ?? [])];
+
+            return collect($domains)->contains(fn (mixed $domain): bool => is_string($domain) && $this->hostsMatch($host, Str::lower($domain)));
+        });
+    }
+
+    private function rules(): Collection
+    {
+        if ($this->configuredRules !== null) {
+            return $this->configuredRules;
+        }
+
+        try {
+            if (! Schema::hasTable('image_source_priorities')) {
+                return $this->configuredRules = collect();
+            }
+
+            return $this->configuredRules = ImageSourcePriority::query()
+                ->where('is_enabled', true)
+                ->orderByDesc('priority')
+                ->orderBy('id')
+                ->get();
+        } catch (\Throwable) {
+            return $this->configuredRules = collect();
+        }
     }
 
     /** @param array<int, mixed> $sources */
@@ -143,7 +213,6 @@ class ProductSourcePriority
                 || in_array($segment, ['en', 'us', 'uk', 'gb', 'ca', 'au'], true);
         }
 
-        // Manufacturer root/global paths are normally their canonical English/US version.
         return true;
     }
 
@@ -157,22 +226,13 @@ class ProductSourcePriority
             || str_contains($host, 'ssl-images-amazon.');
     }
 
-    /**
-     * Major US and Czech/EU electronics retailers/marketplaces that are as
-     * reliable as Amazon for exact-product photos and listings, ranked just
-     * below it. Deliberately no Ukrainian retailers here (e.g. Rozetka) -
-     * their product photos frequently carry Ukrainian text/watermarks, so
-     * they stay a source_verified fallback only, never an equal trust tier.
-     */
     private function isTrustedRetailer(string $url): bool
     {
         $host = $this->host($url);
 
         return collect([
-            // US
             'ebay.', 'newegg.', 'bestbuy.', 'walmart.', 'target.',
             'bhphotovideo.', 'adorama.', 'costco.', 'samsclub.', 'microcenter.',
-            // Czech / EU
             'alza.', 'czc.cz', 'datart.cz', 'mediamarkt.', 'saturn.de',
         ])->contains(fn (string $needle): bool => str_contains($host, $needle));
     }
@@ -197,6 +257,9 @@ class ProductSourcePriority
 
     private function hostsMatch(string $left, string $right): bool
     {
+        $left = Str::after(Str::lower($left), 'www.');
+        $right = Str::after(Str::lower($right), 'www.');
+
         return $left !== '' && $right !== '' && (
             $left === $right
             || str_ends_with($left, '.'.$right)
@@ -206,7 +269,7 @@ class ProductSourcePriority
 
     private function host(string $url): string
     {
-        return Str::lower((string) parse_url($url, PHP_URL_HOST));
+        return Str::after(Str::lower((string) parse_url($url, PHP_URL_HOST)), 'www.');
     }
 
     private function brandKey(?string $brand): string

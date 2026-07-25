@@ -17,6 +17,7 @@ use App\Models\TelegramUpdate;
 use App\Services\Ai\AiErrorPresenter;
 use App\Services\Products\ProductIdentityKey;
 use App\Services\Products\ProductImageResolver;
+use App\Services\Products\ProductImageStorage;
 use App\Services\Telegram\TelegramClient;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request as HttpRequest;
@@ -52,6 +53,79 @@ class ProcessTelegramMessageTest extends TestCase
         Http::assertSent(fn (HttpRequest $request): bool => str_ends_with($request->url(), '/sendMessage')
             && $request['chat_id'] === '98765'
             && $request['text'] === 'Сервер работает нормально.');
+    }
+
+    public function test_ready_draft_is_sent_as_one_photo_approval_card_with_buttons(): void
+    {
+        Storage::fake('public');
+        config(['services.telegram.bot_token' => 'test-token']);
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []])]);
+        $update = $this->update();
+        $researchRun = AiRun::query()->create([
+            'telegram_update_id' => $update->id,
+            'provider' => 'openai',
+            'model' => 'gpt-4.1-mini',
+            'status' => 'completed',
+            'prompt' => 'find product',
+            'started_at' => now(),
+            'completed_at' => now(),
+        ]);
+        $draft = ProductDraft::query()->create([
+            'telegram_update_id' => $update->id,
+            'ai_run_id' => $researchRun->id,
+            'requested_by_telegram_user_id' => $update->telegram_user_id,
+            'title' => 'MSI Aegis Exact Black',
+            'brand' => 'MSI',
+            'model' => 'Aegis Exact',
+            'color' => 'Black',
+            'description' => 'Готовое описание товара для каталога.',
+            'specifications' => [['key' => 'cpu', 'name' => 'Процессор', 'value' => 'Intel Core Ultra 9']],
+            'sources' => [['title' => 'Amazon', 'url' => 'https://amazon.com/dp/EXACT', 'type' => 'marketplace']],
+            'primary_source_url' => 'https://amazon.com/dp/EXACT',
+            'image_urls' => [],
+            'images_staged_at' => now(),
+            'confidence' => 0.98,
+        ]);
+        $path = "drafts/{$draft->id}/primary-test.webp";
+        Storage::disk('public')->put($path, 'fake-image');
+        $draft->media()->create([
+            'disk' => 'public',
+            'path' => $path,
+            'source_url' => 'https://m.media-amazon.com/images/I/exact.jpg',
+            'role' => 'primary',
+            'mime_type' => 'image/webp',
+            'checksum' => hash('sha256', 'fake-image'),
+            'verification_status' => 'verified',
+            'sort_order' => 0,
+            'is_primary' => true,
+        ]);
+        ServerAssistantAgent::fake([[
+            'response_type' => 'draft',
+            'message' => 'Черновик готов.',
+            'draft_id' => $draft->id,
+            'product_ids' => [],
+            'operation_ids' => [],
+        ]]);
+
+        (new ProcessTelegramMessage($update->id))->handle(
+            app(TelegramClient::class),
+            app(AiErrorPresenter::class),
+        );
+
+        Http::assertSent(function (HttpRequest $request) use ($draft): bool {
+            if (! str_ends_with($request->url(), '/sendPhoto')) {
+                return false;
+            }
+
+            $parts = collect($request->data())->keyBy('name');
+            $caption = (string) ($parts->get('caption')['contents'] ?? '');
+            $replyMarkup = json_decode((string) ($parts->get('reply_markup')['contents'] ?? ''), true);
+
+            return str_contains($caption, "Черновик #{$draft->id} готов к добавлению")
+                && str_contains($caption, 'Проверено фото: 1')
+                && data_get($replyMarkup, 'inline_keyboard.0.0.callback_data') === "draft:add:{$draft->id}";
+        });
+        Http::assertNotSent(fn (HttpRequest $request): bool => str_ends_with($request->url(), '/sendMessage'));
     }
 
     public function test_reply_to_text_is_prepended_as_context_for_the_agent(): void
@@ -316,10 +390,17 @@ class ProcessTelegramMessageTest extends TestCase
             'brand' => 'Lenovo',
             'model' => 'Legion 5 16IRX9',
             'category' => 'laptops',
+            'product_type' => 'laptop',
             'color' => 'Luna Grey',
             'description' => 'Игровой ноутбук.',
             'specifications' => [['key' => 'ram', 'name' => 'RAM', 'value' => '32 GB']],
-            'sources' => [['title' => 'Lenovo', 'url' => 'https://www.lenovo.com/example']],
+            'sources' => [
+                ['title' => 'Amazon', 'url' => 'https://www.amazon.com/dp/LEGION', 'type' => 'marketplace'],
+                ['title' => 'Lenovo', 'url' => 'https://www.lenovo.com/example', 'type' => 'manufacturer'],
+            ],
+            'primary_source_url' => 'https://www.amazon.com/dp/LEGION',
+            'official_source_url' => 'https://www.lenovo.com/example',
+            'research_notes' => null,
             'image_urls' => ['https://example.com/legion.jpg'],
             'confidence' => 0.95,
         ]]);
@@ -327,12 +408,19 @@ class ProcessTelegramMessageTest extends TestCase
 
         $resolver = $this->mock(ProductImageResolver::class);
         $resolver->shouldReceive('resolve')->once()->andReturn([]);
-        $result = json_decode((new ResearchProduct($update, $resolver))->handle(new Request([
+        $imageStorage = $this->mock(ProductImageStorage::class);
+        $imageStorage->shouldReceive('stage')->once()->andReturnUsing(function (ProductDraft $draft): int {
+            $draft->update(['images_staged_at' => now()]);
+
+            return 3;
+        });
+        $result = json_decode((new ResearchProduct($update, $resolver, imageStorage: $imageStorage))->handle(new Request([
             'query' => 'Lenovo Legion 5 32 GB',
         ])), true, flags: JSON_THROW_ON_ERROR);
 
         $this->assertTrue($result['ok']);
         $this->assertSame('found', $result['status']);
+        $this->assertSame(3, $result['image_count']);
         $this->assertDatabaseHas('product_drafts', [
             'telegram_update_id' => $update->id,
             'title' => 'Lenovo Legion 5 16IRX9',
@@ -372,10 +460,17 @@ class ProcessTelegramMessageTest extends TestCase
             'brand' => 'Lenovo',
             'model' => 'Legion 5 16IRX9',
             'category' => 'laptops',
+            'product_type' => 'laptop',
             'color' => 'Luna Grey',
             'description' => 'Игровой ноутбук.',
             'specifications' => [['key' => 'ram', 'name' => 'RAM', 'value' => '32 GB']],
-            'sources' => [['title' => 'Lenovo', 'url' => 'https://www.lenovo.com/example']],
+            'sources' => [
+                ['title' => 'Amazon', 'url' => 'https://www.amazon.com/dp/LEGION', 'type' => 'marketplace'],
+                ['title' => 'Lenovo', 'url' => 'https://www.lenovo.com/example', 'type' => 'manufacturer'],
+            ],
+            'primary_source_url' => 'https://www.amazon.com/dp/LEGION',
+            'official_source_url' => 'https://www.lenovo.com/example',
+            'research_notes' => null,
             'image_urls' => [],
             'confidence' => 0.95,
         ]]);

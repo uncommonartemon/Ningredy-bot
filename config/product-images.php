@@ -19,6 +19,7 @@ return [
     // Vision receives candidates in small batches and stops after enough
     // publication images are selected.
     'vision_candidates' => 4,
+    'vision_detail' => env('PRODUCT_IMAGE_VISION_DETAIL', 'low'),
     'vision_max_batches' => 2,
     'vision_min_score' => 60,
     'vision_official_min_score' => 55,

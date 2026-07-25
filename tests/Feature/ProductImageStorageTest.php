@@ -815,6 +815,70 @@ class ProductImageStorageTest extends TestCase
         $this->assertSame(0, $product->media()->count());
     }
 
+    public function test_it_stages_one_verified_gallery_before_approval_and_adopts_it_without_searching_again(): void
+    {
+        Storage::fake('public');
+        config()->set('product-images.max_images_by_type.laptop', 3);
+        ProductImageVisionAgent::fake(function (string $prompt, $attachments): array {
+            return [
+                'images' => $attachments->keys()->map(fn (int $index): array => [
+                    'index' => $index + 1,
+                    'exact_match' => true,
+                    'color_match' => true,
+                    'publishable' => true,
+                    'kind' => 'product',
+                    'view' => $index === 0 ? 'front' : 'angle',
+                    'gallery_rank' => $index + 1,
+                    'score' => 96 - $index,
+                    'reason' => 'Exact product and selected color.',
+                ])->all(),
+            ];
+        })->preventStrayPrompts();
+        Http::fake(function (Request $request) {
+            if (str_contains($request->url(), '/product-page')) {
+                return Http::response('<html></html>', 200, ['Content-Type' => 'text/html']);
+            }
+
+            preg_match('/image-(\d+)/', $request->url(), $matches);
+
+            return Http::response($this->jpeg((int) ($matches[1] ?? 1)), 200, ['Content-Type' => 'image/jpeg']);
+        });
+        [$product, $variant, $draft] = $this->records();
+        $draft->update([
+            'product_type' => 'laptop',
+            'brand' => 'Lenovo',
+            'model' => 'Test',
+            'color' => 'Black',
+            'primary_source_url' => 'https://93.184.216.34/product-page',
+            'sources' => [[
+                'title' => 'Exact retailer listing',
+                'url' => 'https://93.184.216.34/product-page',
+                'type' => 'retailer',
+            ]],
+        ]);
+
+        $storage = app(ProductImageStorage::class);
+        $staged = $storage->stage($draft->fresh());
+
+        $this->assertSame(3, $staged);
+        $this->assertSame(0, $product->media()->count());
+        $this->assertSame(3, $draft->media()->count());
+        $this->assertNotNull($draft->fresh()->images_staged_at);
+        $stagedPaths = $draft->media()->pluck('path')->all();
+
+        $adopted = $storage->adoptStaged($product, $variant, $draft);
+
+        $this->assertSame(3, $adopted);
+        $this->assertSame(3, $product->media()->count());
+        $this->assertSame(0, $draft->media()->count());
+        foreach ($stagedPaths as $path) {
+            Storage::disk('public')->assertMissing($path);
+        }
+        foreach ($product->media as $media) {
+            Storage::disk('public')->assertExists($media->path);
+        }
+    }
+
     public function test_image_discovery_is_cached_for_queue_retries(): void
     {
         Http::fake([

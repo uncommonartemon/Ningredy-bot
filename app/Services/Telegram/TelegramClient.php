@@ -44,7 +44,7 @@ class TelegramClient
         ]);
     }
 
-    public function sendPhotoFile(string $chatId, string $path, ?string $caption = null): array
+    public function sendPhotoFile(string $chatId, string $path, ?string $caption = null, ?array $replyMarkup = null): array
     {
         if (! is_file($path) || ! is_readable($path)) {
             throw new RuntimeException('Local Telegram photo is not readable.');
@@ -55,12 +55,18 @@ class TelegramClient
             throw new RuntimeException('TELEGRAM_BOT_TOKEN is not configured.');
         }
 
+        $payload = [
+            'chat_id' => $chatId,
+            'caption' => mb_substr((string) $caption, 0, 1024),
+        ];
+
+        if ($replyMarkup !== null) {
+            $payload['reply_markup'] = json_encode($replyMarkup, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
+        }
+
         try {
             return $this->multipartRequest()->attach('photo', fopen($path, 'rb'), basename($path))
-                ->post('sendPhoto', [
-                    'chat_id' => $chatId,
-                    'caption' => mb_substr((string) $caption, 0, 1024),
-                ])->throw()->json();
+                ->post('sendPhoto', $payload)->throw()->json();
         } catch (Throwable $exception) {
             throw new RuntimeException(str_replace($token, '[redacted]', $exception->getMessage()), (int) $exception->getCode());
         }

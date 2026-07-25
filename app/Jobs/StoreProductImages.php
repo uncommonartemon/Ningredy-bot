@@ -52,6 +52,13 @@ class StoreProductImages implements ShouldQueue
         }
 
         $searchStartedAt = now();
+
+        if ($this->replaceMediaIds === [] && $draft->images_staged_at) {
+            $storage->adoptStaged($product, $variant, $draft);
+
+            return;
+        }
+
         $stored = $storage->store($product, $variant, $draft, $this->replaceMediaIds);
 
         if ($this->replaceMediaIds !== []) {

@@ -176,6 +176,175 @@ class ProductImageStorage
         return $stored;
     }
 
+    public function stage(ProductDraft $draft): int
+    {
+        ini_set('memory_limit', '512M');
+
+        foreach ($draft->media()->get() as $media) {
+            $media->delete();
+        }
+
+        $target = $this->targetDraftImageCount($draft);
+        $prioritizedSources = $this->sourcePriority->sortSources($draft->sources ?? [], $draft->brand);
+        $commerceSources = collect($prioritizedSources)
+            ->filter(fn (mixed $source): bool => is_array($source)
+                && is_string($source['url'] ?? null)
+                && in_array($source['type'] ?? null, ['retailer', 'marketplace'], true))
+            ->sortBy(fn (array $source): int => ($source['url'] ?? null) === $draft->primary_source_url ? 0 : 1)
+            ->values();
+        $selected = [];
+        $chosenSource = null;
+
+        foreach ($commerceSources as $index => $source) {
+            $urls = $index === 0 ? $this->cleanUrls($draft->image_urls ?? []) : [];
+            $urls = array_values(array_unique([
+                ...$urls,
+                ...$this->resolver->resolve([$source], max(8, $target * 2)),
+            ]));
+            $allCandidates = $this->downloadCandidates($urls, $draft);
+
+            if ($allCandidates === []) {
+                continue;
+            }
+
+            $visionLimit = max(1, (int) config('product-images.vision_candidates', 4));
+            $candidates = array_slice($allCandidates, 0, $visionLimit);
+            $this->destroy(array_slice($allCandidates, $visionLimit));
+            $selected = $this->selectFromCandidates($draft, $candidates, $target, true);
+            $selected = $this->removeNearDuplicates($selected);
+            $this->destroyUnselected($candidates, $selected);
+
+            if ($selected !== []) {
+                $chosenSource = $source;
+                break;
+            }
+
+        }
+
+        $roles = ['primary', 'secondary', 'detail'];
+        $stored = 0;
+        $checksums = [];
+
+        foreach ($selected as $candidate) {
+            $path = null;
+
+            try {
+                $converted = $this->encoder->toWebp($candidate['image']);
+                $encoded = $converted['bytes'];
+                $checksum = hash('sha256', $encoded);
+
+                if (isset($checksums[$checksum])) {
+                    continue;
+                }
+
+                $role = $roles[$stored] ?? 'detail';
+                $path = "drafts/{$draft->id}/{$role}-".substr($checksum, 0, 12).'.webp';
+
+                if (! Storage::disk('public')->put($path, $encoded)) {
+                    throw new \RuntimeException("Could not write staged product image: {$path}");
+                }
+
+                $draft->media()->create([
+                    'disk' => 'public',
+                    'path' => $path,
+                    'source_url' => $candidate['source_url'],
+                    'role' => $role,
+                    'mime_type' => 'image/webp',
+                    'width' => $converted['width'],
+                    'height' => $converted['height'],
+                    'file_size' => strlen($encoded),
+                    'checksum' => $checksum,
+                    'verification_status' => 'verified',
+                    'verification_score' => isset($candidate['vision_score']) ? $candidate['vision_score'] / 100 : null,
+                    'verification_model' => $candidate['vision_model'] ?? null,
+                    'verification_notes' => $candidate['vision_reason'] ?? null,
+                    'sort_order' => $stored,
+                    'is_primary' => $stored === 0,
+                ]);
+                $checksums[$checksum] = true;
+                $stored++;
+            } catch (Throwable $exception) {
+                if ($path) {
+                    Storage::disk('public')->delete($path);
+                }
+
+                report($exception);
+            } finally {
+                imagedestroy($candidate['image']);
+            }
+        }
+
+        $draft->update([
+            'primary_source_url' => $chosenSource['url'] ?? $draft->primary_source_url,
+            'images_staged_at' => now(),
+        ]);
+
+        return $stored;
+    }
+
+    public function adoptStaged(Product $product, ProductVariant $variant, ProductDraft $draft): int
+    {
+        $staged = $draft->media()->get();
+        $existing = $product->media()->where('type', 'image')->count();
+        $stored = 0;
+
+        foreach ($staged as $media) {
+            $path = null;
+
+            try {
+                if (! $media->disk || ! $media->path || ! Storage::disk($media->disk)->exists($media->path)) {
+                    continue;
+                }
+
+                if ($product->media()->where('checksum', $media->checksum)->exists()) {
+                    continue;
+                }
+
+                $encoded = Storage::disk($media->disk)->get($media->path);
+                $role = $media->role ?: ($stored === 0 ? 'primary' : 'detail');
+                $path = "products/{$product->id}/{$role}-".substr($media->checksum, 0, 12).'.webp';
+
+                if (! Storage::disk('public')->put($path, $encoded)) {
+                    throw new \RuntimeException("Could not adopt staged product image: {$path}");
+                }
+
+                $product->media()->create([
+                    'product_variant_id' => $variant->id,
+                    'type' => 'image',
+                    'disk' => 'public',
+                    'path' => $path,
+                    'role' => $role,
+                    'url' => '/storage/'.str_replace('\\', '/', $path),
+                    'source_url' => $media->source_url,
+                    'alt' => $product->title,
+                    'mime_type' => $media->mime_type,
+                    'width' => $media->width,
+                    'height' => $media->height,
+                    'file_size' => $media->file_size,
+                    'checksum' => $media->checksum,
+                    'verification_status' => $media->verification_status,
+                    'verification_score' => $media->verification_score,
+                    'verification_model' => $media->verification_model,
+                    'verification_notes' => $media->verification_notes,
+                    'verified_at' => now(),
+                    'sort_order' => $existing + $stored,
+                    'is_primary' => $existing === 0 && $stored === 0,
+                ]);
+                $stored++;
+            } catch (Throwable $exception) {
+                if ($path) {
+                    Storage::disk('public')->delete($path);
+                }
+
+                report($exception);
+            } finally {
+                $media->delete();
+            }
+        }
+
+        return $stored;
+    }
+
     /** @param array<int, mixed> $urls @return array<int, string> */
     private function cleanUrls(array $urls): array
     {
@@ -270,18 +439,13 @@ class ProductImageStorage
     }
 
     /**
-     * Prefer trusted-source images (skip Vision entirely) and only spend a
-     * Vision review on the remaining slots. Used both for the initial batch
-     * of candidates and again for whatever discovery finds afterward, so the
-     * two callers never need to duplicate this sequence.
-     *
      * @param  array<int, array<string, mixed>>  $candidates
      * @return array<int, array<string, mixed>>
      */
-    private function selectFromCandidates(ProductDraft $draft, array $candidates, int $remaining): array
+    private function selectFromCandidates(ProductDraft $draft, array $candidates, int $remaining, bool $forceVision = false): array
     {
-        $candidates = $this->preferSingleSourceGallery($candidates);
-        $selected = $this->sourceVerified($draft, $candidates, $remaining);
+        $candidates = $forceVision ? $candidates : $this->preferSingleSourceGallery($candidates);
+        $selected = $forceVision ? [] : $this->sourceVerified($draft, $candidates, $remaining);
         $needsVision = $this->removeSelectedCandidates($candidates, $selected);
 
         if (count($selected) < $remaining) {
@@ -622,6 +786,14 @@ class ProductImageStorage
     {
         $default = max(1, (int) config('product-images.max_images', 3));
         $configured = config("product-images.max_images_by_type.{$product->product_type}");
+
+        return max(1, (int) ($configured ?? $default));
+    }
+
+    private function targetDraftImageCount(ProductDraft $draft): int
+    {
+        $default = max(1, (int) config('product-images.max_images', 3));
+        $configured = config("product-images.max_images_by_type.{$draft->product_type}");
 
         return max(1, (int) ($configured ?? $default));
     }

@@ -48,7 +48,7 @@ class ProductImageVisionVerifier
             $attachments = array_map(fn (array $candidate, int $index) => Image::fromBase64(
                 base64_encode($this->thumbnail($candidate['image'])),
                 'image/webp',
-            )->as('candidate-'.($index + 1).'.webp')->withProviderOptions(['detail' => 'high']), $candidates, array_keys($candidates));
+            )->as('candidate-'.($index + 1).'.webp')->withProviderOptions(['detail' => (string) config('product-images.vision_detail', 'low')]), $candidates, array_keys($candidates));
 
             $response = ProductImageVisionAgent::make()->prompt(
                 $prompt,
