@@ -401,7 +401,9 @@ class ProcessTelegramMessageTest extends TestCase
             'primary_source_url' => 'https://www.amazon.com/dp/LEGION',
             'official_source_url' => 'https://www.lenovo.com/example',
             'research_notes' => null,
-            'image_urls' => ['https://example.com/legion.jpg'],
+            'image_urls' => collect(range(1, 12))
+                ->map(fn (int $index): string => "https://example.com/legion-{$index}.jpg")
+                ->all(),
             'confidence' => 0.95,
         ]]);
         $update = $this->update();
@@ -432,6 +434,7 @@ class ProcessTelegramMessageTest extends TestCase
             'action' => 'create_product_draft',
             'status' => 'completed',
         ]);
+        $this->assertCount(10, ProductDraft::query()->firstOrFail()->image_urls);
     }
 
     public function test_research_recognizes_a_product_already_in_the_catalog_instead_of_duplicating_it(): void

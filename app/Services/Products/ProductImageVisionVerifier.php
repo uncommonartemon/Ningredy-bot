@@ -57,7 +57,25 @@ class ProductImageVisionVerifier
                 model: $model,
                 timeout: (int) config('services.product_image_vision.timeout', 45),
             );
-            $data = Validator::make($response->toArray(), [
+            $normalizedResponse = $response->toArray();
+            $normalizedResponse['images'] = collect($normalizedResponse['images'] ?? [])
+                ->filter(fn (mixed $image): bool => is_array($image))
+                ->map(function (array $image): array {
+                    if (is_string($image['reason'] ?? null)) {
+                        $image['reason'] = mb_substr($image['reason'], 0, 1000);
+                    }
+
+                    return $image;
+                })
+                ->filter(fn (array $image): bool => is_int($image['index'] ?? null)
+                    && $image['index'] >= 1
+                    && $image['index'] <= count($candidates))
+                ->unique('index')
+                ->sortBy('index')
+                ->take(count($candidates))
+                ->values()
+                ->all();
+            $data = Validator::make($normalizedResponse, [
                 'images' => ['required', 'array', 'size:'.count($candidates)],
                 'images.*.index' => ['required', 'integer', 'between:1,'.count($candidates), 'distinct'],
                 'images.*.exact_match' => ['required', 'boolean'],

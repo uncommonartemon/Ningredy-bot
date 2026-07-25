@@ -45,8 +45,8 @@ class ProductImageDiscoveryAgent implements Agent, HasStructuredOutput, HasTools
     public function schema(JsonSchema $schema): array
     {
         return [
-            'image_urls' => $schema->array()->items($schema->string())->required(),
-            'page_urls' => $schema->array()->items($schema->string())->required(),
+            'image_urls' => $schema->array()->max(12)->items($schema->string()->max(2048))->required(),
+            'page_urls' => $schema->array()->max(12)->items($schema->string()->max(2048))->required(),
         ];
     }
 }

@@ -65,7 +65,7 @@ class ProductImageVisionAgent implements Agent, HasStructuredOutput
     public function schema(JsonSchema $schema): array
     {
         return [
-            'images' => $schema->array()->items($schema->object([
+            'images' => $schema->array()->max(4)->items($schema->object([
                 'index' => $schema->integer()->min(1)->max(4)->required(),
                 'exact_match' => $schema->boolean()->required(),
                 'color_match' => $schema->boolean()->required(),
@@ -78,7 +78,7 @@ class ProductImageVisionAgent implements Agent, HasStructuredOutput
                 ])->required(),
                 'gallery_rank' => $schema->integer()->min(1)->max(4)->required(),
                 'score' => $schema->integer()->min(0)->max(100)->required(),
-                'reason' => $schema->string()->required(),
+                'reason' => $schema->string()->max(1000)->required(),
             ])->withoutAdditionalProperties())->required(),
         ];
     }

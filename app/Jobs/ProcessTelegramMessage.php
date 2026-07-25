@@ -81,14 +81,31 @@ class ProcessTelegramMessage implements ShouldQueue
                 ? "[Пользователь ответил (Reply) на сообщение бота: \"{$update->reply_to_text}\"]\n{$update->text}"
                 : (string) $update->text;
             $response = $agent->prompt($prompt, provider: $provider, model: $model, timeout: 210);
-            $data = Validator::make($response->toArray(), [
+            $normalizedResponse = $response->toArray();
+
+            if (is_string($normalizedResponse['message'] ?? null)) {
+                $normalizedResponse['message'] = mb_substr($normalizedResponse['message'], 0, 12000);
+            }
+
+            foreach (['product_ids', 'operation_ids'] as $idField) {
+                $normalizedResponse[$idField] = collect($normalizedResponse[$idField] ?? [])
+                    ->filter(fn (mixed $id): bool => is_int($id) || (is_string($id) && ctype_digit($id)))
+                    ->map(fn (int|string $id): int => (int) $id)
+                    ->filter(fn (int $id): bool => $id > 0)
+                    ->unique()
+                    ->take(100)
+                    ->values()
+                    ->all();
+            }
+
+            $data = Validator::make($normalizedResponse, [
                 'response_type' => ['required', 'string'],
                 'message' => ['required', 'string', 'max:12000'],
                 'draft_id' => ['nullable', 'integer'],
-                'product_ids' => ['present', 'array'],
-                'product_ids.*' => ['integer'],
-                'operation_ids' => ['present', 'array'],
-                'operation_ids.*' => ['integer'],
+                'product_ids' => ['present', 'array', 'max:100'],
+                'product_ids.*' => ['integer', 'distinct'],
+                'operation_ids' => ['present', 'array', 'max:100'],
+                'operation_ids.*' => ['integer', 'distinct'],
             ])->validate();
 
             if ($response->conversationId) {

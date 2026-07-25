@@ -14,6 +14,7 @@ use App\Services\Products\ProductIdentityKey;
 use App\Services\Products\ProductImageResolver;
 use App\Services\Products\ProductImageStorage;
 use App\Services\Products\ProductPublicDescription;
+use App\Services\Products\ProductResearchResponseNormalizer;
 use App\Services\Products\ProductSourcePriority;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
 use Illuminate\Support\Facades\Validator;
@@ -33,6 +34,7 @@ class ResearchProduct implements Tool
         private readonly ?ProductSourcePriority $sourcePriority = null,
         private readonly ?ProductPublicDescription $publicDescription = null,
         private readonly ?ProductImageStorage $imageStorage = null,
+        private readonly ?ProductResearchResponseNormalizer $responseNormalizer = null,
     ) {}
 
     public function description(): Stringable|string
@@ -56,7 +58,9 @@ class ResearchProduct implements Tool
 
         try {
             $response = ProductResearchAgent::make()->prompt($query, provider: $provider, model: $model, timeout: 150);
-            $data = Validator::make($response->toArray(), [
+            $normalizedResponse = ($this->responseNormalizer ?? app(ProductResearchResponseNormalizer::class))
+                ->normalize($response->toArray());
+            $data = Validator::make($normalizedResponse, [
                 'status' => ['required', 'in:found,needs_clarification,not_found'],
                 'clarification_question' => ['nullable', 'string', 'max:1000'],
                 'title' => ['nullable', 'string', 'max:255'],

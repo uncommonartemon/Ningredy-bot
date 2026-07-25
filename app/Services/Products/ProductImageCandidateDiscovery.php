@@ -88,7 +88,22 @@ class ProductImageCandidateDiscovery
                 model: $model,
                 timeout: (int) config('services.product_image_discovery.timeout', 75),
             );
-            $data = Validator::make($response->toArray(), [
+            $normalizedResponse = $response->toArray();
+
+            foreach (['image_urls', 'page_urls'] as $urlField) {
+                $normalizedResponse[$urlField] = collect($normalizedResponse[$urlField] ?? [])
+                    ->filter(fn (mixed $url): bool => is_string($url))
+                    ->map(fn (string $url): string => trim($url))
+                    ->filter(fn (string $url): bool => mb_strlen($url) <= 2048
+                        && filter_var($url, FILTER_VALIDATE_URL) !== false
+                        && in_array(parse_url($url, PHP_URL_SCHEME), ['http', 'https'], true))
+                    ->unique()
+                    ->take(12)
+                    ->values()
+                    ->all();
+            }
+
+            $data = Validator::make($normalizedResponse, [
                 'image_urls' => ['present', 'array', 'max:12'],
                 'image_urls.*' => ['url:http,https', 'max:2048'],
                 'page_urls' => ['present', 'array', 'max:12'],

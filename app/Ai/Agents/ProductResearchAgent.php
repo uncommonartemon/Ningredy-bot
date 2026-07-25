@@ -111,39 +111,39 @@ class ProductResearchAgent implements Agent, HasStructuredOutput, HasTools
             'status' => $schema->string()
                 ->enum(['found', 'needs_clarification', 'not_found'])
                 ->required(),
-            'clarification_question' => $schema->string()->nullable()->required(),
-            'title' => $schema->string()->nullable()->required(),
-            'brand' => $schema->string()->nullable()->required(),
-            'model' => $schema->string()->nullable()->required(),
+            'clarification_question' => $schema->string()->max(1000)->nullable()->required(),
+            'title' => $schema->string()->max(255)->nullable()->required(),
+            'brand' => $schema->string()->max(255)->nullable()->required(),
+            'model' => $schema->string()->max(255)->nullable()->required(),
             'product_type' => $schema->string()
                 ->enum(['laptop', 'desktop', 'component', 'other'])
                 ->nullable()->required(),
             'category' => $schema->string()
                 ->enum($this->categorySlugs())
                 ->nullable()->required(),
-            'color' => $schema->string()->nullable()->required(),
-            'description' => $schema->string()->nullable()->required(),
-            'research_notes' => $schema->string()->nullable()->required(),
-            'specifications' => $schema->array()->items(
+            'color' => $schema->string()->max(255)->nullable()->required(),
+            'description' => $schema->string()->max(5000)->nullable()->required(),
+            'research_notes' => $schema->string()->max(5000)->nullable()->required(),
+            'specifications' => $schema->array()->max(100)->items(
                 $schema->object([
-                    'key' => $schema->string()->required(),
-                    'name' => $schema->string()->required(),
-                    'value' => $schema->string()->required(),
+                    'key' => $schema->string()->max(100)->required(),
+                    'name' => $schema->string()->max(255)->required(),
+                    'value' => $schema->string()->max(2000)->required(),
                 ])->withoutAdditionalProperties()
             )->required(),
-            'sources' => $schema->array()->items(
+            'sources' => $schema->array()->max(20)->items(
                 $schema->object([
-                    'title' => $schema->string()->required(),
-                    'url' => $schema->string()->required(),
+                    'title' => $schema->string()->max(500)->required(),
+                    'url' => $schema->string()->max(2048)->required(),
                     'type' => $schema->string()
                         ->enum(['manufacturer', 'retailer', 'marketplace', 'review', 'database', 'web'])
                         ->required(),
                 ])->withoutAdditionalProperties()
             )->required(),
-            'primary_source_url' => $schema->string()->nullable()->required(),
-            'official_source_url' => $schema->string()->nullable()->required(),
-            'image_urls' => $schema->array()->items($schema->string())->required(),
-            'confidence' => $schema->number()->required(),
+            'primary_source_url' => $schema->string()->max(2048)->nullable()->required(),
+            'official_source_url' => $schema->string()->max(2048)->nullable()->required(),
+            'image_urls' => $schema->array()->max(10)->items($schema->string()->max(2048))->required(),
+            'confidence' => $schema->number()->min(0)->max(1)->required(),
         ];
     }
 }

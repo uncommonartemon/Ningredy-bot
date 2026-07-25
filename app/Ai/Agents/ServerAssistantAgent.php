@@ -158,10 +158,10 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
                 'answer', 'catalog_results', 'research_result', 'operation_result',
                 'delete_confirmation', 'clarification', 'error',
             ])->required(),
-            'message' => $schema->string()->required(),
+            'message' => $schema->string()->max(12000)->required(),
             'draft_id' => $schema->integer()->nullable()->required(),
-            'product_ids' => $schema->array()->items($schema->integer())->required(),
-            'operation_ids' => $schema->array()->items($schema->integer())->required(),
+            'product_ids' => $schema->array()->max(100)->items($schema->integer())->required(),
+            'operation_ids' => $schema->array()->max(100)->items($schema->integer())->required(),
         ];
     }
 }
