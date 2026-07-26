@@ -44,6 +44,14 @@ class ProductResearchAgent implements Agent, HasStructuredOutput, HasTools
             Only after all configured priority sources, try the official manufacturer website and then other reliable
             stores. The official website is just another fallback source; do not use it as a separate cross-check.
 
+            Default variant policy: when the user does not specify condition, search only for a new, factory-sealed
+            product. Never select used, refurbished, renewed, recertified, or open-box offers unless the user explicitly
+            requests such a condition. When RAM, storage, color, or another configuration detail is omitted, do not ask
+            about it: choose the most current normally available new configuration from the highest-priority complete
+            product page and faithfully use that page's exact configuration in the draft. If an exact model is
+            discontinued and no new complete product page exists, return not_found instead of asking about refurbished
+            options. needs_clarification is only for genuine ambiguity in the product identity itself.
+
             Find several exact product pages whenever possible (target 3-6 candidates). Every returned candidate must
             match the requested model, variant, generation, important configuration, condition, and color. A candidate
             is useful only when the SAME page supplies both usable product information and a usable image gallery.
