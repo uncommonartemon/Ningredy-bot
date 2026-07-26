@@ -29,7 +29,7 @@ class ProcessTelegramMessage implements ShouldQueue
 
     public int $tries = 3;
 
-    public int $timeout = 240;
+    public int $timeout = 480;
 
     public array $backoff = [10, 60, 300];
 
@@ -81,7 +81,7 @@ class ProcessTelegramMessage implements ShouldQueue
             $prompt = $update->reply_to_text
                 ? "[Пользователь ответил (Reply) на сообщение бота: \"{$update->reply_to_text}\"]\n{$update->text}"
                 : (string) $update->text;
-            $response = $agent->prompt($prompt, provider: $provider, model: $model, timeout: 210);
+            $response = $agent->prompt($prompt, provider: $provider, model: $model, timeout: 300);
             $normalizedResponse = $response->toArray();
 
             if (is_string($normalizedResponse['message'] ?? null)) {

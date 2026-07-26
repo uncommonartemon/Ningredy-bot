@@ -57,7 +57,7 @@ class ResearchProduct implements Tool
         ]);
 
         try {
-            $response = ProductResearchAgent::make()->prompt($query, provider: $provider, model: $model, timeout: 150);
+            $response = ProductResearchAgent::make()->prompt($query, provider: $provider, model: $model, timeout: 240);
             $normalizedResponse = ($this->responseNormalizer ?? app(ProductResearchResponseNormalizer::class))
                 ->normalize($response->toArray());
             $data = Validator::make($normalizedResponse, [
