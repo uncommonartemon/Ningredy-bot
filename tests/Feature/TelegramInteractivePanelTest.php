@@ -2,15 +2,19 @@
 
 namespace Tests\Feature;
 
+use App\Jobs\EnhanceDraftPhoto;
 use App\Jobs\ProcessTelegramMessage;
 use App\Jobs\StoreProductImages;
 use App\Models\AiRun;
+use App\Models\Product;
 use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request as ClientRequest;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
+use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 
 class TelegramInteractivePanelTest extends TestCase
@@ -21,6 +25,8 @@ class TelegramInteractivePanelTest extends TestCase
     {
         parent::setUp();
 
+        Storage::fake('public');
+        Cache::flush();
         config([
             'services.telegram.bot_token' => 'test-token',
             'services.telegram.webhook_secret' => 'test-secret',
@@ -116,7 +122,7 @@ class TelegramInteractivePanelTest extends TestCase
             'status' => 'published',
             'is_active' => true,
         ]);
-        $product = \App\Models\Product::query()->where('title', 'Lenovo Legion')->firstOrFail();
+        $product = Product::query()->where('title', 'Lenovo Legion')->firstOrFail();
         $this->assertStringNotContainsString('Closest', (string) $product->description);
         $this->assertStringContainsString('RAM: 32 GB DDR5', (string) $product->description);
         $this->assertStringContainsString('family-level match', (string) $draft->fresh()->research_notes);
@@ -151,6 +157,121 @@ class TelegramInteractivePanelTest extends TestCase
             && $request['reply_markup']['inline_keyboard'] === []
         );
         Http::assertNotSent(fn (ClientRequest $request): bool => str_ends_with($request->url(), '/sendMessage'));
+    }
+
+    public function test_enhance_button_opens_numbered_draft_photo_selection(): void
+    {
+        Queue::fake();
+        $draft = $this->pendingDraftWithMedia();
+
+        $this->postJson('/api/telegram/webhook', [
+            'update_id' => 3101,
+            'callback_query' => [
+                'id' => 'callback-enhance-menu',
+                'from' => ['id' => 12345, 'username' => 'admin'],
+                'data' => "draft:enhance:{$draft->id}",
+                'message' => [
+                    'message_id' => 80,
+                    'chat' => ['id' => 98765],
+                ],
+            ],
+        ], $this->headers())->assertOk();
+
+        Queue::assertNotPushed(EnhanceDraftPhoto::class);
+        Http::assertSent(fn (ClientRequest $request): bool => str_ends_with($request->url(), '/sendMessage')
+            && str_contains((string) ($request['text'] ?? ''), "Какое фото черновика #{$draft->id}")
+            && data_get($request['reply_markup'] ?? [], 'inline_keyboard.0.0.text') === '1️⃣'
+            && str_starts_with(
+                (string) data_get($request['reply_markup'] ?? [], 'inline_keyboard.0.0.callback_data'),
+                "draft:enhance-photo:{$draft->id}:",
+            ));
+    }
+
+    public function test_selecting_a_draft_photo_queues_enhancement_and_reports_progress(): void
+    {
+        Queue::fake();
+        $draft = $this->pendingDraftWithMedia();
+        $media = $draft->media()->orderBy('sort_order')->firstOrFail();
+
+        $this->postJson('/api/telegram/webhook', [
+            'update_id' => 3102,
+            'callback_query' => [
+                'id' => 'callback-enhance-photo',
+                'from' => ['id' => 12345, 'username' => 'admin'],
+                'data' => "draft:enhance-photo:{$draft->id}:{$media->id}",
+                'message' => [
+                    'message_id' => 81,
+                    'chat' => ['id' => 98765],
+                ],
+            ],
+        ], $this->headers())->assertOk();
+
+        Queue::assertPushed(EnhanceDraftPhoto::class, fn (EnhanceDraftPhoto $job): bool => $job->draftId === $draft->id
+            && $job->mediaId === $media->id
+            && $job->chatId === '98765');
+        $this->assertDatabaseHas('ai_operations', [
+            'action' => 'enhance_draft_photo',
+            'target_id' => $media->id,
+            'status' => 'running',
+        ]);
+        Http::assertSent(fn (ClientRequest $request): bool => str_ends_with($request->url(), '/sendMessage')
+            && str_contains((string) ($request['text'] ?? ''), 'Улучшаю фото 1'));
+    }
+
+    private function pendingDraftWithMedia(): ProductDraft
+    {
+        $sourceUpdate = TelegramUpdate::query()->create([
+            'update_id' => random_int(10000, 90000),
+            'telegram_user_id' => '12345',
+            'chat_id' => '98765',
+            'message_id' => 79,
+            'text' => 'Find exact product',
+            'payload' => [],
+            'status' => 'completed',
+        ]);
+        $run = AiRun::query()->create([
+            'telegram_update_id' => $sourceUpdate->id,
+            'provider' => 'openai',
+            'model' => 'gpt-5-mini',
+            'status' => 'completed',
+            'prompt' => 'Find exact product',
+            'started_at' => now(),
+            'completed_at' => now(),
+        ]);
+        $draft = ProductDraft::query()->create([
+            'telegram_update_id' => $sourceUpdate->id,
+            'ai_run_id' => $run->id,
+            'requested_by_telegram_user_id' => '12345',
+            'title' => 'MSI Aegis Exact',
+            'brand' => 'MSI',
+            'model' => 'Aegis Exact',
+            'color' => 'Black',
+            'description' => 'Exact product description.',
+            'specifications' => [],
+            'sources' => [['title' => 'Amazon', 'url' => 'https://amazon.com/dp/EXACT', 'type' => 'marketplace']],
+            'primary_source_url' => 'https://amazon.com/dp/EXACT',
+            'image_urls' => [],
+            'images_staged_at' => now(),
+            'confidence' => 0.95,
+        ]);
+
+        foreach (range(1, 3) as $position) {
+            $path = "drafts/{$draft->id}/photo-{$position}.webp";
+            Storage::disk('public')->put($path, "photo-{$position}");
+            $draft->media()->create([
+                'disk' => 'public',
+                'path' => $path,
+                'source_url' => "https://images.example/photo-{$position}.jpg",
+                'role' => $position === 1 ? 'primary' : 'secondary',
+                'mime_type' => 'image/webp',
+                'checksum' => hash('sha256', "photo-{$position}"),
+                'verification_status' => 'verified',
+                'sort_order' => $position - 1,
+                'is_primary' => $position === 1,
+            ]);
+        }
+
+        return $draft;
     }
 
     private function headers(): array

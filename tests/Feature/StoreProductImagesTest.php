@@ -63,6 +63,49 @@ class StoreProductImagesTest extends TestCase
         });
     }
 
+    public function test_staged_draft_photos_are_adopted_and_the_added_product_album_is_sent(): void
+    {
+        Storage::fake('public');
+        config(['services.telegram.bot_token' => 'test-token']);
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []])]);
+        [$product, $variant, $draft] = $this->approvedProductWithMedia();
+        $draft->update(['images_staged_at' => now()]);
+
+        foreach (range(1, 2) as $position) {
+            $path = "drafts/{$draft->id}/staged-{$position}.webp";
+            Storage::disk('public')->put($path, "staged-{$position}");
+            $draft->media()->create([
+                'disk' => 'public',
+                'path' => $path,
+                'source_url' => "https://shop.example/staged-{$position}.jpg",
+                'role' => $position === 1 ? 'primary' : 'secondary',
+                'mime_type' => 'image/webp',
+                'checksum' => hash('sha256', "staged-{$position}"),
+                'verification_status' => 'verified',
+                'sort_order' => $position - 1,
+                'is_primary' => $position === 1,
+            ]);
+        }
+
+        (new StoreProductImages($product->id, $variant->id, $draft->id))->handle(
+            app(ProductImageStorage::class),
+            app(TelegramClient::class),
+        );
+
+        $this->assertDatabaseCount('product_draft_media', 0);
+        $this->assertSame(5, $product->media()->count());
+        Http::assertSent(function (HttpRequest $request) use ($product): bool {
+            if (! str_ends_with($request->url(), '/sendMediaGroup')) {
+                return false;
+            }
+
+            $parts = collect($request->data())->keyBy('name');
+            $media = json_decode((string) ($parts->get('media')['contents'] ?? ''), true) ?? [];
+
+            return str_contains((string) ($media[0]['caption'] ?? ''), "Товар #{$product->id} добавлен в каталог");
+        });
+    }
+
     /** @return array{Product, ProductVariant, ProductDraft} */
     private function approvedProductWithMedia(): array
     {

@@ -36,7 +36,6 @@ class ProductResearchResponseNormalizer
         $data['sources'] = $this->sources(
             $data['sources'] ?? [],
             is_string($data['primary_source_url'] ?? null) ? $data['primary_source_url'] : null,
-            is_string($data['official_source_url'] ?? null) ? $data['official_source_url'] : null,
         );
         $data['specifications'] = $this->specifications($data['specifications'] ?? []);
 
@@ -64,8 +63,8 @@ class ProductResearchResponseNormalizer
             ->all();
     }
 
-    /** @return array<int, array{title: string, url: string, type: string}> */
-    private function sources(mixed $values, ?string $primaryUrl, ?string $officialUrl): array
+    /** @return array<int, array{title: string, url: string, type: string, image_urls: array<int, string>}> */
+    private function sources(mixed $values, ?string $primaryUrl): array
     {
         if (! is_array($values)) {
             return [];
@@ -89,15 +88,16 @@ class ProductResearchResponseNormalizer
                     return null;
                 }
 
-                return compact('title', 'url', 'type');
+                return [
+                    'title' => $title,
+                    'url' => $url,
+                    'type' => $type,
+                    'image_urls' => $this->httpUrls($source['image_urls'] ?? [], 10),
+                ];
             })
             ->filter()
             ->unique('url')
-            ->sortBy(fn (array $source): int => match ($source['url']) {
-                $primaryUrl => 0,
-                $officialUrl => 1,
-                default => 2,
-            })
+            ->sortBy(fn (array $source): int => $source['url'] === $primaryUrl ? 0 : 1)
             ->take(20)
             ->values()
             ->all();

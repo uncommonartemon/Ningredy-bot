@@ -64,11 +64,28 @@ class TelegramClient
             $payload['reply_markup'] = json_encode($replyMarkup, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
         }
 
+        [$preparedPath, $temporary] = $this->preparePhotoPath($path);
+        $handle = null;
+
         try {
-            return $this->multipartRequest()->attach('photo', fopen($path, 'rb'), basename($path))
+            $handle = fopen($preparedPath, 'rb');
+
+            if ($handle === false) {
+                throw new RuntimeException("Could not open Telegram photo file: {$preparedPath}");
+            }
+
+            return $this->multipartRequest()->attach('photo', $handle, basename($preparedPath))
                 ->post('sendPhoto', $payload)->throw()->json();
         } catch (Throwable $exception) {
             throw new RuntimeException(str_replace($token, '[redacted]', $exception->getMessage()), (int) $exception->getCode());
+        } finally {
+            if (is_resource($handle)) {
+                fclose($handle);
+            }
+
+            if ($temporary) {
+                @unlink($preparedPath);
+            }
         }
     }
 
@@ -89,18 +106,24 @@ class TelegramClient
         $request = $this->multipartRequest();
         $media = [];
         $handles = [];
+        $temporaryPaths = [];
 
         try {
             foreach ($paths as $index => $path) {
+                [$preparedPath, $temporary] = $this->preparePhotoPath($path);
                 $name = "photo{$index}";
-                $handle = fopen($path, 'rb');
+                $handle = fopen($preparedPath, 'rb');
 
                 if ($handle === false) {
-                    throw new RuntimeException("Could not open Telegram media file: {$path}");
+                    throw new RuntimeException("Could not open Telegram media file: {$preparedPath}");
+                }
+
+                if ($temporary) {
+                    $temporaryPaths[] = $preparedPath;
                 }
 
                 $handles[] = $handle;
-                $request = $request->attach($name, $handle, basename($path));
+                $request = $request->attach($name, $handle, basename($preparedPath));
                 $item = ['type' => 'photo', 'media' => "attach://{$name}"];
 
                 if ($index === 0 && $caption !== null) {
@@ -121,7 +144,61 @@ class TelegramClient
             foreach ($handles as $handle) {
                 fclose($handle);
             }
+
+            foreach ($temporaryPaths as $temporaryPath) {
+                @unlink($temporaryPath);
+            }
         }
+    }
+
+    /** @return array{0: string, 1: bool} */
+    private function preparePhotoPath(string $path): array
+    {
+        $imageInfo = @getimagesize($path);
+
+        if (($imageInfo['mime'] ?? null) !== 'image/webp') {
+            return [$path, false];
+        }
+
+        $source = @imagecreatefromwebp($path);
+
+        if (! $source instanceof \GdImage) {
+            return [$path, false];
+        }
+
+        $canvas = imagecreatetruecolor(imagesx($source), imagesy($source));
+
+        if (! $canvas instanceof \GdImage) {
+            imagedestroy($source);
+
+            return [$path, false];
+        }
+
+        $white = imagecolorallocate($canvas, 255, 255, 255);
+        imagefill($canvas, 0, 0, $white);
+        imagecopy($canvas, $source, 0, 0, 0, 0, imagesx($source), imagesy($source));
+        imagedestroy($source);
+
+        $temporaryBase = tempnam(sys_get_temp_dir(), 'ningredy-tg-');
+
+        if ($temporaryBase === false) {
+            imagedestroy($canvas);
+
+            return [$path, false];
+        }
+
+        $temporaryPath = $temporaryBase.'.jpg';
+        @unlink($temporaryBase);
+        $written = imagejpeg($canvas, $temporaryPath, 92);
+        imagedestroy($canvas);
+
+        if (! $written) {
+            @unlink($temporaryPath);
+
+            return [$path, false];
+        }
+
+        return [$temporaryPath, true];
     }
 
     public function getFile(string $fileId): array

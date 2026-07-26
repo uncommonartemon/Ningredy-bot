@@ -42,7 +42,8 @@ class ProductResearchResponseNormalizerTest extends TestCase
         $this->assertCount(10, $data['image_urls']);
         $this->assertCount(20, $data['sources']);
         $this->assertSame($primaryUrl, $data['sources'][0]['url']);
-        $this->assertSame($officialUrl, $data['sources'][1]['url']);
+        $this->assertSame('https://store1.example/product', $data['sources'][1]['url']);
+        $this->assertSame([], $data['sources'][1]['image_urls']);
         $this->assertCount(100, $data['specifications']);
         $this->assertSame('specification_1', $data['specifications'][0]['key']);
         $this->assertSame(5000, mb_strlen($data['description']));

@@ -879,6 +879,68 @@ class ProductImageStorageTest extends TestCase
         }
     }
 
+    public function test_staging_skips_a_source_without_photos_and_uses_the_next_complete_card_source(): void
+    {
+        Storage::fake('public');
+        config()->set('product-images.max_images_by_type.laptop', 3);
+        ProductImageVisionAgent::fake(fn (string $prompt, $attachments): array => [
+            'images' => $attachments->keys()->map(fn (int $index): array => [
+                'index' => $index + 1,
+                'exact_match' => true,
+                'color_match' => true,
+                'publishable' => true,
+                'kind' => 'product',
+                'view' => 'front',
+                'gallery_rank' => 1,
+                'score' => 98,
+                'reason' => 'Exact product and selected color.',
+            ])->all(),
+        ])->preventStrayPrompts();
+        Http::fake(function (Request $request) {
+            if (str_contains($request->url(), 'without-gallery')) {
+                return Http::response('<html><body>No product photos</body></html>', 200, ['Content-Type' => 'text/html']);
+            }
+
+            if ($request->url() === 'https://93.184.216.34/complete-card') {
+                return Http::response('<html></html>', 200, ['Content-Type' => 'text/html']);
+            }
+
+            return Http::response($this->jpeg(2), 200, ['Content-Type' => 'image/jpeg']);
+        });
+        [, , $draft] = $this->records();
+        $draft->update([
+            'product_type' => 'laptop',
+            'brand' => 'Lenovo',
+            'model' => 'Test',
+            'color' => 'Black',
+            'primary_source_url' => 'https://93.184.216.34/without-gallery',
+            'image_urls' => [],
+            'sources' => [
+                [
+                    'title' => 'First store without photos',
+                    'url' => 'https://93.184.216.34/without-gallery',
+                    'type' => 'retailer',
+                    'image_urls' => [],
+                ],
+                [
+                    'title' => 'Second complete product card',
+                    'url' => 'https://93.184.216.34/complete-card',
+                    'type' => 'retailer',
+                    'image_urls' => ['https://93.184.216.34/complete-card-photo.jpg'],
+                ],
+            ],
+        ]);
+
+        $stored = app(ProductImageStorage::class)->stage($draft->fresh());
+
+        $this->assertSame(1, $stored);
+        $this->assertSame('https://93.184.216.34/complete-card', $draft->fresh()->primary_source_url);
+        $this->assertSame(
+            'https://93.184.216.34/complete-card-photo.jpg',
+            $draft->media()->firstOrFail()->source_url,
+        );
+    }
+
     public function test_image_discovery_is_cached_for_queue_retries(): void
     {
         Http::fake([

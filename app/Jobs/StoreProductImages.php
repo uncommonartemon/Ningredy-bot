@@ -54,12 +54,10 @@ class StoreProductImages implements ShouldQueue
         $searchStartedAt = now();
 
         if ($this->replaceMediaIds === [] && $draft->images_staged_at) {
-            $storage->adoptStaged($product, $variant, $draft);
-
-            return;
+            $stored = $storage->adoptStaged($product, $variant, $draft);
+        } else {
+            $stored = $storage->store($product, $variant, $draft, $this->replaceMediaIds);
         }
-
-        $stored = $storage->store($product, $variant, $draft, $this->replaceMediaIds);
 
         if ($this->replaceMediaIds !== []) {
             app(ProductPhotoManager::class)->completeRefind($product, $this->replaceMediaIds, $stored);

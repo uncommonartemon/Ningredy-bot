@@ -79,6 +79,8 @@ class ResearchProduct implements Tool
                 'sources.*.title' => ['required', 'string', 'max:500'],
                 'sources.*.url' => ['required', 'url:http,https', 'max:2048'],
                 'sources.*.type' => ['nullable', 'in:manufacturer,retailer,marketplace,review,database,web'],
+                'sources.*.image_urls' => ['present', 'array', 'max:10'],
+                'sources.*.image_urls.*' => ['url:http,https', 'max:2048'],
                 'primary_source_url' => ['nullable', 'url:http,https', 'max:2048'],
                 'official_source_url' => ['nullable', 'url:http,https', 'max:2048'],
                 'image_urls' => ['present', 'array', 'max:10'],
@@ -100,26 +102,22 @@ class ResearchProduct implements Tool
                     'primary_source_url' => ['required', 'url:http,https'],
                 ])->validate();
 
+                $reportedPrimaryUrl = $data['primary_source_url'];
                 $primarySource = collect($data['sources'])->first(
-                    fn (array $source): bool => ($source['url'] ?? null) === $data['primary_source_url'],
+                    fn (array $source): bool => in_array($source['type'] ?? null, ['manufacturer', 'retailer', 'marketplace'], true),
                 );
 
                 Validator::make(['primary_source' => $primarySource], [
                     'primary_source' => ['required', 'array'],
-                    'primary_source.type' => ['required', 'in:retailer,marketplace'],
+                    'primary_source.type' => ['required', 'in:manufacturer,retailer,marketplace'],
                 ])->validate();
 
-                $data['sources'] = collect($data['sources'])
-                    ->sortBy(fn (array $source): int => match ($source['url'] ?? null) {
-                        $data['primary_source_url'] => 0,
-                        $data['official_source_url'] => 1,
-                        default => 2,
-                    })
-                    ->values()
-                    ->all();
+                $data['primary_source_url'] = $primarySource['url'];
                 $resolvedGallery = $this->imageResolver->resolve([$primarySource], 10);
+                $legacyPrimaryImages = $reportedPrimaryUrl === $data['primary_source_url'] ? $data['image_urls'] : [];
                 $data['image_urls'] = $sourcePriority->sortUrls([
-                    ...$data['image_urls'],
+                    ...($primarySource['image_urls'] ?? []),
+                    ...$legacyPrimaryImages,
                     ...$resolvedGallery,
                 ], $data['brand'], [$primarySource]);
             }

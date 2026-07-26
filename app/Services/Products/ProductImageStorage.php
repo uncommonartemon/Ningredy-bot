@@ -186,17 +186,24 @@ class ProductImageStorage
 
         $target = $this->targetDraftImageCount($draft);
         $prioritizedSources = $this->sourcePriority->sortSources($draft->sources ?? [], $draft->brand);
-        $commerceSources = collect($prioritizedSources)
+        $cardSources = collect($prioritizedSources)
             ->filter(fn (mixed $source): bool => is_array($source)
                 && is_string($source['url'] ?? null)
-                && in_array($source['type'] ?? null, ['retailer', 'marketplace'], true))
-            ->sortBy(fn (array $source): int => ($source['url'] ?? null) === $draft->primary_source_url ? 0 : 1)
+                && in_array($source['type'] ?? null, ['retailer', 'marketplace', 'manufacturer'], true))
             ->values();
         $selected = [];
         $chosenSource = null;
 
-        foreach ($commerceSources as $index => $source) {
-            $urls = $index === 0 ? $this->cleanUrls($draft->image_urls ?? []) : [];
+        foreach ($cardSources as $source) {
+            $urls = $this->cleanUrls($source['image_urls'] ?? []);
+
+            if (($source['url'] ?? null) === $draft->primary_source_url) {
+                $urls = array_values(array_unique([
+                    ...$urls,
+                    ...$this->cleanUrls($draft->image_urls ?? []),
+                ]));
+            }
+
             $urls = array_values(array_unique([
                 ...$urls,
                 ...$this->resolver->resolve([$source], max(8, $target * 2)),
@@ -218,7 +225,6 @@ class ProductImageStorage
                 $chosenSource = $source;
                 break;
             }
-
         }
 
         $roles = ['primary', 'secondary', 'detail'];

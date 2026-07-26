@@ -55,7 +55,7 @@ class ProcessTelegramMessageTest extends TestCase
             && $request['text'] === 'Сервер работает нормально.');
     }
 
-    public function test_ready_draft_is_sent_as_one_photo_approval_card_with_buttons(): void
+    public function test_ready_draft_is_sent_as_one_album_followed_by_compact_approval_controls(): void
     {
         Storage::fake('public');
         config(['services.telegram.bot_token' => 'test-token']);
@@ -86,19 +86,21 @@ class ProcessTelegramMessageTest extends TestCase
             'images_staged_at' => now(),
             'confidence' => 0.98,
         ]);
-        $path = "drafts/{$draft->id}/primary-test.webp";
-        Storage::disk('public')->put($path, 'fake-image');
-        $draft->media()->create([
-            'disk' => 'public',
-            'path' => $path,
-            'source_url' => 'https://m.media-amazon.com/images/I/exact.jpg',
-            'role' => 'primary',
-            'mime_type' => 'image/webp',
-            'checksum' => hash('sha256', 'fake-image'),
-            'verification_status' => 'verified',
-            'sort_order' => 0,
-            'is_primary' => true,
-        ]);
+        foreach (range(1, 3) as $position) {
+            $path = "drafts/{$draft->id}/photo-{$position}.webp";
+            Storage::disk('public')->put($path, "fake-image-{$position}");
+            $draft->media()->create([
+                'disk' => 'public',
+                'path' => $path,
+                'source_url' => "https://m.media-amazon.com/images/I/exact-{$position}.jpg",
+                'role' => $position === 1 ? 'primary' : 'secondary',
+                'mime_type' => 'image/webp',
+                'checksum' => hash('sha256', "fake-image-{$position}"),
+                'verification_status' => 'verified',
+                'sort_order' => $position - 1,
+                'is_primary' => $position === 1,
+            ]);
+        }
         ServerAssistantAgent::fake([[
             'response_type' => 'draft',
             'message' => 'Черновик готов.',
@@ -113,19 +115,22 @@ class ProcessTelegramMessageTest extends TestCase
         );
 
         Http::assertSent(function (HttpRequest $request) use ($draft): bool {
-            if (! str_ends_with($request->url(), '/sendPhoto')) {
+            if (! str_ends_with($request->url(), '/sendMediaGroup')) {
                 return false;
             }
 
             $parts = collect($request->data())->keyBy('name');
-            $caption = (string) ($parts->get('caption')['contents'] ?? '');
-            $replyMarkup = json_decode((string) ($parts->get('reply_markup')['contents'] ?? ''), true);
+            $media = json_decode((string) ($parts->get('media')['contents'] ?? ''), true) ?? [];
+            $caption = (string) ($media[0]['caption'] ?? '');
 
-            return str_contains($caption, "Черновик #{$draft->id} готов к добавлению")
-                && str_contains($caption, 'Проверено фото: 1')
-                && data_get($replyMarkup, 'inline_keyboard.0.0.callback_data') === "draft:add:{$draft->id}";
+            return count($media) === 3
+                && str_contains($caption, "Черновик #{$draft->id} готов к добавлению")
+                && str_contains($caption, '📷 Фото: 3');
         });
-        Http::assertNotSent(fn (HttpRequest $request): bool => str_ends_with($request->url(), '/sendMessage'));
+        Http::assertSent(fn (HttpRequest $request): bool => str_ends_with($request->url(), '/sendMessage')
+            && str_contains((string) ($request['text'] ?? ''), "Итого: черновик #{$draft->id}")
+            && data_get($request['reply_markup'] ?? [], 'inline_keyboard.0.0.callback_data') === "draft:add:{$draft->id}"
+            && data_get($request['reply_markup'] ?? [], 'inline_keyboard.1.0.callback_data') === "draft:enhance:{$draft->id}");
     }
 
     public function test_reply_to_text_is_prepended_as_context_for_the_agent(): void

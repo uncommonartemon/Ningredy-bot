@@ -94,17 +94,18 @@ class ProductSourcePriority
     private function score(string $url, ?string $brand, array $sources, mixed $explicitType = null): int
     {
         if ($rule = $this->matchingConfiguredRule($url)) {
-            return (int) $rule->priority;
+            return 1_000_000 + (int) $rule->priority;
         }
 
         $classification = $this->classify($url, $brand, $sources);
+        $hasConfiguredRules = $this->rules()->isNotEmpty();
 
         if ($classification === 'official_english') {
-            return 820;
+            return $hasConfiguredRules ? 900_000 : 820;
         }
 
         if ($classification === 'official_localized') {
-            return 780;
+            return $hasConfiguredRules ? 899_000 : 780;
         }
 
         if ($classification === 'amazon') {

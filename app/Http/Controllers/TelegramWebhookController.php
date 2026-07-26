@@ -2,19 +2,23 @@
 
 namespace App\Http\Controllers;
 
+use App\Jobs\EnhanceDraftPhoto;
 use App\Jobs\ProcessTelegramMessage;
 use App\Jobs\TranscribeTelegramVoice;
 use App\Models\AiOperation;
 use App\Models\AppSetting;
 use App\Models\Product;
 use App\Models\ProductDraft;
+use App\Models\ProductDraftMedia;
 use App\Models\TelegramChatState;
 use App\Models\TelegramUpdate;
 use App\Services\Products\ProductDraftWorkflow;
 use App\Services\Products\ProductPhotoManager;
+use App\Services\Telegram\DraftTelegramPresenter;
 use App\Services\Telegram\TelegramClient;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Throwable;
 
 class TelegramWebhookController extends Controller
@@ -22,6 +26,7 @@ class TelegramWebhookController extends Controller
     public function __construct(
         private readonly TelegramClient $telegram,
         private readonly ProductDraftWorkflow $draftWorkflow,
+        private readonly DraftTelegramPresenter $draftPresenter,
     ) {}
 
     public function __invoke(Request $request): JsonResponse
@@ -196,6 +201,43 @@ class TelegramWebhookController extends Controller
         $chatId = (string) data_get($callback, 'message.chat.id');
         $messageId = data_get($callback, 'message.message_id');
 
+        if (preg_match('/^draft:enhance-photo:(\d+):(\d+)$/', $data, $enhancePhotoMatches) === 1) {
+            $this->handleDraftEnhancePhoto(
+                draftId: (int) $enhancePhotoMatches[1],
+                mediaId: (int) $enhancePhotoMatches[2],
+                callbackId: $callbackId,
+                chatId: $chatId,
+                messageId: $messageId,
+                update: $update,
+            );
+
+            return;
+        }
+
+        if (preg_match('/^draft:enhance:(\d+)$/', $data, $enhanceMatches) === 1) {
+            $this->handleDraftEnhanceMenu(
+                draftId: (int) $enhanceMatches[1],
+                callbackId: $callbackId,
+                chatId: $chatId,
+                messageId: $messageId,
+                update: $update,
+            );
+
+            return;
+        }
+
+        if (preg_match('/^draft:review:(\d+)$/', $data, $reviewMatches) === 1) {
+            $this->handleDraftReview(
+                draftId: (int) $reviewMatches[1],
+                callbackId: $callbackId,
+                chatId: $chatId,
+                messageId: $messageId,
+                update: $update,
+            );
+
+            return;
+        }
+
         if (preg_match('/^photos:refind:(\d+)$/', $data, $refindMatches) === 1) {
             $this->handlePhotoRefind((int) $refindMatches[1], $callbackId, $chatId);
 
@@ -271,6 +313,142 @@ class TelegramWebhookController extends Controller
         }
         if ($chatId !== '' && ! $approved) {
             $this->telegram->sendMessage($chatId, $result, $this->mainKeyboard());
+        }
+    }
+
+    private function handleDraftEnhanceMenu(
+        int $draftId,
+        string $callbackId,
+        string $chatId,
+        mixed $messageId,
+        TelegramUpdate $update,
+    ): void {
+        $draft = ProductDraft::query()->find($draftId);
+
+        if (! $draft || $draft->status !== 'pending_review') {
+            $this->telegram->answerCallbackQuery($callbackId, 'Черновик не найден или уже обработан.');
+            $update->update(['status' => 'not_found', 'processed_at' => now()]);
+
+            return;
+        }
+
+        if (! $draft->media()->exists()) {
+            $this->telegram->answerCallbackQuery($callbackId, 'В черновике нет фото для улучшения.');
+            $update->update(['status' => 'not_found', 'processed_at' => now()]);
+
+            return;
+        }
+
+        $this->telegram->answerCallbackQuery($callbackId, 'Выберите фотографию.');
+        $this->removeCallbackKeyboard($chatId, $messageId);
+        $this->draftPresenter->sendPhotoSelection($this->telegram, $chatId, $draft);
+        $update->update(['status' => 'completed', 'processed_at' => now()]);
+    }
+
+    private function handleDraftReview(
+        int $draftId,
+        string $callbackId,
+        string $chatId,
+        mixed $messageId,
+        TelegramUpdate $update,
+    ): void {
+        $draft = ProductDraft::query()->find($draftId);
+
+        if (! $draft || $draft->status !== 'pending_review') {
+            $this->telegram->answerCallbackQuery($callbackId, 'Черновик не найден или уже обработан.');
+            $update->update(['status' => 'not_found', 'processed_at' => now()]);
+
+            return;
+        }
+
+        $this->telegram->answerCallbackQuery($callbackId, 'Возвращаю действия черновика.');
+        $this->removeCallbackKeyboard($chatId, $messageId);
+        $this->draftPresenter->sendControls($this->telegram, $chatId, $draft);
+        $update->update(['status' => 'completed', 'processed_at' => now()]);
+    }
+
+    private function handleDraftEnhancePhoto(
+        int $draftId,
+        int $mediaId,
+        string $callbackId,
+        string $chatId,
+        mixed $messageId,
+        TelegramUpdate $update,
+    ): void {
+        $draft = ProductDraft::query()->find($draftId);
+        $media = $draft?->media()->whereKey($mediaId)->first();
+
+        if (! $draft || $draft->status !== 'pending_review' || ! $media) {
+            $this->telegram->answerCallbackQuery($callbackId, 'Черновик или фотография уже недоступны.');
+            $update->update(['status' => 'not_found', 'processed_at' => now()]);
+
+            return;
+        }
+
+        $queuedKey = "draft-photo-enhance:{$draft->id}:queued";
+
+        if (! Cache::add($queuedKey, $update->id, now()->addMinutes(6))) {
+            $this->telegram->answerCallbackQuery($callbackId, 'Фото этого черновика уже обрабатывается.');
+            $update->update(['status' => 'already_processing', 'processed_at' => now()]);
+
+            return;
+        }
+
+        $position = $draft->media()
+            ->orderByDesc('is_primary')
+            ->orderBy('sort_order')
+            ->pluck('id')
+            ->search($media->id);
+        $position = $position === false ? 1 : $position + 1;
+        $operation = AiOperation::query()->create([
+            'telegram_update_id' => $update->id,
+            'telegram_user_id' => $update->telegram_user_id,
+            'tool' => 'TelegramCallback',
+            'action' => 'enhance_draft_photo',
+            'target_type' => ProductDraftMedia::class,
+            'target_id' => $media->id,
+            'idempotency_key' => "enhance-draft-photo:{$update->id}",
+            'payload' => ['draft_id' => $draft->id, 'media_id' => $media->id, 'position' => $position],
+            'status' => 'running',
+        ]);
+
+        try {
+            $this->telegram->answerCallbackQuery($callbackId, "Улучшаю фото {$position}. Это займёт некоторое время.");
+            $this->removeCallbackKeyboard($chatId, $messageId);
+            $this->telegram->sendMessage(
+                $chatId,
+                "⏳ Улучшаю фото {$position} черновика #{$draft->id}. Исходник сохранён до успешной проверки.",
+            );
+            EnhanceDraftPhoto::dispatch(
+                $draft->id,
+                $media->id,
+                $update->id,
+                $chatId,
+                $operation->id,
+            );
+            $update->update(['status' => 'completed', 'processed_at' => now()]);
+        } catch (Throwable $exception) {
+            Cache::forget($queuedKey);
+            $operation->update([
+                'status' => 'failed',
+                'error' => mb_substr($exception->getMessage(), 0, 5000),
+                'executed_at' => now(),
+            ]);
+
+            throw $exception;
+        }
+    }
+
+    private function removeCallbackKeyboard(string $chatId, mixed $messageId): void
+    {
+        if ($chatId === '' || ! is_int($messageId)) {
+            return;
+        }
+
+        try {
+            $this->telegram->removeInlineKeyboard($chatId, $messageId);
+        } catch (Throwable $exception) {
+            report($exception);
         }
     }
 

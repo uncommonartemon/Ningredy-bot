@@ -22,8 +22,12 @@ class ProductImageVisionVerifier
      * @param  array<int, array<string, mixed>>  $candidates
      * @return array<int, array<string, mixed>>
      */
-    public function select(ProductDraft $draft, array $candidates, int $limit): array
-    {
+    public function select(
+        ProductDraft $draft,
+        array $candidates,
+        int $limit,
+        ?int $telegramUpdateId = null,
+    ): array {
         if ($limit <= 0 || $candidates === []) {
             return [];
         }
@@ -36,7 +40,7 @@ class ProductImageVisionVerifier
         $model = app(AiSettings::class)->modelFor('product_image_vision');
         $prompt = $this->prompt($draft, $candidates);
         $run = AiRun::query()->create([
-            'telegram_update_id' => $draft->telegram_update_id,
+            'telegram_update_id' => $telegramUpdateId ?? $draft->telegram_update_id,
             'provider' => $provider,
             'model' => $model,
             'status' => 'running',
