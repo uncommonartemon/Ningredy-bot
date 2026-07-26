@@ -93,8 +93,11 @@ class DraftTelegramPresenter
             ->map(fn (array $item): string => "• {$item['name']}: {$item['value']}")
             ->implode("\n");
         $galleryCount = $draft->media()->count();
-        $primaryHost = (string) parse_url((string) $draft->primary_source_url, PHP_URL_HOST);
-        $footer = "📷 Фото: {$galleryCount}".($primaryHost !== '' ? " · {$primaryHost}" : '');
+        $primarySourceUrl = trim((string) $draft->primary_source_url);
+        $footer = implode("\n", array_filter([
+            "📷 Фото: {$galleryCount}",
+            $primarySourceUrl !== '' ? "🔗 Источник: {$primarySourceUrl}" : null,
+        ]));
         $header = implode("\n", array_filter([
             "Черновик #{$draft->id} готов к добавлению",
             $draft->title,

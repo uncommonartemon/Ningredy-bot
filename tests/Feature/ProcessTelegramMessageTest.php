@@ -125,7 +125,8 @@ class ProcessTelegramMessageTest extends TestCase
 
             return count($media) === 3
                 && str_contains($caption, "Черновик #{$draft->id} готов к добавлению")
-                && str_contains($caption, '📷 Фото: 3');
+                && str_contains($caption, '📷 Фото: 3')
+                && str_contains($caption, '🔗 Источник: https://amazon.com/dp/EXACT');
         });
         Http::assertSent(fn (HttpRequest $request): bool => str_ends_with($request->url(), '/sendMessage')
             && str_contains((string) ($request['text'] ?? ''), "Итого: черновик #{$draft->id}")
