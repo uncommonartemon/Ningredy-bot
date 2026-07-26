@@ -19,7 +19,8 @@ class ProductImageCandidateDiscovery
     ) {}
 
     /** @return array<int, string> */
-    public function find(ProductDraft $draft, array $excludedUrls = []): array
+    /** @param null|callable(string): void $progress */
+    public function find(ProductDraft $draft, array $excludedUrls = [], bool $skipKnownSources = false, ?callable $progress = null): array
     {
         $excludedUrls = collect($excludedUrls)
             ->filter(fn (mixed $url): bool => is_string($url) && $url !== '')
@@ -27,7 +28,7 @@ class ProductImageCandidateDiscovery
             ->values()
             ->all();
         $sources = $this->imageSources($this->sourcePriority->sortSources($draft->sources ?? [], $draft->brand));
-        $knownSourceUrls = $this->resolver->resolve($sources, 16);
+        $knownSourceUrls = $skipKnownSources ? [] : $this->resolver->resolve($sources, 16);
         $preferredUrls = $this->withoutExcluded($this->sourcePriority->sortUrls(
             $knownSourceUrls,
             $draft->brand,
@@ -68,7 +69,7 @@ class ProductImageCandidateDiscovery
         if ($cached && is_array($cached->response)) {
             return $this->withoutExcluded($this->sourcePriority->sortUrls([
                 ...$availableUrls,
-                ...$this->candidateUrls($cached->response, $draft, $sources),
+                ...$this->candidateUrls($cached->response, $draft, $sources, $progress),
             ], $draft->brand, $sources), $excludedUrls);
         }
 
@@ -119,7 +120,7 @@ class ProductImageCandidateDiscovery
 
             return $this->withoutExcluded($this->sourcePriority->sortUrls([
                 ...$availableUrls,
-                ...$this->candidateUrls($data, $draft, $sources),
+                ...$this->candidateUrls($data, $draft, $sources, $progress),
             ], $draft->brand, $sources), $excludedUrls);
         } catch (Throwable $exception) {
             $run->update([
@@ -217,7 +218,7 @@ class ProductImageCandidateDiscovery
         $excluded = collect($excludedUrls)->take(12)->implode("\n");
 
         return <<<PROMPT
-            [product-image-discovery:v6]
+            [product-image-discovery:v7]
             Find current, downloadable catalog image candidates for this exact product:
             Title: {$draft->title}
             Brand: {$draft->brand}
@@ -252,7 +253,7 @@ class ProductImageCandidateDiscovery
     }
 
     /** @param array<string, mixed> $data @return array<int, string> */
-    private function candidateUrls(array $data, ProductDraft $draft, array $sources): array
+    private function candidateUrls(array $data, ProductDraft $draft, array $sources, ?callable $progress = null): array
     {
         $imageUrls = array_values(array_filter(
             $data['image_urls'] ?? [],
@@ -262,11 +263,15 @@ class ProductImageCandidateDiscovery
             $data['page_urls'] ?? [],
             fn (mixed $url): bool => is_string($url),
         ));
-        $pageUrls = $this->sourcePriority->sortUrls($pageUrls, $draft->brand, $sources);
-        $resolved = $this->resolver->resolve(
-            array_map(fn (string $url): array => ['url' => $url], $pageUrls),
-            16,
-        );
+        $pageUrls = array_slice($this->sourcePriority->sortUrls($pageUrls, $draft->brand, $sources), 0, 4);
+        $pageSources = array_map(fn (string $url): array => ['url' => $url], $pageUrls);
+        $resolved = $progress
+            ? $this->resolver->resolve(
+                $pageSources,
+                16,
+                fn (string $level, string $message) => $progress($message),
+            )
+            : $this->resolver->resolve($pageSources, 16);
 
         return array_slice($this->sourcePriority->sortUrls(
             [...$resolved, ...$imageUrls],

@@ -52,9 +52,11 @@ class ProductResearchAgent implements Agent, HasStructuredOutput, HasTools
             discontinued and no new complete product page exists, return not_found instead of asking about refurbished
             options. needs_clarification is only for genuine ambiguity in the product identity itself.
 
-            Find several exact product pages whenever possible (target 3-6 candidates). Every returned candidate must
-            match the requested model, variant, generation, important configuration, condition, and color. A candidate
-            is useful only when the SAME page supplies both usable product information and a usable image gallery.
+            Find several exact product pages whenever possible (target 3-6 candidates on different domains, never
+            several different SKUs from one retailer). First choose one exact current configuration, then require every
+            candidate to match that same SKU or the same CPU, GPU, RAM, storage, display, condition, and color. Never mix
+            variant specifications under a generic family title. A candidate is useful only when the SAME page supplies
+            both usable product information and a gallery with at least two distinct physical-product photographs.
             If a page has information but no usable photos, silently skip it and continue to the next source. Never
             stop at the first incomplete page and never ask the user whether to create a draft without photographs.
 

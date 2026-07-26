@@ -178,7 +178,8 @@ class ProductImageStorage
         return $stored;
     }
 
-    public function stage(ProductDraft $draft): int
+    /** @param null|callable(string): void $progress */
+    public function stage(ProductDraft $draft, ?callable $progress = null): int
     {
         ini_set('memory_limit', '512M');
 
@@ -196,7 +197,10 @@ class ProductImageStorage
         $selected = [];
         $chosenSource = null;
 
-        foreach ($cardSources as $source) {
+        foreach ($cardSources as $sourceIndex => $source) {
+            if ($progress) {
+                $progress('Проверяю источник '.($sourceIndex + 1).'/'.$cardSources->count().': '.(parse_url($source['url'], PHP_URL_HOST) ?: $source['url']).'.');
+            }
             $urls = $this->cleanUrls($source['image_urls'] ?? []);
 
             if (($source['url'] ?? null) === $draft->primary_source_url) {
@@ -208,7 +212,11 @@ class ProductImageStorage
 
             $urls = array_values(array_unique([
                 ...$urls,
-                ...$this->resolver->resolve([$source], max(8, $target * 2)),
+                ...$this->resolver->resolve(
+                    [$source],
+                    max(8, $target * 2),
+                    $progress ? fn (string $level, string $message) => $progress($message) : null,
+                ),
             ]));
             $allCandidates = $this->downloadCandidates($urls, $draft);
 
@@ -227,6 +235,34 @@ class ProductImageStorage
                 $chosenSource = $source;
                 break;
             }
+        }
+
+        if ($selected === []) {
+            if ($progress) {
+                $progress('Галереи указанных карточек не подошли. Автоматически ищу другие магазины · лимит до 300 сек.');
+            }
+            $knownUrls = $this->cleanUrls([
+                ...($draft->image_urls ?? []),
+                ...$cardSources->flatMap(fn (array $source): array => $source['image_urls'] ?? [])->all(),
+            ]);
+            [$discoveredCandidates] = $this->discoverCandidates($draft, $knownUrls, true, $progress);
+            $candidateGroups = collect($discoveredCandidates)
+                ->groupBy(fn (array $candidate): string => $this->host((string) ($candidate['source_url'] ?? '')) ?? 'unknown');
+
+            foreach ($candidateGroups as $host => $group) {
+                if ($progress) {
+                    $progress("Проверяю найденную галерею: {$host}.");
+                }
+                $groupCandidates = $group->values()->all();
+                $verified = $this->selectFromCandidates($draft, $groupCandidates, $target, true);
+                $selected = $this->removeNearDuplicates($verified);
+
+                if ($selected !== []) {
+                    break;
+                }
+            }
+
+            $this->destroyUnselected($discoveredCandidates, $selected);
         }
 
         $roles = ['primary', 'secondary', 'detail'];
@@ -541,9 +577,15 @@ class ProductImageStorage
     }
 
     /** @param array<int, string> $existingUrls @return array{array<int, array<string, mixed>>, bool} */
-    private function discoverCandidates(ProductDraft $draft, array $existingUrls): array
-    {
-        $discovered = $this->candidateDiscovery->find($draft, $existingUrls);
+    private function discoverCandidates(
+        ProductDraft $draft,
+        array $existingUrls,
+        bool $skipKnownSources = false,
+        ?callable $progress = null,
+    ): array {
+        $discovered = ($skipKnownSources || $progress)
+            ? $this->candidateDiscovery->find($draft, $existingUrls, $skipKnownSources, $progress)
+            : $this->candidateDiscovery->find($draft, $existingUrls);
         $newUrls = array_values(array_diff($this->cleanUrls($discovered), $existingUrls));
 
         if ($discovered !== []) {

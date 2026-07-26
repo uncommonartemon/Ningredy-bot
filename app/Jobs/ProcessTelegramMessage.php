@@ -29,7 +29,7 @@ class ProcessTelegramMessage implements ShouldQueue
 
     public int $tries = 3;
 
-    public int $timeout = 480;
+    public int $timeout = 780;
 
     public array $backoff = [10, 60, 300];
 
@@ -81,7 +81,7 @@ class ProcessTelegramMessage implements ShouldQueue
             $prompt = $update->reply_to_text
                 ? "[Пользователь ответил (Reply) на сообщение бота: \"{$update->reply_to_text}\"]\n{$update->text}"
                 : (string) $update->text;
-            $response = $agent->prompt($prompt, provider: $provider, model: $model, timeout: 300);
+            $response = $agent->prompt($prompt, provider: $provider, model: $model, timeout: 720);
             $normalizedResponse = $response->toArray();
 
             if (is_string($normalizedResponse['message'] ?? null)) {
@@ -126,6 +126,12 @@ class ProcessTelegramMessage implements ShouldQueue
             $update->update(['status' => 'completed', 'processed_at' => now()]);
 
             $draft = empty($data['draft_id']) ? null : ProductDraft::query()->find($data['draft_id']);
+            $failedGalleryDraft = ProductDraft::query()
+                ->where('telegram_update_id', $update->id)
+                ->where('status', 'rejected')
+                ->where('rejection_reason', 'like', '%галере%')
+                ->latest('id')
+                ->first();
             $deletion = AiOperation::query()
                 ->where('telegram_update_id', $update->id)
                 ->where('action', 'delete_product')
@@ -155,6 +161,11 @@ class ProcessTelegramMessage implements ShouldQueue
                             ],
                         ]],
                     ],
+                );
+            } elseif ($failedGalleryDraft) {
+                $telegram->sendMessage(
+                    $update->chat_id,
+                    "❌ Не удалось собрать проверенную галерею для «{$failedGalleryDraft->title}». Все найденные карточки и резервный поиск уже проверены; черновик без фото не создаю.".$usageFootnote,
                 );
             } elseif ($data['response_type'] === 'catalog_results' && ! empty($data['product_ids'])) {
                 $telegram->sendMessage($update->chat_id, $data['message'].$usageFootnote);

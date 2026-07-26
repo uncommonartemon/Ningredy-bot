@@ -40,6 +40,14 @@ class BrowserProductGalleryExtractor
             // The migration may not have been run yet; generic extraction remains available.
         }
 
+        if ($recipe?->last_failure_at?->isAfter(now()->subMinutes(10)) && $recipe->status === 'learning') {
+            if ($debug) {
+                $debug('warning', "Playwright: {$host} уже вернул пустую галерею; пропускаю повтор до окончания 10-минутного cooldown.");
+            }
+
+            return [];
+        }
+
         try {
             if ($debug) {
                 $debug('step', $recipe

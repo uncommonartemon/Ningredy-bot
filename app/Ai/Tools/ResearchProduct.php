@@ -219,13 +219,17 @@ class ResearchProduct implements Tool
             $draft = ProductDraft::query()->find($result['draft_id'] ?? null);
 
             if ($draft && $draft->status === 'pending_review' && ! $draft->images_staged_at) {
-                $progress->step('3/4 · загрузка, дедупликация и vision-проверка фото', 180);
-                $imageCount = ($this->imageStorage ?? app(ProductImageStorage::class))->stage($draft);
+                $progress->step('3/4 · загрузка, резервный поиск и vision-проверка фото', 360);
+                $imageCount = ($this->imageStorage ?? app(ProductImageStorage::class))->stage(
+                    $draft,
+                    fn (string $message) => $progress->info($message),
+                );
             } else {
                 $imageCount = $draft?->media()->count() ?? 0;
             }
 
             if ($draft && $imageCount === 0) {
+                $progress->warning('Все карточки и резервный поиск проверены: подходящая галерея не найдена.');
                 $draft->update([
                     'status' => 'rejected',
                     'reviewed_at' => now(),
