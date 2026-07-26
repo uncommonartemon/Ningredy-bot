@@ -17,9 +17,10 @@ class ProductImageResolver
 
     /**
      * @param  array<int, array<string, mixed>>  $sources
+     * @param  null|callable(string, string): void  $debug
      * @return array<int, string>
      */
-    public function resolve(array $sources, int $limit = 5): array
+    public function resolve(array $sources, int $limit = 5, ?callable $debug = null): array
     {
         $images = [];
 
@@ -49,6 +50,9 @@ class ProductImageResolver
                     }
                 }
             } catch (Throwable $exception) {
+                if ($debug) {
+                    $debug('warning', 'HTML страницы недоступен: '.$exception->getMessage());
+                }
                 Log::debug('Product image metadata source was unavailable.', [
                     'host' => parse_url($sourceUrl, PHP_URL_HOST),
                     'error' => $exception->getMessage(),
@@ -56,7 +60,10 @@ class ProductImageResolver
             }
 
             if ($browserEligible && count($images) < $limit) {
-                $browserImages = collect($this->browser->extract($browserUrl, $limit))
+                $browserResult = $debug
+                    ? $this->browser->extract($browserUrl, $limit, $debug)
+                    : $this->browser->extract($browserUrl, $limit);
+                $browserImages = collect($browserResult)
                     ->filter(fn (mixed $imageUrl): bool => is_string($imageUrl) && $this->isPublicUrl($imageUrl))
                     ->values()
                     ->all();

@@ -11,6 +11,8 @@ use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Throwable;
 
+use App\Models\ProductDraftMedia;
+
 class ProductImageStorage
 {
     public function __construct(
@@ -286,6 +288,116 @@ class ProductImageStorage
         ]);
 
         return $stored;
+    }
+
+    /**
+     * Replace one staged photo without touching the rest of the draft gallery.
+     *
+     * @param  null|callable(string): void  $progress
+     */
+    public function replaceDraftMedia(ProductDraft $draft, ProductDraftMedia $media, ?callable $progress = null): ProductDraftMedia
+    {
+        throw_unless(
+            $draft->status === 'pending_review' && $media->product_draft_id === $draft->id,
+            \RuntimeException::class,
+            'Draft photo is no longer available.',
+        );
+
+        $existingMedia = $draft->media()->get();
+        $existingUrls = $this->cleanUrls($existingMedia->pluck('source_url')->all());
+        $excludedHashes = $this->perceptualHashesForMedia($existingMedia);
+        $sources = $this->sourcePriority->sortSources($draft->sources ?? [], $draft->brand);
+        $selected = [];
+
+        foreach ($sources as $sourceIndex => $source) {
+            if (! is_array($source) || ! is_string($source['url'] ?? null)) {
+                continue;
+            }
+
+            if ($progress) {
+                $progress('Источник '.($sourceIndex + 1).': '.(parse_url($source['url'], PHP_URL_HOST) ?: $source['url']));
+            }
+            $urls = array_values(array_diff($this->cleanUrls([
+                ...($source['image_urls'] ?? []),
+                ...$this->resolver->resolve(
+                    [$source],
+                    10,
+                    $progress ? fn (string $level, string $message) => $progress($message) : null,
+                ),
+            ]), $existingUrls));
+            $candidates = $this->downloadCandidates($urls, $draft);
+
+            if ($candidates === []) {
+                continue;
+            }
+
+            $verified = $this->selectFromCandidates($draft, $candidates, 1, true);
+            $selected = $this->removeNearDuplicates($verified, $excludedHashes);
+            $this->destroyUnselected($candidates, $selected);
+
+            if ($selected !== []) {
+                break;
+            }
+        }
+
+        if ($selected === []) {
+            if ($progress) {
+                $progress('Галереи источников исчерпаны; выполняю дополнительный поиск.');
+            }
+            [$candidates] = $this->discoverCandidates($draft, $existingUrls);
+            $verified = $this->selectFromCandidates($draft, $candidates, 1, true);
+            $selected = $this->removeNearDuplicates($verified, $excludedHashes);
+            $this->destroyUnselected($candidates, $selected);
+        }
+
+        throw_if($selected === [], \RuntimeException::class, 'Не найдено новое непохожее фото той же модели и цвета.');
+        $candidate = $selected[0];
+        $newPath = null;
+
+        try {
+            $converted = $this->encoder->toWebp($candidate['image']);
+            $checksum = hash('sha256', $converted['bytes']);
+            $newPath = "drafts/{$draft->id}/replacement-{$media->id}-".substr($checksum, 0, 12).'.webp';
+            throw_unless(
+                Storage::disk('public')->put($newPath, $converted['bytes']),
+                \RuntimeException::class,
+                'Could not store replacement draft photo.',
+            );
+            $oldDisk = $media->disk;
+            $oldPath = $media->path;
+            $media->update([
+                'disk' => 'public',
+                'path' => $newPath,
+                'source_url' => $candidate['source_url'],
+                'mime_type' => 'image/webp',
+                'width' => $converted['width'],
+                'height' => $converted['height'],
+                'file_size' => strlen($converted['bytes']),
+                'checksum' => $checksum,
+                'verification_status' => 'verified',
+                'verification_score' => isset($candidate['vision_score']) ? $candidate['vision_score'] / 100 : null,
+                'verification_model' => $candidate['vision_model'] ?? null,
+                'verification_notes' => $candidate['vision_reason'] ?? null,
+            ]);
+
+            if ($oldDisk && $oldPath && ($oldDisk !== 'public' || $oldPath !== $newPath)) {
+                Storage::disk($oldDisk)->delete($oldPath);
+            }
+
+            return $media->fresh();
+        } catch (Throwable $exception) {
+            if ($newPath && $media->path !== $newPath) {
+                Storage::disk('public')->delete($newPath);
+            }
+
+            throw $exception;
+        } finally {
+            foreach ($selected as $item) {
+                if (($item['image'] ?? null) instanceof GdImage) {
+                    imagedestroy($item['image']);
+                }
+            }
+        }
     }
 
     public function adoptStaged(Product $product, ProductVariant $variant, ProductDraft $draft): int

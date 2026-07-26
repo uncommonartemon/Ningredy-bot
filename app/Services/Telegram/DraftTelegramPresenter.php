@@ -44,8 +44,18 @@ class DraftTelegramPresenter
         );
     }
 
-    public function sendPhotoSelection(TelegramClient $telegram, string $chatId, ProductDraft $draft): array
-    {
+    public function sendPhotoSelection(
+        TelegramClient $telegram,
+        string $chatId,
+        ProductDraft $draft,
+        string $action = 'enhance',
+    ): array {
+        $labels = [
+            'enhance' => 'улучшить',
+            'replace' => 'заменить',
+            'delete' => 'удалить',
+        ];
+        $verb = $labels[$action] ?? $labels['enhance'];
         $buttons = $draft->media()
             ->orderByDesc('is_primary')
             ->orderBy('sort_order')
@@ -54,7 +64,7 @@ class DraftTelegramPresenter
             ->values()
             ->map(fn ($media, int $index): array => [
                 'text' => $this->numberEmoji($index + 1),
-                'callback_data' => "draft:enhance-photo:{$draft->id}:{$media->id}",
+                'callback_data' => "draft:{$action}-photo:{$draft->id}:{$media->id}",
             ])
             ->chunk(5)
             ->map(fn ($row): array => $row->values()->all())
@@ -67,7 +77,7 @@ class DraftTelegramPresenter
 
         return $telegram->sendMessage(
             $chatId,
-            "Какое фото черновика #{$draft->id} улучшить?\nНомер соответствует позиции в альбоме.",
+            "Какое фото черновика #{$draft->id} {$verb}?\nНомер соответствует позиции в альбоме.",
             ['inline_keyboard' => $buttons],
         );
     }
@@ -81,7 +91,11 @@ class DraftTelegramPresenter
                     ['text' => '✖ Отменить', 'callback_data' => "draft:reject:{$draft->id}"],
                 ],
                 [
-                    ['text' => '✨ Улучшить фото', 'callback_data' => "draft:enhance:{$draft->id}"],
+                    ['text' => '✨ Улучшить', 'callback_data' => "draft:enhance:{$draft->id}"],
+                    ['text' => '🔄 Заменить', 'callback_data' => "draft:replace:{$draft->id}"],
+                ],
+                [
+                    ['text' => '🗑 Удалить фото', 'callback_data' => "draft:delete:{$draft->id}"],
                 ],
             ],
         ];

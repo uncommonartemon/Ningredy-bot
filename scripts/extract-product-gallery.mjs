@@ -4,6 +4,17 @@ import { chromium } from 'playwright-core';
 
 const sourceUrl = process.argv[2];
 const limit = Math.max(1, Math.min(60, Number.parseInt(process.argv[3] || '20', 10)));
+let recipe = {};
+
+try {
+    recipe = JSON.parse(process.env.PRODUCT_GALLERY_RECIPE || '{}');
+} catch {
+    recipe = {};
+}
+
+const recipeSelectors = (key) => Array.isArray(recipe[key])
+    ? recipe[key].filter((selector) => typeof selector === 'string' && selector.length <= 300)
+    : [];
 
 if (!sourceUrl) {
     process.stderr.write('A product URL is required.\n');
@@ -173,7 +184,7 @@ page.on('response', (response) => {
     pendingPayloads.add(pending);
 });
 
-const gallerySelectors = [
+const genericGallerySelectors = [
     '[data-selenium*="thumbnail" i] img',
     '[data-selenium*="mainimage" i]',
     '[data-selenium*="main-image" i]',
@@ -189,6 +200,22 @@ const gallerySelectors = [
     '[class*="product-media" i] img',
     'img[itemprop="image"]',
 ];
+const gallerySelectors = [...new Set([...recipeSelectors('collect_selectors'), ...genericGallerySelectors])];
+const thumbnailSelectors = [...new Set([...recipeSelectors('thumbnail_selectors'), ...genericGallerySelectors.slice(0, 10)])];
+const openSelectors = [...new Set([
+    ...recipeSelectors('open_selectors'),
+    'button[data-selenium*="media" i]',
+    'button[class*="openmedia" i]',
+    'button[class*="gallery" i]',
+    'button[class*="thumbnail" i]',
+    '[role="button"][class*="media" i]',
+])];
+const nextSelectors = [...new Set([
+    ...recipeSelectors('next_selectors'),
+    'button[aria-label*="next" i]',
+    'button[data-selenium*="next" i]',
+    'button[class*="next" i]',
+])];
 
 const collectDomImages = async () => page.evaluate((selectors) => {
     const urls = [];
@@ -272,6 +299,7 @@ const collectDomImages = async () => page.evaluate((selectors) => {
 }, gallerySelectors);
 
 const gathered = [];
+let learnedRecipe = {};
 const collect = async () => {
     gathered.push(...await collectDomImages());
 };
@@ -281,7 +309,18 @@ try {
     await page.waitForLoadState('networkidle', { timeout: 5_000 }).catch(() => {});
     await collect();
 
-    const thumbnails = page.locator(gallerySelectors.slice(0, 10).join(','));
+    const selectorCounts = {};
+    for (const selector of [...new Set([...gallerySelectors, ...openSelectors, ...nextSelectors])]) {
+        selectorCounts[selector] = await page.locator(selector).count().catch(() => 0);
+    }
+    learnedRecipe = {
+        collect_selectors: gallerySelectors.filter((selector) => selectorCounts[selector] > 0).slice(0, 12),
+        thumbnail_selectors: thumbnailSelectors.filter((selector) => selectorCounts[selector] > 1).slice(0, 8),
+        open_selectors: openSelectors.filter((selector) => selectorCounts[selector] > 0).slice(0, 5),
+        next_selectors: nextSelectors.filter((selector) => selectorCounts[selector] > 0).slice(0, 5),
+    };
+
+    const thumbnails = page.locator(thumbnailSelectors.join(','));
     const thumbnailCount = Math.min(await thumbnails.count(), 20);
 
     for (let index = 0; index < thumbnailCount; index++) {
@@ -292,13 +331,7 @@ try {
         await collect();
     }
 
-    const openMediaButtons = page.locator([
-        'button[data-selenium*="media" i]',
-        'button[class*="openmedia" i]',
-        'button[class*="gallery" i]',
-        'button[class*="thumbnail" i]',
-        '[role="button"][class*="media" i]',
-    ].join(','));
+    const openMediaButtons = page.locator(openSelectors.join(','));
     const openMediaCount = Math.min(await openMediaButtons.count(), 5);
 
     for (let index = 0; index < openMediaCount; index++) {
@@ -315,11 +348,7 @@ try {
         await collect();
     }
 
-    const nextButtons = page.locator([
-        'button[aria-label*="next" i]',
-        'button[data-selenium*="next" i]',
-        'button[class*="next" i]',
-    ].join(','));
+    const nextButtons = page.locator(nextSelectors.join(','));
 
     if (await nextButtons.count()) {
         for (let index = 0; index < Math.min(limit, 15); index++) {
@@ -415,4 +444,13 @@ for (const candidate of candidates) {
 
 const images = [...bestImages.values()].slice(0, limit);
 
-process.stdout.write(JSON.stringify({ images }));
+process.stdout.write(JSON.stringify({
+    images,
+    learned_recipe: learnedRecipe,
+    diagnostics: {
+        dom_candidates: domImages.length,
+        payload_candidates: embeddedImages.length,
+        network_candidates: requestedImages.length,
+        unique_candidates: allCandidates.length,
+    },
+}));

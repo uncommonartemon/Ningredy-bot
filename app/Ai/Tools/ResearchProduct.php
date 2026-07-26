@@ -24,6 +24,9 @@ use Laravel\Ai\Tools\Request;
 use Stringable;
 use Throwable;
 
+use App\Services\Telegram\TelegramClient;
+use App\Services\Telegram\TelegramProgressReporter;
+
 class ResearchProduct implements Tool
 {
     use RecordsOperations;
@@ -45,6 +48,8 @@ class ResearchProduct implements Tool
     public function handle(Request $request): Stringable|string
     {
         $query = trim((string) $request->string('query'));
+        $progress = new TelegramProgressReporter(app(TelegramClient::class), (string) $this->update->chat_id);
+        $progress->step('1/4 · поиск точной карточки и характеристик', 240, $query);
         $provider = app(AiSettings::class)->providerFor('product_research');
         $model = app(AiSettings::class)->modelFor('product_research');
         $run = AiRun::query()->create([
@@ -58,6 +63,7 @@ class ResearchProduct implements Tool
 
         try {
             $response = ProductResearchAgent::make()->prompt($query, provider: $provider, model: $model, timeout: 240);
+            $progress->info('Карточка получена; проверяю модель, цвет и источники.');
             $normalizedResponse = ($this->responseNormalizer ?? app(ProductResearchResponseNormalizer::class))
                 ->normalize($response->toArray());
             $data = Validator::make($normalizedResponse, [
@@ -113,7 +119,18 @@ class ResearchProduct implements Tool
                 ])->validate();
 
                 $data['primary_source_url'] = $primarySource['url'];
-                $resolvedGallery = $this->imageResolver->resolve([$primarySource], 10);
+                $progress->step('2/4 · чтение галереи страницы', 45, parse_url($data['primary_source_url'], PHP_URL_HOST) ?: null);
+                $resolvedGallery = $this->imageResolver->resolve(
+                    [$primarySource],
+                    10,
+                    function (string $level, string $message) use ($progress): void {
+                        match ($level) {
+                            'error' => $progress->warning($message),
+                            'warning' => $progress->warning($message),
+                            default => $progress->info($message),
+                        };
+                    },
+                );
                 $legacyPrimaryImages = $reportedPrimaryUrl === $data['primary_source_url'] ? $data['image_urls'] : [];
                 $data['image_urls'] = $sourcePriority->sortUrls([
                     ...($primarySource['image_urls'] ?? []),
@@ -202,6 +219,7 @@ class ResearchProduct implements Tool
             $draft = ProductDraft::query()->find($result['draft_id'] ?? null);
 
             if ($draft && $draft->status === 'pending_review' && ! $draft->images_staged_at) {
+                $progress->step('3/4 · загрузка, дедупликация и vision-проверка фото', 180);
                 $imageCount = ($this->imageStorage ?? app(ProductImageStorage::class))->stage($draft);
             } else {
                 $imageCount = $draft?->media()->count() ?? 0;
@@ -224,9 +242,11 @@ class ResearchProduct implements Tool
             }
 
             $result['image_count'] = $imageCount;
+            $progress->done("4/4 · черновик #{$draft->id} готов, фото: {$imageCount}");
 
             return $this->json($result);
         } catch (Throwable $exception) {
+            $progress->failed('Поиск товара', $exception);
             $run->update([
                 'status' => 'failed',
                 'error' => mb_substr($exception->getMessage(), 0, 5000),

@@ -48,6 +48,6 @@ return [
         'enabled' => env('PRODUCT_IMAGE_BROWSER_ENABLED', env('APP_ENV') !== 'testing'),
         'node_binary' => env('PRODUCT_IMAGE_BROWSER_NODE', 'node'),
         'script' => 'scripts/extract-product-gallery.mjs',
-        'timeout' => 35,
+        'timeout' => 45,
     ],
 ];

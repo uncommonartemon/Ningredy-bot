@@ -30,6 +30,8 @@ use Laravel\Ai\Contracts\HasTools;
 use Laravel\Ai\Promptable;
 use Stringable;
 
+use App\Ai\Tools\ManageDraftPhotos;
+
 class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput, HasTools
 {
     use Promptable, RemembersConversations;
@@ -48,6 +50,12 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
     public function instructions(): Stringable|string
     {
         return <<<'PROMPT'
+            Pending draft photo management:
+            - If the user refers to a pending draft or replies to its review card and asks to enhance, replace, or delete photos, use ManageDraftPhotos, never the published-product tools.
+            - Album positions are 1-based. For a mixed request, put every requested position into enhance_positions, replace_positions, and delete_positions in one ManageDraftPhotos call.
+            - Replacing means finding a different, model/color-matching, non-duplicate internet photo. Enhancing means processing the same selected photo.
+            - ManageDraftPhotos is asynchronous. Say only that processing has started; progress and the updated review album will be sent automatically.
+
             When a message starts with "[Пользователь ответил (Reply) на сообщение бота: ...]" - the user
             used Telegram's Reply feature on that exact earlier bot message. Treat its quoted text as the
             primary identity/context for the request (which product, which photo, which draft) - it is more
@@ -145,6 +153,7 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
             new UpdateProduct($this->update),
             new UpdateVariant($this->update),
             new ReviewProductDraft($this->update, app(ProductDraftWorkflow::class)),
+            new ManageDraftPhotos($this->update),
             new PrepareProductDeletion($this->update),
             new RetryFailedJob($this->update),
             new ReorderProductPhotos($this->update),
