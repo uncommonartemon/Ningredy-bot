@@ -11,6 +11,10 @@ use Throwable;
 
 class ProductImageResolver
 {
+    public function __construct(
+        private readonly BrowserProductGalleryExtractor $browser,
+    ) {}
+
     /**
      * @param  array<int, array<string, mixed>>  $sources
      * @return array<int, string>
@@ -26,11 +30,17 @@ class ProductImageResolver
                 continue;
             }
 
+            $sourceImageStart = count($images);
+            $browserUrl = $sourceUrl;
+            $browserEligible = true;
+
             try {
                 [$response, $finalUrl] = $this->fetch($sourceUrl);
+                $browserUrl = $finalUrl;
 
                 if (str_starts_with(strtolower((string) $response->header('Content-Type')), 'image/')) {
                     $images[] = $finalUrl;
+                    $browserEligible = false;
                 } elseif (str_contains(strtolower((string) $response->header('Content-Type')), 'text/html')) {
                     foreach ($this->extractPageImages($response->body(), $finalUrl) as $imageUrl) {
                         if ($this->isPublicUrl($imageUrl)) {
@@ -43,6 +53,21 @@ class ProductImageResolver
                     'host' => parse_url($sourceUrl, PHP_URL_HOST),
                     'error' => $exception->getMessage(),
                 ]);
+            }
+
+            if ($browserEligible && count($images) < $limit) {
+                $browserImages = collect($this->browser->extract($browserUrl, $limit))
+                    ->filter(fn (mixed $imageUrl): bool => is_string($imageUrl) && $this->isPublicUrl($imageUrl))
+                    ->values()
+                    ->all();
+
+                if ($browserImages !== []) {
+                    $previousSourceImages = array_slice($images, 0, $sourceImageStart);
+                    $staticSourceImages = array_slice($images, $sourceImageStart);
+                    $images = count($browserImages) >= 2
+                        ? [...$previousSourceImages, ...$browserImages]
+                        : [...$previousSourceImages, ...$browserImages, ...$staticSourceImages];
+                }
             }
 
             $images = array_values(array_unique($images));

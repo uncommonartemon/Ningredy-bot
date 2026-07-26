@@ -41,4 +41,13 @@ return [
     // no downloadable candidate, or every downloaded candidate was rejected.
     'fallback_discovery' => true,
     'discover_after_rejection' => true,
+
+    // A real browser is used only when static HTML does not expose enough
+    // product gallery images (for example, JavaScript sliders on B&H).
+    'browser_fallback' => [
+        'enabled' => env('PRODUCT_IMAGE_BROWSER_ENABLED', env('APP_ENV') !== 'testing'),
+        'node_binary' => env('PRODUCT_IMAGE_BROWSER_NODE', 'node'),
+        'script' => 'scripts/extract-product-gallery.mjs',
+        'timeout' => 35,
+    ],
 ];

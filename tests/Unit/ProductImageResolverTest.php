@@ -2,6 +2,7 @@
 
 namespace Tests\Unit;
 
+use App\Services\Products\BrowserProductGalleryExtractor;
 use App\Services\Products\ProductImageResolver;
 use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
@@ -97,6 +98,35 @@ class ProductImageResolverTest extends TestCase
             'https://93.184.216.34/gallery/product-small.webp',
             'https://93.184.216.34/gallery/product-front.jpg',
             'https://93.184.216.34/gallery/product-back.jpg',
+        ], $images);
+    }
+
+    public function test_it_uses_the_browser_fallback_when_static_html_has_too_few_gallery_images(): void
+    {
+        config()->set('product-images.browser_fallback.enabled', true);
+        Http::fake([
+            'https://93.184.216.34/javascript-product' => Http::response(
+                '<html><head><meta property="og:image" content="/static-fallback.jpg"></head><body><div id="app"></div></body></html>',
+                200,
+                ['Content-Type' => 'text/html'],
+            ),
+        ]);
+        $browser = $this->mock(BrowserProductGalleryExtractor::class);
+        $browser->shouldReceive('extract')
+            ->once()
+            ->with('https://93.184.216.34/javascript-product', 5)
+            ->andReturn([
+                'https://93.184.216.34/browser-product-front.jpg',
+                'https://93.184.216.34/browser-product-back.jpg',
+            ]);
+
+        $images = app(ProductImageResolver::class)->resolve([
+            ['url' => 'https://93.184.216.34/javascript-product'],
+        ], 5);
+
+        $this->assertSame([
+            'https://93.184.216.34/browser-product-front.jpg',
+            'https://93.184.216.34/browser-product-back.jpg',
         ], $images);
     }
 }
