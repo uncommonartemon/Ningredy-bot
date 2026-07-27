@@ -129,4 +129,30 @@ class ProductImageResolverTest extends TestCase
             'https://93.184.216.34/browser-product-back.jpg',
         ], $images);
     }
+
+    public function test_it_marks_a_continue_shopping_page_as_blocked_instead_of_extracting_its_images(): void
+    {
+        config()->set('product-images.browser_fallback.enabled', true);
+        Http::fake([
+            'https://93.184.216.34/blocked-product' => Http::response(
+                '<html><body><img src="/tiny.jpg"><p>Click the button below to continue shopping</p></body></html>',
+                200,
+                ['Content-Type' => 'text/html'],
+            ),
+        ]);
+        $browser = $this->mock(BrowserProductGalleryExtractor::class);
+        $browser->shouldReceive('extract')->once()->andReturn([]);
+        $events = [];
+
+        $images = app(ProductImageResolver::class)->resolve(
+            [['url' => 'https://93.184.216.34/blocked-product']],
+            5,
+            function (string $level, string $message) use (&$events): void {
+                $events[] = [$level, $message];
+            },
+        );
+
+        $this->assertSame([], $images);
+        $this->assertSame('blocked', $events[0][0]);
+    }
 }

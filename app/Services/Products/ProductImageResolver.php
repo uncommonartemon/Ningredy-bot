@@ -9,6 +9,8 @@ use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Throwable;
 
+use Illuminate\Support\Str;
+
 class ProductImageResolver
 {
     public function __construct(
@@ -43,9 +45,17 @@ class ProductImageResolver
                     $images[] = $finalUrl;
                     $browserEligible = false;
                 } elseif (str_contains(strtolower((string) $response->header('Content-Type')), 'text/html')) {
-                    foreach ($this->extractPageImages($response->body(), $finalUrl) as $imageUrl) {
-                        if ($this->isPublicUrl($imageUrl)) {
-                            $images[] = $imageUrl;
+                    $html = $response->body();
+
+                    if ($this->looksLikeAccessGate($html)) {
+                        if ($debug) {
+                            $debug('blocked', 'Страница источника открыла CAPTCHA/служебную заглушку вместо карточки товара.');
+                        }
+                    } else {
+                        foreach ($this->extractPageImages($html, $finalUrl) as $imageUrl) {
+                            if ($this->isPublicUrl($imageUrl)) {
+                                $images[] = $imageUrl;
+                            }
                         }
                     }
                 }
@@ -365,6 +375,20 @@ class ProductImageResolver
         }
 
         return $this->absoluteUrl($candidate, $pageUrl);
+    }
+
+    private function looksLikeAccessGate(string $html): bool
+    {
+        $text = Str::lower(strip_tags($html));
+
+        return Str::contains($text, [
+            'click the button below to continue shopping',
+            'captcha page',
+            'enter the characters you see below',
+            'sorry, we just need to make sure you\'re not a robot',
+            'robot check',
+            'access denied',
+        ]);
     }
 
     private function absoluteUrl(string $candidate, string $baseUrl): string

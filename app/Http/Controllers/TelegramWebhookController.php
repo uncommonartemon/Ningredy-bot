@@ -283,9 +283,19 @@ class TelegramWebhookController extends Controller
         }
 
         $approved = in_array($matches[1], ['add', 'approve'], true);
-        $product = $approved
-            ? $this->draftWorkflow->approve($draft, telegramReviewerId: $update->telegram_user_id)
-            : null;
+
+        try {
+            $product = $approved
+                ? $this->draftWorkflow->approve($draft, telegramReviewerId: $update->telegram_user_id)
+                : null;
+        } catch (\RuntimeException $exception) {
+            $this->telegram->answerCallbackQuery($callbackId, mb_substr($exception->getMessage(), 0, 180));
+            $this->telegram->sendMessage($chatId, '⚠️ '.$exception->getMessage());
+            $update->update(['status' => 'rejected', 'error' => $exception->getMessage(), 'processed_at' => now()]);
+
+            return;
+        }
+
         if (! $approved) {
             $this->draftWorkflow->reject($draft, telegramReviewerId: $update->telegram_user_id);
         }

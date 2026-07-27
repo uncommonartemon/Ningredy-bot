@@ -210,14 +210,28 @@ class ProductImageStorage
                 ]));
             }
 
-            $urls = array_values(array_unique([
-                ...$urls,
-                ...$this->resolver->resolve(
-                    [$source],
-                    max(8, $target * 2),
-                    $progress ? fn (string $level, string $message) => $progress($message) : null,
-                ),
-            ]));
+            $sourceBlocked = false;
+            $resolvedUrls = $this->resolver->resolve(
+                [$source],
+                max(8, $target * 2),
+                function (string $level, string $message) use (&$sourceBlocked, $progress): void {
+                    if ($level === 'blocked') {
+                        $sourceBlocked = true;
+                    }
+                    if ($progress) {
+                        $progress($message);
+                    }
+                },
+            );
+
+            if ($sourceBlocked) {
+                if ($progress) {
+                    $progress('Источник пропущен: ссылка ведёт на защитную заглушку, а не на товар.');
+                }
+                continue;
+            }
+
+            $urls = array_values(array_unique([...$urls, ...$resolvedUrls]));
             $allCandidates = $this->downloadCandidates($urls, $draft);
 
             if ($allCandidates === []) {
@@ -928,6 +942,10 @@ class ProductImageStorage
 
         if (str_contains($host, 'dlcdnwebimgs.asus.com')) {
             return preg_replace('#//w(?:48|64|96|184)(?:\?|$)#i', '//w800', $url) ?: $url;
+        }
+
+        if ($host === 'm.media-amazon.com' || str_ends_with($host, '.media-amazon.com')) {
+            return preg_replace('#\._[^/]+(?=\.(?:jpe?g|png|webp)(?:$|\?))#i', '', $url) ?: $url;
         }
 
         return $url;

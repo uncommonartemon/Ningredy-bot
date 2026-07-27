@@ -1137,7 +1137,7 @@ class ProductImageStorageTest extends TestCase
 
         // Keep fixtures above the production minimum without retaining dozens of
         // multi-megabyte GD buffers across the complete Windows test process.
-        $large = imagescale($small, 450, 350);
+        $large = imagescale($small, 640, 500);
         ob_start();
         imagejpeg($large, null, 90);
         $jpeg = ob_get_clean();

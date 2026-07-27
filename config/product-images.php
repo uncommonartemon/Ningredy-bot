@@ -9,9 +9,8 @@ return [
     ],
     'download_limit' => 20,
     'download_candidates' => 8,
-    // Some official product galleries (for example ARTLINE) expose only a
-    // clean 220px catalog image. Vision still has to approve it.
-    'minimum_side' => 200,
+    // Reject thumbnails: staged catalog media must have at least a 480px short side.
+    'minimum_side' => 480,
     'minimum_ratio' => 0.28,
     'maximum_ratio' => 3.5,
     'public_source_target' => 6,

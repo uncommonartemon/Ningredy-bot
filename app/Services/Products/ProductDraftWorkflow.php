@@ -29,6 +29,18 @@ class ProductDraftWorkflow
         ?User $reviewer = null,
         ?string $telegramReviewerId = null,
     ): Product {
+        $minimumSide = (int) config('product-images.minimum_side', 480);
+        $hasLowResolutionMedia = $draft->media()
+            ->where(fn ($query) => $query
+                ->where('width', '<', $minimumSide)
+                ->orWhere('height', '<', $minimumSide))
+            ->exists();
+        throw_if(
+            $hasLowResolutionMedia,
+            \RuntimeException::class,
+            "Черновик содержит фото меньше {$minimumSide}px и не может быть опубликован. Сначала замените фотографии.",
+        );
+
         try {
             return $this->doApprove($draft, $reviewer, $telegramReviewerId);
         } catch (UniqueConstraintViolationException) {

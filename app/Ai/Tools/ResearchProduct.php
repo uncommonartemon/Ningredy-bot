@@ -126,7 +126,7 @@ class ResearchProduct implements Tool
                     function (string $level, string $message) use ($progress): void {
                         match ($level) {
                             'error' => $progress->warning($message),
-                            'warning' => $progress->warning($message),
+                            'warning', 'blocked' => $progress->warning($message),
                             default => $progress->info($message),
                         };
                     },
