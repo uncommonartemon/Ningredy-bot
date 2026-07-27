@@ -36,6 +36,8 @@ class ProductImageResolver
             $sourceImageStart = count($images);
             $browserUrl = $sourceUrl;
             $browserEligible = true;
+            $forceBrowser = preg_match('/(^|\.)amazon\.[a-z.]+$/i', (string) parse_url($sourceUrl, PHP_URL_HOST)) === 1
+                && preg_match('#/dp/[A-Z0-9]{10}(?:/|$)#i', (string) parse_url($sourceUrl, PHP_URL_PATH)) === 1;
             $accessGateDetected = false;
             $browserImages = [];
 
@@ -69,7 +71,7 @@ class ProductImageResolver
                 ]);
             }
 
-            if ($browserEligible && count($images) < $limit) {
+            if ($browserEligible && (count($images) < $limit || $forceBrowser)) {
                 $browserResult = $debug
                     ? $this->browser->extract($browserUrl, $limit, $debug)
                     : $this->browser->extract($browserUrl, $limit);
