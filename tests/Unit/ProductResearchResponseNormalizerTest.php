@@ -74,4 +74,20 @@ class ProductResearchResponseNormalizerTest extends TestCase
         $this->assertSame('cpu_model', $data['specifications'][0]['key']);
         $this->assertCount(1, $data['specifications']);
     }
+
+    public function test_it_canonicalizes_regional_amazon_product_links_to_amazon_com(): void
+    {
+        $data = app(ProductResearchResponseNormalizer::class)->normalize([
+            'primary_source_url' => 'https://www.amazon.ca/dp/B0BS4BP8FB',
+            'sources' => [[
+                'title' => 'Amazon Canada listing',
+                'url' => 'https://www.amazon.ca/Aspire-Laptop/dp/B0BS4BP8FB?ref_=ast_sto_dp',
+                'type' => 'marketplace',
+                'image_urls' => [],
+            ]],
+        ]);
+
+        $this->assertSame('https://www.amazon.com/dp/B0BS4BP8FB', $data['primary_source_url']);
+        $this->assertSame('https://www.amazon.com/dp/B0BS4BP8FB', $data['sources'][0]['url']);
+    }
 }

@@ -33,6 +33,9 @@ class ProductResearchResponseNormalizer
         }
 
         $data['image_urls'] = $this->httpUrls($data['image_urls'] ?? [], 10);
+        if (is_string($data['primary_source_url'] ?? null)) {
+            $data['primary_source_url'] = $this->canonicalProductPageUrl($data['primary_source_url']);
+        }
         $data['sources'] = $this->sources(
             $data['sources'] ?? [],
             is_string($data['primary_source_url'] ?? null) ? $data['primary_source_url'] : null,
@@ -76,7 +79,9 @@ class ProductResearchResponseNormalizer
                 $title = is_string($source['title'] ?? null)
                     ? mb_substr(trim($source['title']), 0, 500)
                     : '';
-                $url = is_string($source['url'] ?? null) ? trim($source['url']) : '';
+                $url = is_string($source['url'] ?? null)
+                    ? $this->canonicalProductPageUrl(trim($source['url']))
+                    : '';
                 $type = is_string($source['type'] ?? null) ? $source['type'] : '';
 
                 if (
@@ -137,6 +142,19 @@ class ProductResearchResponseNormalizer
             ->take(100)
             ->values()
             ->all();
+    }
+
+    private function canonicalProductPageUrl(string $url): string
+    {
+        $host = strtolower((string) parse_url($url, PHP_URL_HOST));
+        $path = (string) parse_url($url, PHP_URL_PATH);
+
+        if (preg_match('/(^|\.)amazon\.[a-z.]+$/', $host) === 1
+            && preg_match('#/(?:[^/]+/)?dp/([A-Z0-9]{10})(?:/|$)#i', $path, $matches) === 1) {
+            return 'https://www.amazon.com/dp/'.strtoupper($matches[1]);
+        }
+
+        return $url;
     }
 
     private function isHttpUrl(string $url): bool

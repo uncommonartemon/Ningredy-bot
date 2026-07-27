@@ -155,4 +155,28 @@ class ProductImageResolverTest extends TestCase
         $this->assertSame([], $images);
         $this->assertSame('blocked', $events[0][0]);
     }
+
+    public function test_it_extracts_amazon_full_resolution_gallery_urls_from_data_old_hires(): void
+    {
+        config()->set('product-images.browser_fallback.enabled', false);
+        Http::fake([
+            'https://93.184.216.34/amazon-product' => Http::response(
+                '<ul class="desktop-media-mainView">'
+                .'<li><img data-old-hires="https://m.media-amazon.com/images/I/MAIN._AC_SL1500_.jpg"></li>'
+                .'<li><div data-old-hires="https://m.media-amazon.com/images/I/SECOND._AC_SL1000_.jpg"></div></li>'
+                .'</ul>',
+                200,
+                ['Content-Type' => 'text/html'],
+            ),
+        ]);
+
+        $images = app(ProductImageResolver::class)->resolve([
+            ['url' => 'https://93.184.216.34/amazon-product'],
+        ], 5);
+
+        $this->assertSame([
+            'https://m.media-amazon.com/images/I/MAIN._AC_SL1500_.jpg',
+            'https://m.media-amazon.com/images/I/SECOND._AC_SL1000_.jpg',
+        ], $images);
+    }
 }

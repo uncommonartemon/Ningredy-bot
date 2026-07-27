@@ -36,6 +36,8 @@ class ProductImageResolver
             $sourceImageStart = count($images);
             $browserUrl = $sourceUrl;
             $browserEligible = true;
+            $accessGateDetected = false;
+            $browserImages = [];
 
             try {
                 [$response, $finalUrl] = $this->fetch($sourceUrl);
@@ -48,9 +50,7 @@ class ProductImageResolver
                     $html = $response->body();
 
                     if ($this->looksLikeAccessGate($html)) {
-                        if ($debug) {
-                            $debug('blocked', 'Страница источника открыла CAPTCHA/служебную заглушку вместо карточки товара.');
-                        }
+                        $accessGateDetected = true;
                     } else {
                         foreach ($this->extractPageImages($html, $finalUrl) as $imageUrl) {
                             if ($this->isPublicUrl($imageUrl)) {
@@ -79,12 +79,17 @@ class ProductImageResolver
                     ->all();
 
                 if ($browserImages !== []) {
+                    $accessGateDetected = false;
                     $previousSourceImages = array_slice($images, 0, $sourceImageStart);
                     $staticSourceImages = array_slice($images, $sourceImageStart);
                     $images = count($browserImages) >= 2
                         ? [...$previousSourceImages, ...$browserImages]
                         : [...$previousSourceImages, ...$browserImages, ...$staticSourceImages];
                 }
+            }
+
+            if ($accessGateDetected && $browserImages === [] && $debug) {
+                $debug('blocked', 'HTTP-запрос получил служебную страницу, и Playwright не смог открыть полноценную карточку товара.');
             }
 
             $images = array_values(array_unique($images));
@@ -202,6 +207,7 @@ class ProductImageResolver
         $xpath = new DOMXPath($document);
         $galleryScope = '//*[contains(translate(concat(" ", @class, " ", @id, " "), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "gallery") or contains(translate(concat(" ", @class, " ", @id, " "), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "slider") or contains(translate(concat(" ", @class, " ", @id, " "), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "swiper") or contains(translate(concat(" ", @class, " ", @id, " "), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "carousel") or contains(translate(concat(" ", @class, " ", @id, " "), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "product-image") or contains(translate(concat(" ", @class, " ", @id, " "), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "product-media")]';
         $directQueries = [
+            $galleryScope.'//*[@data-old-hires]/@data-old-hires',
             $galleryScope.'//img/@data-zoom-image',
             $galleryScope.'//img/@data-large_image',
             $galleryScope.'//img/@data-full',
@@ -219,6 +225,7 @@ class ProductImageResolver
             '//meta[@name="twitter:image:src"]/@content',
             '//meta[@itemprop="image"]/@content',
             '//link[@rel="image_src"]/@href',
+            '//*[@data-old-hires]/@data-old-hires',
             '//img/@data-full',
             '//img/@data-full-src',
             '//img/@data-hires',

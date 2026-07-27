@@ -185,6 +185,7 @@ page.on('response', (response) => {
 });
 
 const genericGallerySelectors = [
+    '[data-old-hires]',
     '[data-selenium*="thumbnail" i] img',
     '[data-selenium*="mainimage" i]',
     '[data-selenium*="main-image" i]',
@@ -239,6 +240,7 @@ const collectDomImages = async () => page.evaluate((selectors) => {
         }
 
         for (const attribute of [
+            'data-old-hires',
             'data-zoom-image',
             'data-large_image',
             'data-full',
@@ -299,14 +301,36 @@ const collectDomImages = async () => page.evaluate((selectors) => {
 }, gallerySelectors);
 
 const gathered = [];
+const priorityImages = [];
 let learnedRecipe = {};
 const collect = async () => {
     gathered.push(...await collectDomImages());
+    priorityImages.push(...await page.locator('[data-old-hires]').evaluateAll(
+        (elements) => elements.map((element) => element.getAttribute('data-old-hires')).filter(Boolean),
+    ).catch(() => []));
 };
 
 try {
     await page.goto(sourceUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 });
     await page.waitForLoadState('networkidle', { timeout: 5_000 }).catch(() => {});
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+        const continueShopping = page.locator([
+            'button:has-text("Continue shopping")',
+            'a:has-text("Continue shopping")',
+            'input[value*="Continue shopping" i]',
+        ].join(',')).first();
+
+        if (!await continueShopping.count()) {
+            break;
+        }
+
+        await continueShopping.click({ force: true, timeout: 2_000 }).catch(() => {});
+        await page.waitForLoadState('domcontentloaded', { timeout: 10_000 }).catch(() => {});
+        await page.waitForLoadState('networkidle', { timeout: 5_000 }).catch(() => {});
+    }
+
+    await page.locator('#sp-cc-accept').click({ timeout: 500 }).catch(() => {});
     await collect();
 
     const selectorCounts = {};
@@ -396,6 +420,7 @@ const normalize = (rawUrl) => {
 };
 
 const domImages = gathered.map(normalize).filter(Boolean);
+const priorityDomImages = [...new Set(priorityImages.map(normalize).filter(Boolean))];
 const requestedImages = networkImages.map(normalize).filter(Boolean);
 const embeddedImages = payloadImages.map(normalize).filter(Boolean);
 const allCandidates = [...new Set([...domImages, ...embeddedImages, ...requestedImages])];
@@ -407,14 +432,19 @@ const qualityScore = (rawUrl) => {
         Number.parseInt(url.searchParams.get('width') || url.searchParams.get('w') || '0', 10),
         Number.parseInt(url.searchParams.get('height') || url.searchParams.get('h') || '0', 10),
     );
+    const amazonSize = Number.parseInt(url.pathname.match(/\._(?:AC_)?S(?:L|X|Y)(\d+)/i)?.[1] || '0', 10);
 
-    return Math.max(pathSize, querySize);
+    return Math.max(pathSize, querySize, amazonSize);
 };
 const assetKey = (rawUrl) => {
     const url = new URL(rawUrl);
 
     if (url.hostname.endsWith('bhphoto.com')) {
         return `bh:${url.pathname.split('/').pop()?.toLowerCase()}`;
+    }
+
+    if (url.hostname.endsWith('media-amazon.com')) {
+        return `amazon:${url.pathname.replace(/\._[^/]+(?=\.[^./]+$)/, '').toLowerCase()}`;
     }
 
     for (const key of ['width', 'height', 'w', 'h', 'quality', 'q', 'fit']) {
@@ -424,9 +454,11 @@ const assetKey = (rawUrl) => {
     return url.toString();
 };
 const domKeys = new Set(domImages.map(assetKey));
-const candidates = domImages.length >= 2
-    ? allCandidates.filter((candidate) => domKeys.has(assetKey(candidate)))
-    : allCandidates;
+const candidates = priorityDomImages.length >= 2
+    ? priorityDomImages
+    : (domImages.length >= 2
+        ? allCandidates.filter((candidate) => domKeys.has(assetKey(candidate)))
+        : allCandidates);
 const bestImages = new Map();
 
 for (const candidate of candidates) {
