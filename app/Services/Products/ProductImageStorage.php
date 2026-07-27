@@ -231,7 +231,8 @@ class ProductImageStorage
                 continue;
             }
 
-            $urls = array_values(array_unique([...$urls, ...$resolvedUrls]));
+            // Browser/DOM gallery URLs are more reliable than AI-provided thumbnails.
+            $urls = array_values(array_unique([...$resolvedUrls, ...$urls]));
             $allCandidates = $this->downloadCandidates($urls, $draft);
 
             if ($allCandidates === []) {
