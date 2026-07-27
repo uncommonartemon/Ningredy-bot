@@ -7,10 +7,12 @@ use App\Ai\Tools\GetProduct;
 use App\Ai\Tools\GetRecentErrors;
 use App\Ai\Tools\GetSystemStatus;
 use App\Ai\Tools\ListPendingDrafts;
+use App\Ai\Tools\ManageDraftPhotos;
 use App\Ai\Tools\PrepareProductDeletion;
 use App\Ai\Tools\RefindProductPhotos;
 use App\Ai\Tools\ReorderProductPhotos;
 use App\Ai\Tools\ResearchProduct;
+use App\Ai\Tools\RetrainDraftGalleryRecipe;
 use App\Ai\Tools\RetryFailedJob;
 use App\Ai\Tools\ReviewProductDraft;
 use App\Ai\Tools\SearchCatalog;
@@ -29,8 +31,6 @@ use Laravel\Ai\Contracts\HasStructuredOutput;
 use Laravel\Ai\Contracts\HasTools;
 use Laravel\Ai\Promptable;
 use Stringable;
-
-use App\Ai\Tools\ManageDraftPhotos;
 
 class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput, HasTools
 {
@@ -55,6 +55,7 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
             - Album positions are 1-based. For a mixed request, put every requested position into enhance_positions, replace_positions, and delete_positions in one ManageDraftPhotos call.
             - Replacing means finding a different, model/color-matching, non-duplicate internet photo. Enhancing means processing the same selected photo.
             - ManageDraftPhotos is asynchronous. Say only that processing has started; progress and the updated review album will be sent automatically.
+            - If the user asks to improve/retrain the source recipe, says the source has more/better/full-resolution gallery photos, or the extracted gallery is incomplete, use RetrainDraftGalleryRecipe. It studies sanitized DOM with the dedicated strongest model, validates the candidate recipe, then replaces draft photos asynchronously.
 
             When a message starts with "[Пользователь ответил (Reply) на сообщение бота: ...]" - the user
             used Telegram's Reply feature on that exact earlier bot message. Treat its quoted text as the
@@ -154,6 +155,7 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
             new UpdateVariant($this->update),
             new ReviewProductDraft($this->update, app(ProductDraftWorkflow::class)),
             new ManageDraftPhotos($this->update),
+            new RetrainDraftGalleryRecipe($this->update),
             new PrepareProductDeletion($this->update),
             new RetryFailedJob($this->update),
             new ReorderProductPhotos($this->update),

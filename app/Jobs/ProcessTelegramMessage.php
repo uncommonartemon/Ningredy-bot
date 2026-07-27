@@ -27,11 +27,11 @@ class ProcessTelegramMessage implements ShouldQueue
 {
     use Queueable;
 
-    public int $tries = 3;
+    public int $tries = 2;
 
-    public int $timeout = 780;
+    public int $timeout = 1500;
 
-    public array $backoff = [10, 60, 300];
+    public array $backoff = [30, 180];
 
     public function __construct(public int $telegramUpdateId)
     {
@@ -40,7 +40,7 @@ class ProcessTelegramMessage implements ShouldQueue
 
     public function middleware(): array
     {
-        return [(new WithoutOverlapping('telegram-update:'.$this->telegramUpdateId))->releaseAfter(10)->expireAfter(300)];
+        return [(new WithoutOverlapping('telegram-update:'.$this->telegramUpdateId))->releaseAfter(30)->expireAfter(1560)];
     }
 
     public function handle(TelegramClient $telegram, AiErrorPresenter $errors): void
@@ -81,7 +81,7 @@ class ProcessTelegramMessage implements ShouldQueue
             $prompt = $update->reply_to_text
                 ? "[Пользователь ответил (Reply) на сообщение бота: \"{$update->reply_to_text}\"]\n{$update->text}"
                 : (string) $update->text;
-            $response = $agent->prompt($prompt, provider: $provider, model: $model, timeout: 720);
+            $response = $agent->prompt($prompt, provider: $provider, model: $model, timeout: 1440);
             $normalizedResponse = $response->toArray();
 
             if (is_string($normalizedResponse['message'] ?? null)) {

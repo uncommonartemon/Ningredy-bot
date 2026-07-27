@@ -95,6 +95,9 @@ class DraftTelegramPresenter
                     ['text' => '🔄 Заменить', 'callback_data' => "draft:replace:{$draft->id}"],
                 ],
                 [
+                    ['text' => '🧠 Улучшить рецепт источника', 'callback_data' => "draft:retrain:{$draft->id}"],
+                ],
+                [
                     ['text' => '🗑 Удалить фото', 'callback_data' => "draft:delete:{$draft->id}"],
                 ],
             ],

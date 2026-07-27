@@ -40,7 +40,7 @@ return [
             'connection' => env('DB_QUEUE_CONNECTION'),
             'table' => env('DB_QUEUE_TABLE', 'jobs'),
             'queue' => env('DB_QUEUE', 'default'),
-            'retry_after' => max(900, (int) env('DB_QUEUE_RETRY_AFTER', 900)),
+            'retry_after' => max(1650, (int) env('DB_QUEUE_RETRY_AFTER', 1650)),
             'after_commit' => false,
         ],
 

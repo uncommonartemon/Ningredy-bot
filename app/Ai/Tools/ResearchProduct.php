@@ -16,6 +16,8 @@ use App\Services\Products\ProductImageStorage;
 use App\Services\Products\ProductPublicDescription;
 use App\Services\Products\ProductResearchResponseNormalizer;
 use App\Services\Products\ProductSourcePriority;
+use App\Services\Telegram\TelegramClient;
+use App\Services\Telegram\TelegramProgressReporter;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Validation\Rule;
@@ -23,9 +25,6 @@ use Laravel\Ai\Contracts\Tool;
 use Laravel\Ai\Tools\Request;
 use Stringable;
 use Throwable;
-
-use App\Services\Telegram\TelegramClient;
-use App\Services\Telegram\TelegramProgressReporter;
 
 class ResearchProduct implements Tool
 {
@@ -119,7 +118,7 @@ class ResearchProduct implements Tool
                 ])->validate();
 
                 $data['primary_source_url'] = $primarySource['url'];
-                $progress->step('2/4 · чтение галереи страницы', 45, parse_url($data['primary_source_url'], PHP_URL_HOST) ?: null);
+                $progress->step('2/4 · галерея страницы и AI-переобучение при необходимости', 480, parse_url($data['primary_source_url'], PHP_URL_HOST) ?: null);
                 $resolvedGallery = $this->imageResolver->resolve(
                     [$primarySource],
                     10,

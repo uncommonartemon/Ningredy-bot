@@ -45,6 +45,21 @@ class AiSettings
         AppSetting::put('ai.image_model', array_key_exists($model, self::IMAGE_MODELS) ? $model : null);
     }
 
+    public function galleryRecipeTrainingModel(): ?string
+    {
+        $model = AppSetting::valueFor('ai.gallery_recipe_training_model');
+
+        return $this->models->has('openai', $model) ? $model : null;
+    }
+
+    public function saveGalleryRecipeTrainingModel(?string $model): void
+    {
+        AppSetting::put(
+            'ai.gallery_recipe_training_model',
+            $this->models->has('openai', $model) ? $model : null,
+        );
+    }
+
     public function providerFor(string $role): string
     {
         return 'openai';
@@ -54,6 +69,11 @@ class AiSettings
     {
         if ($role === 'image_upscale') {
             return $this->imageModel() ?: (string) config('services.image_upscale.model');
+        }
+
+        if ($role === 'gallery_recipe_training') {
+            return $this->galleryRecipeTrainingModel()
+                ?: (string) config('services.gallery_recipe_training.model', 'gpt-5.4');
         }
 
         // The admin's global chat-model override must never apply to a

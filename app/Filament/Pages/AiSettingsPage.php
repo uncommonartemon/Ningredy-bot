@@ -42,6 +42,8 @@ class AiSettingsPage extends Page implements HasForms
         $this->form->fill([
             'model' => $settings->model(),
             'image_model' => $settings->imageModel(),
+            'gallery_recipe_training_model' => $settings->galleryRecipeTrainingModel()
+                ?: (string) config('services.gallery_recipe_training.model', 'gpt-5.4'),
         ]);
     }
 
@@ -73,6 +75,17 @@ class AiSettingsPage extends Page implements HasForms
                             ->options(fn (): array => app(AiModelCatalog::class)->options('openai'))
                             ->placeholder('Из .env')
                             ->helperText('Пусто — используются модели из .env. Тарифы проверены по официальным страницам'.($checkedAt ? " {$checkedAt}." : '.'))
+                            ->searchable(),
+                    ]),
+                Section::make('Обучение Playwright-рецептов')
+                    ->description('Эта модель изучает очищенную HTML/DOM-структуру незнакомой или изменившейся галереи. Используется при первом запуске и автоматическом переобучении; обычный рабочий проход AI не вызывает.')
+                    ->schema([
+                        Select::make('gallery_recipe_training_model')
+                            ->label('Сильная модель тренера')
+                            ->options(fn (): array => app(AiModelCatalog::class)->options('openai'))
+                            ->default((string) config('services.gallery_recipe_training.model', 'gpt-5.4'))
+                            ->required()
+                            ->helperText('По умолчанию gpt-5.4. Рецепт — только безопасный JSON с CSS-селекторами, без произвольного JavaScript.')
                             ->searchable(),
                     ]),
                 Section::make('Улучшение фото')
@@ -129,6 +142,7 @@ class AiSettingsPage extends Page implements HasForms
 
         $settings->saveModel($data['model'] ?? null);
         $settings->saveImageModel($data['image_model'] ?? null);
+        $settings->saveGalleryRecipeTrainingModel($data['gallery_recipe_training_model'] ?? null);
 
         try {
             Artisan::call('queue:restart');

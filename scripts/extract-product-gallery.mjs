@@ -4,6 +4,7 @@ import { chromium } from 'playwright-core';
 
 const sourceUrl = process.argv[2];
 const limit = Math.max(1, Math.min(60, Number.parseInt(process.argv[3] || '20', 10)));
+const scoutOnly = process.env.PRODUCT_GALLERY_SCOUT_ONLY === '1';
 let recipe = {};
 
 try {
@@ -13,7 +14,18 @@ try {
 }
 
 const recipeSelectors = (key) => Array.isArray(recipe[key])
-    ? recipe[key].filter((selector) => typeof selector === 'string' && selector.length <= 300)
+    ? recipe[key].filter((selector) => typeof selector === 'string'
+        && selector.length <= 300
+        && !/(?:javascript:|https?:|file:|xpath|script\b|iframe\b)/i.test(selector))
+    : [];
+const recipeNumber = (key, fallback, max) => Number.isInteger(recipe[key])
+    ? Math.max(0, Math.min(max, recipe[key]))
+    : fallback;
+const recipeAttributes = Array.isArray(recipe.attributes)
+    ? recipe.attributes
+        .filter((attribute) => typeof attribute === 'string'
+            && /^(?:src|href|srcset|data-[a-z0-9_-]+)$/i.test(attribute))
+        .slice(0, 12)
     : [];
 
 if (!sourceUrl) {
@@ -201,24 +213,36 @@ const genericGallerySelectors = [
     '[class*="product-media" i] img',
     'img[itemprop="image"]',
 ];
-const gallerySelectors = [...new Set([...recipeSelectors('collect_selectors'), ...genericGallerySelectors])];
-const thumbnailSelectors = [...new Set([...recipeSelectors('thumbnail_selectors'), ...genericGallerySelectors.slice(0, 10)])];
+const strictRecipe = Object.keys(recipe).length > 0 && !scoutOnly;
+const preClickSelectors = [...new Set(recipeSelectors('pre_click_selectors'))];
+const gallerySelectors = [...new Set([
+    ...recipeSelectors('collect_selectors'),
+    ...(strictRecipe ? [] : genericGallerySelectors),
+])];
+const thumbnailSelectors = [...new Set([
+    ...recipeSelectors('thumbnail_selectors'),
+    ...(strictRecipe ? [] : genericGallerySelectors.slice(0, 10)),
+])];
 const openSelectors = [...new Set([
     ...recipeSelectors('open_selectors'),
+    ...(strictRecipe ? [] : [
     'button[data-selenium*="media" i]',
     'button[class*="openmedia" i]',
     'button[class*="gallery" i]',
     'button[class*="thumbnail" i]',
-    '[role="button"][class*="media" i]',
+        '[role="button"][class*="media" i]',
+    ]),
 ])];
 const nextSelectors = [...new Set([
     ...recipeSelectors('next_selectors'),
-    'button[aria-label*="next" i]',
-    'button[data-selenium*="next" i]',
-    'button[class*="next" i]',
+    ...(strictRecipe ? [] : [
+        'button[aria-label*="next" i]',
+        'button[data-selenium*="next" i]',
+        'button[class*="next" i]',
+    ]),
 ])];
 
-const collectDomImages = async () => page.evaluate((selectors) => {
+const collectDomImages = async () => page.evaluate(({ selectors, extraAttributes }) => {
     const urls = [];
     const add = (value) => {
         if (typeof value === 'string' && value.trim() !== '') {
@@ -239,7 +263,8 @@ const collectDomImages = async () => page.evaluate((selectors) => {
             return;
         }
 
-        for (const attribute of [
+        for (const attribute of [...new Set([
+            ...extraAttributes,
             'data-old-hires',
             'data-zoom-image',
             'data-large_image',
@@ -251,7 +276,7 @@ const collectDomImages = async () => page.evaluate((selectors) => {
             'data-src',
             'src',
             'href',
-        ]) {
+        ])]) {
             add(element.getAttribute?.(attribute));
         }
 
@@ -269,9 +294,13 @@ const collectDomImages = async () => page.evaluate((selectors) => {
     };
 
     for (const selector of selectors) {
-        for (const element of document.querySelectorAll(selector)) {
-            addElement(element);
-            addElement(element.parentElement);
+        try {
+            for (const element of document.querySelectorAll(selector)) {
+                addElement(element);
+                addElement(element.parentElement);
+            }
+        } catch {
+            // Ignore an invalid selector instead of aborting the entire recipe.
         }
     }
 
@@ -298,11 +327,12 @@ const collectDomImages = async () => page.evaluate((selectors) => {
     }
 
     return urls;
-}, gallerySelectors);
+}, { selectors: gallerySelectors, extraAttributes: recipeAttributes });
 
 const gathered = [];
 const priorityImages = [];
 let learnedRecipe = {};
+let scout = {};
 const collect = async () => {
     gathered.push(...await collectDomImages());
     priorityImages.push(...await page.locator('[data-old-hires]').evaluateAll(
@@ -331,6 +361,49 @@ try {
     }
 
     await page.locator('#sp-cc-accept').click({ timeout: 500 }).catch(() => {});
+
+    for (const selector of preClickSelectors) {
+        const control = page.locator(selector).first();
+
+        if (await control.count().catch(() => 0)) {
+            await control.click({ force: true, timeout: 1_000 }).catch(() => {});
+            await page.waitForTimeout(recipeNumber('wait_after_click_ms', 150, 1000));
+        }
+    }
+
+    scout = await page.evaluate(() => {
+        const candidates = [...document.querySelectorAll([
+            '[data-old-hires]', '[data-zoom-image]', '[data-large_image]', '[itemprop="image"]',
+            '[class*="gallery" i]', '[class*="thumbnail" i]', '[class*="slider" i]',
+            '[class*="carousel" i]', '[class*="swiper" i]', '[class*="product-image" i]',
+            '[class*="product-media" i]', '[data-selenium*="media" i]',
+            'button[aria-label*="next" i]', 'button[aria-label*="image" i]',
+        ].join(','))].slice(0, 40);
+        const sanitize = (element) => {
+            const clone = element.cloneNode(true);
+
+            for (const node of [clone, ...clone.querySelectorAll('*')]) {
+                for (const attribute of [...node.attributes]) {
+                    if (/^on/i.test(attribute.name) || ['style', 'nonce', 'integrity'].includes(attribute.name)) {
+                        node.removeAttribute(attribute.name);
+                    }
+                }
+            }
+
+            for (const node of clone.querySelectorAll('script,style,noscript,iframe,object,embed,form,input,textarea')) {
+                node.remove();
+            }
+
+            return clone.outerHTML.replace(/\s+/g, ' ').slice(0, 1000);
+        };
+
+        return {
+            final_url: location.href,
+            title: document.title.slice(0, 500),
+            fragments: candidates.map(sanitize).filter(Boolean).slice(0, 18),
+        };
+    });
+
     await collect();
 
     const selectorCounts = {};
@@ -344,19 +417,22 @@ try {
         next_selectors: nextSelectors.filter((selector) => selectorCounts[selector] > 0).slice(0, 5),
     };
 
-    const thumbnails = page.locator(thumbnailSelectors.join(','));
-    const thumbnailCount = Math.min(await thumbnails.count(), 20);
+    if (!scoutOnly) {
+        const thumbnails = thumbnailSelectors.length ? page.locator(thumbnailSelectors.join(',')) : null;
+    const thumbnailCount = thumbnails
+        ? Math.min(await thumbnails.count(), recipeNumber('max_thumbnail_clicks', 20, 20))
+        : 0;
 
     for (let index = 0; index < thumbnailCount; index++) {
         const thumbnail = thumbnails.nth(index);
         await thumbnail.scrollIntoViewIfNeeded({ timeout: 500 }).catch(() => {});
         await thumbnail.click({ force: true, timeout: 700 }).catch(() => {});
-        await page.waitForTimeout(80);
+        await page.waitForTimeout(recipeNumber('wait_after_click_ms', 100, 1000));
         await collect();
     }
 
-    const openMediaButtons = page.locator(openSelectors.join(','));
-    const openMediaCount = Math.min(await openMediaButtons.count(), 5);
+    const openMediaButtons = openSelectors.length ? page.locator(openSelectors.join(',')) : null;
+    const openMediaCount = openMediaButtons ? Math.min(await openMediaButtons.count(), 5) : 0;
 
     for (let index = 0; index < openMediaCount; index++) {
         const button = openMediaButtons.nth(index);
@@ -372,14 +448,15 @@ try {
         await collect();
     }
 
-    const nextButtons = page.locator(nextSelectors.join(','));
+    const nextButtons = nextSelectors.length ? page.locator(nextSelectors.join(',')) : null;
 
-    if (await nextButtons.count()) {
-        for (let index = 0; index < Math.min(limit, 15); index++) {
+    if (nextButtons && await nextButtons.count()) {
+        for (let index = 0; index < Math.min(limit, recipeNumber('max_next_clicks', 15, 15)); index++) {
             await nextButtons.first().click({ force: true, timeout: 700 }).catch(() => {});
             await page.waitForTimeout(100);
             await collect();
         }
+    }
     }
 } finally {
     await Promise.allSettled([...pendingPayloads]);
@@ -478,6 +555,7 @@ const images = [...bestImages.values()].slice(0, limit);
 
 process.stdout.write(JSON.stringify({
     images,
+    scout,
     learned_recipe: learnedRecipe,
     diagnostics: {
         dom_candidates: domImages.length,

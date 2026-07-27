@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class ProductGalleryRecipe extends Model
 {
@@ -18,5 +19,10 @@ class ProductGalleryRecipe extends Model
             'last_success_at' => 'datetime',
             'last_failure_at' => 'datetime',
         ];
+    }
+
+    public function versions(): HasMany
+    {
+        return $this->hasMany(ProductGalleryRecipeVersion::class);
     }
 }

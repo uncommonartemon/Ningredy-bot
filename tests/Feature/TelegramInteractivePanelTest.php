@@ -2,9 +2,10 @@
 
 namespace Tests\Feature;
 
-use App\Jobs\EnhanceDraftPhoto;
+use App\Jobs\ProcessDraftPhotoActions;
 use App\Jobs\ProcessTelegramMessage;
 use App\Jobs\StoreProductImages;
+use App\Jobs\TrainDraftGalleryRecipe;
 use App\Models\AiRun;
 use App\Models\Product;
 use App\Models\ProductDraft;
@@ -206,8 +207,9 @@ class TelegramInteractivePanelTest extends TestCase
             ],
         ], $this->headers())->assertOk();
 
-        Queue::assertPushed(EnhanceDraftPhoto::class, fn (EnhanceDraftPhoto $job): bool => $job->draftId === $draft->id
-            && $job->mediaId === $media->id
+        Queue::assertPushed(ProcessDraftPhotoActions::class, fn (ProcessDraftPhotoActions $job): bool => $job->draftId === $draft->id
+            && data_get($job->actions, '0.action') === 'enhance'
+            && data_get($job->actions, '0.media_id') === $media->id
             && $job->chatId === '98765');
         $this->assertDatabaseHas('ai_operations', [
             'action' => 'enhance_draft_photo',
@@ -216,6 +218,28 @@ class TelegramInteractivePanelTest extends TestCase
         ]);
         Http::assertSent(fn (ClientRequest $request): bool => str_ends_with($request->url(), '/sendMessage')
             && str_contains((string) ($request['text'] ?? ''), 'Улучшаю фото 1'));
+    }
+
+    public function test_retrain_source_button_queues_ai_recipe_training(): void
+    {
+        Queue::fake();
+        $draft = $this->pendingDraftWithMedia();
+
+        $this->postJson('/api/telegram/webhook', [
+            'update_id' => 3103,
+            'callback_query' => [
+                'id' => 'callback-retrain-source',
+                'from' => ['id' => 12345, 'username' => 'admin'],
+                'data' => "draft:retrain:{$draft->id}",
+                'message' => [
+                    'message_id' => 82,
+                    'chat' => ['id' => 98765],
+                ],
+            ],
+        ], $this->headers())->assertOk();
+
+        Queue::assertPushed(TrainDraftGalleryRecipe::class, fn (TrainDraftGalleryRecipe $job): bool => $job->draftId === $draft->id
+            && $job->chatId === '98765');
     }
 
     private function pendingDraftWithMedia(): ProductDraft

@@ -2,8 +2,9 @@
 
 namespace App\Http\Controllers;
 
-use App\Jobs\EnhanceDraftPhoto;
+use App\Jobs\ProcessDraftPhotoActions;
 use App\Jobs\ProcessTelegramMessage;
+use App\Jobs\TrainDraftGalleryRecipe;
 use App\Jobs\TranscribeTelegramVoice;
 use App\Models\AiOperation;
 use App\Models\AppSetting;
@@ -20,8 +21,6 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Throwable;
-
-use App\Jobs\ProcessDraftPhotoActions;
 
 class TelegramWebhookController extends Controller
 {
@@ -224,6 +223,17 @@ class TelegramWebhookController extends Controller
                 callbackId: $callbackId,
                 chatId: $chatId,
                 messageId: $messageId,
+                update: $update,
+            );
+
+            return;
+        }
+
+        if (preg_match('/^draft:retrain:(\d+)$/', $data, $retrainMatches) === 1) {
+            $this->handleDraftRecipeTraining(
+                draftId: (int) $retrainMatches[1],
+                callbackId: $callbackId,
+                chatId: $chatId,
                 update: $update,
             );
 
@@ -484,6 +494,43 @@ class TelegramWebhookController extends Controller
         $this->telegram->answerCallbackQuery(
             $callbackId,
             $started ? 'Ищу фото заново, придут отдельным сообщением.' : 'Не удалось запустить поиск: нет исходного черновика.',
+        );
+    }
+
+    private function handleDraftRecipeTraining(
+        int $draftId,
+        string $callbackId,
+        string $chatId,
+        TelegramUpdate $update,
+    ): void {
+        $draft = ProductDraft::query()->find($draftId);
+
+        if (! $draft || $draft->status !== 'pending_review') {
+            $this->telegram->answerCallbackQuery($callbackId, 'Черновик не найден или уже обработан.');
+
+            return;
+        }
+
+        if (blank($draft->primary_source_url)) {
+            $this->telegram->answerCallbackQuery($callbackId, 'У черновика нет ссылки на карточку товара.');
+
+            return;
+        }
+
+        $queuedKey = "draft-gallery-retrain:{$draft->id}:queued";
+
+        if (! Cache::add($queuedKey, true, now()->addMinutes(10))) {
+            $this->telegram->answerCallbackQuery($callbackId, 'Переобучение этого источника уже идёт.');
+
+            return;
+        }
+
+        TrainDraftGalleryRecipe::dispatch($draft->id, $update->id, $chatId);
+        $update->update(['status' => 'completed', 'processed_at' => now()]);
+        $this->telegram->answerCallbackQuery($callbackId, 'AI изучает DOM источника и проверит новый рецепт.');
+        $this->telegram->sendMessage(
+            $chatId,
+            "🧠 Черновик #{$draft->id}: запускаю переобучение источника. Старый рецепт и фото останутся, пока новый не пройдёт проверку.",
         );
     }
 

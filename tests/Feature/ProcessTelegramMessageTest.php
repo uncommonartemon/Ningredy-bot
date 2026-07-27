@@ -131,7 +131,8 @@ class ProcessTelegramMessageTest extends TestCase
         Http::assertSent(fn (HttpRequest $request): bool => str_ends_with($request->url(), '/sendMessage')
             && str_contains((string) ($request['text'] ?? ''), "Итого: черновик #{$draft->id}")
             && data_get($request['reply_markup'] ?? [], 'inline_keyboard.0.0.callback_data') === "draft:add:{$draft->id}"
-            && data_get($request['reply_markup'] ?? [], 'inline_keyboard.1.0.callback_data') === "draft:enhance:{$draft->id}");
+            && data_get($request['reply_markup'] ?? [], 'inline_keyboard.1.0.callback_data') === "draft:enhance:{$draft->id}"
+            && data_get($request['reply_markup'] ?? [], 'inline_keyboard.2.0.callback_data') === "draft:retrain:{$draft->id}");
     }
 
     public function test_reply_to_text_is_prepended_as_context_for_the_agent(): void
