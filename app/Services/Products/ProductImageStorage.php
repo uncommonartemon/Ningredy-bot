@@ -4,14 +4,13 @@ namespace App\Services\Products;
 
 use App\Models\Product;
 use App\Models\ProductDraft;
+use App\Models\ProductDraftMedia;
 use App\Models\ProductVariant;
 use GdImage;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Throwable;
-
-use App\Models\ProductDraftMedia;
 
 class ProductImageStorage
 {
@@ -181,11 +180,10 @@ class ProductImageStorage
     /** @param null|callable(string): void $progress */
     public function stage(ProductDraft $draft, ?callable $progress = null): int
     {
-        ini_set('memory_limit', '512M');
-
-        foreach ($draft->media()->get() as $media) {
-            $media->delete();
-        }
+        // The previous staged gallery is replaced only after a new one was
+        // stored successfully, so a failed search never leaves the draft
+        // without photos (same philosophy as completeRefind).
+        $previousMedia = $draft->media()->get();
 
         $target = $this->targetDraftImageCount($draft);
         $prioritizedSources = $this->sourcePriority->sortSources($draft->sources ?? [], $draft->brand);
@@ -228,6 +226,7 @@ class ProductImageStorage
                 if ($progress) {
                     $progress('Источник пропущен: ссылка ведёт на защитную заглушку, а не на товар.');
                 }
+
                 continue;
             }
 
@@ -262,7 +261,7 @@ class ProductImageStorage
             ]);
             [$discoveredCandidates] = $this->discoverCandidates($draft, $knownUrls, true, $progress);
             $candidateGroups = collect($discoveredCandidates)
-                ->groupBy(fn (array $candidate): string => $this->host((string) ($candidate['source_url'] ?? '')) ?? 'unknown');
+                ->groupBy(fn (array $candidate): string => ProductSourcePriority::host((string) ($candidate['source_url'] ?? '')) ?? 'unknown');
 
             foreach ($candidateGroups as $host => $group) {
                 if ($progress) {
@@ -283,6 +282,7 @@ class ProductImageStorage
         $roles = ['primary', 'secondary', 'detail'];
         $stored = 0;
         $checksums = [];
+        $reusedMediaIds = [];
 
         foreach ($selected as $candidate) {
             $path = null;
@@ -297,6 +297,29 @@ class ProductImageStorage
                 }
 
                 $role = $roles[$stored] ?? 'detail';
+                $existingMedia = $previousMedia->firstWhere('checksum', $checksum);
+
+                if ($existingMedia) {
+                    $existingMedia->update([
+                        'source_url' => $candidate['source_url'],
+                        'role' => $role,
+                        'width' => $converted['width'],
+                        'height' => $converted['height'],
+                        'file_size' => strlen($encoded),
+                        'verification_status' => 'verified',
+                        'verification_score' => isset($candidate['vision_score']) ? $candidate['vision_score'] / 100 : null,
+                        'verification_model' => $candidate['vision_model'] ?? null,
+                        'verification_notes' => $candidate['vision_reason'] ?? null,
+                        'sort_order' => $stored,
+                        'is_primary' => $stored === 0,
+                    ]);
+                    $reusedMediaIds[] = $existingMedia->id;
+                    $checksums[$checksum] = true;
+                    $stored++;
+
+                    continue;
+                }
+
                 $path = "drafts/{$draft->id}/{$role}-".substr($checksum, 0, 12).'.webp';
 
                 if (! Storage::disk('public')->put($path, $encoded)) {
@@ -330,6 +353,12 @@ class ProductImageStorage
                 report($exception);
             } finally {
                 imagedestroy($candidate['image']);
+            }
+        }
+
+        if ($stored > 0) {
+            foreach ($previousMedia->whereNotIn('id', $reusedMediaIds) as $media) {
+                $media->delete();
             }
         }
 
@@ -466,6 +495,8 @@ class ProductImageStorage
                 }
 
                 if ($product->media()->where('checksum', $media->checksum)->exists()) {
+                    $media->delete();
+
                     continue;
                 }
 
@@ -500,14 +531,13 @@ class ProductImageStorage
                     'is_primary' => $existing === 0 && $stored === 0,
                 ]);
                 $stored++;
+                $media->delete();
             } catch (Throwable $exception) {
                 if ($path) {
                     Storage::disk('public')->delete($path);
                 }
 
                 report($exception);
-            } finally {
-                $media->delete();
             }
         }
 
@@ -517,7 +547,7 @@ class ProductImageStorage
     /** @param array<int, mixed> $urls @return array<int, string> */
     private function cleanUrls(array $urls): array
     {
-        $limit = (int) config('product-images.download_limit', 8);
+        $limit = (int) config('product-images.download_limit', 20);
 
         return collect($urls)
             ->filter(fn (mixed $url): bool => is_string($url))
@@ -688,7 +718,7 @@ class ProductImageStorage
         $priorityRank = ['official' => 3, 'amazon' => 2, 'trusted_retailer' => 1, 'standard' => 0];
 
         $groups = collect($candidates)
-            ->groupBy(fn (array $candidate): string => $this->host((string) ($candidate['source_url'] ?? '')))
+            ->groupBy(fn (array $candidate): string => ProductSourcePriority::host((string) ($candidate['source_url'] ?? '')))
             ->filter(fn ($group, string $host): bool => $host !== '');
 
         if ($groups->isEmpty()) {
@@ -776,14 +806,14 @@ class ProductImageStorage
     /** @param array<int, mixed> $sources */
     private function sourceTypeForUrl(string $url, array $sources): ?string
     {
-        $host = $this->host($url);
+        $host = ProductSourcePriority::host($url);
 
         foreach ($sources as $source) {
             if (! is_array($source) || ! is_string($source['url'] ?? null)) {
                 continue;
             }
 
-            if ($this->hostsMatch($host, $this->host($source['url']))) {
+            if (ProductSourcePriority::hostsMatch($host, ProductSourcePriority::host($source['url']))) {
                 return is_string($source['type'] ?? null) ? $source['type'] : null;
             }
         }
@@ -793,25 +823,22 @@ class ProductImageStorage
 
     private function looksLikeTrustedDirectImage(string $url): bool
     {
-        $host = $this->host($url);
+        $host = ProductSourcePriority::host($url);
 
         return $host !== ''
             && filter_var($host, FILTER_VALIDATE_IP) === false
             && preg_match('#\.(?:jpe?g|png|webp|avif)(?:\?|$)#i', (string) parse_url($url, PHP_URL_PATH)) === 1;
     }
 
-    private function hostsMatch(string $left, string $right): bool
+    private function looksLikeJunk(string $url): bool
     {
-        return $left !== '' && $right !== '' && (
-            $left === $right
-            || str_ends_with($left, '.'.$right)
-            || str_ends_with($right, '.'.$left)
-        );
-    }
-
-    private function host(string $url): string
-    {
-        return Str::lower((string) parse_url($url, PHP_URL_HOST));
+        return ImageUrlHeuristics::containsMarker($url, [
+            ...ImageUrlHeuristics::COMMON_MARKERS,
+            ...ImageUrlHeuristics::THUMBNAIL_MARKERS,
+            ...ImageUrlHeuristics::TRACKING_MARKERS,
+            ...ImageUrlHeuristics::ASSET_MARKERS,
+            'avatar', 'icon-', '/icon/', '/flags/', 'locale-flag', '/blogs/', '/category/icons/', 'banner',
+        ]);
     }
 
     /** @param array<int, array<string, mixed>> $candidates */
@@ -950,15 +977,6 @@ class ProductImageStorage
         }
 
         return $url;
-    }
-
-    private function looksLikeJunk(string $url): bool
-    {
-        return Str::contains(Str::lower($url), [
-            'logo', 'favicon', 'sprite', 'placeholder', 'thumb', 'thumbnail', '/small/', '_small',
-            'avatar', 'icon-', '/icon/', '/icons/', '/flags/', 'locale-flag', '/blogs/',
-            '/category/icons/', '.svg', 'banner', 'tracking', 'pixel.', '/header/', '/w48', '/w64', '/w96', '/w184',
-        ]);
     }
 
     private function targetImageCount(Product $product): int

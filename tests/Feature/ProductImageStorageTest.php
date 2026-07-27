@@ -17,6 +17,7 @@ use App\Services\Products\ProductImageResolver;
 use App\Services\Products\ProductImageStorage;
 use App\Services\Products\ProductPhotoManager;
 use App\Services\Products\WikimediaImageSearch;
+use Illuminate\Filesystem\FilesystemAdapter;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
@@ -864,7 +865,17 @@ class ProductImageStorageTest extends TestCase
         $this->assertSame(0, $product->media()->count());
         $this->assertSame(3, $draft->media()->count());
         $this->assertNotNull($draft->fresh()->images_staged_at);
+        $stagedIds = $draft->media()->pluck('id')->all();
         $stagedPaths = $draft->media()->pluck('path')->all();
+
+        $restaged = $storage->stage($draft->fresh());
+
+        $this->assertSame(3, $restaged);
+        $this->assertSame($stagedIds, $draft->media()->pluck('id')->all());
+        $this->assertSame($stagedPaths, $draft->media()->pluck('path')->all());
+        foreach ($stagedPaths as $path) {
+            Storage::disk('public')->assertExists($path);
+        }
 
         $adopted = $storage->adoptStaged($product, $variant, $draft);
 
@@ -939,6 +950,81 @@ class ProductImageStorageTest extends TestCase
             'https://93.184.216.34/complete-card-photo.jpg',
             $draft->media()->firstOrFail()->source_url,
         );
+    }
+
+    public function test_staging_keeps_the_previous_gallery_when_the_search_finds_nothing(): void
+    {
+        Storage::fake('public');
+        ProductImageDiscoveryAgent::fake([[
+            'image_urls' => [],
+            'page_urls' => [],
+        ]])->preventStrayPrompts();
+        ProductImageVisionAgent::fake(fn () => throw new \RuntimeException('Vision should not run without candidates'))
+            ->preventStrayPrompts();
+        Http::fake(fn () => Http::response('<html></html>', 200, ['Content-Type' => 'text/html']));
+        [, , $draft] = $this->records();
+        $draft->update([
+            'brand' => 'Lenovo',
+            'model' => 'Test',
+            'primary_source_url' => 'https://93.184.216.34/product-page',
+            'image_urls' => [],
+            'sources' => [[
+                'title' => 'Exact retailer listing',
+                'url' => 'https://93.184.216.34/product-page',
+                'type' => 'retailer',
+            ]],
+        ]);
+        $oldPath = "drafts/{$draft->id}/primary-old.webp";
+        Storage::disk('public')->put($oldPath, 'old-photo-bytes');
+        $old = $draft->media()->create([
+            'disk' => 'public',
+            'path' => $oldPath,
+            'source_url' => 'https://93.184.216.34/old-photo.jpg',
+            'role' => 'primary',
+            'mime_type' => 'image/webp',
+            'checksum' => hash('sha256', 'old-photo-bytes'),
+            'verification_status' => 'verified',
+            'sort_order' => 0,
+            'is_primary' => true,
+        ]);
+
+        $stored = app(ProductImageStorage::class)->stage($draft->fresh());
+
+        $this->assertSame(0, $stored);
+        $this->assertSame(1, $draft->media()->count());
+        $this->assertDatabaseHas('product_draft_media', ['id' => $old->id]);
+        Storage::disk('public')->assertExists($oldPath);
+    }
+
+    public function test_adopting_staged_photos_keeps_them_when_the_copy_fails(): void
+    {
+        Storage::fake('public');
+        [$product, $variant, $draft] = $this->records();
+        $path = "drafts/{$draft->id}/staged-1.webp";
+        Storage::disk('public')->put($path, 'staged-bytes');
+        $media = $draft->media()->create([
+            'disk' => 'public',
+            'path' => $path,
+            'source_url' => 'https://93.184.216.34/staged-1.jpg',
+            'role' => 'primary',
+            'mime_type' => 'image/webp',
+            'checksum' => hash('sha256', 'staged-bytes'),
+            'verification_status' => 'verified',
+            'sort_order' => 0,
+            'is_primary' => true,
+        ]);
+        $disk = \Mockery::mock(FilesystemAdapter::class);
+        $disk->shouldReceive('exists')->andReturn(true);
+        $disk->shouldReceive('get')->andReturn('staged-bytes');
+        $disk->shouldReceive('put')->andReturn(false);
+        $disk->shouldReceive('delete')->andReturn(true);
+        Storage::shouldReceive('disk')->with('public')->andReturn($disk);
+
+        $stored = app(ProductImageStorage::class)->adoptStaged($product, $variant, $draft);
+
+        $this->assertSame(0, $stored);
+        $this->assertSame(0, $product->media()->count());
+        $this->assertDatabaseHas('product_draft_media', ['id' => $media->id]);
     }
 
     public function test_image_discovery_is_cached_for_queue_retries(): void

@@ -256,7 +256,7 @@ class ProductSourcePriority
         return null;
     }
 
-    private function hostsMatch(string $left, string $right): bool
+    public static function hostsMatch(string $left, string $right): bool
     {
         $left = Str::after(Str::lower($left), 'www.');
         $right = Str::after(Str::lower($right), 'www.');
@@ -268,7 +268,7 @@ class ProductSourcePriority
         );
     }
 
-    private function host(string $url): string
+    public static function host(string $url): string
     {
         return Str::after(Str::lower((string) parse_url($url, PHP_URL_HOST)), 'www.');
     }

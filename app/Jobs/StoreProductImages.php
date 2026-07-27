@@ -12,6 +12,7 @@ use App\Services\Products\ProductPhotoManager;
 use App\Services\Telegram\TelegramClient;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Storage;
 use Throwable;
 
@@ -43,6 +44,26 @@ class StoreProductImages implements ShouldQueue
         // memory spike fails the job cleanly instead of killing the worker.
         ini_set('memory_limit', '512M');
 
+        // A duplicate dispatch (double photos:refind callback tap or a queue
+        // retry) would rerun the whole AI image pipeline for the same
+        // product; hold a lock instead and retry once the current run ends.
+        $lock = Cache::lock("store-product-images:{$this->productId}", 600);
+
+        if (! $lock->get()) {
+            $this->release(60);
+
+            return;
+        }
+
+        try {
+            $this->process($storage, $telegram);
+        } finally {
+            $lock->release();
+        }
+    }
+
+    private function process(ProductImageStorage $storage, TelegramClient $telegram): void
+    {
         $product = Product::query()->find($this->productId);
         $variant = ProductVariant::query()->find($this->variantId);
         $draft = ProductDraft::query()->with('telegramUpdate')->find($this->draftId);

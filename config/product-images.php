@@ -1,5 +1,9 @@
 <?php
 
+// Note: the image pipeline decodes full-size photos into GD bitmaps, so the
+// queue workers need a raised memory limit. StoreProductImages sets 512M
+// inside the job; the worker environment is responsible for the rest.
+
 return [
     // Public catalog limits. The original files are stored locally as WebP.
     'max_images' => 3,
@@ -14,6 +18,22 @@ return [
     'minimum_ratio' => 0.28,
     'maximum_ratio' => 3.5,
     'public_source_target' => 6,
+
+    // HTTP client used for product pages and candidate image downloads.
+    'http' => [
+        'connect_timeout' => 3,
+        'timeout' => 7,
+    ],
+
+    // How many source pages one resolve pass may open, how many image URLs a
+    // single page may yield, and how wide the resolver search goes overall.
+    'max_sources_per_resolve' => 10,
+    'max_urls_per_page' => 60,
+    'resolve_limit' => 16,
+    // AI discovery: how many of the suggested page URLs are opened and how
+    // many candidate URLs are kept from one discovery run.
+    'ai_page_urls_limit' => 4,
+    'ai_result_limit' => 20,
 
     // Vision receives candidates in small batches and stops after enough
     // publication images are selected.
@@ -48,5 +68,6 @@ return [
         'node_binary' => env('PRODUCT_IMAGE_BROWSER_NODE', 'node'),
         'script' => 'scripts/extract-product-gallery.mjs',
         'timeout' => 45,
+        'scout_timeout' => 60,
     ],
 ];

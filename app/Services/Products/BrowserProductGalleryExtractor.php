@@ -37,8 +37,7 @@ class BrowserProductGalleryExtractor
             $images = $result['images'] ?? [];
 
             if (count($images) >= 2) {
-                $recipe->update([
-                    'success_count' => $recipe->success_count + 1,
+                $recipe->increment('success_count', 1, [
                     'last_success_at' => now(),
                     'last_error' => null,
                 ]);
@@ -47,8 +46,7 @@ class BrowserProductGalleryExtractor
                 return $images;
             }
 
-            $recipe->update([
-                'failure_count' => $recipe->failure_count + 1,
+            $recipe->increment('failure_count', 1, [
                 'last_failure_at' => now(),
                 'last_error' => 'Active AI recipe returned fewer than two gallery images.',
             ]);
@@ -106,7 +104,7 @@ class BrowserProductGalleryExtractor
             ]);
             $process->setTimeout((float) ($scoutOnly
                 ? config('product-images.browser_fallback.scout_timeout', 60)
-                : config('product-images.browser_fallback.timeout', 75)));
+                : config('product-images.browser_fallback.timeout', 45)));
             $process->run();
 
             if (! $process->isSuccessful()) {

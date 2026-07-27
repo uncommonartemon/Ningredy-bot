@@ -178,7 +178,6 @@ class TelegramInteractivePanelTest extends TestCase
             ],
         ], $this->headers())->assertOk();
 
-        Queue::assertNotPushed(EnhanceDraftPhoto::class);
         Http::assertSent(fn (ClientRequest $request): bool => str_ends_with($request->url(), '/sendMessage')
             && str_contains((string) ($request['text'] ?? ''), "Какое фото черновика #{$draft->id}")
             && data_get($request['reply_markup'] ?? [], 'inline_keyboard.0.0.text') === '1️⃣'

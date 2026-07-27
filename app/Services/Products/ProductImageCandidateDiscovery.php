@@ -28,7 +28,7 @@ class ProductImageCandidateDiscovery
             ->values()
             ->all();
         $sources = $this->imageSources($this->sourcePriority->sortSources($draft->sources ?? [], $draft->brand));
-        $knownSourceUrls = $skipKnownSources ? [] : $this->resolver->resolve($sources, 16);
+        $knownSourceUrls = $skipKnownSources ? [] : $this->resolver->resolve($sources, (int) config('product-images.resolve_limit', 16));
         $preferredUrls = $this->withoutExcluded($this->sourcePriority->sortUrls(
             $knownSourceUrls,
             $draft->brand,
@@ -181,18 +181,10 @@ class ProductImageCandidateDiscovery
     {
         $lower = strtolower(urldecode($url));
 
-        if (str_contains($lower, '.svg')
-            || str_contains($lower, 'favicon')
-            || str_contains($lower, 'logo')
-            || str_contains($lower, 'sprite')
-            || str_contains($lower, 'placeholder')
-            || str_contains($lower, '/header/')
-            || str_contains($lower, '/icons/')
-            || str_contains($lower, '/w48')
-            || str_contains($lower, '/w64')
-            || str_contains($lower, '/w96')
-            || str_contains($lower, '/w184')
-        ) {
+        if (ImageUrlHeuristics::containsMarker($lower, [
+            ...ImageUrlHeuristics::COMMON_MARKERS,
+            ...ImageUrlHeuristics::ASSET_MARKERS,
+        ])) {
             return false;
         }
 
@@ -263,20 +255,21 @@ class ProductImageCandidateDiscovery
             $data['page_urls'] ?? [],
             fn (mixed $url): bool => is_string($url),
         ));
-        $pageUrls = array_slice($this->sourcePriority->sortUrls($pageUrls, $draft->brand, $sources), 0, 4);
+        $pageUrls = array_slice($this->sourcePriority->sortUrls($pageUrls, $draft->brand, $sources), 0, (int) config('product-images.ai_page_urls_limit', 4));
         $pageSources = array_map(fn (string $url): array => ['url' => $url], $pageUrls);
+        $resolveLimit = (int) config('product-images.resolve_limit', 16);
         $resolved = $progress
             ? $this->resolver->resolve(
                 $pageSources,
-                16,
+                $resolveLimit,
                 fn (string $level, string $message) => $progress($message),
             )
-            : $this->resolver->resolve($pageSources, 16);
+            : $this->resolver->resolve($pageSources, $resolveLimit);
 
         return array_slice($this->sourcePriority->sortUrls(
             [...$resolved, ...$imageUrls],
             $draft->brand,
             $sources,
-        ), 0, 20);
+        ), 0, (int) config('product-images.ai_result_limit', 20));
     }
 }

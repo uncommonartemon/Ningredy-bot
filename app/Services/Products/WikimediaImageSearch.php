@@ -135,7 +135,7 @@ class WikimediaImageSearch
         $width = (int) ($info['thumbwidth'] ?? $info['width'] ?? 0);
         $height = (int) ($info['thumbheight'] ?? $info['height'] ?? 0);
 
-        if (min($width, $height) < 320) {
+        if (min($width, $height) < (int) config('product-images.minimum_side', 480)) {
             return false;
         }
 

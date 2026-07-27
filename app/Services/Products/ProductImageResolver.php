@@ -7,9 +7,8 @@ use DOMXPath;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
-use Throwable;
-
 use Illuminate\Support\Str;
+use Throwable;
 
 class ProductImageResolver
 {
@@ -26,7 +25,7 @@ class ProductImageResolver
     {
         $images = [];
 
-        foreach (array_slice($sources, 0, 10) as $source) {
+        foreach (array_slice($sources, 0, (int) config('product-images.max_sources_per_resolve', 10)) as $source) {
             $sourceUrl = is_array($source) ? ($source['url'] ?? null) : null;
 
             if (! is_string($sourceUrl) || ! $this->isPublicUrl($sourceUrl)) {
@@ -65,7 +64,7 @@ class ProductImageResolver
                 if ($debug) {
                     $debug('warning', 'HTML страницы недоступен: '.$exception->getMessage());
                 }
-                Log::debug('Product image metadata source was unavailable.', [
+                Log::notice('Product image metadata source was unavailable.', [
                     'host' => parse_url($sourceUrl, PHP_URL_HOST),
                     'error' => $exception->getMessage(),
                 ]);
@@ -135,7 +134,7 @@ class ProductImageResolver
                 'height' => (int) $dimensions[1],
             ];
         } catch (Throwable $exception) {
-            Log::debug('Product image candidate was unavailable.', [
+            Log::notice('Product image candidate was unavailable.', [
                 'host' => parse_url($url, PHP_URL_HOST),
                 'error' => $exception->getMessage(),
             ]);
@@ -158,7 +157,11 @@ class ProductImageResolver
                 'Accept-Language' => 'en-US,en;q=0.9',
                 'Referer' => $this->origin($url).'/',
                 'Cache-Control' => 'no-cache',
-            ])->withoutRedirecting()->connectTimeout(3)->timeout(7)->get($url);
+            ])->withoutRedirecting()
+                ->connectTimeout((int) config('product-images.http.connect_timeout', 3))
+                ->timeout((int) config('product-images.http.timeout', 7))
+                ->retry(2, 250)
+                ->get($url);
 
             if ($response->redirect()) {
                 $location = $response->header('Location');
@@ -282,7 +285,7 @@ class ProductImageResolver
             ->map(fn (string $candidate): ?string => $this->normalizeImageCandidate($candidate, $pageUrl))
             ->filter()
             ->unique()
-            ->take(60)
+            ->take((int) config('product-images.max_urls_per_page', 60))
             ->values()
             ->all();
     }
@@ -347,16 +350,12 @@ class ProductImageResolver
 
     private function looksLikeImageUrl(string $url): bool
     {
-        $lower = strtolower($url);
-
         return preg_match('#^https?://#i', $url) === 1
             && preg_match('#\.(?:jpe?g|png|webp|avif)(?:\?|$)#i', $url) === 1
-            && ! str_contains($lower, 'favicon')
-            && ! str_contains($lower, 'logo')
-            && ! str_contains($lower, 'sprite')
-            && ! str_contains($lower, 'placeholder')
-            && ! str_contains($lower, 'tracking')
-            && ! str_contains($lower, 'pixel.');
+            && ! ImageUrlHeuristics::containsMarker($url, [
+                ...ImageUrlHeuristics::COMMON_MARKERS,
+                ...ImageUrlHeuristics::TRACKING_MARKERS,
+            ]);
     }
 
     private function normalizeImageCandidate(string $candidate, string $pageUrl): ?string
@@ -369,16 +368,11 @@ class ProductImageResolver
             || str_starts_with($candidate, '#')
             || str_starts_with($lower, 'data:')
             || str_starts_with($lower, 'blob:')
-            || str_contains($lower, 'favicon')
-            || str_contains($lower, 'logo')
-            || str_contains($lower, 'sprite')
-            || str_contains($lower, 'placeholder')
-            || str_contains($lower, 'thumb')
-            || str_contains($lower, 'thumbnail')
-            || str_contains($lower, '/small/')
-            || str_contains($lower, '_small')
-            || str_contains($lower, 'tracking')
-            || str_contains($lower, 'pixel.')
+            || ImageUrlHeuristics::containsMarker($candidate, [
+                ...ImageUrlHeuristics::COMMON_MARKERS,
+                ...ImageUrlHeuristics::THUMBNAIL_MARKERS,
+                ...ImageUrlHeuristics::TRACKING_MARKERS,
+            ])
         ) {
             return null;
         }

@@ -33,7 +33,7 @@ class ProductImageVisionVerifier
         }
 
         $maxCandidates = (int) config('product-images.vision_candidates', 4);
-        $minimumScore = (int) config('product-images.vision_min_score', 70);
+        $minimumScore = (int) config('product-images.vision_min_score', 60);
         $officialMinimumScore = (int) config('product-images.vision_official_min_score', 55);
         $candidates = array_slice($candidates, 0, $maxCandidates);
         $provider = app(AiSettings::class)->providerFor('product_image_vision');
