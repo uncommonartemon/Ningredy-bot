@@ -6,9 +6,9 @@ use App\Ai\Agents\ProductImageVisionAgent;
 use App\Models\AiRun;
 use App\Models\ProductDraft;
 use App\Services\Ai\AiSettings;
+use App\Services\Ai\ProductSearchTimeBudget;
 use GdImage;
 use Illuminate\Support\Facades\Validator;
-use Illuminate\Support\Str;
 use Laravel\Ai\Files\Image;
 use Throwable;
 
@@ -34,10 +34,20 @@ class ProductImageVisionVerifier
 
         $maxCandidates = (int) config('product-images.vision_candidates', 4);
         $minimumScore = (int) config('product-images.vision_min_score', 60);
-        $officialMinimumScore = (int) config('product-images.vision_official_min_score', 55);
         $candidates = array_slice($candidates, 0, $maxCandidates);
-        $provider = app(AiSettings::class)->providerFor('product_image_vision');
-        $model = app(AiSettings::class)->modelFor('product_image_vision');
+        $settings = app(AiSettings::class);
+        $timeBudget = app(ProductSearchTimeBudget::class);
+
+        if (! $timeBudget->canStart($telegramUpdateId ?? $draft->telegram_update_id, 15)) {
+            return [];
+        }
+
+        $visionTimeout = $timeBudget->timeoutFor(
+            $telegramUpdateId ?? $draft->telegram_update_id,
+            $settings->imageVisionTimeoutSeconds(),
+        );
+        $provider = $settings->providerFor('product_image_vision');
+        $model = $settings->modelFor('product_image_vision');
         $prompt = $this->prompt($draft, $candidates);
         $run = AiRun::query()->create([
             'telegram_update_id' => $telegramUpdateId ?? $draft->telegram_update_id,
@@ -59,7 +69,7 @@ class ProductImageVisionVerifier
                 attachments: $attachments,
                 provider: $provider,
                 model: $model,
-                timeout: (int) config('services.product_image_vision.timeout', 45),
+                timeout: $visionTimeout,
             );
             $normalizedResponse = $response->toArray();
             $normalizedResponse['images'] = collect($normalizedResponse['images'] ?? [])
@@ -109,38 +119,23 @@ class ProductImageVisionVerifier
                         'hero' => $review['kind'] === 'product'
                             && in_array($review['view'], ['front', 'angle'], true),
                         'source_supported' => $this->identityMatcher->supports($draft, (string) ($candidate['source_url'] ?? '')),
-                        'official_source' => ($candidate['source_priority'] ?? null) === 'official',
-                        'source_rank' => match ($candidate['source_priority'] ?? null) {
-                            'official' => 3,
-                            'amazon' => 2,
-                            'trusted_retailer' => 1,
-                            default => 0,
-                        },
                     ];
                 });
 
             $reviews = $this->rankReviews($reviewed->filter(fn (array $review): bool => $review['publishable']
                 && (! filled($draft->color) || $review['color_match'])
                 && in_array($review['kind'], ['product', 'packaging', 'detail'], true)
-                && $review['score'] >= ($review['official_source'] ? $officialMinimumScore : $minimumScore)
-                && ($review['exact_match'] || $review['source_supported'] || $review['official_source'])));
-
-            if ($reviews->isEmpty()) {
-                $reviews = $this->rankReviews($reviewed->filter(
-                    fn (array $review): bool => $this->isAcceptableOfficialFallback($review),
-                ));
-            }
+                && $review['score'] >= $minimumScore
+                && ($review['exact_match'] || $review['source_supported'])));
 
             return $reviews->take($limit)->map(function (array $review) use ($candidates, $model): array {
                 return [
                     ...$candidates[$review['index'] - 1],
                     'vision_kind' => $review['kind'],
                     'vision_score' => $review['score'],
-                    'vision_reason' => match (true) {
-                        $review['official_source'] => 'Official manufacturer source. '.$review['reason'],
-                        $review['source_supported'] && ! $review['exact_match'] => 'Exact identity is supported by the source URL. '.$review['reason'],
-                        default => $review['reason'],
-                    },
+                    'vision_reason' => $review['source_supported'] && ! $review['exact_match']
+                        ? 'Exact identity is supported by the source URL. '.$review['reason']
+                        : $review['reason'],
                     'vision_model' => $model,
                 ];
             })->all();
@@ -171,29 +166,9 @@ class ProductImageVisionVerifier
                     $review['source_supported'] ? 1 : 0,
                     $review['kind'] === 'product' ? 1 : 0,
                     $review['score'],
-                    $review['source_rank'],
                 ]),
             )
             ->values();
-    }
-
-    private function isAcceptableOfficialFallback(array $review): bool
-    {
-        if (! ($review['color_match'] ?? false)) {
-            return false;
-        }
-
-        if (! $review['official_source'] || ! in_array($review['kind'], ['product', 'packaging', 'detail'], true)) {
-            return false;
-        }
-
-        $reason = Str::lower((string) $review['reason']);
-
-        return ! Str::contains($reason, [
-            'conflict', 'conflicting', 'another model', 'different model', 'unrelated',
-            'logo', 'banner', 'screenshot', 'watermark', 'collage', 'distorted',
-            'not a product', 'accessory',
-        ]);
     }
 
     /** @param array<int, array<string, mixed>> $candidates */
@@ -205,10 +180,11 @@ class ProductImageVisionVerifier
         })->filter()->take(12)->implode('; ');
         $candidateSources = collect($candidates)->map(
             fn (array $candidate, int $index): string => '#'.($index + 1)
-                .(($candidate['source_priority'] ?? null) === 'official' ? ' [OFFICIAL MANUFACTURER]' : '')
-                .(($candidate['source_priority'] ?? null) === 'amazon' ? ' [AMAZON]' : '')
-                .(($candidate['source_priority'] ?? null) === 'trusted_retailer' ? ' [TRUSTED RETAILER]' : '')
-                .' source: '.($candidate['source_url'] ?? 'unknown'),
+                .' source: '.($candidate['source_url'] ?? 'unknown')
+                .' resolution: '.($candidate['width'] ?? '?').'x'.($candidate['height'] ?? '?')
+                .(($candidate['confirmed_gallery'] ?? false)
+                    ? ' confirmed_playwright_gallery_frame: yes; best resolution exposed by this complete gallery'
+                    : ''),
         )->implode("\n");
 
         return <<<PROMPT
@@ -217,10 +193,28 @@ class ProductImageVisionVerifier
             Brand: {$draft->brand}
             Model: {$draft->model}
             Required color/version: {$draft->color}
-            A visibly different product color must have color_match=false even on an official source.
+
+            Judge every source type by identical rules. A manufacturer, marketplace, or retailer URL is evidence only
+            and must never override a visible mismatch. A visibly different product color requires color_match=false.
+            Set publishable=false for a thumbnail, blurry or pixelated/upscaled image, watermark or promotional text,
+            badly cropped/truncated product, collage, screenshot, logo, accessory-only shot, or image where the product
+            is too small to be useful. Also reject user-generated used-item and auction photos, worn/damaged units,
+            hands, rooms, or improvised phone shots even when the model matches.
+            A candidate marked confirmed_playwright_gallery_frame is part of a complete gallery extracted and validated
+            by Playwright from this exact product's page. Do not reject it solely because its clean source resolution
+            is 400-599px, or solely because it shows an unusual camera angle or framing (side, top, closed lid, hinge,
+            ports, keyboard deck, or another close-up of a distinctive part) instead of a clean front hero shot -
+            classify those as kind=product or kind=detail, not uncertain or unrelated, and score them on sharpness and
+            usefulness rather than penalizing the angle itself. Still reject a confirmed-gallery frame that is a logo,
+            banner, screenshot, accessory-only shot, or that visibly conflicts on model or color - gallery membership
+            is not identity or color evidence by itself, only a pass on resolution and camera angle.
+
+            Prefer a sharp, clean, full-product hero view first, then distinct useful angles/details. Near-identical
+            shots, resized copies, and crops of the same photograph must not all be selected. Do not infer exact model,
+            color, or quality from the URL when visible evidence conflicts.
             Key specifications: {$specifications}
             Numbering follows attachment order: first attachment is image 1, etc.
-            Candidate source URLs (supporting evidence only; visible conflicts always win):
+            Candidate URLs and decoded resolutions:
             {$candidateSources}
             PROMPT;
     }

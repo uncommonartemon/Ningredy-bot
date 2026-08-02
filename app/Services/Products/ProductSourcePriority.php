@@ -2,25 +2,32 @@
 
 namespace App\Services\Products;
 
-use App\Models\ImageSourcePriority;
-use Illuminate\Support\Collection;
-use Illuminate\Support\Facades\Schema;
+use App\Models\ProductGalleryRecipe;
 use Illuminate\Support\Str;
+use Throwable;
 
 class ProductSourcePriority
 {
-    private ?Collection $configuredRules = null;
+    /** @var array<string, ProductGalleryRecipe|null> */
+    private array $recipeCache = [];
+
+    /** @var array<int, string>|null */
+    private ?array $blockedDomainsCache = null;
+
+    public function __construct(private readonly ProductSourceMetrics $metrics) {}
 
     /** @param array<int, mixed> $sources @return array<int, array<string, mixed>> */
     public function sortSources(array $sources, ?string $brand): array
     {
         return collect($sources)
-            ->filter(fn (mixed $source): bool => is_array($source) && is_string($source['url'] ?? null))
+            ->filter(fn (mixed $source): bool => is_array($source)
+                && is_string($source['url'] ?? null)
+                && ! $this->isBlockedUrl($source['url']))
             ->values()
             ->map(fn (array $source, int $index): array => [
                 'source' => $source,
                 'index' => $index,
-                'score' => $this->score($source['url'], $brand, $sources, $source['type'] ?? null),
+                'score' => $this->score($source['url']),
             ])
             ->sort(fn (array $left, array $right): int => ($right['score'] <=> $left['score']) ?: ($left['index'] <=> $right['index']))
             ->pluck('source')
@@ -32,13 +39,13 @@ class ProductSourcePriority
     public function sortUrls(array $urls, ?string $brand, array $sources = []): array
     {
         return collect($urls)
-            ->filter(fn (mixed $url): bool => is_string($url) && $url !== '')
+            ->filter(fn (mixed $url): bool => is_string($url) && $url !== '' && ! $this->isBlockedUrl($url))
             ->unique()
             ->values()
             ->map(fn (string $url, int $index): array => [
                 'url' => $url,
                 'index' => $index,
-                'score' => $this->score($url, $brand, $sources),
+                'score' => $this->score($url),
             ])
             ->sort(fn (array $left, array $right): int => ($right['score'] <=> $left['score']) ?: ($left['index'] <=> $right['index']))
             ->pluck('url')
@@ -46,214 +53,97 @@ class ProductSourcePriority
             ->all();
     }
 
-    /** @param array<int, mixed> $sources */
-    public function classify(string $url, ?string $brand, array $sources = []): string
+    public function isBlockedUrl(string $url): bool
     {
-        $rule = $this->matchingConfiguredRule($url);
+        $host = self::host($url);
 
-        if ($rule) {
-            if ($rule->source_type === 'manufacturer') {
-                return $this->isEnglishOrUs($url) ? 'official_english' : 'official_localized';
-            }
-
-            if (Str::contains(Str::lower($rule->name.' '.$rule->domain), 'amazon')) {
-                return 'amazon';
-            }
-
-            if (in_array($rule->source_type, ['retailer', 'marketplace'], true)) {
-                return 'trusted_retailer';
-            }
-        }
-
-        if ($this->isOfficial($url, $brand, $sources)) {
-            return $this->isEnglishOrUs($url) ? 'official_english' : 'official_localized';
-        }
-
-        if ($this->isAmazon($url)) {
-            return 'amazon';
-        }
-
-        if ($this->isTrustedRetailer($url)) {
-            return 'trusted_retailer';
-        }
-
-        return 'standard';
+        return $host !== '' && collect($this->blockedDomains())
+            ->contains(fn (string $blocked): bool => self::hostsMatch($host, $blocked));
     }
 
-    public function preferredSourceInstructions(): string
+    /** @return array<int, string> */
+    public function blockedDomains(): array
     {
-        $lines = $this->rules()
-            ->take(15)
-            ->map(fn (ImageSourcePriority $source): string => "- {$source->name} ({$source->domain}), priority {$source->priority}, type {$source->source_type}")
-            ->implode("\n");
+        if ($this->blockedDomainsCache !== null) {
+            return $this->blockedDomainsCache;
+        }
 
-        return $lines !== '' ? $lines : '- Amazon, Best Buy, B&H Photo, Newegg, Walmart, Target';
+        try {
+            return $this->blockedDomainsCache = ProductGalleryRecipe::query()
+                ->where('source_blocked', true)
+                ->pluck('domain')
+                ->filter(fn (mixed $domain): bool => is_string($domain) && $domain !== '')
+                ->map(fn (string $domain): string => self::host('https://'.$domain))
+                ->unique()->values()->all();
+        } catch (Throwable) {
+            return $this->blockedDomainsCache = [];
+        }
     }
 
-    /** @param array<int, mixed> $sources */
-    private function score(string $url, ?string $brand, array $sources, mixed $explicitType = null): int
+    private function score(string $url): int
     {
-        if ($rule = $this->matchingConfiguredRule($url)) {
-            return 1_000_000 + (int) $rule->priority;
-        }
-
-        $classification = $this->classify($url, $brand, $sources);
-        $hasConfiguredRules = $this->rules()->isNotEmpty();
-
-        if ($classification === 'official_english') {
-            return $hasConfiguredRules ? 900_000 : 820;
-        }
-
-        if ($classification === 'official_localized') {
-            return $hasConfiguredRules ? 899_000 : 780;
-        }
-
-        if ($classification === 'amazon') {
-            return 1000;
-        }
-
-        if ($classification === 'trusted_retailer') {
-            return 760;
-        }
-
-        $type = is_string($explicitType) ? $explicitType : $this->matchingSourceType($url, $sources);
-
-        return match ($type) {
-            'retailer' => 700,
-            'marketplace' => 680,
-            'manufacturer' => 650,
-            'database' => 500,
-            'review' => 400,
-            'web' => 300,
-            default => str_contains(Str::lower($url), 'wikimedia.org') ? 140 : 100,
-        };
+        return $this->extractionScore($url);
     }
 
-    private function matchingConfiguredRule(string $url): ?ImageSourcePriority
+    /**
+     * Source type is deliberately irrelevant to ordering. Official sites,
+     * marketplaces and retailers all start neutral; only measured extraction
+     * and Vision-acceptance history may move a domain up or down.
+     */
+    private function extractionScore(string $url): int
     {
-        $host = $this->host($url);
+        $recipe = $this->recipeFor($url);
+
+        if ($recipe?->source_blocked || $recipe?->status === 'disabled') {
+            return -1_000_000;
+        }
+
+        $measuredScore = $this->metrics->score($url);
+
+        if ($measuredScore !== 0) {
+            return $measuredScore;
+        }
+
+        if (! $recipe) {
+            return 0;
+        }
+
+        // Preserve useful history gathered before product_source_stats existed.
+        $successes = max(0, (int) $recipe->success_count);
+        $failures = max(0, (int) $recipe->failure_count);
+        $attempts = $successes + $failures;
+
+        if ($recipe->status === 'active' && $successes > 0) {
+            $smoothedRate = ($successes + 1) / ($attempts + 2);
+
+            return 50_000
+                + (int) round($smoothedRate * 5_000)
+                + min(500, $successes);
+        }
+
+        return $failures > 0 ? -1 * min(10_000, $failures) : 0;
+    }
+
+    private function recipeFor(string $url): ?ProductGalleryRecipe
+    {
+        $host = self::host($url);
 
         if ($host === '') {
             return null;
         }
 
-        return $this->rules()->first(function (ImageSourcePriority $source) use ($host): bool {
-            $domains = [$source->domain, ...($source->aliases ?? [])];
-
-            return collect($domains)->contains(fn (mixed $domain): bool => is_string($domain) && $this->hostsMatch($host, Str::lower($domain)));
-        });
-    }
-
-    private function rules(): Collection
-    {
-        if ($this->configuredRules !== null) {
-            return $this->configuredRules;
+        if (array_key_exists($host, $this->recipeCache)) {
+            return $this->recipeCache[$host];
         }
 
         try {
-            if (! Schema::hasTable('image_source_priorities')) {
-                return $this->configuredRules = collect();
-            }
-
-            return $this->configuredRules = ImageSourcePriority::query()
-                ->where('is_enabled', true)
-                ->orderByDesc('priority')
-                ->orderBy('id')
-                ->get();
-        } catch (\Throwable) {
-            return $this->configuredRules = collect();
+            return $this->recipeCache[$host] = ProductGalleryRecipe::query()
+                ->where('domain', $host)
+                ->where('path_pattern', '*')
+                ->first();
+        } catch (Throwable) {
+            return $this->recipeCache[$host] = null;
         }
-    }
-
-    /** @param array<int, mixed> $sources */
-    private function isOfficial(string $url, ?string $brand, array $sources): bool
-    {
-        $host = $this->host($url);
-
-        if ($host === '') {
-            return false;
-        }
-
-        $brandKey = $this->brandKey($brand);
-        $labels = explode('.', $host);
-
-        if ($brandKey !== '' && in_array($brandKey, $labels, true)) {
-            return true;
-        }
-
-        foreach ($sources as $source) {
-            if (! is_array($source) || ! is_string($source['url'] ?? null)) {
-                continue;
-            }
-
-            $sourceHost = $this->host($source['url']);
-            $sourceLabels = explode('.', $sourceHost);
-            $manufacturer = ($source['type'] ?? null) === 'manufacturer'
-                || ($brandKey !== '' && in_array($brandKey, $sourceLabels, true));
-
-            if ($manufacturer && $this->hostsMatch($host, $sourceHost)) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private function isEnglishOrUs(string $url): bool
-    {
-        $segments = array_values(array_filter(explode('/', Str::lower((string) parse_url($url, PHP_URL_PATH)))));
-
-        foreach (array_slice($segments, 0, 2) as $segment) {
-            $segment = str_replace('_', '-', $segment);
-
-            if (preg_match('/^[a-z]{2}(?:-[a-z]{2})?$/', $segment) !== 1) {
-                continue;
-            }
-
-            return str_starts_with($segment, 'en-')
-                || in_array($segment, ['en', 'us', 'uk', 'gb', 'ca', 'au'], true);
-        }
-
-        return true;
-    }
-
-    private function isAmazon(string $url): bool
-    {
-        $host = $this->host($url);
-
-        return preg_match('/(^|\.)amazon\.[a-z.]+$/', $host) === 1
-            || str_contains($host, 'media-amazon.')
-            || str_contains($host, 'images-amazon.')
-            || str_contains($host, 'ssl-images-amazon.');
-    }
-
-    private function isTrustedRetailer(string $url): bool
-    {
-        $host = $this->host($url);
-
-        return collect([
-            'ebay.', 'newegg.', 'bestbuy.', 'walmart.', 'target.',
-            'bhphotovideo.', 'adorama.', 'costco.', 'samsclub.', 'microcenter.',
-            'alza.', 'czc.cz', 'datart.cz', 'mediamarkt.', 'saturn.de',
-        ])->contains(fn (string $needle): bool => str_contains($host, $needle));
-    }
-
-    /** @param array<int, mixed> $sources */
-    private function matchingSourceType(string $url, array $sources): ?string
-    {
-        $host = $this->host($url);
-
-        foreach ($sources as $source) {
-            if (! is_array($source) || ! is_string($source['url'] ?? null)) {
-                continue;
-            }
-
-            if ($this->hostsMatch($host, $this->host($source['url']))) {
-                return is_string($source['type'] ?? null) ? $source['type'] : null;
-            }
-        }
-
-        return null;
     }
 
     public static function hostsMatch(string $left, string $right): bool
@@ -271,10 +161,5 @@ class ProductSourcePriority
     public static function host(string $url): string
     {
         return Str::after(Str::lower((string) parse_url($url, PHP_URL_HOST)), 'www.');
-    }
-
-    private function brandKey(?string $brand): string
-    {
-        return preg_replace('/[^a-z0-9]+/', '', Str::lower(Str::ascii((string) $brand))) ?: '';
     }
 }

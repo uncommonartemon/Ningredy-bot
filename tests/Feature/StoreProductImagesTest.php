@@ -11,6 +11,7 @@ use App\Models\ProductDraft;
 use App\Models\ProductVariant;
 use App\Models\TelegramUpdate;
 use App\Services\Products\ProductImageStorage;
+use App\Services\Telegram\DraftTelegramMessageLifecycle;
 use App\Services\Telegram\TelegramClient;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request as HttpRequest;
@@ -47,6 +48,7 @@ class StoreProductImagesTest extends TestCase
         (new StoreProductImages($product->id, $variant->id, $draft->id))->handle(
             app(ProductImageStorage::class),
             app(TelegramClient::class),
+            app(DraftTelegramMessageLifecycle::class),
         );
 
         Http::assertSent(function (HttpRequest $request): bool {
@@ -90,6 +92,7 @@ class StoreProductImagesTest extends TestCase
         (new StoreProductImages($product->id, $variant->id, $draft->id))->handle(
             app(ProductImageStorage::class),
             app(TelegramClient::class),
+            app(DraftTelegramMessageLifecycle::class),
         );
 
         $this->assertDatabaseCount('product_draft_media', 0);
@@ -104,6 +107,60 @@ class StoreProductImagesTest extends TestCase
 
             return str_contains((string) ($media[0]['caption'] ?? ''), "Товар #{$product->id} добавлен в каталог");
         });
+    }
+
+    public function test_existing_draft_album_is_finalized_in_place_and_controls_are_deleted(): void
+    {
+        Storage::fake('public');
+        config(['services.telegram.bot_token' => 'test-token']);
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => true])]);
+        [$product, $variant, $draft] = $this->approvedProductWithMedia();
+        $lifecycle = app(DraftTelegramMessageLifecycle::class);
+        $originalCaption = "🆕 Черновик #{$draft->id} готов к добавлению\n\n"
+            ."🏷 {$draft->title}\n\n"
+            ."⚙️ Характеристики:\n🧠 Процессор: Test CPU\n💾 Память: 16 GB\n\n"
+            .'📷 Фото: 3';
+        $lifecycle->rememberReviewResponse($draft, '98765', [
+            'ok' => true,
+            'result' => [
+                ['message_id' => 701],
+                ['message_id' => 702],
+                ['message_id' => 703],
+            ],
+        ], true, $originalCaption);
+        $lifecycle->rememberControlResponse($draft, '98765', [
+            'ok' => true,
+            'result' => ['message_id' => 704],
+        ]);
+
+        (new StoreProductImages($product->id, $variant->id, $draft->id))->handle(
+            app(ProductImageStorage::class),
+            app(TelegramClient::class),
+            $lifecycle,
+        );
+
+        Http::assertSent(function (HttpRequest $request) use ($product, $originalCaption): bool {
+            if (! str_ends_with($request->url(), '/editMessageCaption') || (int) $request['message_id'] !== 701) {
+                return false;
+            }
+
+            $expectedCaption = preg_replace(
+                '/\A[^\r\n]*/u',
+                "✅ Товар #{$product->id} добавлен в каталог",
+                $originalCaption,
+                1,
+            );
+
+            return $request['caption'] === $expectedCaption;
+        });
+        Http::assertSent(fn (HttpRequest $request): bool => str_ends_with($request->url(), '/deleteMessages')
+            && $request['message_ids'] === [704]);
+        Http::assertNotSent(fn (HttpRequest $request): bool => str_ends_with($request->url(), '/sendMediaGroup'));
+
+        $draft->refresh();
+        $this->assertSame([701, 702, 703], $draft->telegram_review_message_ids);
+        $this->assertSame([], $draft->telegram_control_message_ids);
+        $this->assertNotNull($draft->telegram_review_finalized_at);
     }
 
     /** @return array{Product, ProductVariant, ProductDraft} */

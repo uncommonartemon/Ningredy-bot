@@ -2,6 +2,7 @@
 
 namespace Tests\Unit;
 
+use App\Services\Ai\AiSettings;
 use App\Services\Products\BrowserProductGalleryExtractor;
 use App\Services\Products\ProductImageResolver;
 use Illuminate\Support\Facades\Http;
@@ -9,6 +10,16 @@ use Tests\TestCase;
 
 class ProductImageResolverTest extends TestCase
 {
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        $this->mock(AiSettings::class)
+            ->shouldReceive('galleryBrowserMode')
+            ->byDefault()
+            ->andReturn(AiSettings::GALLERY_BROWSER_AUTO);
+    }
+
     public function test_it_extracts_absolute_and_relative_product_metadata_images(): void
     {
         Http::fake([
@@ -114,7 +125,9 @@ class ProductImageResolverTest extends TestCase
         $browser = $this->mock(BrowserProductGalleryExtractor::class);
         $browser->shouldReceive('extract')
             ->once()
-            ->with('https://93.184.216.34/javascript-product', 5)
+            ->with('https://93.184.216.34/javascript-product', 5, null, null, [
+                'static_image_urls' => ['https://93.184.216.34/static-fallback.jpg'],
+            ])
             ->andReturn([
                 'https://93.184.216.34/browser-product-front.jpg',
                 'https://93.184.216.34/browser-product-back.jpg',
@@ -127,6 +140,114 @@ class ProductImageResolverTest extends TestCase
         $this->assertSame([
             'https://93.184.216.34/browser-product-front.jpg',
             'https://93.184.216.34/browser-product-back.jpg',
+        ], $images);
+    }
+
+    public function test_it_never_sends_pdf_json_or_direct_images_to_playwright(): void
+    {
+        Http::fake([
+            'https://93.184.216.34/manual' => Http::response(
+                "%PDF-1.7\nproduct manual",
+                200,
+                ['Content-Type' => 'text/html'],
+            ),
+            'https://93.184.216.34/product.json' => Http::response(
+                '{"images":["/one.jpg"]}',
+                200,
+                ['Content-Type' => 'application/json'],
+            ),
+            'https://93.184.216.34/hero.jpg' => Http::response(
+                'image bytes',
+                200,
+                ['Content-Type' => 'image/jpeg'],
+            ),
+        ]);
+        $this->mock(BrowserProductGalleryExtractor::class)
+            ->shouldNotReceive('extract');
+
+        $images = app(ProductImageResolver::class)->resolve([
+            ['url' => 'https://93.184.216.34/manual'],
+            ['url' => 'https://93.184.216.34/product.json'],
+            ['url' => 'https://93.184.216.34/hero.jpg'],
+        ], 5);
+
+        $this->assertSame([], $images);
+    }
+
+    public function test_it_accepts_headerless_html_but_rejects_a_pdf_url_before_browser(): void
+    {
+        Http::fake([
+            'https://93.184.216.34/headerless-product' => Http::response(
+                '<!doctype html><html><head><meta property="og:image" content="/hero.jpg"></head></html>',
+                200,
+            ),
+        ]);
+        $browser = $this->mock(BrowserProductGalleryExtractor::class);
+        $browser->shouldReceive('extract')
+            ->once()
+            ->with('https://93.184.216.34/headerless-product', 5, null, null, [
+                'static_image_urls' => ['https://93.184.216.34/hero.jpg'],
+            ])
+            ->andReturn([]);
+
+        $images = app(ProductImageResolver::class)->resolve([
+            ['url' => 'https://93.184.216.34/specification.pdf'],
+            ['url' => 'https://93.184.216.34/headerless-product'],
+        ], 5);
+
+        $this->assertSame(['https://93.184.216.34/hero.jpg'], $images);
+        Http::assertNotSent(fn ($request): bool => $request->url() === 'https://93.184.216.34/specification.pdf');
+    }
+
+    public function test_it_does_not_use_browser_when_gallery_browser_mode_is_off(): void
+    {
+        Http::fake([
+            'https://93.184.216.34/product' => Http::response(
+                '<html><head><meta property="og:image" content="/static.jpg"></head></html>',
+                200,
+                ['Content-Type' => 'text/html'],
+            ),
+        ]);
+        $settings = $this->mock(AiSettings::class);
+        $settings->shouldReceive('galleryBrowserMode')
+            ->andReturn(AiSettings::GALLERY_BROWSER_OFF);
+        $browser = $this->mock(BrowserProductGalleryExtractor::class);
+        $browser->shouldNotReceive('extract');
+
+        $images = app(ProductImageResolver::class)->resolve([
+            ['url' => 'https://93.184.216.34/product'],
+        ], 5);
+
+        $this->assertSame(['https://93.184.216.34/static.jpg'], $images);
+    }
+
+    public function test_it_always_uses_browser_in_always_mode_even_when_static_gallery_is_full(): void
+    {
+        Http::fake([
+            'https://93.184.216.34/product' => Http::response(
+                '<html><head>'
+                .'<meta property="og:image" content="/static-1.jpg">'
+                .'<meta name="twitter:image" content="/static-2.jpg">'
+                .'</head></html>',
+                200,
+                ['Content-Type' => 'text/html'],
+            ),
+        ]);
+        $settings = $this->mock(AiSettings::class);
+        $settings->shouldReceive('galleryBrowserMode')
+            ->andReturn(AiSettings::GALLERY_BROWSER_ALWAYS);
+        $browser = $this->mock(BrowserProductGalleryExtractor::class);
+        $browser->shouldReceive('extract')
+            ->once()
+            ->andReturn(['https://93.184.216.34/browser.jpg']);
+
+        $images = app(ProductImageResolver::class)->resolve([
+            ['url' => 'https://93.184.216.34/product'],
+        ], 2);
+
+        $this->assertSame([
+            'https://93.184.216.34/browser.jpg',
+            'https://93.184.216.34/static-1.jpg',
         ], $images);
     }
 

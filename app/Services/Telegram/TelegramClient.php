@@ -9,8 +9,13 @@ use Throwable;
 
 class TelegramClient
 {
-    public function sendMessage(string $chatId, string $text, ?array $replyMarkup = null): array
-    {
+    public function sendMessage(
+        string $chatId,
+        string $text,
+        ?array $replyMarkup = null,
+        bool $silent = false,
+        ?string $parseMode = null,
+    ): array {
         $payload = [
             'chat_id' => $chatId,
             'text' => mb_substr($text, 0, 4096),
@@ -19,8 +24,38 @@ class TelegramClient
         if ($replyMarkup !== null) {
             $payload['reply_markup'] = $replyMarkup;
         }
+        if ($silent) {
+            $payload['disable_notification'] = true;
+        }
+        if ($parseMode !== null) {
+            $payload['parse_mode'] = $parseMode;
+        }
 
         return $this->post('sendMessage', $payload);
+    }
+
+    public function editMessageText(int|string $chatId, int $messageId, string $text, ?string $parseMode = null): array
+    {
+        $payload = [
+            'chat_id' => $chatId,
+            'message_id' => $messageId,
+            'text' => mb_substr($text, 0, 4096),
+            'disable_web_page_preview' => true,
+        ];
+        if ($parseMode !== null) {
+            $payload['parse_mode'] = $parseMode;
+        }
+
+        return $this->post('editMessageText', $payload);
+    }
+
+    public function editMessageCaption(int|string $chatId, int $messageId, string $caption): array
+    {
+        return $this->post('editMessageCaption', [
+            'chat_id' => $chatId,
+            'message_id' => $messageId,
+            'caption' => mb_substr($caption, 0, 1024),
+        ]);
     }
 
     public function sendPhoto(string $chatId, string $photoUrl, ?string $caption = null, ?array $replyMarkup = null): array
@@ -227,6 +262,24 @@ class TelegramClient
             'chat_id' => $chatId,
             'message_id' => $messageId,
             'reply_markup' => ['inline_keyboard' => []],
+        ]);
+    }
+
+    /** @param array<int, int> $messageIds */
+    public function deleteMessages(int|string $chatId, array $messageIds): array
+    {
+        $messageIds = array_values(array_unique(array_filter(
+            array_map('intval', $messageIds),
+            fn (int $messageId): bool => $messageId > 0,
+        )));
+
+        if ($messageIds === []) {
+            return ['ok' => true, 'result' => true];
+        }
+
+        return $this->post('deleteMessages', [
+            'chat_id' => $chatId,
+            'message_ids' => array_slice($messageIds, 0, 100),
         ]);
     }
 

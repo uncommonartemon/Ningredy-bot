@@ -4,6 +4,7 @@ namespace App\Filament\Resources\ProductGalleryRecipes\Tables;
 
 use Filament\Actions\DeleteAction;
 use Filament\Actions\EditAction;
+use Filament\Tables\Columns\IconColumn;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Filters\SelectFilter;
 use Filament\Tables\Table;
@@ -35,6 +36,10 @@ class ProductGalleryRecipesTable
                         'disabled' => 'gray',
                         default => 'gray',
                     }),
+                IconColumn::make('source_blocked')
+                    ->label('Источник заблокирован')
+                    ->boolean()
+                    ->sortable(),
                 TextColumn::make('success_count')
                     ->label('Успехов')
                     ->numeric()

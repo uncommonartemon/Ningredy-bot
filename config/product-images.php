@@ -13,8 +13,8 @@ return [
     ],
     'download_limit' => 20,
     'download_candidates' => 8,
-    // Reject thumbnails: staged catalog media must have at least a 480px short side.
-    'minimum_side' => 480,
+    // Reject genuinely tiny thumbnails while allowing clean medium-size shop photos.
+    'minimum_side' => 450,
     'minimum_ratio' => 0.28,
     'maximum_ratio' => 3.5,
     'public_source_target' => 6,
@@ -31,9 +31,31 @@ return [
     'max_urls_per_page' => 60,
     'resolve_limit' => 16,
     // AI discovery: how many of the suggested page URLs are opened and how
-    // many candidate URLs are kept from one discovery run.
-    'ai_page_urls_limit' => 4,
+    // many candidate URLs are kept from one discovery run. 12 is the agent's
+    // own return cap (see ProductImageDiscoveryAgent::schema) - the real
+    // stopping condition is max_search_cost_usd below, not this count.
+    'ai_page_urls_limit' => 12,
     'ai_result_limit' => 20,
+
+    // Once one Telegram search has spent this much (across research, vision,
+    // gallery-recipe training, and discovery calls), ProductImageResolver
+    // stops opening further candidate sources and the search gives up with
+    // whatever was already found. 0 disables the budget cutoff.
+    'max_search_cost_usd' => (float) env('PRODUCT_IMAGE_MAX_SEARCH_COST_USD', 0.30),
+
+    // The queue worker has a larger hard timeout (1500s). Application work
+    // stops earlier and keeps a reserve for persisting the draft and replying
+    // to Telegram instead of being killed in the middle of finalization.
+    'search_timing' => [
+        'max_seconds' => (int) env('PRODUCT_SEARCH_MAX_SECONDS', 1200),
+        'reserve_seconds' => (int) env('PRODUCT_SEARCH_RESERVE_SECONDS', 120),
+        'product_research_timeout_seconds' => (int) env('PRODUCT_SEARCH_RESEARCH_TIMEOUT', 360),
+        'image_discovery_timeout_seconds' => (int) env('PRODUCT_SEARCH_IMAGE_DISCOVERY_TIMEOUT', 180),
+        'gallery_recipe_timeout_seconds' => (int) env('PRODUCT_SEARCH_GALLERY_RECIPE_TIMEOUT', 240),
+        'image_vision_timeout_seconds' => (int) env('PRODUCT_SEARCH_VISION_TIMEOUT', 90),
+        'browser_timeout_seconds' => (int) env('PRODUCT_SEARCH_BROWSER_TIMEOUT', 90),
+        'browser_scout_timeout_seconds' => (int) env('PRODUCT_SEARCH_BROWSER_SCOUT_TIMEOUT', 120),
+    ],
 
     // Vision receives candidates in small batches and stops after enough
     // publication images are selected.
@@ -61,12 +83,19 @@ return [
     'fallback_discovery' => true,
     'discover_after_rejection' => true,
 
-    // A real browser is used only when static HTML does not expose enough
-    // product gallery images (for example, JavaScript sliders on B&H).
+    // In auto mode a browser scout and mandatory AI gate decide whether the
+    // static URLs are sufficient or a hidden/layered gallery needs training.
     'browser_fallback' => [
         'enabled' => env('PRODUCT_IMAGE_BROWSER_ENABLED', env('APP_ENV') !== 'testing'),
         'node_binary' => env('PRODUCT_IMAGE_BROWSER_NODE', 'node'),
         'script' => 'scripts/extract-product-gallery.mjs',
+        'gallery_limit' => 10,
+        'dom_wait_ms' => (int) env('PRODUCT_IMAGE_BROWSER_DOM_WAIT_MS', 12000),
+        'image_probe_timeout_ms' => (int) env('PRODUCT_IMAGE_BROWSER_PROBE_TIMEOUT_MS', 5000),
+        // A complete Playwright gallery may only expose medium-size originals.
+        // This lower limit is used only after the recipe confirms every frame.
+        'confirmed_gallery_minimum_side' => (int) env('PRODUCT_IMAGE_CONFIRMED_GALLERY_MINIMUM_SIDE', 400),
+        'training_max_rounds' => (int) env('PRODUCT_IMAGE_GALLERY_TRAINING_MAX_ROUNDS', 3),
         'timeout' => 45,
         'scout_timeout' => 60,
     ],

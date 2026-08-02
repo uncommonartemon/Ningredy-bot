@@ -4,9 +4,44 @@ namespace App\Services\Ai;
 
 use App\Models\AppSetting;
 use App\Models\TelegramChatState;
+use Illuminate\Support\Facades\Crypt;
+use Throwable;
 
 class AiSettings
 {
+    public const DEFAULT_MAX_SEARCH_COST_USD = 0.30;
+
+    public const DEFAULT_SEARCH_MAX_SECONDS = 1200;
+
+    public const DEFAULT_SEARCH_RESERVE_SECONDS = 120;
+
+    public const DEFAULT_PRODUCT_RESEARCH_TIMEOUT_SECONDS = 360;
+
+    public const DEFAULT_IMAGE_DISCOVERY_TIMEOUT_SECONDS = 180;
+
+    public const DEFAULT_GALLERY_RECIPE_TIMEOUT_SECONDS = 240;
+
+    public const DEFAULT_IMAGE_VISION_TIMEOUT_SECONDS = 90;
+
+    public const DEFAULT_BROWSER_TIMEOUT_SECONDS = 90;
+
+    public const DEFAULT_BROWSER_SCOUT_TIMEOUT_SECONDS = 120;
+
+    public const DEFAULT_GALLERY_TRAINING_MAX_ROUNDS = 3;
+
+    public const GALLERY_BROWSER_AUTO = 'auto';
+
+    public const GALLERY_BROWSER_OFF = 'off';
+
+    public const GALLERY_BROWSER_ALWAYS = 'always';
+
+    /** @var array<string, string> */
+    public const GALLERY_BROWSER_MODES = [
+        self::GALLERY_BROWSER_AUTO => 'Автоматически',
+        self::GALLERY_BROWSER_OFF => 'Выключен',
+        self::GALLERY_BROWSER_ALWAYS => 'Всегда',
+    ];
+
     /** @var array<string, string> */
     public const IMAGE_MODELS = [
         'gpt-image-2' => 'GPT Image 2 (лучшее качество, по умолчанию)',
@@ -31,6 +66,37 @@ class AiSettings
         }
 
         AppSetting::put('ai.model', $selectedModel);
+    }
+
+    /**
+     * The DB-stored key overrides OPENAI_API_KEY (see AppServiceProvider::boot());
+     * returns null when unset so callers fall back to the .env value.
+     */
+    public function openAiApiKey(): ?string
+    {
+        $encrypted = AppSetting::valueFor('ai.openai_api_key');
+
+        if (! is_string($encrypted) || $encrypted === '') {
+            return null;
+        }
+
+        try {
+            return Crypt::decryptString($encrypted);
+        } catch (Throwable) {
+            return null;
+        }
+    }
+
+    public function hasStoredOpenAiApiKey(): bool
+    {
+        return $this->openAiApiKey() !== null;
+    }
+
+    public function saveOpenAiApiKey(?string $key): void
+    {
+        $key = trim((string) $key);
+
+        AppSetting::put('ai.openai_api_key', $key !== '' ? Crypt::encryptString($key) : null);
     }
 
     public function imageModel(): ?string
@@ -60,6 +126,188 @@ class AiSettings
         );
     }
 
+    public function maxSearchCostUsd(): float
+    {
+        $value = AppSetting::valueFor('ai.max_search_cost_usd');
+
+        return is_numeric($value)
+            ? max(0.0, (float) $value)
+            : (float) config('product-images.max_search_cost_usd', self::DEFAULT_MAX_SEARCH_COST_USD);
+    }
+
+    public function saveMaxSearchCostUsd(?float $value): void
+    {
+        AppSetting::put('ai.max_search_cost_usd', $value !== null ? (string) max(0.0, $value) : null);
+    }
+
+    public function fallbackSourcesEnabled(): bool
+    {
+        $value = AppSetting::valueFor('ai.fallback_sources_enabled');
+
+        return $value === null
+            ? true
+            : filter_var($value, FILTER_VALIDATE_BOOLEAN);
+    }
+
+    public function saveFallbackSourcesEnabled(bool $enabled): void
+    {
+        AppSetting::put('ai.fallback_sources_enabled', $enabled ? '1' : '0');
+    }
+
+    public function searchMaxSeconds(): int
+    {
+        return $this->integerSetting(
+            'ai.search_max_seconds',
+            (int) config('product-images.search_timing.max_seconds', self::DEFAULT_SEARCH_MAX_SECONDS),
+            300,
+            1200,
+        );
+    }
+
+    public function saveSearchMaxSeconds(?int $seconds): void
+    {
+        $this->saveIntegerSetting('ai.search_max_seconds', $seconds, 300, 1200);
+    }
+
+    public function searchReserveSeconds(): int
+    {
+        return $this->integerSetting(
+            'ai.search_reserve_seconds',
+            (int) config('product-images.search_timing.reserve_seconds', self::DEFAULT_SEARCH_RESERVE_SECONDS),
+            30,
+            300,
+        );
+    }
+
+    public function saveSearchReserveSeconds(?int $seconds): void
+    {
+        $this->saveIntegerSetting('ai.search_reserve_seconds', $seconds, 30, 300);
+    }
+
+    public function productResearchTimeoutSeconds(): int
+    {
+        return $this->integerSetting(
+            'ai.product_research_timeout_seconds',
+            (int) config('product-images.search_timing.product_research_timeout_seconds', self::DEFAULT_PRODUCT_RESEARCH_TIMEOUT_SECONDS),
+            60,
+            600,
+        );
+    }
+
+    public function saveProductResearchTimeoutSeconds(?int $seconds): void
+    {
+        $this->saveIntegerSetting('ai.product_research_timeout_seconds', $seconds, 60, 600);
+    }
+
+    public function imageDiscoveryTimeoutSeconds(): int
+    {
+        return $this->integerSetting(
+            'ai.image_discovery_timeout_seconds',
+            (int) config('product-images.search_timing.image_discovery_timeout_seconds', self::DEFAULT_IMAGE_DISCOVERY_TIMEOUT_SECONDS),
+            30,
+            300,
+        );
+    }
+
+    public function saveImageDiscoveryTimeoutSeconds(?int $seconds): void
+    {
+        $this->saveIntegerSetting('ai.image_discovery_timeout_seconds', $seconds, 30, 300);
+    }
+
+    public function galleryRecipeTimeoutSeconds(): int
+    {
+        return $this->integerSetting(
+            'ai.gallery_recipe_timeout_seconds',
+            (int) config('product-images.search_timing.gallery_recipe_timeout_seconds', self::DEFAULT_GALLERY_RECIPE_TIMEOUT_SECONDS),
+            30,
+            600,
+        );
+    }
+
+    public function saveGalleryRecipeTimeoutSeconds(?int $seconds): void
+    {
+        $this->saveIntegerSetting('ai.gallery_recipe_timeout_seconds', $seconds, 30, 600);
+    }
+
+    public function imageVisionTimeoutSeconds(): int
+    {
+        return $this->integerSetting(
+            'ai.image_vision_timeout_seconds',
+            (int) config('product-images.search_timing.image_vision_timeout_seconds', self::DEFAULT_IMAGE_VISION_TIMEOUT_SECONDS),
+            15,
+            180,
+        );
+    }
+
+    public function saveImageVisionTimeoutSeconds(?int $seconds): void
+    {
+        $this->saveIntegerSetting('ai.image_vision_timeout_seconds', $seconds, 15, 180);
+    }
+
+    public function browserTimeoutSeconds(): int
+    {
+        return $this->integerSetting(
+            'ai.browser_timeout_seconds',
+            (int) config('product-images.search_timing.browser_timeout_seconds', self::DEFAULT_BROWSER_TIMEOUT_SECONDS),
+            15,
+            300,
+        );
+    }
+
+    public function saveBrowserTimeoutSeconds(?int $seconds): void
+    {
+        $this->saveIntegerSetting('ai.browser_timeout_seconds', $seconds, 15, 300);
+    }
+
+    public function browserScoutTimeoutSeconds(): int
+    {
+        return $this->integerSetting(
+            'ai.browser_scout_timeout_seconds',
+            (int) config('product-images.search_timing.browser_scout_timeout_seconds', self::DEFAULT_BROWSER_SCOUT_TIMEOUT_SECONDS),
+            15,
+            300,
+        );
+    }
+
+    public function saveBrowserScoutTimeoutSeconds(?int $seconds): void
+    {
+        $this->saveIntegerSetting('ai.browser_scout_timeout_seconds', $seconds, 15, 300);
+    }
+
+    public function galleryTrainingMaxRounds(): int
+    {
+        return $this->integerSetting(
+            'ai.gallery_training_max_rounds',
+            (int) config('product-images.browser_fallback.training_max_rounds', self::DEFAULT_GALLERY_TRAINING_MAX_ROUNDS),
+            1,
+            4,
+        );
+    }
+
+    public function saveGalleryTrainingMaxRounds(?int $rounds): void
+    {
+        $this->saveIntegerSetting('ai.gallery_training_max_rounds', $rounds, 1, 4);
+    }
+
+    public function galleryBrowserMode(): string
+    {
+        $mode = AppSetting::valueFor('ai.gallery_browser_mode', self::GALLERY_BROWSER_AUTO);
+
+        return array_key_exists($mode, self::GALLERY_BROWSER_MODES)
+            ? $mode
+            : self::GALLERY_BROWSER_AUTO;
+    }
+
+    public function saveGalleryBrowserMode(?string $mode): void
+    {
+        AppSetting::put(
+            'ai.gallery_browser_mode',
+            array_key_exists($mode, self::GALLERY_BROWSER_MODES)
+                ? $mode
+                : self::GALLERY_BROWSER_AUTO,
+        );
+    }
+
     public function providerFor(string $role): string
     {
         return 'openai';
@@ -83,5 +331,19 @@ class AiSettings
         }
 
         return $this->model() ?: (string) config("services.{$role}.model");
+    }
+
+    private function integerSetting(string $key, int $default, int $min, int $max): int
+    {
+        $value = AppSetting::valueFor($key);
+
+        return is_numeric($value)
+            ? max($min, min($max, (int) $value))
+            : max($min, min($max, $default));
+    }
+
+    private function saveIntegerSetting(string $key, ?int $value, int $min, int $max): void
+    {
+        AppSetting::put($key, $value === null ? null : (string) max($min, min($max, $value)));
     }
 }

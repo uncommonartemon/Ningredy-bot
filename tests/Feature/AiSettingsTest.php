@@ -85,4 +85,44 @@ class AiSettingsTest extends TestCase
 
         $this->assertNull($settings->imageModel());
     }
+
+    public function test_gallery_browser_mode_defaults_to_auto_and_only_accepts_known_modes(): void
+    {
+        $settings = app(AiSettings::class);
+
+        $this->assertSame(AiSettings::GALLERY_BROWSER_AUTO, $settings->galleryBrowserMode());
+
+        $settings->saveGalleryBrowserMode(AiSettings::GALLERY_BROWSER_OFF);
+        $this->assertSame(AiSettings::GALLERY_BROWSER_OFF, $settings->galleryBrowserMode());
+
+        $settings->saveGalleryBrowserMode('invalid');
+        $this->assertSame(AiSettings::GALLERY_BROWSER_AUTO, $settings->galleryBrowserMode());
+    }
+
+
+    public function test_search_limits_have_safe_defaults_and_are_clamped(): void
+    {
+        $settings = app(AiSettings::class);
+
+        $this->assertSame(0.30, $settings->maxSearchCostUsd());
+        $this->assertTrue($settings->fallbackSourcesEnabled());
+        $this->assertSame(1200, $settings->searchMaxSeconds());
+        $this->assertSame(120, $settings->searchReserveSeconds());
+        $this->assertSame(360, $settings->productResearchTimeoutSeconds());
+        $this->assertSame(180, $settings->imageDiscoveryTimeoutSeconds());
+        $this->assertSame(240, $settings->galleryRecipeTimeoutSeconds());
+        $this->assertSame(90, $settings->imageVisionTimeoutSeconds());
+        $this->assertSame(90, $settings->browserTimeoutSeconds());
+        $this->assertSame(120, $settings->browserScoutTimeoutSeconds());
+
+        $settings->saveFallbackSourcesEnabled(false);
+        $settings->saveSearchMaxSeconds(9999);
+        $settings->saveSearchReserveSeconds(1);
+        $settings->saveImageDiscoveryTimeoutSeconds(9999);
+
+        $this->assertFalse($settings->fallbackSourcesEnabled());
+        $this->assertSame(1200, $settings->searchMaxSeconds());
+        $this->assertSame(30, $settings->searchReserveSeconds());
+        $this->assertSame(300, $settings->imageDiscoveryTimeoutSeconds());
+    }
 }

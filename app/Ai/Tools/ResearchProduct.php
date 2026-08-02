@@ -10,12 +10,14 @@ use App\Models\Product;
 use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
 use App\Services\Ai\AiSettings;
+use App\Services\Ai\ProductSearchTimeBudget;
 use App\Services\Products\ProductIdentityKey;
 use App\Services\Products\ProductImageResolver;
 use App\Services\Products\ProductImageStorage;
 use App\Services\Products\ProductPublicDescription;
 use App\Services\Products\ProductResearchResponseNormalizer;
 use App\Services\Products\ProductSourcePriority;
+use App\Services\Products\ProductSourceAttemptRecorder;
 use App\Services\Telegram\TelegramClient;
 use App\Services\Telegram\TelegramProgressReporter;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
@@ -48,25 +50,45 @@ class ResearchProduct implements Tool
     {
         $query = trim((string) $request->string('query'));
         $progress = new TelegramProgressReporter(app(TelegramClient::class), (string) $this->update->chat_id);
-        $progress->step('1/4 · поиск точной карточки и характеристик', 240, $query);
-        $provider = app(AiSettings::class)->providerFor('product_research');
-        $model = app(AiSettings::class)->modelFor('product_research');
+        $settings = app(AiSettings::class);
+        $timeBudget = app(ProductSearchTimeBudget::class);
+
+        if (! $timeBudget->canStart($this->update->id, 60)) {
+            $progress->warning('Общий лимит поиска исчерпан; новый долгий этап не запускаю, чтобы корректно завершить запрос.');
+
+            return $this->json([
+                'ok' => false,
+                'status' => 'time_budget_exhausted',
+                'message' => 'Поиск достиг общего лимита времени. Запрос завершён без аварийного падения; его можно повторить отдельно.',
+            ]);
+        }
+
+        $researchTimeout = $timeBudget->timeoutFor(
+            $this->update->id,
+            $settings->productResearchTimeoutSeconds(),
+        );
+        $progress->step('1/4 · поиск точной карточки и характеристик', $researchTimeout, $query);
+        $provider = $settings->providerFor('product_research');
+        $model = $settings->modelFor('product_research');
+        $sourcePriority = $this->sourcePriority ?? app(ProductSourcePriority::class);
+        $blockedDomains = $sourcePriority->blockedDomains();
+        $researchPrompt = $query.($blockedDomains === [] ? '' : PHP_EOL.'Never search or return these blocked domains: '.implode(', ', $blockedDomains));
         $run = AiRun::query()->create([
             'telegram_update_id' => $this->update->id,
             'provider' => $provider,
             'model' => $model,
             'status' => 'running',
-            'prompt' => $query,
+            'prompt' => $researchPrompt,
             'started_at' => now(),
         ]);
 
         try {
-            $response = ProductResearchAgent::make()->prompt($query, provider: $provider, model: $model, timeout: 240);
+            $response = ProductResearchAgent::make()->prompt($researchPrompt, provider: $provider, model: $model, timeout: $researchTimeout);
             $progress->info('Карточка получена; проверяю модель, цвет и источники.');
             $normalizedResponse = ($this->responseNormalizer ?? app(ProductResearchResponseNormalizer::class))
                 ->normalize($response->toArray());
             $data = Validator::make($normalizedResponse, [
-                'status' => ['required', 'in:found,needs_clarification,not_found'],
+                'status' => ['required', 'in:found,not_found'],
                 'clarification_question' => ['nullable', 'string', 'max:1000'],
                 'title' => ['nullable', 'string', 'max:255'],
                 'brand' => ['nullable', 'string', 'max:255'],
@@ -97,8 +119,22 @@ class ResearchProduct implements Tool
             $normalizedDescription = $publicDescription->normalize($data);
             $data['description'] = $normalizedDescription['description'];
             $data['research_notes'] = $normalizedDescription['research_notes'];
-            $sourcePriority = $this->sourcePriority ?? app(ProductSourcePriority::class);
-            $data['sources'] = $sourcePriority->sortSources($data['sources'], $data['brand']);
+            $reportedSources = $data['sources'];
+            $data['sources'] = $sourcePriority->sortSources($reportedSources, $data['brand']);
+            $attemptRecorder = app(ProductSourceAttemptRecorder::class);
+            foreach ($reportedSources as $source) {
+                $blocked = $sourcePriority->isBlockedUrl((string) $source['url']);
+                $attemptRecorder->record([
+                    'telegram_update_id' => $this->update->id,
+                    'product_url' => $source['url'],
+                    'actor' => 'web_search',
+                    'phase' => 'product_research',
+                    'action' => 'candidate_source',
+                    'status' => $blocked ? 'blocked' : 'completed',
+                    'decision' => $blocked ? 'reject_global_block' : 'accept_candidate',
+                    'output' => $source,
+                ]);
+            }
 
             if ($data['status'] === 'found') {
                 Validator::make($data, [
@@ -118,7 +154,13 @@ class ResearchProduct implements Tool
                 ])->validate();
 
                 $data['primary_source_url'] = $primarySource['url'];
-                $progress->step('2/4 · галерея страницы и AI-переобучение при необходимости', 480, parse_url($data['primary_source_url'], PHP_URL_HOST) ?: null);
+                $galleryTimeout = $timeBudget->timeoutFor(
+                    $this->update->id,
+                    $settings->browserScoutTimeoutSeconds()
+                        + ($settings->galleryRecipeTimeoutSeconds() * (1 + $settings->galleryTrainingMaxRounds()))
+                        + ($settings->browserTimeoutSeconds() * $settings->galleryTrainingMaxRounds()),
+                );
+                $progress->step('2/4 · галерея страницы и AI-переобучение при необходимости', $galleryTimeout, parse_url($data['primary_source_url'], PHP_URL_HOST) ?: null);
                 $resolvedGallery = $this->imageResolver->resolve(
                     [$primarySource],
                     10,
@@ -129,6 +171,7 @@ class ResearchProduct implements Tool
                             default => $progress->info($message),
                         };
                     },
+                    $this->update->id,
                 );
                 $legacyPrimaryImages = $reportedPrimaryUrl === $data['primary_source_url'] ? $data['image_urls'] : [];
                 $data['image_urls'] = $sourcePriority->sortUrls([
@@ -218,7 +261,12 @@ class ResearchProduct implements Tool
             $draft = ProductDraft::query()->find($result['draft_id'] ?? null);
 
             if ($draft && $draft->status === 'pending_review' && ! $draft->images_staged_at) {
-                $progress->step('3/4 · загрузка, резервный поиск и vision-проверка фото', 360);
+                $imageStageTimeout = $timeBudget->timeoutFor(
+                    $this->update->id,
+                    $settings->imageDiscoveryTimeoutSeconds()
+                        + (2 * $settings->imageVisionTimeoutSeconds()),
+                );
+                $progress->step('3/4 · загрузка, резервный поиск и vision-проверка фото', $imageStageTimeout);
                 $imageCount = ($this->imageStorage ?? app(ProductImageStorage::class))->stage(
                     $draft,
                     fn (string $message) => $progress->info($message),
@@ -262,6 +310,13 @@ class ResearchProduct implements Tool
 
     public function schema(JsonSchema $schema): array
     {
-        return ['query' => $schema->string()->required()];
+        return [
+            'query' => $schema->string()->required()->description(
+                'The product exactly as the user described it: brand, model, and the specs/identifiers they '
+                .'actually stated. Do not add a model year, generation, suffix, or any other identifying detail '
+                .'the user did not mention - an invented detail can steer the downstream search toward the wrong '
+                .'product. Do not repeat the same term multiple times or wrap it in quotes.'
+            ),
+        ];
     }
 }

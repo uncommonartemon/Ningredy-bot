@@ -6,6 +6,7 @@ use Filament\Forms\Components\Select;
 use Filament\Forms\Components\TagsInput;
 use Filament\Forms\Components\Textarea;
 use Filament\Forms\Components\TextInput;
+use Filament\Forms\Components\Toggle;
 use Filament\Schemas\Components\Section;
 use Filament\Schemas\Schema;
 
@@ -36,6 +37,13 @@ class ProductGalleryRecipeForm
                         ])
                         ->required()
                         ->native(false),
+                    Toggle::make('source_blocked')
+                        ->label('Полностью исключить источник')
+                        ->helperText('Домен не попадёт ни в Web Search, ни в HTML/Playwright-обработку.'),
+                    Textarea::make('source_block_reason')
+                        ->label('Причина блокировки источника')
+                        ->rows(3)
+                        ->columnSpanFull(),
                     TextInput::make('success_count')->label('Успешных запусков')->disabled()->dehydrated(false),
                     TextInput::make('failure_count')->label('Ошибок')->disabled()->dehydrated(false),
                     Textarea::make('last_error')->label('Последняя ошибка')->rows(3)->disabled()->dehydrated(false)->columnSpanFull(),
@@ -45,6 +53,37 @@ class ProductGalleryRecipeForm
             Section::make('Безопасный Playwright JSON-рецепт')
                 ->description('Разрешены только CSS-селекторы, атрибуты изображений и жёстко ограниченные клики. Произвольный JavaScript не хранится и не запускается.')
                 ->schema([
+                    Textarea::make('recipe_text')
+                        ->label('Полный ответ AI (JSON-рецепт)')
+                        ->helperText('Точный структурированный ответ агента, который исполняет Playwright.')
+                        ->rows(18)
+                        ->disabled()
+                        ->dehydrated(false)
+                        ->columnSpanFull(),
+                    Textarea::make('reason')
+                        ->label('Объяснение AI')
+                        ->rows(4)
+                        ->disabled()
+                        ->dehydrated(false)
+                        ->columnSpanFull(),
+                    TextInput::make('confidence')
+                        ->label('Уверенность AI')
+                        ->disabled()
+                        ->dehydrated(false),
+                    Toggle::make('gallery_present')
+                        ->label('Галерея подтверждена')
+                        ->disabled()
+                        ->dehydrated(false),
+                    TextInput::make('expected_image_count')
+                        ->label('Ожидается фото')
+                        ->disabled()
+                        ->dehydrated(false),
+                    Textarea::make('expected_count_evidence')
+                        ->label('Почему ожидается это количество')
+                        ->rows(3)
+                        ->disabled()
+                        ->dehydrated(false)
+                        ->columnSpanFull(),
                     TagsInput::make('pre_click_selectors')
                         ->label('Кнопки перед сбором')
                         ->helperText('Только открытие галереи, cookies или Continue shopping.')

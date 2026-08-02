@@ -12,7 +12,7 @@ class TrainProductGalleryRecipe implements ShouldQueue
 
     public int $tries = 1;
 
-    public int $timeout = 420;
+    public int $timeout = 1380;
 
     public function __construct(
         public string $url,

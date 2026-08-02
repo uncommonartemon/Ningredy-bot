@@ -102,11 +102,23 @@ class AiUsageReporterTest extends TestCase
             'started_at' => now(),
         ]);
 
+        AiRun::query()->create([
+            'telegram_update_id' => $update1->id,
+            'provider' => 'openai',
+            'model' => 'gpt-5.4',
+            'status' => 'failed',
+            'prompt' => 'timed out request with unknown provider-side cost',
+            'usage' => null,
+            'started_at' => now(),
+            'completed_at' => now(),
+        ]);
+
         $reporter = app(AiUsageReporter::class);
 
         $wholeUpdate = $reporter->forTelegramUpdate($update1->id);
         $this->assertSame(2, $wholeUpdate['runs']);
         $this->assertSame(375, $wholeUpdate['tokens']['total']);
+        $this->assertSame(1, $wholeUpdate['usage_unknown_failures']);
 
         $sinceLater = $reporter->forTelegramUpdate($update1->id, $later->created_at->subSecond());
         $this->assertSame(1, $sinceLater['runs']);

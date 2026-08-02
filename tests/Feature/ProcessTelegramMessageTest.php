@@ -132,7 +132,8 @@ class ProcessTelegramMessageTest extends TestCase
             && str_contains((string) ($request['text'] ?? ''), "Итого: черновик #{$draft->id}")
             && data_get($request['reply_markup'] ?? [], 'inline_keyboard.0.0.callback_data') === "draft:add:{$draft->id}"
             && data_get($request['reply_markup'] ?? [], 'inline_keyboard.1.0.callback_data') === "draft:enhance:{$draft->id}"
-            && data_get($request['reply_markup'] ?? [], 'inline_keyboard.2.0.callback_data') === "draft:retrain:{$draft->id}");
+            && data_get($request['reply_markup'] ?? [], 'inline_keyboard.2.0.callback_data') === "draft:restage:{$draft->id}"
+            && data_get($request['reply_markup'] ?? [], 'inline_keyboard.3.0.callback_data') === "draft:retrain:{$draft->id}");
     }
 
     public function test_reply_to_text_is_prepended_as_context_for_the_agent(): void
@@ -203,7 +204,7 @@ class ProcessTelegramMessageTest extends TestCase
 
         Http::assertSent(fn (HttpRequest $request): bool => str_ends_with($request->url(), '/sendMessage')
             && str_contains((string) $request['text'], 'Сервер работает нормально.')
-            && str_contains((string) $request['text'], 'Токены: 1 200')
+            && str_contains((string) $request['text'], 'Примерно токенов потрачено: 1 200')
             && str_contains((string) $request['text'], '(~$0.0068)'));
     }
 

@@ -7,7 +7,7 @@ use Tests\TestCase;
 
 class ProductSourcePriorityTest extends TestCase
 {
-    public function test_it_prioritizes_amazon_then_official_sources(): void
+    public function test_unknown_source_types_keep_their_input_order(): void
     {
         $priority = app(ProductSourcePriority::class);
         $sources = [
@@ -18,23 +18,15 @@ class ProductSourcePriorityTest extends TestCase
             ['title' => 'Apple US', 'url' => 'https://www.apple.com/iphone-17/', 'type' => 'manufacturer'],
         ];
 
-        $sorted = $priority->sortSources($sources, 'Apple');
-
-        $this->assertSame([
-            'Amazon',
-            'Apple US',
-            'Apple UA',
-            'Store',
-            'Review',
-        ], array_column($sorted, 'title'));
+        $this->assertSame(
+            array_column($sources, 'title'),
+            array_column($priority->sortSources($sources, 'Apple'), 'title'),
+        );
     }
 
-    public function test_it_applies_the_same_priority_to_image_urls(): void
+    public function test_unknown_image_hosts_keep_their_input_order(): void
     {
         $priority = app(ProductSourcePriority::class);
-        $sources = [
-            ['title' => 'Apple US', 'url' => 'https://www.apple.com/iphone-17/', 'type' => 'manufacturer'],
-        ];
         $urls = [
             'https://upload.wikimedia.org/product.jpg',
             'https://m.media-amazon.com/images/I/product.jpg',
@@ -42,11 +34,6 @@ class ProductSourcePriorityTest extends TestCase
             'https://www.apple.com/v/iphone-17/images/product.jpg',
         ];
 
-        $this->assertSame([
-            'https://m.media-amazon.com/images/I/product.jpg',
-            'https://www.apple.com/v/iphone-17/images/product.jpg',
-            'https://www.apple.com/ua/images/product.jpg',
-            'https://upload.wikimedia.org/product.jpg',
-        ], $priority->sortUrls($urls, 'Apple', $sources));
+        $this->assertSame($urls, $priority->sortUrls($urls, 'Apple'));
     }
 }

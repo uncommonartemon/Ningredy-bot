@@ -4,6 +4,8 @@ namespace App\Http\Controllers;
 
 use App\Jobs\ProcessDraftPhotoActions;
 use App\Jobs\ProcessTelegramMessage;
+use App\Jobs\RestageDraftGalleryPhotos;
+use App\Jobs\TopUpDraftGalleryPhotos;
 use App\Jobs\TrainDraftGalleryRecipe;
 use App\Jobs\TranscribeTelegramVoice;
 use App\Models\AiOperation;
@@ -14,7 +16,6 @@ use App\Models\ProductDraftMedia;
 use App\Models\TelegramChatState;
 use App\Models\TelegramUpdate;
 use App\Services\Products\ProductDraftWorkflow;
-use App\Services\Products\ProductPhotoManager;
 use App\Services\Telegram\DraftTelegramPresenter;
 use App\Services\Telegram\TelegramClient;
 use Illuminate\Http\JsonResponse;
@@ -240,6 +241,28 @@ class TelegramWebhookController extends Controller
             return;
         }
 
+        if (preg_match('/^draft:restage:(\d+)$/', $data, $restageMatches) === 1) {
+            $this->handleDraftRestageGallery(
+                draftId: (int) $restageMatches[1],
+                callbackId: $callbackId,
+                chatId: $chatId,
+                update: $update,
+            );
+
+            return;
+        }
+
+        if (preg_match('/^draft:findmore:(\d+)$/', $data, $findMoreMatches) === 1) {
+            $this->handleDraftFindMorePhotos(
+                draftId: (int) $findMoreMatches[1],
+                callbackId: $callbackId,
+                chatId: $chatId,
+                update: $update,
+            );
+
+            return;
+        }
+
         if (preg_match('/^draft:review:(\d+)$/', $data, $reviewMatches) === 1) {
             $this->handleDraftReview(
                 draftId: (int) $reviewMatches[1],
@@ -248,12 +271,6 @@ class TelegramWebhookController extends Controller
                 messageId: $messageId,
                 update: $update,
             );
-
-            return;
-        }
-
-        if (preg_match('/^photos:refind:(\d+)$/', $data, $refindMatches) === 1) {
-            $this->handlePhotoRefind((int) $refindMatches[1], $callbackId, $chatId);
 
             return;
         }
@@ -480,23 +497,6 @@ class TelegramWebhookController extends Controller
         }
     }
 
-    private function handlePhotoRefind(int $productId, string $callbackId, string $chatId): void
-    {
-        $product = Product::query()->find($productId);
-
-        if (! $product) {
-            $this->telegram->answerCallbackQuery($callbackId, 'Товар не найден.');
-
-            return;
-        }
-
-        $started = app(ProductPhotoManager::class)->refind($product, fresh: true);
-        $this->telegram->answerCallbackQuery(
-            $callbackId,
-            $started ? 'Ищу фото заново, придут отдельным сообщением.' : 'Не удалось запустить поиск: нет исходного черновика.',
-        );
-    }
-
     private function handleDraftRecipeTraining(
         int $draftId,
         string $callbackId,
@@ -531,6 +531,68 @@ class TelegramWebhookController extends Controller
         $this->telegram->sendMessage(
             $chatId,
             "🧠 Черновик #{$draft->id}: запускаю переобучение источника. Старый рецепт и фото останутся, пока новый не пройдёт проверку.",
+        );
+    }
+
+    private function handleDraftRestageGallery(
+        int $draftId,
+        string $callbackId,
+        string $chatId,
+        TelegramUpdate $update,
+    ): void {
+        $draft = ProductDraft::query()->find($draftId);
+
+        if (! $draft || $draft->status !== 'pending_review') {
+            $this->telegram->answerCallbackQuery($callbackId, 'Черновик не найден или уже обработан.');
+
+            return;
+        }
+
+        $queuedKey = "draft-gallery-restage:{$draft->id}:queued";
+
+        if (! Cache::add($queuedKey, true, now()->addMinutes(10))) {
+            $this->telegram->answerCallbackQuery($callbackId, 'Поиск фото уже идёт.');
+
+            return;
+        }
+
+        RestageDraftGalleryPhotos::dispatch($draft->id, $chatId);
+        $update->update(['status' => 'completed', 'processed_at' => now()]);
+        $this->telegram->answerCallbackQuery($callbackId, 'Ищу другие фото без прежних источников.');
+        $this->telegram->sendMessage(
+            $chatId,
+            "🔄 Черновик #{$draft->id}: исключаю прежние источники и похожие фото. Старая галерея останется, пока новая не будет готова.",
+        );
+    }
+
+    private function handleDraftFindMorePhotos(
+        int $draftId,
+        string $callbackId,
+        string $chatId,
+        TelegramUpdate $update,
+    ): void {
+        $draft = ProductDraft::query()->find($draftId);
+
+        if (! $draft || $draft->status !== 'pending_review') {
+            $this->telegram->answerCallbackQuery($callbackId, 'Черновик не найден или уже обработан.');
+
+            return;
+        }
+
+        $queuedKey = "draft-gallery-topup:{$draft->id}:queued";
+
+        if (! Cache::add($queuedKey, true, now()->addMinutes(10))) {
+            $this->telegram->answerCallbackQuery($callbackId, 'Поиск дополнительных фото уже идёт.');
+
+            return;
+        }
+
+        TopUpDraftGalleryPhotos::dispatch($draft->id, $chatId);
+        $update->update(['status' => 'completed', 'processed_at' => now()]);
+        $this->telegram->answerCallbackQuery($callbackId, 'Ищу дополнительные фото.');
+        $this->telegram->sendMessage(
+            $chatId,
+            "🔍 Черновик #{$draft->id}: ищу дополнительные фото. Текущие останутся на месте.",
         );
     }
 

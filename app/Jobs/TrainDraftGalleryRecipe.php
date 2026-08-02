@@ -18,7 +18,7 @@ class TrainDraftGalleryRecipe implements ShouldQueue
 
     public int $tries = 1;
 
-    public int $timeout = 480;
+    public int $timeout = 1380;
 
     public function __construct(
         public int $draftId,
@@ -38,7 +38,7 @@ class TrainDraftGalleryRecipe implements ShouldQueue
         throw_if($url === '', RuntimeException::class, 'У черновика нет ссылки на товарную карточку.');
 
         $progress = new TelegramProgressReporter($telegram, $this->chatId);
-        $progress->step('1/2 · AI изучает DOM и проверяет новый Playwright-рецепт', 300);
+        $progress->step('1/2 · AI изучает DOM и проверяет новый Playwright-рецепт', 1080);
         $images = $trainer->train(
             $url,
             'manual_telegram',
@@ -54,6 +54,7 @@ class TrainDraftGalleryRecipe implements ShouldQueue
                 }
             },
             true,
+            $this->telegramUpdateId,
         );
         throw_if(count($images) < 2, RuntimeException::class, 'Новый рецепт не прошёл проверку; старый рецепт и фото сохранены.');
 

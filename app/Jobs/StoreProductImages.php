@@ -9,6 +9,7 @@ use App\Models\ProductVariant;
 use App\Services\Ai\AiUsageReporter;
 use App\Services\Products\ProductImageStorage;
 use App\Services\Products\ProductPhotoManager;
+use App\Services\Telegram\DraftTelegramMessageLifecycle;
 use App\Services\Telegram\TelegramClient;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
@@ -22,7 +23,7 @@ class StoreProductImages implements ShouldQueue
 
     public int $tries = 2;
 
-    public int $timeout = 300;
+    public int $timeout = 900;
 
     public array $backoff = [30, 180];
 
@@ -36,7 +37,11 @@ class StoreProductImages implements ShouldQueue
         $this->onQueue('media');
     }
 
-    public function handle(ProductImageStorage $storage, TelegramClient $telegram): void
+    public function handle(
+        ProductImageStorage $storage,
+        TelegramClient $telegram,
+        DraftTelegramMessageLifecycle $messageLifecycle,
+    ): void
     {
         // Decoding several full-size candidate images into GD bitmaps in the
         // same pass can exceed the default 128M CLI limit even after
@@ -56,13 +61,17 @@ class StoreProductImages implements ShouldQueue
         }
 
         try {
-            $this->process($storage, $telegram);
+            $this->process($storage, $telegram, $messageLifecycle);
         } finally {
             $lock->release();
         }
     }
 
-    private function process(ProductImageStorage $storage, TelegramClient $telegram): void
+    private function process(
+        ProductImageStorage $storage,
+        TelegramClient $telegram,
+        DraftTelegramMessageLifecycle $messageLifecycle,
+    ): void
     {
         $product = Product::query()->find($this->productId);
         $variant = ProductVariant::query()->find($this->variantId);
@@ -91,8 +100,33 @@ class StoreProductImages implements ShouldQueue
             : '';
 
         if ($chatId) {
+            $postUpdated = false;
+            $reviewTarget = $messageLifecycle->reviewTarget($draft);
+
+            if ($reviewTarget !== null) {
+                try {
+                    $postUpdated = $this->updateDraftPost(
+                        $telegram,
+                        $reviewTarget,
+                        $draft,
+                        $product,
+                        $usageFootnote,
+                    );
+                } catch (Throwable $exception) {
+                    report($exception);
+                }
+            }
+
+            if ($postUpdated) {
+                $messageLifecycle->finalizeEditedReview($telegram, $draft);
+
+                return;
+            }
+
             try {
                 if ($this->sendProductPost($telegram, $chatId, $product, $usageFootnote)) {
+                    $messageLifecycle->finalizeFallbackPost($telegram, $draft);
+
                     return;
                 }
             } catch (Throwable $exception) {
@@ -143,6 +177,13 @@ class StoreProductImages implements ShouldQueue
             $line .= sprintf(' (~$%s)', number_format((float) $usage['estimated_cost_usd'], 4));
         }
 
+        if (($usage['usage_unknown_failures'] ?? 0) > 0) {
+            $line .= sprintf(
+                ' · %d попытка(и) без usage: итоговая стоимость может быть выше',
+                $usage['usage_unknown_failures'],
+            );
+        }
+
         return $line;
     }
 
@@ -190,14 +231,53 @@ class StoreProductImages implements ShouldQueue
         $paths = $media->map(fn ($item): string => Storage::disk($item->disk)->path($item->path))->all();
         $caption = $this->caption($product, $media->pluck('source_url')->filter()->all()).$usageFootnote;
         $telegram->sendMediaGroupFiles($chatId, $paths, $caption);
-        // sendMediaGroup has no reply_markup support, so the "redo" action
-        // has to be a short follow-up message instead of an inline button
-        // on the album itself.
-        $telegram->sendMessage($chatId, 'Фото не подошли?', [
-            'inline_keyboard' => [[
-                ['text' => '🔄 Найти фото заново', 'callback_data' => "photos:refind:{$product->id}"],
-            ]],
-        ]);
+
+        return true;
+    }
+
+    /**
+     * Keep the existing draft album in chat and turn its caption into the
+     * final catalog confirmation instead of sending the same photos again.
+     *
+     * @param array{chat_id: string, message_id: int, has_media: bool} $reviewTarget
+     */
+    private function updateDraftPost(
+        TelegramClient $telegram,
+        array $reviewTarget,
+        ProductDraft $draft,
+        Product $product,
+        string $usageFootnote = '',
+    ): bool {
+        $caption = app(DraftTelegramMessageLifecycle::class)
+            ->finalizedReviewCaption($draft, $product->id);
+
+        // Drafts created before telegram_review_caption was introduced still
+        // need the old final-post fallback.
+        if ($caption === null) {
+            $sourceUrls = $product->media()
+                ->where('type', 'image')
+                ->whereIn('verification_status', ['verified', 'source_verified', 'manual'])
+                ->orderByDesc('is_primary')
+                ->orderBy('sort_order')
+                ->pluck('source_url')
+                ->filter()
+                ->all();
+            $caption = $this->caption($product, $sourceUrls).$usageFootnote;
+        }
+
+        if ($reviewTarget['has_media']) {
+            $telegram->editMessageCaption(
+                $reviewTarget['chat_id'],
+                $reviewTarget['message_id'],
+                $caption,
+            );
+        } else {
+            $telegram->editMessageText(
+                $reviewTarget['chat_id'],
+                $reviewTarget['message_id'],
+                $caption,
+            );
+        }
 
         return true;
     }

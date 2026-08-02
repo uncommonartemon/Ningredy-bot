@@ -31,13 +31,22 @@ class AiUsageReporter
      */
     public function forTelegramUpdate(int $telegramUpdateId, ?\DateTimeInterface $since = null): array
     {
-        $query = AiRun::query()->where('telegram_update_id', $telegramUpdateId)->whereNotNull('usage');
+        $billed = AiRun::query()->where('telegram_update_id', $telegramUpdateId)->whereNotNull('usage');
+        // A failed request may have no usage payload even when the provider processed
+        // part or all of it. Keep these attempts separate: their exact cost is unknown,
+        // so they must never be presented as free or included as a confirmed zero.
+        $unknownUsageFailures = AiRun::query()->where('telegram_update_id', $telegramUpdateId)
+            ->whereNull('usage')->where('status', 'failed');
 
         if ($since !== null) {
-            $query->where('created_at', '>=', $since);
+            $billed->where('created_at', '>=', $since);
+            $unknownUsageFailures->where('created_at', '>=', $since);
         }
 
-        return $this->summarizeRuns($query->get(['provider', 'model', 'usage']));
+        return [
+            ...$this->summarizeRuns($billed->get(['provider', 'model', 'usage'])),
+            'usage_unknown_failures' => $unknownUsageFailures->count(),
+        ];
     }
 
     /** @return array<string, mixed> */

@@ -13,13 +13,24 @@ class ProductDraft extends Model
         'reviewed_by_telegram_user_id', 'rejection_reason', 'requested_by_telegram_user_id',
         'approved_product_id', 'approved_variant_id',
         'title', 'brand', 'model', 'product_type', 'category', 'color', 'description', 'research_notes', 'specifications',
-        'sources', 'primary_source_url', 'official_source_url', 'image_urls', 'images_staged_at', 'confidence',
+        'sources', 'primary_source_url', 'official_source_url', 'image_urls',
+        'excluded_gallery_source_urls', 'excluded_gallery_image_urls', 'excluded_gallery_hashes',
+        'telegram_review_chat_id', 'telegram_review_message_ids', 'telegram_review_has_media', 'telegram_review_caption',
+        'telegram_control_message_ids', 'telegram_review_finalized_at',
+        'images_staged_at', 'gallery_status', 'gallery_notes', 'confidence',
     ];
 
     protected function casts(): array
     {
         return [
             'specifications' => 'array', 'sources' => 'array', 'image_urls' => 'array',
+            'excluded_gallery_source_urls' => 'array',
+            'excluded_gallery_image_urls' => 'array',
+            'excluded_gallery_hashes' => 'array',
+            'telegram_review_message_ids' => 'array',
+            'telegram_review_has_media' => 'boolean',
+            'telegram_control_message_ids' => 'array',
+            'telegram_review_finalized_at' => 'datetime',
             'confidence' => 'decimal:4',
             'reviewed_at' => 'datetime',
             'images_staged_at' => 'datetime',

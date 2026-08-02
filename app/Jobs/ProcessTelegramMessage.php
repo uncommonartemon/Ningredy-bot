@@ -236,10 +236,17 @@ class ProcessTelegramMessage implements ShouldQueue
             return '';
         }
 
-        $line = "\n\n🔢 Токены: ".number_format($tokens, 0, '.', ' ');
+        $line = "\n\n🔢 Примерно токенов потрачено: ".number_format($tokens, 0, '.', ' ');
 
         if ($usage['estimated_cost_usd'] !== null) {
             $line .= sprintf(' (~$%s)', number_format((float) $usage['estimated_cost_usd'], 4));
+        }
+
+        if (($usage['usage_unknown_failures'] ?? 0) > 0) {
+            $line .= sprintf(
+                ' · %d попытка(и) без usage: итоговая стоимость может быть выше',
+                $usage['usage_unknown_failures'],
+            );
         }
 
         return $line;

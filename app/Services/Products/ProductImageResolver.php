@@ -2,6 +2,9 @@
 
 namespace App\Services\Products;
 
+use App\Services\Ai\AiSettings;
+use App\Services\Ai\AiUsageReporter;
+use App\Services\Ai\ProductSearchTimeBudget;
 use DOMDocument;
 use DOMXPath;
 use Illuminate\Http\Client\Response;
@@ -14,6 +17,11 @@ class ProductImageResolver
 {
     public function __construct(
         private readonly BrowserProductGalleryExtractor $browser,
+        private readonly AiSettings $settings,
+        private readonly AiUsageReporter $usageReporter,
+        private readonly ProductSourceMetrics $metrics,
+        private readonly ProductSearchTimeBudget $timeBudget,
+        private readonly ProductSourceAttemptRecorder $attempts,
     ) {}
 
     /**
@@ -21,37 +29,55 @@ class ProductImageResolver
      * @param  null|callable(string, string): void  $debug
      * @return array<int, string>
      */
-    public function resolve(array $sources, int $limit = 5, ?callable $debug = null): array
+    public function resolve(array $sources, int $limit = 5, ?callable $debug = null, ?int $telegramUpdateId = null): array
     {
         $images = [];
 
         foreach (array_slice($sources, 0, (int) config('product-images.max_sources_per_resolve', 10)) as $source) {
+            if (! $this->timeBudget->canStart($telegramUpdateId, 20)) {
+                $debug?->__invoke('warning', 'Резерв времени достигнут; новые страницы не открываю, чтобы успеть сохранить результат и ответить в Telegram.');
+                break;
+            }
+
+            if ($telegramUpdateId !== null && $this->searchBudgetExceeded($telegramUpdateId)) {
+                $debug?->__invoke('warning', sprintf(
+                    'Бюджет поиска исчерпан (~$%.2f); прекращаю проверку источников.',
+                    $this->settings->maxSearchCostUsd(),
+                ));
+
+                break;
+            }
+
             $sourceUrl = is_array($source) ? ($source['url'] ?? null) : null;
 
             if (! is_string($sourceUrl) || ! $this->isPublicUrl($sourceUrl)) {
                 continue;
             }
 
+            if ($this->looksLikeNonHtmlDocumentUrl($sourceUrl)) {
+                $debug?->__invoke('warning', 'Источник пропущен: ссылка ведёт на документ, а не на HTML-карточку товара.');
+                $this->metrics->recordExtraction($sourceUrl, 0, 'non_html');
+
+                continue;
+            }
+
             $sourceImageStart = count($images);
             $browserUrl = $sourceUrl;
             $browserEligible = true;
-            $forceBrowser = preg_match('/(^|\.)amazon\.[a-z.]+$/i', (string) parse_url($sourceUrl, PHP_URL_HOST)) === 1
-                && preg_match('#/dp/[A-Z0-9]{10}(?:/|$)#i', (string) parse_url($sourceUrl, PHP_URL_PATH)) === 1;
             $accessGateDetected = false;
             $browserImages = [];
+            $failureKind = null;
 
             try {
                 [$response, $finalUrl] = $this->fetch($sourceUrl);
                 $browserUrl = $finalUrl;
 
-                if (str_starts_with(strtolower((string) $response->header('Content-Type')), 'image/')) {
-                    $images[] = $finalUrl;
-                    $browserEligible = false;
-                } elseif (str_contains(strtolower((string) $response->header('Content-Type')), 'text/html')) {
+                if ($this->isHtmlResponse($response)) {
                     $html = $response->body();
 
                     if ($this->looksLikeAccessGate($html)) {
                         $accessGateDetected = true;
+                        $failureKind = 'access_gate';
                     } else {
                         foreach ($this->extractPageImages($html, $finalUrl) as $imageUrl) {
                             if ($this->isPublicUrl($imageUrl)) {
@@ -59,21 +85,37 @@ class ProductImageResolver
                             }
                         }
                     }
+                } else {
+                    $browserEligible = false;
+                    $failureKind = 'non_html';
+                    $contentType = strtolower(trim((string) $response->header('Content-Type')));
+                    $debug?->__invoke(
+                        'warning',
+                        'Источник пропущен: ожидалась HTML-карточка товара, получен '.($contentType !== '' ? $contentType : 'неизвестный тип содержимого').'.',
+                    );
                 }
             } catch (Throwable $exception) {
-                if ($debug) {
-                    $debug('warning', 'HTML страницы недоступен: '.$exception->getMessage());
-                }
+                $failureKind = 'http_error';
+                $debug?->__invoke('warning', 'HTML страницы недоступен: '.$exception->getMessage());
                 Log::notice('Product image metadata source was unavailable.', [
                     'host' => parse_url($sourceUrl, PHP_URL_HOST),
                     'error' => $exception->getMessage(),
                 ]);
             }
 
-            if ($browserEligible && (count($images) < $limit || $forceBrowser)) {
+            $staticSourceImages = array_slice($images, $sourceImageStart);
+            $browserMode = $this->settings->galleryBrowserMode();
+            $shouldUseBrowser = $browserEligible
+                && $browserMode !== AiSettings::GALLERY_BROWSER_OFF;
+
+            if ($shouldUseBrowser) {
                 $browserResult = $debug
-                    ? $this->browser->extract($browserUrl, $limit, $debug)
-                    : $this->browser->extract($browserUrl, $limit);
+                    ? $this->browser->extract($browserUrl, $limit, $debug, $telegramUpdateId, [
+                        'static_image_urls' => $staticSourceImages,
+                    ])
+                    : $this->browser->extract($browserUrl, $limit, telegramUpdateId: $telegramUpdateId, context: [
+                        'static_image_urls' => $staticSourceImages,
+                    ]);
                 $browserImages = collect($browserResult)
                     ->filter(fn (mixed $imageUrl): bool => is_string($imageUrl) && $this->isPublicUrl($imageUrl))
                     ->values()
@@ -81,19 +123,40 @@ class ProductImageResolver
 
                 if ($browserImages !== []) {
                     $accessGateDetected = false;
+                    $failureKind = null;
                     $previousSourceImages = array_slice($images, 0, $sourceImageStart);
-                    $staticSourceImages = array_slice($images, $sourceImageStart);
                     $images = count($browserImages) >= 2
                         ? [...$previousSourceImages, ...$browserImages]
                         : [...$previousSourceImages, ...$browserImages, ...$staticSourceImages];
                 }
             }
 
-            if ($accessGateDetected && $browserImages === [] && $debug) {
-                $debug('blocked', 'HTTP-запрос получил служебную страницу, и Playwright не смог открыть полноценную карточку товара.');
+            if ($accessGateDetected && $browserImages === []) {
+                $debug?->__invoke('blocked', 'HTTP-запрос получил служебную страницу, и Playwright не смог открыть полноценную карточку товара.');
             }
 
             $images = array_values(array_unique($images));
+            $sourceImageCount = max(0, count($images) - $sourceImageStart);
+            if ($browserImages !== []) {
+                $this->metrics->recordExtraction($sourceUrl, count($browserImages));
+            } elseif ($sourceImageCount === 0) {
+                $this->metrics->recordExtraction($sourceUrl, 0, $failureKind ?: 'empty_gallery');
+            }
+            $this->attempts->record([
+                'telegram_update_id' => $telegramUpdateId,
+                'product_url' => $sourceUrl,
+                'actor' => 'html_resolver',
+                'phase' => 'source_resolution',
+                'action' => 'extract_page_images',
+                'status' => $sourceImageCount > 0 ? 'completed' : 'failed',
+                'decision' => $failureKind ?: ($browserImages !== [] ? 'playwright_images' : 'static_images'),
+                'input' => ['final_url' => $browserUrl, 'browser_mode' => $browserMode],
+                'output' => [
+                    'static_count' => count($staticSourceImages),
+                    'browser_count' => count($browserImages),
+                    'returned_count' => $sourceImageCount,
+                ],
+            ]);
 
             if (count($images) >= $limit) {
                 break;
@@ -103,8 +166,46 @@ class ProductImageResolver
         return array_slice($images, 0, $limit);
     }
 
+    private function looksLikeNonHtmlDocumentUrl(string $url): bool
+    {
+        $extension = strtolower(pathinfo((string) parse_url($url, PHP_URL_PATH), PATHINFO_EXTENSION));
+
+        return in_array($extension, [
+            'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx',
+            'zip', 'rar', '7z', 'csv', 'xml', 'json',
+        ], true);
+    }
+
+    private function isHtmlResponse(mixed $response): bool
+    {
+        $body = (string) $response->body();
+        $prefix = strtolower(ltrim(substr($body, 0, 1024), "\xEF\xBB\xBF\x00\x09\x0A\x0D\x20"));
+
+        if (str_starts_with($prefix, '%pdf-')
+            || str_starts_with($prefix, '{"')
+            || str_starts_with($prefix, '[')
+            || str_starts_with($prefix, 'pk'."\x03\x04")) {
+            return false;
+        }
+
+        $contentType = strtolower((string) $response->header('Content-Type'));
+
+        if (str_contains($contentType, 'text/html')
+            || str_contains($contentType, 'application/xhtml+xml')) {
+            return true;
+        }
+
+        if ($contentType !== ''
+            && ! str_contains($contentType, 'application/octet-stream')
+            && ! str_contains($contentType, 'text/plain')) {
+            return false;
+        }
+
+        return preg_match('/^\s*(?:<!doctype\s+html|<html\b|<head\b|<body\b)/i', $prefix) === 1;
+    }
+
     /**
-     * @return array{bytes: string, source_url: string, mime_type: string, width: int, height: int}|null
+     * @return array{bytes: string, source_url: string, mime_type: string, width: int, height: int, confirmed_gallery: bool, partial_gallery: bool}|null
      */
     public function download(string $url, int $maxBytes = 8_388_608): ?array
     {
@@ -132,6 +233,10 @@ class ProductImageResolver
                 'mime_type' => $dimensions['mime'] ?? 'application/octet-stream',
                 'width' => (int) $dimensions[0],
                 'height' => (int) $dimensions[1],
+                'confirmed_gallery' => $this->browser->isConfirmedGalleryImage($url)
+                    || $this->browser->isConfirmedGalleryImage($finalUrl),
+                'partial_gallery' => $this->browser->isPartialGalleryImage($url)
+                    || $this->browser->isPartialGalleryImage($finalUrl),
             ];
         } catch (Throwable $exception) {
             Log::notice('Product image candidate was unavailable.', [
@@ -417,6 +522,24 @@ class ProductImageResolver
         $directory = str_ends_with($path, '/') ? $path : dirname($path).'/';
 
         return "{$scheme}://{$host}{$port}{$directory}{$candidate}";
+    }
+
+    /**
+     * Stops opening more candidate sources once this search has already
+     * spent the configured budget - replaces a fixed source-count cutoff
+     * with one tied to what the search has actually cost so far.
+     */
+    private function searchBudgetExceeded(int $telegramUpdateId): bool
+    {
+        $maxCost = $this->settings->maxSearchCostUsd();
+
+        if ($maxCost <= 0) {
+            return false;
+        }
+
+        $spent = $this->usageReporter->forTelegramUpdate($telegramUpdateId)['estimated_cost_usd'] ?? null;
+
+        return is_numeric($spent) && (float) $spent >= $maxCost;
     }
 
     private function isPublicUrl(string $url): bool

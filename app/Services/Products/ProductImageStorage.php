@@ -5,7 +5,10 @@ namespace App\Services\Products;
 use App\Models\Product;
 use App\Models\ProductDraft;
 use App\Models\ProductDraftMedia;
+use App\Models\ProductSourceAttempt;
 use App\Models\ProductVariant;
+use App\Services\Ai\AiSettings;
+use App\Services\Ai\ProductSearchTimeBudget;
 use GdImage;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
@@ -19,9 +22,13 @@ class ProductImageStorage
         private readonly ProductImageCandidateDiscovery $candidateDiscovery,
         private readonly ProductImageVisionVerifier $visionVerifier,
         private readonly ProductSourcePriority $sourcePriority,
+        private readonly ProductSourceMetrics $sourceMetrics,
         private readonly ImagePerceptualHash $perceptualHash,
         private readonly ProductImageEncoder $encoder,
         private readonly ProductIdentityMatcher $identityMatcher,
+        private readonly AiSettings $settings,
+        private readonly ProductSearchTimeBudget $timeBudget,
+        private readonly ProductSourceAttemptRecorder $attempts,
     ) {}
 
     /** @param array<int, int> $replaceMediaIds */
@@ -184,20 +191,35 @@ class ProductImageStorage
         // stored successfully, so a failed search never leaves the draft
         // without photos (same philosophy as completeRefind).
         $previousMedia = $draft->media()->get();
+        $excludedHashes = array_values(array_filter($draft->excluded_gallery_hashes ?? [], 'is_string'));
 
         $target = $this->targetDraftImageCount($draft);
         $prioritizedSources = $this->sourcePriority->sortSources($draft->sources ?? [], $draft->brand);
         $cardSources = collect($prioritizedSources)
             ->filter(fn (mixed $source): bool => is_array($source)
                 && is_string($source['url'] ?? null)
-                && in_array($source['type'] ?? null, ['retailer', 'marketplace', 'manufacturer'], true))
+                && in_array($source['type'] ?? null, ['retailer', 'marketplace', 'manufacturer'], true)
+                && ! $this->sourceExcludedForDraft($source['url'], $draft))
             ->values();
+
+        if (! $this->settings->fallbackSourcesEnabled()) {
+            $cardSources = $cardSources->take(1)->values();
+        }
+
         $selected = [];
         $chosenSource = null;
+        $partialSelected = [];
+        $partialSource = null;
+        $partialFromDiscovery = false;
 
         foreach ($cardSources as $sourceIndex => $source) {
+            if (! $this->timeBudget->canStart($draft->telegram_update_id, 20)) {
+                $progress?->__invoke('Резерв времени достигнут: новые источники больше не открываю, завершаю текущий результат.');
+                break;
+            }
+
             if ($progress) {
-                $progress('Проверяю источник '.($sourceIndex + 1).'/'.$cardSources->count().': '.(parse_url($source['url'], PHP_URL_HOST) ?: $source['url']).'.');
+                $progress('Проверяю источник '.($sourceIndex + 1).'/'.$cardSources->count().': '.$source['url']);
             }
             $urls = $this->cleanUrls($source['image_urls'] ?? []);
 
@@ -220,6 +242,7 @@ class ProductImageStorage
                         $progress($message);
                     }
                 },
+                $draft->telegram_update_id,
             );
 
             if ($sourceBlocked) {
@@ -233,52 +256,154 @@ class ProductImageStorage
             // Browser/DOM gallery URLs are more reliable than AI-provided thumbnails.
             $urls = array_values(array_unique([...$resolvedUrls, ...$urls]));
             $allCandidates = $this->downloadCandidates($urls, $draft);
+            $this->attempts->record([
+                'telegram_update_id' => $draft->telegram_update_id,
+                'product_draft_id' => $draft->id,
+                'product_url' => $source['url'],
+                'actor' => 'downloader',
+                'phase' => 'image_download',
+                'action' => 'download_candidates',
+                'status' => $allCandidates !== [] ? 'completed' : 'failed',
+                'decision' => $allCandidates !== [] ? 'send_to_vision' : 'skip_source',
+                'input' => ['candidate_urls' => count($urls)],
+                'output' => ['downloaded_images' => count($allCandidates)],
+            ]);
 
             if ($allCandidates === []) {
+                $progress?->__invoke('Не удалось скачать ни одного технически пригодного изображения: '.$source['url']);
+
                 continue;
             }
 
-            $visionLimit = max(1, (int) config('product-images.vision_candidates', 4));
-            $candidates = array_slice($allCandidates, 0, $visionLimit);
-            $this->destroy(array_slice($allCandidates, $visionLimit));
-            $selected = $this->selectFromCandidates($draft, $candidates, $target, true);
-            $selected = $this->removeNearDuplicates($selected);
-            $this->destroyUnselected($candidates, $selected);
+            $selected = $this->selectFromCandidates($draft, $allCandidates, $target);
+            $selected = $this->removeNearDuplicates($selected, $excludedHashes);
+            $this->attempts->record([
+                'telegram_update_id' => $draft->telegram_update_id,
+                'product_draft_id' => $draft->id,
+                'product_url' => $source['url'],
+                'actor' => 'vision',
+                'phase' => 'image_verification',
+                'action' => 'verify_gallery',
+                'status' => $selected !== [] ? 'completed' : 'failed',
+                'decision' => $selected !== [] ? 'accept_images' : 'reject_source',
+                'input' => ['downloaded_images' => count($allCandidates)],
+                'output' => [
+                    'accepted_images' => count($selected),
+                    'accepted_urls' => collect($selected)->pluck('source_url')->values()->all(),
+                ],
+            ]);
+            $this->destroyUnselected($allCandidates, $selected);
 
             if ($selected !== []) {
+                $isPartial = count($selected) < 2 || collect($selected)
+                    ->every(fn (array $candidate): bool => (bool) ($candidate['partial_gallery'] ?? false));
+
+                if ($isPartial) {
+                    if (count($selected) > count($partialSelected)) {
+                        $this->destroy($partialSelected);
+                        $partialSelected = $selected;
+                        $partialSource = $source;
+                        $partialFromDiscovery = false;
+                    } else {
+                        $this->destroy($selected);
+                    }
+                    $selected = [];
+                    $progress?->__invoke('Источник дал только частичный проверенный результат; сохраняю его в резерв и продолжаю: '.$source['url']);
+
+                    continue;
+                }
+
+                $this->destroy($partialSelected);
+                $partialSelected = [];
                 $chosenSource = $source;
                 break;
             }
+
+            $progress?->__invoke('Vision отклонил все скачанные изображения этой страницы: '.$source['url']);
         }
 
-        if ($selected === []) {
+        if (
+            $selected === []
+            && $this->settings->fallbackSourcesEnabled()
+            && $this->timeBudget->canStart($draft->telegram_update_id, 30)
+        ) {
             if ($progress) {
-                $progress('Галереи указанных карточек не подошли. Автоматически ищу другие магазины · лимит до 300 сек.');
+                $progress('Галереи указанных карточек не подошли. Автоматически ищу другие магазины в пределах оставшегося бюджета времени.');
             }
             $knownUrls = $this->cleanUrls([
                 ...($draft->image_urls ?? []),
+                ...($draft->excluded_gallery_image_urls ?? []),
                 ...$cardSources->flatMap(fn (array $source): array => $source['image_urls'] ?? [])->all(),
             ]);
             [$discoveredCandidates] = $this->discoverCandidates($draft, $knownUrls, true, $progress);
             $candidateGroups = collect($discoveredCandidates)
-                ->groupBy(fn (array $candidate): string => ProductSourcePriority::host((string) ($candidate['source_url'] ?? '')) ?? 'unknown');
+                ->groupBy(function (array $candidate): string {
+                    $pageUrl = $candidate['page_source_url'] ?? null;
 
-            foreach ($candidateGroups as $host => $group) {
+                    if (is_string($pageUrl) && filter_var($pageUrl, FILTER_VALIDATE_URL)) {
+                        return 'page:'.$pageUrl;
+                    }
+
+                    return 'host:'.(ProductSourcePriority::host((string) ($candidate['source_url'] ?? '')) ?: 'unknown');
+                });
+
+            foreach ($candidateGroups as $groupKey => $group) {
+                $groupPageUrl = str_starts_with((string) $groupKey, 'page:')
+                    ? substr((string) $groupKey, 5)
+                    : null;
+                $host = $groupPageUrl ?: substr((string) $groupKey, 5);
                 if ($progress) {
                     $progress("Проверяю найденную галерею: {$host}.");
                 }
                 $groupCandidates = $group->values()->all();
-                $verified = $this->selectFromCandidates($draft, $groupCandidates, $target, true);
-                $selected = $this->removeNearDuplicates($verified);
+                $verified = $this->selectFromCandidates($draft, $groupCandidates, $target);
+                $selected = $this->removeNearDuplicates($verified, $excludedHashes);
 
                 if ($selected !== []) {
+                    if (count($selected) < 2) {
+                        if (count($selected) > count($partialSelected)) {
+                            if (! $partialFromDiscovery) {
+                                $this->destroy($partialSelected);
+                            }
+                            $partialSelected = $selected;
+                            $partialSource = $groupPageUrl ? ['url' => $groupPageUrl] : null;
+                            $partialFromDiscovery = true;
+                        }
+                        $selected = [];
+
+                        continue;
+                    }
+
+                    if (! $partialFromDiscovery) {
+                        $this->destroy($partialSelected);
+                    }
+                    $partialSelected = [];
+                    $chosenSource = $groupPageUrl ? ['url' => $groupPageUrl] : null;
                     break;
                 }
             }
 
+            if ($selected === [] && $partialSelected !== []) {
+                $selected = $partialSelected;
+                $chosenSource = $partialSource;
+            }
             $this->destroyUnselected($discoveredCandidates, $selected);
+        } elseif ($selected === [] && $progress) {
+            $reason = $this->settings->fallbackSourcesEnabled()
+                ? 'Резерв времени достигнут; дополнительный поиск источников не запускаю.'
+                : 'Резервные источники выключены в настройках; дополнительный поиск не запускаю.';
+            $progress($reason);
         }
 
+        if ($selected === [] && $partialSelected !== []) {
+            $selected = $partialSelected;
+            $chosenSource = $partialSource;
+        }
+
+        $galleryIsPartial = $selected !== [] && (
+            count($selected) < 2
+            || collect($selected)->every(fn (array $candidate): bool => (bool) ($candidate['partial_gallery'] ?? false))
+        );
         $roles = ['primary', 'secondary', 'detail'];
         $stored = 0;
         $checksums = [];
@@ -360,10 +485,20 @@ class ProductImageStorage
             foreach ($previousMedia->whereNotIn('id', $reusedMediaIds) as $media) {
                 $media->delete();
             }
+
+            if (is_array($chosenSource) && is_string($chosenSource['url'] ?? null)) {
+                $this->sourceMetrics->recordAcceptedGallery($chosenSource['url'], $stored);
+            }
         }
 
         $draft->update([
             'primary_source_url' => $chosenSource['url'] ?? $draft->primary_source_url,
+            'gallery_status' => $stored > 0
+                ? ($galleryIsPartial ? 'partial' : 'complete')
+                : ($previousMedia->isNotEmpty() ? $draft->gallery_status : 'missing'),
+            'gallery_notes' => $stored > 0 && $galleryIsPartial
+                ? 'После полного цикла поиска сохранён лучший частичный результат: '.$stored.' проверенных фото.'
+                : null,
             'images_staged_at' => now(),
         ]);
 
@@ -386,11 +521,16 @@ class ProductImageStorage
         $existingMedia = $draft->media()->get();
         $existingUrls = $this->cleanUrls($existingMedia->pluck('source_url')->all());
         $excludedHashes = $this->perceptualHashesForMedia($existingMedia);
-        $sources = $this->sourcePriority->sortSources($draft->sources ?? [], $draft->brand);
+        $currentSource = $this->currentDraftSource($draft);
+        $sources = $currentSource ? [$currentSource] : [];
         $selected = [];
 
         foreach ($sources as $sourceIndex => $source) {
-            if (! is_array($source) || ! is_string($source['url'] ?? null)) {
+            if (
+                ! is_array($source)
+                || ! is_string($source['url'] ?? null)
+                || $this->sourceExcludedForDraft($source['url'], $draft)
+            ) {
                 continue;
             }
 
@@ -403,6 +543,7 @@ class ProductImageStorage
                     [$source],
                     10,
                     $progress ? fn (string $level, string $message) => $progress($message) : null,
+                    $draft->telegram_update_id,
                 ),
             ]), $existingUrls));
             $candidates = $this->downloadCandidates($urls, $draft);
@@ -411,7 +552,7 @@ class ProductImageStorage
                 continue;
             }
 
-            $verified = $this->selectFromCandidates($draft, $candidates, 1, true);
+            $verified = $this->selectFromCandidates($draft, $candidates, 1);
             $selected = $this->removeNearDuplicates($verified, $excludedHashes);
             $this->destroyUnselected($candidates, $selected);
 
@@ -424,8 +565,11 @@ class ProductImageStorage
             if ($progress) {
                 $progress('Галереи источников исчерпаны; выполняю дополнительный поиск.');
             }
-            [$candidates] = $this->discoverCandidates($draft, $existingUrls);
-            $verified = $this->selectFromCandidates($draft, $candidates, 1, true);
+            $candidates = $this->downloadCandidates(
+                $this->currentDraftSourceUrls($draft, 10, $progress),
+                $draft,
+            );
+            $verified = $this->selectFromCandidates($draft, $candidates, 1);
             $selected = $this->removeNearDuplicates($verified, $excludedHashes);
             $this->destroyUnselected($candidates, $selected);
         }
@@ -478,6 +622,178 @@ class ProductImageStorage
                 }
             }
         }
+    }
+
+    /**
+     * Permanently rejects the currently staged gallery for this draft.
+     * Both URLs and perceptual hashes are kept so the same photo cannot return
+     * from another CDN size or another product page.
+     */
+    public function excludeCurrentDraftGallery(ProductDraft $draft): void
+    {
+        $media = $draft->media()->get();
+        $imageUrls = $this->cleanUrls([
+            ...($draft->excluded_gallery_image_urls ?? []),
+            ...$media->pluck('source_url')->all(),
+        ]);
+        $sourceUrls = $this->cleanUrls([
+            ...($draft->excluded_gallery_source_urls ?? []),
+            $draft->primary_source_url,
+            ...$media->pluck('source_url')->all(),
+            ...ProductSourceAttempt::query()
+                ->where('product_draft_id', $draft->id)
+                ->pluck('product_url')
+                ->all(),
+        ]);
+        $hashes = array_values(array_unique([
+            ...array_filter($draft->excluded_gallery_hashes ?? [], 'is_string'),
+            ...$this->perceptualHashesForMedia($media),
+        ]));
+
+        $draft->update([
+            'excluded_gallery_source_urls' => $sourceUrls,
+            'excluded_gallery_image_urls' => $imageUrls,
+            'excluded_gallery_hashes' => $hashes,
+        ]);
+    }
+
+    /**
+     * Append additional distinct photos to a still-pending draft without
+     * touching what's already staged - used when the initial search only
+     * landed one or two images and the operator wants the gallery topped
+     * up to its normal target instead of redoing the whole search.
+     *
+     * @param  null|callable(string): void  $progress
+     */
+    public function topUpDraftMedia(ProductDraft $draft, ?callable $progress = null): int
+    {
+        throw_unless($draft->status === 'pending_review', \RuntimeException::class, 'Draft is no longer pending review.');
+
+        $existingMedia = $draft->media()->get();
+        $existing = $existingMedia->count();
+        $remaining = $this->targetDraftImageCount($draft) - $existing;
+
+        if ($remaining <= 0) {
+            return 0;
+        }
+
+        $existingUrls = $this->cleanUrls($existingMedia->pluck('source_url')->all());
+        $excludedHashes = $this->perceptualHashesForMedia($existingMedia);
+        $currentSource = $this->currentDraftSource($draft);
+        $sources = $currentSource ? [$currentSource] : [];
+        $selected = [];
+
+        foreach ($sources as $sourceIndex => $source) {
+            if (count($selected) >= $remaining) {
+                break;
+            }
+
+            if (
+                ! is_array($source)
+                || ! is_string($source['url'] ?? null)
+                || $this->sourceExcludedForDraft($source['url'], $draft)
+            ) {
+                continue;
+            }
+
+            if ($progress) {
+                $progress('Источник '.($sourceIndex + 1).': '.(parse_url($source['url'], PHP_URL_HOST) ?: $source['url']));
+            }
+
+            $needed = $remaining - count($selected);
+            $knownUrls = array_values(array_unique([...$existingUrls, ...collect($selected)->pluck('source_url')->all()]));
+            $urls = array_values(array_diff($this->cleanUrls([
+                ...($source['image_urls'] ?? []),
+                ...$this->resolver->resolve(
+                    [$source],
+                    max(4, $needed * 2),
+                    $progress ? fn (string $level, string $message) => $progress($message) : null,
+                    $draft->telegram_update_id,
+                ),
+            ]), $knownUrls));
+            $candidates = $this->downloadCandidates($urls, $draft);
+
+            if ($candidates === []) {
+                continue;
+            }
+
+            $verified = $this->selectFromCandidates($draft, $candidates, $needed);
+            $newlySelected = $this->removeNearDuplicates($verified, [
+                ...$excludedHashes,
+                ...$this->perceptualHashesForCandidates($selected),
+            ]);
+            $this->destroyUnselected($candidates, $newlySelected);
+            $selected = [...$selected, ...$newlySelected];
+        }
+
+        if (count($selected) < $remaining) {
+            if ($progress) {
+                $progress('Источники исчерпаны; выполняю дополнительный поиск.');
+            }
+
+            $knownUrls = array_values(array_unique([...$existingUrls, ...collect($selected)->pluck('source_url')->all()]));
+            $candidates = $this->downloadCandidates(
+                $this->currentDraftSourceUrls($draft, max(4, $remaining * 2), $progress),
+                $draft,
+            );
+            $verified = $this->selectFromCandidates($draft, $candidates, $remaining - count($selected));
+            $newlySelected = $this->removeNearDuplicates($verified, [
+                ...$excludedHashes,
+                ...$this->perceptualHashesForCandidates($selected),
+            ]);
+            $this->destroyUnselected($candidates, $newlySelected);
+            $selected = [...$selected, ...$newlySelected];
+        }
+
+        $roles = ['primary', 'secondary', 'detail'];
+        $stored = 0;
+
+        foreach ($selected as $candidate) {
+            $path = null;
+
+            try {
+                $converted = $this->encoder->toWebp($candidate['image']);
+                $encoded = $converted['bytes'];
+                $checksum = hash('sha256', $encoded);
+                $role = $roles[$existing + $stored] ?? 'detail';
+                $path = "drafts/{$draft->id}/{$role}-".substr($checksum, 0, 12).'.webp';
+
+                if (! Storage::disk('public')->put($path, $encoded)) {
+                    throw new \RuntimeException("Could not write staged product image: {$path}");
+                }
+
+                $draft->media()->create([
+                    'disk' => 'public',
+                    'path' => $path,
+                    'source_url' => $candidate['source_url'],
+                    'role' => $role,
+                    'mime_type' => 'image/webp',
+                    'width' => $converted['width'],
+                    'height' => $converted['height'],
+                    'file_size' => strlen($encoded),
+                    'checksum' => $checksum,
+                    'verification_status' => $candidate['verification_status'] ?? 'verified',
+                    'verification_score' => isset($candidate['vision_score'])
+                        ? $candidate['vision_score'] / 100
+                        : ($candidate['verification_score'] ?? null),
+                    'verification_model' => $candidate['vision_model'] ?? $candidate['verification_model'] ?? null,
+                    'verification_notes' => $candidate['vision_reason'] ?? $candidate['verification_notes'] ?? null,
+                    'sort_order' => $existing + $stored,
+                    'is_primary' => false,
+                ]);
+                $stored++;
+            } catch (Throwable $exception) {
+                if ($path) {
+                    Storage::disk('public')->delete($path);
+                }
+
+                report($exception);
+            } finally {
+                imagedestroy($candidate['image']);
+            }
+        }
+
+        return $stored;
     }
 
     public function adoptStaged(Product $product, ProductVariant $variant, ProductDraft $draft): int
@@ -544,6 +860,68 @@ class ProductImageStorage
         return $stored;
     }
 
+    private function sourceExcludedForDraft(string $url, ProductDraft $draft): bool
+    {
+        $host = ProductSourcePriority::host($url);
+
+        if ($host === '') {
+            return false;
+        }
+
+        return collect($draft->excluded_gallery_source_urls ?? [])
+            ->filter(fn (mixed $excluded): bool => is_string($excluded))
+            ->contains(fn (string $excluded): bool => ProductSourcePriority::hostsMatch(
+                $host,
+                ProductSourcePriority::host($excluded),
+            ));
+    }
+
+    /** @return array<string, mixed>|null */
+    private function currentDraftSource(ProductDraft $draft): ?array
+    {
+        $primaryUrl = is_string($draft->primary_source_url) ? trim($draft->primary_source_url) : '';
+
+        if ($primaryUrl === '') {
+            return null;
+        }
+
+        $source = collect($draft->sources ?? [])->first(
+            fn (mixed $source): bool => is_array($source)
+                && is_string($source['url'] ?? null)
+                && rtrim($source['url'], '/') === rtrim($primaryUrl, '/'),
+        );
+
+        if (is_array($source)) {
+            return $source;
+        }
+
+        return [
+            'url' => $primaryUrl,
+            'type' => 'web',
+            'image_urls' => $draft->image_urls ?? [],
+        ];
+    }
+
+    /** @return array<int, string> */
+    private function currentDraftSourceUrls(ProductDraft $draft, int $limit, ?callable $progress = null): array
+    {
+        $source = $this->currentDraftSource($draft);
+
+        if (! $source) {
+            return [];
+        }
+
+        return $this->cleanUrls([
+            ...($source['image_urls'] ?? []),
+            ...$this->resolver->resolve(
+                [$source],
+                $limit,
+                $progress ? fn (string $level, string $message) => $progress($message) : null,
+                $draft->telegram_update_id,
+            ),
+        ]);
+    }
+
     /** @param array<int, mixed> $urls @return array<int, string> */
     private function cleanUrls(array $urls): array
     {
@@ -565,6 +943,24 @@ class ProductImageStorage
         $candidates = [];
         $checksums = [];
         $limit = (int) config('product-images.download_candidates', 8);
+        $sourcePagesByUrl = [];
+
+        foreach ($urls as $originalUrl) {
+            if (! is_string($originalUrl)) {
+                continue;
+            }
+
+            $pageUrl = $this->candidateDiscovery->sourcePageForImage($originalUrl);
+
+            if ($pageUrl) {
+                $sourcePagesByUrl[$this->normalizeCandidateUrl($originalUrl)] = $pageUrl;
+            }
+        }
+
+        $urls = array_values(array_diff(
+            $this->cleanUrls($urls),
+            $this->cleanUrls($draft->excluded_gallery_image_urls ?? []),
+        ));
         $urls = $this->sourcePriority->sortUrls($urls, $draft->brand, $draft->sources ?? []);
 
         foreach ($urls as $url) {
@@ -574,7 +970,11 @@ class ProductImageStorage
 
             $download = $this->resolver->download($url);
 
-            if (! $download || ! $this->hasUsefulDimensions($download['width'], $download['height'])) {
+            $minimumSide = (($download['confirmed_gallery'] ?? false) || ($download['partial_gallery'] ?? false))
+                ? (int) config('product-images.browser_fallback.confirmed_gallery_minimum_side', 400)
+                : null;
+
+            if (! $download || ! $this->hasUsefulDimensions($download['width'], $download['height'], $minimumSide)) {
                 continue;
             }
 
@@ -600,20 +1000,11 @@ class ProductImageStorage
                 continue;
             }
 
-            $classification = $this->sourcePriority->classify(
-                $download['source_url'],
-                $draft->brand,
-                $draft->sources ?? [],
-            );
             $candidates[] = [
                 ...$download,
+                'page_source_url' => $sourcePagesByUrl[$url]
+                    ?? $this->candidateDiscovery->sourcePageForImage($url),
                 'image' => $image,
-                'source_priority' => match ($classification) {
-                    'official_english', 'official_localized' => 'official',
-                    'amazon' => 'amazon',
-                    'trusted_retailer' => 'trusted_retailer',
-                    default => 'standard',
-                },
             ];
             $checksums[$checksum] = true;
         }
@@ -644,23 +1035,18 @@ class ProductImageStorage
     }
 
     /**
+     * Every publishable image goes through the same visual identity and quality check.
+     *
+     * Source type is deliberately irrelevant here: an official or marketplace URL
+     * can still contain the wrong variant, a thumbnail, a lifestyle image, or a
+     * duplicated angle. Domain ordering is handled upstream from measured success.
+     *
      * @param  array<int, array<string, mixed>>  $candidates
      * @return array<int, array<string, mixed>>
      */
-    private function selectFromCandidates(ProductDraft $draft, array $candidates, int $remaining, bool $forceVision = false): array
+    private function selectFromCandidates(ProductDraft $draft, array $candidates, int $remaining): array
     {
-        $candidates = $forceVision ? $candidates : $this->preferSingleSourceGallery($candidates);
-        $selected = $forceVision ? [] : $this->sourceVerified($draft, $candidates, $remaining);
-        $needsVision = $this->removeSelectedCandidates($candidates, $selected);
-
-        if (count($selected) < $remaining) {
-            $selected = [
-                ...$selected,
-                ...$this->verify($draft, $needsVision, $remaining - count($selected)),
-            ];
-        }
-
-        return $selected;
+        return $this->verify($draft, $candidates, $remaining);
     }
 
     /** @param array<int, array<string, mixed>> $candidates @return array<int, array<string, mixed>> */
@@ -696,140 +1082,6 @@ class ProductImageStorage
         }
     }
 
-    /**
-     * When one trusted source (official manufacturer, Amazon, a trusted
-     * retailer) has its own multi-shot gallery, build the whole public
-     * gallery from that single listing instead of mixing angles scraped
-     * from several different sites - stops "the same shot, but a
-     * smaller/worse copy from another site" from ever entering the pool.
-     * A host only wins this way if it is actually trusted and has at least
-     * two candidates; a single stray image never triggers the restriction,
-     * so a lone official shot can still be topped up from elsewhere.
-     *
-     * @param  array<int, array<string, mixed>>  $candidates
-     * @return array<int, array<string, mixed>>
-     */
-    private function preferSingleSourceGallery(array $candidates): array
-    {
-        if (count($candidates) < 2) {
-            return $candidates;
-        }
-
-        $priorityRank = ['official' => 3, 'amazon' => 2, 'trusted_retailer' => 1, 'standard' => 0];
-
-        $groups = collect($candidates)
-            ->groupBy(fn (array $candidate): string => ProductSourcePriority::host((string) ($candidate['source_url'] ?? '')))
-            ->filter(fn ($group, string $host): bool => $host !== '');
-
-        if ($groups->isEmpty()) {
-            return $candidates;
-        }
-
-        $best = $groups->sortByDesc(function ($group) use ($priorityRank): array {
-            $priority = $priorityRank[$group->first()['source_priority'] ?? 'standard'] ?? 0;
-
-            return [$priority, $group->count()];
-        })->first();
-
-        $bestPriority = $priorityRank[$best->first()['source_priority'] ?? 'standard'] ?? 0;
-
-        if ($bestPriority === 0 || $best->count() < 2) {
-            return $candidates;
-        }
-
-        return $best->values()->all();
-    }
-
-    /** @param array<int, array<string, mixed>> $candidates @return array<int, array<string, mixed>> */
-    private function sourceVerified(ProductDraft $draft, array $candidates, int $limit): array
-    {
-        // A trusted URL proves product identity, but not that every gallery
-        // image shows the requested color. With an explicit color, Vision
-        // must inspect every candidate instead of taking this fast path.
-        if (filled($draft->color)) {
-            return [];
-        }
-
-        if ($limit <= 0 || $candidates === []) {
-            return [];
-        }
-
-        return collect($candidates)
-            ->map(fn (array $candidate): array => [
-                'candidate' => $candidate,
-                'rank' => $this->sourceVerificationRank($draft, (string) ($candidate['source_url'] ?? '')),
-            ])
-            ->filter(fn (array $item): bool => $item['rank'] > 0
-                && $this->looksLikeProductPhotoShape($item['candidate']['width'], $item['candidate']['height']))
-            ->sortByDesc('rank')
-            ->take($limit)
-            ->map(function (array $item): array {
-                return [
-                    ...$item['candidate'],
-                    'verification_status' => 'source_verified',
-                    'verification_score' => min(0.99, 0.80 + ($item['rank'] * 0.03)),
-                    'verification_model' => null,
-                    'verification_notes' => 'Source-verified product image from a trusted exact product source.',
-                ];
-            })
-            ->values()
-            ->all();
-    }
-
-    /** @param array<int, array<string, mixed>> $candidates @param array<int, array<string, mixed>> $selected @return array<int, array<string, mixed>> */
-    private function removeSelectedCandidates(array $candidates, array $selected): array
-    {
-        $selectedIds = array_map(fn (array $candidate): int => spl_object_id($candidate['image']), $selected);
-
-        return array_values(array_filter(
-            $candidates,
-            fn (array $candidate): bool => ! in_array(spl_object_id($candidate['image']), $selectedIds, true),
-        ));
-    }
-
-    private function sourceVerificationRank(ProductDraft $draft, string $url): int
-    {
-        if ($url === '' || $this->looksLikeJunk($url) || ! $this->identityMatcher->supports($draft, $url)) {
-            return 0;
-        }
-
-        $sourceType = $this->sourceTypeForUrl($url, $draft->sources ?? []);
-
-        return match ($sourceType) {
-            'retailer', 'marketplace' => 5,
-            'manufacturer' => 4,
-            'database' => 3,
-            default => $this->looksLikeTrustedDirectImage($url) ? 3 : 0,
-        };
-    }
-
-    /** @param array<int, mixed> $sources */
-    private function sourceTypeForUrl(string $url, array $sources): ?string
-    {
-        $host = ProductSourcePriority::host($url);
-
-        foreach ($sources as $source) {
-            if (! is_array($source) || ! is_string($source['url'] ?? null)) {
-                continue;
-            }
-
-            if (ProductSourcePriority::hostsMatch($host, ProductSourcePriority::host($source['url']))) {
-                return is_string($source['type'] ?? null) ? $source['type'] : null;
-            }
-        }
-
-        return null;
-    }
-
-    private function looksLikeTrustedDirectImage(string $url): bool
-    {
-        $host = ProductSourcePriority::host($url);
-
-        return $host !== ''
-            && filter_var($host, FILTER_VALIDATE_IP) === false
-            && preg_match('#\.(?:jpe?g|png|webp|avif)(?:\?|$)#i', (string) parse_url($url, PHP_URL_PATH)) === 1;
-    }
-
     private function looksLikeJunk(string $url): bool
     {
         return ImageUrlHeuristics::containsMarker($url, [
@@ -861,6 +1113,16 @@ class ProductImageStorage
                 imagedestroy($candidate['image']);
             }
         }
+    }
+
+    /** @param array<int, array<string, mixed>> $candidates @return array<int, string> */
+    private function perceptualHashesForCandidates(array $candidates): array
+    {
+        return collect($candidates)
+            ->map(fn (array $candidate): string => $this->perceptualHash->hash($candidate['image']))
+            ->unique()
+            ->values()
+            ->all();
     }
 
     /** @return array<int, string> */
@@ -976,6 +1238,16 @@ class ProductImageStorage
             return preg_replace('#\._[^/]+(?=\.(?:jpe?g|png|webp)(?:$|\?))#i', '', $url) ?: $url;
         }
 
+        // Adobe Scene7 Dynamic Media ("/is/image/...") sizes images via wid/hei
+        // query params, not the URL path - Dell and other manufacturers reuse
+        // the same thumbnail URL for every gallery size selector, so the raw
+        // src is often a ~90px tab icon that fails the minimum-side check.
+        if (preg_match('#/is/image/#i', (string) parse_url($url, PHP_URL_PATH)) === 1) {
+            $url = preg_replace('/([?&])(wid|hei)=\d+/i', '$1$2=1500', $url) ?: $url;
+
+            return preg_replace('/[?&]scl=\d+/i', '', $url) ?: $url;
+        }
+
         return $url;
     }
 
@@ -995,11 +1267,11 @@ class ProductImageStorage
         return max(1, (int) ($configured ?? $default));
     }
 
-    private function hasUsefulDimensions(int $width, int $height): bool
+    private function hasUsefulDimensions(int $width, int $height, ?int $minimumSide = null): bool
     {
         $ratio = $width / max($height, 1);
 
-        return min($width, $height) >= (int) config('product-images.minimum_side', 320)
+        return min($width, $height) >= ($minimumSide ?? (int) config('product-images.minimum_side', 320))
             && $ratio >= (float) config('product-images.minimum_ratio', 0.28)
             && $ratio <= (float) config('product-images.maximum_ratio', 3.5);
     }
