@@ -3,16 +3,24 @@
 namespace App\Ai\Agents;
 
 use Illuminate\Contracts\JsonSchema\JsonSchema;
+use Laravel\Ai\Attributes\MaxTokens;
 use Laravel\Ai\Contracts\Agent;
+use Laravel\Ai\Contracts\HasProviderOptions;
 use Laravel\Ai\Contracts\HasStructuredOutput;
 use Laravel\Ai\Contracts\HasTools;
+use Laravel\Ai\Enums\Lab;
 use Laravel\Ai\Promptable;
 use Laravel\Ai\Providers\Tools\WebSearch;
 use Stringable;
 
-class ProductImageDiscoveryAgent implements Agent, HasStructuredOutput, HasTools
+#[MaxTokens(self::MAX_OUTPUT_TOKENS)]
+class ProductImageDiscoveryAgent implements Agent, HasProviderOptions, HasStructuredOutput, HasTools
 {
     use Promptable;
+
+    public const int MAX_OUTPUT_TOKENS = 12_000;
+
+    public const int MAX_WEB_SEARCH_CALLS = 6;
 
     public function instructions(): Stringable|string
     {
@@ -45,9 +53,17 @@ class ProductImageDiscoveryAgent implements Agent, HasStructuredOutput, HasTools
     {
         return [
             (new WebSearch)
-                ->max(6)
                 ->location(country: 'US'),
         ];
+    }
+
+    public function providerOptions(Lab|string $provider): array
+    {
+        if ($provider === Lab::OpenAI || $provider === Lab::OpenAI->value) {
+            return ['max_tool_calls' => self::MAX_WEB_SEARCH_CALLS];
+        }
+
+        return [];
     }
 
     public function schema(JsonSchema $schema): array

@@ -10,14 +10,14 @@ class AiRun extends Model
 {
     protected $fillable = [
         'telegram_update_id', 'invocation_id', 'provider', 'model', 'status',
-        'prompt', 'response', 'usage', 'error', 'started_at', 'completed_at',
+        'prompt', 'response', 'activity', 'usage', 'error', 'started_at', 'last_activity_at', 'completed_at',
     ];
 
     protected function casts(): array
     {
         return [
-            'response' => 'array', 'usage' => 'array',
-            'started_at' => 'datetime', 'completed_at' => 'datetime',
+            'response' => 'array', 'activity' => 'array', 'usage' => 'array',
+            'started_at' => 'datetime', 'last_activity_at' => 'datetime', 'completed_at' => 'datetime',
         ];
     }
 

@@ -3,14 +3,18 @@
 namespace App\Ai\Agents;
 
 use Illuminate\Contracts\JsonSchema\JsonSchema;
+use Laravel\Ai\Attributes\MaxTokens;
 use Laravel\Ai\Contracts\Agent;
 use Laravel\Ai\Contracts\HasStructuredOutput;
 use Laravel\Ai\Promptable;
 use Stringable;
 
+#[MaxTokens(self::MAX_OUTPUT_TOKENS)]
 class ProductGalleryPreflightAgent implements Agent, HasStructuredOutput
 {
     use Promptable;
+
+    public const int MAX_OUTPUT_TOKENS = 8_000;
 
     public function instructions(): Stringable|string
     {
@@ -31,9 +35,11 @@ class ProductGalleryPreflightAgent implements Agent, HasStructuredOutput
             Ignore videos and 360-degree media completely. Count only photographs; also ignore color
             swatches, recommendations, logos, icons, and unrelated page images. Do not call a generic class name proof by itself:
             cite selectors, attributes, labels, repeated product-media nodes, image URL patterns, or counts.
-            The application will train only for train_playwright. Be conservative about cost, but prefer
-            train_playwright when a real layered gallery is evidenced and the missing originals can
-            plausibly appear after one or more safe clicks.
+            The application is Playwright-first whenever a real product gallery is evidenced. Return
+            train_playwright for a credible Gallery/Media/Images tab or link even if the current screen has
+            no gallery fragments yet, and whenever a real layered gallery can plausibly expose originals
+            after one or more safe clicks. Use no_gallery only when there is genuinely no credible gallery
+            evidence; do not choose it merely because the gallery lives on another internal tab.
 
             Always write "reason" and every "evidence" entry in Russian, regardless of what language the
             inspected page, its selectors, or its labels are in - this text is shown directly to a

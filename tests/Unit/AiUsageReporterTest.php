@@ -125,6 +125,28 @@ class AiUsageReporterTest extends TestCase
         $this->assertSame(225, $sinceLater['tokens']['total']);
     }
 
+    public function test_it_includes_openai_web_search_tool_calls_in_the_estimated_cost(): void
+    {
+        AiRun::query()->create([
+            'telegram_update_id' => $this->update()->id,
+            'provider' => 'openai',
+            'model' => 'gpt-5-mini',
+            'status' => 'completed',
+            'prompt' => 'MSI Katana 17 HX B14WGK-059US',
+            'usage' => [
+                'prompt_tokens' => 73_366,
+                'completion_tokens' => 7_122,
+                'web_search_calls' => 20,
+            ],
+            'started_at' => now(),
+        ]);
+
+        $summary = app(AiUsageReporter::class)->summary()['all_time'];
+
+        $this->assertSame(20, $summary['tokens']['web_search_calls']);
+        $this->assertEqualsWithDelta(0.232586, $summary['estimated_cost_usd'], 0.0000001);
+    }
+
     private function update(): TelegramUpdate
     {
         return TelegramUpdate::query()->create([

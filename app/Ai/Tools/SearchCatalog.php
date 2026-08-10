@@ -40,7 +40,16 @@ class SearchCatalog implements Tool
 
         $hasSpecificFilters = $brand !== '' || $cpu !== '' || $gpu !== '' || $color !== ''
             || $ramMin !== null || $ramMax !== null || $priceMin !== null || $priceMax !== null;
-        $terms = $hasSpecificFilters ? [] : $this->searchTerms($query);
+        $terms = $this->searchTerms($query);
+
+        if ($hasSpecificFilters) {
+            $structuredTokens = $this->tokens([$brand, $cpu, $gpu, $color]);
+            $terms = collect($terms)
+                ->reject(fn (string $term): bool => in_array($term, $structuredTokens, true))
+                ->filter(fn (string $term): bool => $this->isIdentityTerm($term))
+                ->values()
+                ->all();
+        }
         $products = Product::query()
             ->with([
                 'brand:id,name', 'category:id,name,slug',
@@ -145,24 +154,82 @@ class SearchCatalog implements Tool
             ->where('value', 'like', $this->like($value)));
     }
 
-    /** @return array<int, string> */
+    /**
+     * Real production bug (2026-08-06): a "browse the catalog" button
+     * expands to a full instructional sentence ("Покажи последние активные
+     * товары локального каталога."), and every leftover non-stopword term
+     * became a required AND-ed match - "последние"/"активные"/"локального"
+     * (Russian noun/adjective forms this exact-match stopword list didn't
+     * cover) can never appear in a real product's fields, so the search
+     * always returned zero results regardless of what was actually in the
+     * catalog. $stopWordStems matches by prefix so one entry survives every
+     * case/number/gender form instead of needing each one enumerated - an
+     * exact-match list is permanent whack-a-mole against Russian inflection.
+     *
+     * @return array<int, string>
+     */
     private function searchTerms(string $query): array
     {
         $stopWords = [
-            'найди', 'найти', 'покажи', 'поиск', 'товар', 'товары', 'который', 'которая',
-            'которого', 'есть', 'наш', 'наша', 'наши', 'каталог', 'каталоге', 'база', 'базе',
-            'привет', 'здравствуй', 'как', 'дела', 'можешь', 'сможешь', 'пожалуйста', 'нас',
-            'нужен', 'нужна', 'нужно', 'имеется', 'есть',
-            'ноутбук', 'ноутбука', 'компьютер', 'деталь', 'компонент', 'ram', 'рам', 'гб', 'gb',
-            'find', 'show', 'with', 'product', 'catalog', 'laptop', 'desktop', 'component',
+            'найди', 'найти', 'есть', 'наш', 'наша', 'наши', 'база', 'базе',
+            'привет', 'здравствуй', 'как', 'дела', 'нас', 'ноутбука',
+            'ram', 'рам', 'гб', 'gb', 'find', 'show', 'with', 'product',
+            'catalog', 'laptop', 'desktop', 'component',
+        ];
+        $stopWordStems = [
+            'покаж', 'поиск', 'товар', 'котор', 'каталог', 'можеш', 'сможе',
+            'пожалуйст', 'нужн', 'имеет', 'ноутбук', 'компьютер', 'деталь',
+            'компонент', 'последн', 'актив', 'локальн',
         ];
 
         return collect(preg_split('/[^\pL\pN._-]+/u', Str::lower($query)) ?: [])
-            ->filter(fn (string $term): bool => mb_strlen($term) >= 2 && ! in_array($term, $stopWords, true))
+            ->map(fn (string $term): string => rtrim($term, '.-_'))
+            ->filter(fn (string $term): bool => mb_strlen($term) >= 2
+                && ! in_array($term, $stopWords, true)
+                && ! collect($stopWordStems)->contains(fn (string $stem): bool => str_starts_with($term, $stem)))
             ->unique()
             ->take(8)
             ->values()
             ->all();
+    }
+
+    /**
+     * @param  array<int, string>  $values
+     * @return array<int, string>
+     */
+    private function tokens(array $values): array
+    {
+        return collect($values)
+            ->flatMap(fn (string $value): array => preg_split(
+                '/[^pLpN]+/u',
+                Str::lower($value),
+            ) ?: [])
+            ->filter(fn (string $term): bool => mb_strlen($term) >= 2)
+            ->unique()
+            ->values()
+            ->all();
+    }
+
+    private function isIdentityTerm(string $term): bool
+    {
+        $term = Str::lower(trim($term));
+
+        if (preg_match('/^d+(?:st|nd|rd|th)$/', $term) === 1) {
+            return false;
+        }
+
+        if (mb_strlen($term) >= 4
+            && preg_match('/[a-z]/', $term) === 1
+            && preg_match('/d/', $term) === 1) {
+            return true;
+        }
+
+        return preg_match('/^[a-z]{4,}$/', $term) === 1
+            && ! in_array($term, [
+                'find', 'show', 'with', 'laptop', 'notebook', 'desktop',
+                'component', 'processor', 'graphics', 'gaming', 'generation',
+                'inch', 'inches', 'product', 'catalog',
+            ], true);
     }
 
     private function inferProductType(string $query): string

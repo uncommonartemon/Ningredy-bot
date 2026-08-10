@@ -127,7 +127,7 @@ class ProductImageResolverTest extends TestCase
             ->once()
             ->with('https://93.184.216.34/javascript-product', 5, null, null, [
                 'static_image_urls' => ['https://93.184.216.34/static-fallback.jpg'],
-            ])
+            ], false)
             ->andReturn([
                 'https://93.184.216.34/browser-product-front.jpg',
                 'https://93.184.216.34/browser-product-back.jpg',
@@ -187,7 +187,7 @@ class ProductImageResolverTest extends TestCase
             ->once()
             ->with('https://93.184.216.34/headerless-product', 5, null, null, [
                 'static_image_urls' => ['https://93.184.216.34/hero.jpg'],
-            ])
+            ], false)
             ->andReturn([]);
 
         $images = app(ProductImageResolver::class)->resolve([
@@ -295,9 +295,34 @@ class ProductImageResolverTest extends TestCase
             ['url' => 'https://93.184.216.34/amazon-product'],
         ], 5);
 
+        // Amazon's size-suffix (e.g. "._AC_SL1500_") is stripped by the same
+        // normalization every candidate goes through before being counted or
+        // downloaded (ProductImageStorage::normalizeCandidateUrl()) - the
+        // suffix-free URL is Amazon's own original, full-resolution asset.
         $this->assertSame([
-            'https://m.media-amazon.com/images/I/MAIN._AC_SL1500_.jpg',
-            'https://m.media-amazon.com/images/I/SECOND._AC_SL1000_.jpg',
+            'https://m.media-amazon.com/images/I/MAIN.jpg',
+            'https://m.media-amazon.com/images/I/SECOND.jpg',
+        ], $images);
+    }
+
+    public function test_it_collapses_two_scene7_renditions_of_one_static_photo_into_one_candidate(): void
+    {
+        config()->set('product-images.browser_fallback.enabled', false);
+        Http::fake([
+            'https://93.184.216.34/samsung-product' => Http::response(
+                '<img src="https://images.samsung.com/is/image/samsung/product?%241164_776_PNG%24=">'
+                .'<img src="https://images.samsung.com/is/image/samsung/product?$1164_776_PNG$">',
+                200,
+                ['Content-Type' => 'text/html'],
+            ),
+        ]);
+
+        $images = app(ProductImageResolver::class)->resolve([
+            ['url' => 'https://93.184.216.34/samsung-product'],
+        ], 5);
+
+        $this->assertSame([
+            'https://images.samsung.com/is/image/samsung/product',
         ], $images);
     }
 }

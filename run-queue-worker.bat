@@ -10,7 +10,7 @@ if not "%~2"=="" set "RESTART_DELAY=%~2"
 
 :restart
 echo [%date% %time%] Starting queue worker for: %QUEUE_NAMES%
-php artisan queue:work --queue=%QUEUE_NAMES% --sleep=2 --timeout=1560 --max-time=86400
+php artisan queue:work --queue=%QUEUE_NAMES% --sleep=2 --timeout=2160 --max-time=86400
 set "WORKER_EXIT_CODE=%errorlevel%"
 echo [%date% %time%] Queue worker exited with code %WORKER_EXIT_CODE%. Restarting in %RESTART_DELAY% seconds...
 timeout /t %RESTART_DELAY% /nobreak >nul

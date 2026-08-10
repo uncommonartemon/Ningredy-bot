@@ -5,8 +5,6 @@ namespace App\Jobs;
 use App\Ai\Agents\ServerAssistantAgent;
 use App\Models\AiOperation;
 use App\Models\AiRun;
-use App\Models\AppSetting;
-use App\Models\Product;
 use App\Models\ProductDraft;
 use App\Models\TelegramChatState;
 use App\Models\TelegramUpdate;
@@ -15,11 +13,11 @@ use App\Services\Ai\AiErrorPresenter;
 use App\Services\Ai\AiSettings;
 use App\Services\Ai\AiUsageReporter;
 use App\Services\Telegram\DraftTelegramPresenter;
+use App\Services\Telegram\ProductCardPresenter;
 use App\Services\Telegram\TelegramClient;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
 use Illuminate\Queue\Middleware\WithoutOverlapping;
-use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Validator;
 use Throwable;
 
@@ -29,7 +27,12 @@ class ProcessTelegramMessage implements ShouldQueue
 
     public int $tries = 2;
 
-    public int $timeout = 1500;
+    // Must stay comfortably above AiSettings::searchMaxSeconds() (the whole
+    // research+gallery+images+vision budget, 1800s by default) plus room to
+    // persist the draft and reply to Telegram - otherwise the queue worker
+    // kills the job mid-flight before that internal budget/reserve logic
+    // ever gets a chance to wrap up gracefully.
+    public int $timeout = 2100;
 
     public array $backoff = [30, 180];
 
@@ -40,11 +43,15 @@ class ProcessTelegramMessage implements ShouldQueue
 
     public function middleware(): array
     {
-        return [(new WithoutOverlapping('telegram-update:'.$this->telegramUpdateId))->releaseAfter(30)->expireAfter(1560)];
+        // expireAfter must stay >= $timeout - a shorter lock can expire while
+        // the job is still legitimately running, letting a duplicate job
+        // start processing the same update concurrently.
+        return [(new WithoutOverlapping('telegram-update:'.$this->telegramUpdateId))->releaseAfter(30)->expireAfter(2160)];
     }
 
-    public function handle(TelegramClient $telegram, AiErrorPresenter $errors): void
+    public function handle(TelegramClient $telegram, AiErrorPresenter $errors, ?ProductCardPresenter $productCards = null): void
     {
+        $productCards ??= app(ProductCardPresenter::class);
         $update = TelegramUpdate::query()->findOrFail($this->telegramUpdateId);
 
         if ($update->processed_at) {
@@ -71,6 +78,18 @@ class ProcessTelegramMessage implements ShouldQueue
                 ['telegram_user_id' => $update->telegram_user_id],
             );
             $user = User::query()->first();
+            $bootId = (string) config('app.boot_id');
+
+            // A conversation continued from before this worker process last
+            // (re)started carries the model's memory of everything that
+            // happened in that prior run - including drafts/state that may
+            // no longer be relevant (see ProcessTelegramMessage's draft_id
+            // handling below). Starting the conversation fresh on every new
+            // server boot avoids resurfacing stale context into an otherwise
+            // unrelated new message.
+            if ($bootId !== '' && $state->boot_id !== $bootId) {
+                $state->update(['conversation_id' => null, 'boot_id' => $bootId]);
+            }
 
             if ($user && $state->conversation_id) {
                 $agent->continue($state->conversation_id, as: $user);
@@ -125,7 +144,15 @@ class ProcessTelegramMessage implements ShouldQueue
             ]);
             $update->update(['status' => 'completed', 'processed_at' => now()]);
 
+            // The AI can echo a draft_id from earlier in the same live
+            // conversation (its own memory of "the current draft", not a
+            // fresh tool result) even after that draft was already approved
+            // or rejected in a prior turn. Without this check the bot
+            // re-shows a finalized draft as "ready to add" with whatever
+            // media happens to remain on it (often none - approval moves
+            // photos onto the published product).
             $draft = empty($data['draft_id']) ? null : ProductDraft::query()->find($data['draft_id']);
+            $draft = $draft?->status === 'pending_review' ? $draft : null;
             $failedGalleryDraft = ProductDraft::query()
                 ->where('telegram_update_id', $update->id)
                 ->where('status', 'rejected')
@@ -169,7 +196,7 @@ class ProcessTelegramMessage implements ShouldQueue
                 );
             } elseif ($data['response_type'] === 'catalog_results' && ! empty($data['product_ids'])) {
                 $telegram->sendMessage($update->chat_id, $data['message'].$usageFootnote);
-                $this->sendProductCards($telegram, $update->chat_id, $data['product_ids']);
+                $productCards->sendMany($telegram, $update->chat_id, $data['product_ids']);
             } else {
                 $telegram->sendMessage($update->chat_id, $data['message'].$usageFootnote);
             }
@@ -181,18 +208,52 @@ class ProcessTelegramMessage implements ShouldQueue
             ]);
             $update->update(['status' => 'failed', 'error' => mb_substr($exception->getMessage(), 0, 5000)]);
             $presented = $errors->present($exception, $run->id);
+            $retriesExhausted = $this->attempts() >= $this->tries;
 
-            // Notify on every attempt, not just the final one - the user
-            // should never be left wondering why nothing is happening while
-            // a retryable error (rate limit, timeout, network) is silently
-            // retried in the background.
+            // When the provider says exactly when the limit resets ("Please
+            // try again in 20s"), wait precisely that instead of the blind
+            // fixed backoff: firing earlier just buys another guaranteed 429
+            // (and burns another full search), waiting longer is dead time.
+            $retryAfter = $presented['retryable'] && ! $retriesExhausted
+                ? $errors->retryAfterSeconds($exception)
+                : null;
+
+            if ($presented['retryable'] && ! $retriesExhausted) {
+                // Transient provider failures stay internal. The same user
+                // request is retried; Telegram receives no separate error.
+                if ($retryAfter !== null && $this->job !== null) {
+                    $this->release($retryAfter);
+
+                    return;
+                }
+
+                throw $exception;
+            }
+
+            // Only a non-retryable error or the exhausted final attempt is
+            // user-facing. A first retry remains an internal queue detail;
+            // the existing progress message remains visible while the same
+            // Telegram update is retried. On the last allowed attempt the
+            // error is sent once with final wording;
+            // it never promises another automatic attempt
+            // after the retry budget is exhausted.
+            $message = $presented['retryable'] && $retriesExhausted
+                ? str_replace(
+                    ['Повторю запрос автоматически.', 'Повторю автоматически.'],
+                    'Автоматические попытки исчерпаны — повторите запрос вручную.',
+                    $presented['message'],
+                )
+                : $presented['message'];
+
             try {
-                $telegram->sendMessage($update->chat_id, $presented['message']);
+                $telegram->sendMessage($update->chat_id, $message);
             } catch (Throwable $notifyException) {
                 report($notifyException);
             }
 
             if ($presented['retryable']) {
+                $update->update(['processed_at' => now()]);
+
                 throw $exception;
             }
 
@@ -209,17 +270,15 @@ class ProcessTelegramMessage implements ShouldQueue
 
         $run = $update->aiRuns()->latest('id')->first();
 
-        // handle()'s catch block already notifies on every attempt, including
-        // the final one that lands here when retries are exhausted - skip a
-        // duplicate send when this exact failure was already reported.
-        if ($exception && $run && $run->error === mb_substr($exception->getMessage(), 0, 5000)) {
-            $update->update(['processed_at' => now()]);
-
-            return;
-        }
-
         try {
-            $message = app(AiErrorPresenter::class)->present($exception ?: $run?->error, $run?->id)['message'];
+            $presented = app(AiErrorPresenter::class)->present($exception ?: $run?->error, $run?->id);
+            $message = $presented['retryable']
+                ? str_replace(
+                    ['Повторю запрос автоматически.', 'Повторю автоматически.'],
+                    'Автоматические попытки исчерпаны — повторите запрос вручную.',
+                    $presented['message'],
+                )
+                : $presented['message'];
             app(TelegramClient::class)->sendMessage($update->chat_id, $message);
             $update->update(['processed_at' => now()]);
         } catch (Throwable $notificationError) {
@@ -250,112 +309,6 @@ class ProcessTelegramMessage implements ShouldQueue
         }
 
         return $line;
-    }
-
-    /** @param array<int, int> $productIds */
-    private function sendProductCards(TelegramClient $telegram, string $chatId, array $productIds): void
-    {
-        $productIds = array_slice($productIds, 0, 10);
-        $products = Product::query()
-            ->with(['brand:id,name', 'defaultVariant'])
-            ->whereIn('id', $productIds)
-            ->get()
-            ->sortBy(fn (Product $product): int => (int) array_search($product->id, $productIds, true));
-
-        foreach ($products as $product) {
-            try {
-                $caption = $this->productCardCaption($product);
-                $paths = $product->media()
-                    ->where('type', 'image')
-                    ->whereIn('verification_status', ['verified', 'source_verified', 'manual'])
-                    ->orderByDesc('is_primary')
-                    ->orderBy('sort_order')
-                    ->get()
-                    ->filter(fn ($item): bool => filled($item->disk) && filled($item->path))
-                    ->map(fn ($item): string => Storage::disk($item->disk)->path($item->path))
-                    ->filter(fn (string $path): bool => is_file($path) && is_readable($path))
-                    ->take(10)
-                    ->values()
-                    ->all();
-
-                if ($paths !== []) {
-                    $telegram->sendMediaGroupFiles($chatId, $paths, $caption);
-                } else {
-                    $telegram->sendMessage($chatId, $caption);
-                }
-            } catch (Throwable $exception) {
-                report($exception);
-            }
-        }
-    }
-
-    private function productCardCaption(Product $product): string
-    {
-        $product->loadMissing([
-            'brand', 'defaultVariant.attributes.definition', 'attributes.definition', 'sources',
-        ]);
-        $variant = $product->defaultVariant;
-        $identity = collect([$product->brand?->name, $product->model])->filter()->unique()->implode(' · ');
-        $price = $variant?->price !== null
-            ? trim(number_format((float) $variant->price, 0, '.', ' ').' '.(string) ($variant->currency ?? ''))
-            : null;
-        $stock = match ($variant?->stock_status) {
-            'in_stock' => 'В наличии',
-            'out_of_stock' => 'Нет в наличии',
-            'preorder' => 'Предзаказ',
-            default => null,
-        };
-        $publicUrl = rtrim((string) AppSetting::valueFor(
-            AppSetting::TELEGRAM_PROXY_URL,
-            (string) config('services.telegram.proxy_url'),
-        ), '/');
-        $link = $publicUrl !== '' ? "{$publicUrl}/products/{$product->slug}" : null;
-
-        $header = implode("\n", array_filter([
-            "#{$product->id} · {$product->title}",
-            $identity !== '' && $identity !== $product->title ? $identity : null,
-            implode(' · ', array_filter([$price, $stock])) ?: null,
-        ]));
-
-        $specs = collect($product->attributes)
-            ->merge($variant?->attributes ?? [])
-            ->filter(fn ($attribute): bool => $attribute->definition !== null && filled($attribute->value))
-            ->map(fn ($attribute): string => "• {$attribute->definition->label}: {$attribute->value}".($attribute->unit ? " {$attribute->unit}" : ''))
-            ->implode("\n");
-        $sources = $product->sources->pluck('url')->filter()->take(3)
-            ->map(fn (string $url): string => "• {$url}")->implode("\n");
-        // Telegram caps photo/album captions at 1024 chars (vs 4096 for plain
-        // text messages), so specs/sources are clipped to whatever fits after
-        // the header and link - same budget technique as draftSummary().
-        $body = implode("\n\n", array_filter([
-            $specs !== '' ? "Характеристики:\n{$specs}" : null,
-            $sources !== '' ? "Источники:\n{$sources}" : null,
-        ]));
-        $available = max(0, 1024 - mb_strlen($header."\n\n".($link ?? '')) - 8);
-
-        return mb_substr(implode("\n\n", array_filter([
-            $header,
-            mb_substr($body, 0, $available),
-            $link,
-        ])), 0, 1024);
-    }
-
-    private function draftSummary(ProductDraft $draft): string
-    {
-        $specifications = collect($draft->specifications)->take(12)
-            ->map(fn (array $item): string => "• {$item['name']}: {$item['value']}")->implode("\n");
-        $sources = collect($draft->sources)->take(5)
-            ->map(fn (array $source): string => "• {$source['url']}")->implode("\n");
-
-        return mb_substr(implode("\n\n", array_filter([
-            "Найден товар — черновик #{$draft->id}",
-            $draft->title,
-            implode(' · ', array_filter([$draft->brand, $draft->model, $draft->color])),
-            $draft->description,
-            $specifications ? "Характеристики:\n{$specifications}" : null,
-            $sources ? "Источники:\n{$sources}" : null,
-            'Товар ещё не опубликован. Нажмите кнопку ниже, чтобы добавить его в каталог.',
-        ])), 0, 4096);
     }
 
     private function sendDraftApproval(

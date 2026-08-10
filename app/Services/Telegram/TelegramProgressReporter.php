@@ -2,6 +2,8 @@
 
 namespace App\Services\Telegram;
 
+use Closure;
+use Symfony\Component\Process\Process;
 use Throwable;
 
 /**
@@ -29,12 +31,47 @@ class TelegramProgressReporter
     /** @var array<int, string> Collapsed detail lines (info, warning). */
     private array $log = [];
 
+    /** @var array<int, array<int, array{text: string, callback_data: string}>>|null */
+    private ?array $cancelButtonMarkup = null;
+
+    private ?int $cancelTelegramUpdateId = null;
+
     public function __construct(
         private readonly TelegramClient $telegram,
         private readonly string $chatId,
         private readonly bool $enabled = true,
+        ?int $existingMessageId = null,
+        private readonly ?Closure $onMessageCreated = null,
     ) {
         $this->startedAt = microtime(true);
+        $this->messageId = $existingMessageId !== null && $existingMessageId > 0
+            ? $existingMessageId
+            : null;
+    }
+
+    /**
+     * Attaches a "cancel" button to the progress message for the duration of
+     * one heartbeat() call - see heartbeat()'s own docblock for exactly what
+     * pressing it does and does not stop. Cleared automatically once
+     * heartbeat() returns, so a step that has already finished never keeps
+     * showing a button for a wait that's already over.
+     */
+    public function withCancelButton(int $telegramUpdateId): static
+    {
+        $this->cancelTelegramUpdateId = $telegramUpdateId;
+        $this->cancelButtonMarkup = [[[
+            'text' => '❌ Отменить поиск',
+            'callback_data' => "search:cancel:{$telegramUpdateId}",
+        ]]];
+
+        return $this;
+    }
+
+    public function clearCancelButton(): void
+    {
+        $this->cancelButtonMarkup = null;
+        $this->cancelTelegramUpdateId = null;
+        $this->render(force: true);
     }
 
     public function step(string $title, int $maxSeconds, ?string $detail = null): void
@@ -72,6 +109,63 @@ class TelegramProgressReporter
             'status' => 'done',
         ];
         $this->render(force: true);
+    }
+
+    /**
+     * Some steps are a single blocking call (a web-search AI request that can
+     * run for minutes) with no intermediate progress callback to piggyback
+     * on - without this, the message just sits frozen on "⏳ 1с ..." for the
+     * whole wait, which reads as hung even when it's still working. Runs
+     * $callback while a short-lived background process edits the message
+     * with a live elapsed counter every ~10s, then stops that process
+     * (success or exception) before returning/rethrowing.
+     */
+    public function heartbeat(string $label, int $maxSeconds, Closure $callback): mixed
+    {
+        $process = $this->startHeartbeatProcess($label, $maxSeconds);
+
+        try {
+            return $callback();
+        } finally {
+            $process?->stop(2);
+            // The cancel button (if any) only makes sense for the wait that
+            // just ended - a later step must not keep showing a button whose
+            // click would silently do nothing for an already-finished call.
+            $this->cancelButtonMarkup = null;
+            $this->cancelTelegramUpdateId = null;
+        }
+    }
+
+    private function startHeartbeatProcess(string $label, int $maxSeconds): ?Process
+    {
+        // Never spawn a real OS process from the test suite - it would launch
+        // a genuine `php artisan` child (and, if a real bot token were ever
+        // configured, real Telegram API calls) completely outside of
+        // Http::fake()'s reach.
+        if (! $this->enabled || $this->chatId === '' || $this->messageId === null || app()->runningUnitTests()) {
+            return null;
+        }
+
+        try {
+            $process = new Process([
+                PHP_BINARY,
+                base_path('artisan'),
+                'telegram:progress-heartbeat',
+                $this->chatId,
+                (string) $this->messageId,
+                $label,
+                (string) $maxSeconds,
+                (string) microtime(true),
+                (string) ($this->cancelTelegramUpdateId ?? ''),
+            ], base_path());
+            $process->start();
+
+            return $process;
+        } catch (Throwable $exception) {
+            report($exception);
+
+            return null;
+        }
     }
 
     public function failed(string $stage, Throwable|string $error): void
@@ -126,13 +220,29 @@ class TelegramProgressReporter
         }
 
         $text = $this->buildText();
+        // Always sent explicitly (never omitted): editMessageText leaves a
+        // previous keyboard untouched when reply_markup is absent from the
+        // payload, so once the cancel window closes (heartbeat() cleared
+        // cancelButtonMarkup) this must actively clear it with an empty
+        // inline_keyboard, not just stop attaching a new one.
+        $replyMarkup = ['inline_keyboard' => $this->cancelButtonMarkup ?? []];
 
         try {
             if ($this->messageId === null) {
-                $response = $this->telegram->sendMessage($this->chatId, $text, silent: true, parseMode: 'HTML');
+                $response = $this->telegram->sendMessage(
+                    $this->chatId,
+                    $text,
+                    replyMarkup: $replyMarkup,
+                    silent: true,
+                    parseMode: 'HTML',
+                );
                 $this->messageId = (int) data_get($response, 'result.message_id') ?: null;
+
+                if ($this->messageId !== null) {
+                    ($this->onMessageCreated)?->__invoke($this->messageId);
+                }
             } else {
-                $this->telegram->editMessageText($this->chatId, $this->messageId, $text, parseMode: 'HTML');
+                $this->telegram->editMessageText($this->chatId, $this->messageId, $text, parseMode: 'HTML', replyMarkup: $replyMarkup);
             }
 
             $this->lastEditAt = microtime(true);

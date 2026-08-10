@@ -6,6 +6,7 @@ use App\Services\Ai\AiSettings;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\ServiceProvider;
+use Illuminate\Support\Str;
 use Throwable;
 
 class AppServiceProvider extends ServiceProvider
@@ -32,6 +33,17 @@ class AppServiceProvider extends ServiceProvider
         }
 
         $this->applyStoredOpenAiApiKey();
+
+        // Queue workers only run boot() once per process (see the comment on
+        // applyStoredOpenAiApiKey below) - a fresh, random value here is
+        // therefore stable for the lifetime of one worker process and
+        // changes only when the worker is actually restarted. This lets
+        // ProcessTelegramMessage tell "conversation continued from before
+        // this worker last (re)started" apart from "still the same run",
+        // so a fresh server start never carries forward stale AI
+        // conversation memory (a draft_id mentioned hours ago, etc.) into
+        // an unrelated new message.
+        config(['app.boot_id' => (string) Str::uuid()]);
     }
 
     /**

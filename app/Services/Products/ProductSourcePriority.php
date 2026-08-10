@@ -35,8 +35,22 @@ class ProductSourcePriority
             ->all();
     }
 
-    /** @param array<int, mixed> $urls @param array<int, mixed> $sources @return array<int, string> */
-    public function sortUrls(array $urls, ?string $brand, array $sources = []): array
+    /**
+     * $sourcePagesByUrl maps an image URL to the product page it was found on -
+     * many manufacturer sites (HP, Dell, ...) host photos on a dedicated CDN
+     * subdomain (e.g. hp.widen.net) that is entirely unrelated to the page
+     * domain (www.hp.com) a gallery recipe is trained and scored against.
+     * Scoring the raw image host would leave every such CDN image stuck at a
+     * neutral score forever, even when it came from the same successful
+     * extraction as images the page itself happens to host directly - so an
+     * image is scored by its source page's domain when that mapping is known.
+     *
+     * @param  array<int, mixed>  $urls
+     * @param  array<int, mixed>  $sources
+     * @param  array<string, string>  $sourcePagesByUrl
+     * @return array<int, string>
+     */
+    public function sortUrls(array $urls, ?string $brand, array $sources = [], array $sourcePagesByUrl = []): array
     {
         return collect($urls)
             ->filter(fn (mixed $url): bool => is_string($url) && $url !== '' && ! $this->isBlockedUrl($url))
@@ -45,7 +59,7 @@ class ProductSourcePriority
             ->map(fn (string $url, int $index): array => [
                 'url' => $url,
                 'index' => $index,
-                'score' => $this->score($url),
+                'score' => $this->score($sourcePagesByUrl[$url] ?? $url),
             ])
             ->sort(fn (array $left, array $right): int => ($right['score'] <=> $left['score']) ?: ($left['index'] <=> $right['index']))
             ->pluck('url')

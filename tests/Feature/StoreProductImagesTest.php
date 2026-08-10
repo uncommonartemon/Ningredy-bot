@@ -120,7 +120,7 @@ class StoreProductImagesTest extends TestCase
             ."🏷 {$draft->title}\n\n"
             ."⚙️ Характеристики:\n🧠 Процессор: Test CPU\n💾 Память: 16 GB\n\n"
             .'📷 Фото: 3';
-        $lifecycle->rememberReviewResponse($draft, '98765', [
+        $lifecycle->rememberReviewResponse(app(TelegramClient::class), $draft, '98765', [
             'ok' => true,
             'result' => [
                 ['message_id' => 701],
@@ -128,10 +128,7 @@ class StoreProductImagesTest extends TestCase
                 ['message_id' => 703],
             ],
         ], true, $originalCaption);
-        $lifecycle->rememberControlResponse($draft, '98765', [
-            'ok' => true,
-            'result' => ['message_id' => 704],
-        ]);
+        $draft->forceFill(['telegram_control_message_ids' => [704]])->save();
 
         (new StoreProductImages($product->id, $variant->id, $draft->id))->handle(
             app(ProductImageStorage::class),

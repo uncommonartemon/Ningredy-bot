@@ -3,8 +3,8 @@
 namespace App\Services\Telegram;
 
 use App\Models\ProductDraft;
+use App\Services\Products\ProductSourcePriority;
 use Illuminate\Support\Facades\Storage;
-use Illuminate\Support\Str;
 
 class DraftTelegramPresenter
 {
@@ -39,22 +39,35 @@ class DraftTelegramPresenter
             $response = $telegram->sendMessage($chatId, $caption);
         }
 
-        $this->messageLifecycle->rememberReviewResponse($draft, $chatId, $response, $paths !== [], $caption);
+        $this->messageLifecycle->rememberReviewResponse($telegram, $draft, $chatId, $response, $paths !== [], $caption);
 
         $this->sendControls($telegram, $chatId, $draft);
     }
 
+    public function finalizeRejection(TelegramClient $telegram, ProductDraft $draft): bool
+    {
+        return $this->messageLifecycle->finalizeRejectedReview($telegram, $draft);
+    }
+
+    /**
+     * A control message (photo-selection menu, ...) is used up the moment its
+     * keyboard is acted on - stripping the keyboard and leaving the message
+     * behind (the old pattern) just piles up dead prompts in the chat.
+     */
+    public function clearControls(TelegramClient $telegram, ProductDraft $draft, string $chatId): void
+    {
+        $this->messageLifecycle->clearControlMessages($telegram, $draft, $chatId);
+    }
+
     public function sendControls(TelegramClient $telegram, string $chatId, ProductDraft $draft): array
     {
-        $response = $telegram->sendMessage(
+        return $this->messageLifecycle->replaceControlMessage(
+            $telegram,
+            $draft,
             $chatId,
             "📋 Итого: черновик #{$draft->id}\nВыберите действие:",
             $this->controlMarkup($draft),
         );
-
-        $this->messageLifecycle->rememberControlResponse($draft, $chatId, $response);
-
-        return $response;
     }
 
     public function sendPhotoSelection(
@@ -83,20 +96,25 @@ class DraftTelegramPresenter
             ->map(fn ($row): array => $row->values()->all())
             ->values()
             ->all();
+
+        if ($action === 'replace') {
+            $buttons[] = [[
+                'text' => '🔁 Все фото',
+                'callback_data' => "draft:restage:{$draft->id}",
+            ]];
+        }
         $buttons[] = [[
             'text' => '← Назад',
             'callback_data' => "draft:review:{$draft->id}",
         ]];
 
-        $response = $telegram->sendMessage(
+        return $this->messageLifecycle->replaceControlMessage(
+            $telegram,
+            $draft,
             $chatId,
             "🖼 Какое фото черновика #{$draft->id} {$verb}?\nНомер соответствует позиции в альбоме.",
             ['inline_keyboard' => $buttons],
         );
-
-        $this->messageLifecycle->rememberControlResponse($draft, $chatId, $response);
-
-        return $response;
     }
 
     private function controlMarkup(ProductDraft $draft): array
@@ -119,10 +137,7 @@ class DraftTelegramPresenter
         }
 
         $rows[] = [
-            ['text' => '🔁 Фото не подошли? Найти заново', 'callback_data' => "draft:restage:{$draft->id}"],
-        ];
-        $rows[] = [
-            ['text' => '🧠 Улучшить рецепт источника', 'callback_data' => "draft:retrain:{$draft->id}"],
+            ['text' => '🔗 Источник', 'callback_data' => "draft:source:{$draft->id}"],
         ];
         $rows[] = [
             ['text' => '🗑 Удалить фото', 'callback_data' => "draft:delete:{$draft->id}"],
@@ -131,12 +146,53 @@ class DraftTelegramPresenter
         return ['inline_keyboard' => $rows];
     }
 
+    public function sendSourceMenu(TelegramClient $telegram, string $chatId, ProductDraft $draft): array
+    {
+        $primarySourceUrl = trim((string) $draft->primary_source_url);
+        $host = $primarySourceUrl !== '' ? ProductSourcePriority::host($primarySourceUrl) : '';
+        $buttons = [
+            [['text' => '🧠 Переобучить рецепт', 'callback_data' => "draft:source-retrain:{$draft->id}"]],
+            [['text' => '💬 Переобучить с подсказкой', 'callback_data' => "draft:source-hint:{$draft->id}"]],
+            [['text' => '🚫 Не использовать источник', 'callback_data' => "draft:source-block:{$draft->id}"]],
+            [['text' => '← Назад', 'callback_data' => "draft:review:{$draft->id}"]],
+        ];
+        $text = $host !== ''
+            ? "🔗 Источник черновика #{$draft->id}: {$host}\nЧто сделать?"
+            : "🔗 Источник черновика #{$draft->id}\nЧто сделать?";
+
+        return $this->messageLifecycle->replaceControlMessage(
+            $telegram,
+            $draft,
+            $chatId,
+            $text,
+            ['inline_keyboard' => $buttons],
+        );
+    }
+
+    public function sendSourceBlockConfirm(TelegramClient $telegram, string $chatId, ProductDraft $draft, string $host): array
+    {
+        $buttons = [
+            [
+                ['text' => 'Да, забанить', 'callback_data' => "draft:source-block-confirm:{$draft->id}"],
+                ['text' => 'Отмена', 'callback_data' => "draft:source-block-cancel:{$draft->id}"],
+            ],
+        ];
+
+        return $this->messageLifecycle->replaceControlMessage(
+            $telegram,
+            $draft,
+            $chatId,
+            "⚠️ Забанить источник {$host}?\nОн перестанет использоваться для ВСЕХ будущих товаров, не только этого черновика.",
+            ['inline_keyboard' => $buttons],
+        );
+    }
+
     private function caption(ProductDraft $draft, string $usageFootnote): string
     {
         $specifications = collect($draft->specifications)->take(6)
             ->map(fn (array $item): string => sprintf(
                 '%s %s: %s',
-                $this->specificationEmoji((string) ($item['key'] ?? $item['name'] ?? '')),
+                SpecificationEmoji::for((string) ($item['key'] ?? $item['name'] ?? '')),
                 $item['name'],
                 $item['value'],
             ))
@@ -164,41 +220,6 @@ class DraftTelegramPresenter
         ]));
 
         return mb_substr($header."\n\n".mb_substr($body, 0, $available)."\n\n".$footer.$usageFootnote, 0, 1024);
-    }
-
-    /**
-     * Pick a meaningful emoji for a specification line by matching keywords
-     * in its stable snake_case key (falls back to the display name for
-     * legacy drafts saved before the key was always populated).
-     */
-    private function specificationEmoji(string $keyOrName): string
-    {
-        $needle = Str::lower($keyOrName);
-
-        return match (true) {
-            Str::contains($needle, ['cpu', 'processor', 'процессор']) => '🧠',
-            Str::contains($needle, ['gpu', 'graphic', 'видеокарт', 'видео_карт']) => '🎮',
-            Str::contains($needle, ['ram', 'memory', 'память']) => '💾',
-            Str::contains($needle, ['storage', 'ssd', 'hdd', 'disk', 'накопитель', 'диск']) => '💽',
-            Str::contains($needle, ['refresh_rate', 'refresh rate', 'частота обновления', 'герц']) => '🔄',
-            Str::contains($needle, ['resolution', 'разрешение']) => '📐',
-            Str::contains($needle, ['screen_size', 'display', 'screen', 'monitor', 'экран', 'дисплей', 'диагональ']) => '🖥',
-            Str::contains($needle, ['battery', 'аккумулятор', 'батаре']) => '🔋',
-            Str::contains($needle, ['camera', 'камер']) => '📷',
-            Str::contains($needle, ['weight', 'вес']) => '⚖️',
-            Str::contains($needle, ['size', 'dimension', 'height', 'width', 'length', 'габарит', 'размер']) => '📏',
-            Str::contains($needle, ['color', 'colour', 'цвет']) => '🎨',
-            Str::contains($needle, ['port', 'connector', 'interface', 'usb', 'hdmi', 'разъем', 'разъём', 'порт']) => '🔌',
-            Str::contains($needle, ['wifi', 'bluetooth', 'network', 'lan', 'сеть']) => '📶',
-            Str::contains($needle, ['warranty', 'гарант']) => '🛡',
-            Str::contains($needle, ['material', 'материал']) => '🧱',
-            Str::contains($needle, ['wheel', 'tire', 'tyre', 'шин', 'колес', 'колёс']) => '🛞',
-            Str::contains($needle, ['power', 'watt', 'ватт', 'мощност']) => '⚡',
-            Str::contains($needle, ['keyboard', 'клавиатур']) => '⌨️',
-            Str::contains($needle, ['audio', 'speaker', 'sound', 'звук', 'колонк']) => '🔊',
-            Str::contains($needle, ['os', 'система']) => '🗂',
-            default => '▪️',
-        };
     }
 
     private function numberEmoji(int $number): string

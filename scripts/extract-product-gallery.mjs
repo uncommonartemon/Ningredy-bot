@@ -4,8 +4,10 @@ import { chromium } from 'playwright-core';
 import {
     galleryProbeMinimumSide,
     imageAssetKey,
+    isAllowedProductNavigation,
     normalizeImageCandidate,
     urlQualityScore,
+    withUpscaledSizeParam,
 } from './product-gallery-utils.mjs';
 
 const sourceUrl = process.argv[2];
@@ -27,6 +29,15 @@ const confirmedGalleryMinimumSide = Math.max(100, Math.min(2000, Number.parseInt
     process.env.PRODUCT_GALLERY_CONFIRMED_MINIMUM_SIDE || '400',
     10,
 )));
+// PHP kills this process at its own timeout, and on Windows that kill is a
+// hard TerminateProcess with no chance to run a signal handler - so the only
+// reliable way to keep already-gathered photos is to stop interacting and
+// probing early enough to serialize the partial result before the kill lands.
+const softDeadline = Date.now() + Math.max(10000, Number.parseInt(
+    process.env.PRODUCT_GALLERY_DEADLINE_MS || '90000',
+    10,
+));
+const outOfTime = () => Date.now() >= softDeadline;
 let recipe = {};
 
 try {
@@ -180,6 +191,69 @@ const page = await context.newPage();
 const networkImages = [];
 const payloadImages = [];
 const pendingPayloads = new Set();
+const gathered = [];
+const priorityImages = [];
+let learnedRecipe = {};
+let scout = {};
+let postInteractionScout = {};
+const actionTrace = [];
+let navigationStatus = null;
+let galleryReadiness = {};
+
+// A gallery click can trigger a real page navigation instead of an in-page
+// DOM update (a different product's page, a category listing, ...). Nothing
+// downstream re-checks the URL, so without this guard the script would
+// silently keep collecting - and shipping - photos of a different product.
+let productPageUrl = sourceUrl;
+let leftProductPage = false;
+const onProductPage = () => {
+    try {
+        return isAllowedProductNavigation(productPageUrl, page.url());
+    } catch {
+        return false;
+    }
+};
+
+// Any unhandled error anywhere below (a click triggering a navigation that
+// tears down the execution context mid-evaluate, a selector timing out in an
+// unexpected way, ...) used to crash the whole process, discarding every
+// photo already gathered. The PHP side only needs valid JSON on stdout plus
+// exit code 0 to accept a result - even a partial one - so emit whatever was
+// collected so far instead of losing it to a raw stack trace.
+let crashResultEmitted = false;
+const emitCrashResult = (error) => {
+    if (crashResultEmitted) {
+        return;
+    }
+
+    crashResultEmitted = true;
+
+    const partialImages = [...new Set(
+        [...gathered, ...priorityImages, ...networkImages, ...payloadImages]
+            .map((url) => normalizeImageCandidate(url, sourceUrl))
+            .filter(Boolean),
+    )].slice(0, limit);
+
+    process.stdout.write(JSON.stringify({
+        images: partialImages,
+        scout,
+        post_interaction_scout: postInteractionScout,
+        action_trace: actionTrace,
+        learned_recipe: learnedRecipe,
+        error: String(error?.stack || error).slice(0, 1000),
+        failure_kind: 'browser_crash',
+        diagnostics: {
+            partial: true,
+            dom_candidates: gathered.length,
+            network_candidates: networkImages.length,
+        },
+    }));
+
+    Promise.resolve(browser?.close?.()).catch(() => {}).finally(() => process.exit(0));
+};
+
+process.on('uncaughtException', emitCrashResult);
+process.on('unhandledRejection', emitCrashResult);
 const imageUrlsFromText = (text) => {
     const decoded = text
         .replaceAll('\\u002F', '/')
@@ -273,7 +347,15 @@ const galleryStateSelectors = [...new Set([
     '[class*=thumbnail i] li',
     '[class*=thumbs i] > li',
 ])];
-const readGalleryState = async () => page.evaluate(({ selectors, expectedFromRecipe }) => {
+// A gallery click on some sites triggers a real page navigation instead of an
+// in-page DOM update. If that navigation lands while this evaluate is polling,
+// Playwright throws "Execution context was destroyed" - an unhandled rejection
+// from that would crash the whole Node process mid-run, discarding everything
+// already gathered. Recoverable: wait for the new document to settle and
+// re-read the (now different) gallery state instead of dying.
+const isTornDownContextError = (error) => /execution context was destroyed|context or browser has been closed/i
+    .test(String(error?.message ?? error ?? ''));
+const readGalleryStateOnce = () => page.evaluate(({ selectors, expectedFromRecipe }) => {
     const safeCount = (selector) => {
         try {
             return document.querySelectorAll(selector).length;
@@ -406,6 +488,20 @@ const readGalleryState = async () => page.evaluate(({ selectors, expectedFromRec
     selectors: galleryStateSelectors,
     expectedFromRecipe: recipeNumber('expected_image_count', 0, 20),
 });
+const readGalleryState = async () => {
+    for (let attempt = 0; ; attempt++) {
+        try {
+            return await readGalleryStateOnce();
+        } catch (error) {
+            if (attempt >= 2 || !isTornDownContextError(error)) {
+                throw error;
+            }
+
+            await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
+            await page.waitForTimeout(200);
+        }
+    }
+};
 const waitForStableGallery = async () => {
     const startedAt = Date.now();
     const deadline = startedAt + domWaitMs;
@@ -430,7 +526,7 @@ const waitForStableGallery = async () => {
 
         if (!lazyScrollTriggered && Date.now() - startedAt >= 1500 && state.observed_count < 2) {
             lazyScrollTriggered = true;
-            await page.evaluate(() => window.scrollTo(0, Math.min(document.body.scrollHeight / 3, 900)));
+            await page.evaluate(() => window.scrollTo(0, Math.min(document.body.scrollHeight / 3, 900))).catch(() => {});
         }
 
         await page.waitForTimeout(250);
@@ -577,16 +673,11 @@ const collectDomImages = async () => page.evaluate(({ selectors, extraAttributes
     extraAttributes: recipeAttributes,
 });
 
-const gathered = [];
-const priorityImages = [];
-let learnedRecipe = {};
-let scout = {};
-let postInteractionScout = {};
-const actionTrace = [];
-let navigationStatus = null;
-let galleryReadiness = {};
+const enoughCollected = () => new Set(
+    gathered.map((url) => normalizeImageCandidate(url, sourceUrl)).filter(Boolean),
+).size >= Math.max(limit, recipeNumber('expected_image_count', 0, 20));
 const collect = async () => {
-    gathered.push(...await collectDomImages());
+    gathered.push(...await collectDomImages().catch(() => []));
     priorityImages.push(...await page.locator('[data-old-hires]').evaluateAll(
         (elements) => elements
             .filter((element) => !element.closest('video,[data-type="video"],[data-media-type="video"],[class*="video" i],[class*="360" i]'))
@@ -622,11 +713,59 @@ const clickAndWaitForGalleryChange = async (locator, meta = {}) => {
     const beforeState = await readGalleryState();
     const beforeSignature = await collectionSignature();
     const beforeNetworkCount = networkImages.length;
+    const href = await locator.getAttribute('href').catch(() => null);
+    let navigatedByHref = false;
+
+    if (href && !isAllowedProductNavigation(productPageUrl, href)) {
+        actionTrace.push({
+            ...meta,
+            clicked: false,
+            changed: false,
+            navigation_blocked: true,
+            navigation_target: href,
+            before_images: beforeState.observed_count || 0,
+            after_images: beforeState.observed_count || 0,
+            network_delta: 0,
+            duration_ms: Date.now() - startedAt,
+        });
+
+        return false;
+    }
+    const navigateAllowedHref = async () => {
+        if (!href) {
+            return false;
+        }
+
+        let targetUrl;
+
+        try {
+            targetUrl = new URL(href, page.url()).href;
+        } catch {
+            return false;
+        }
+
+        if (!isAllowedProductNavigation(productPageUrl, targetUrl) || targetUrl === page.url()) {
+            return false;
+        }
+
+        const previousUrl = page.url();
+        const navigation = await page.goto(targetUrl, {
+            waitUntil: 'domcontentloaded',
+            timeout: 10_000,
+        }).catch(() => null);
+
+        await page.waitForLoadState('load', { timeout: 5_000 }).catch(() => {});
+        navigatedByHref = Boolean(navigation)
+            && page.url() !== previousUrl
+            && isAllowedProductNavigation(productPageUrl, page.url());
+
+        return navigatedByHref;
+    };
     const clicked = await locator.click({ timeout: 2000 })
         .then(() => true)
         .catch(() => locator.click({ force: true, timeout: 700 }).then(() => true).catch(() => false));
 
-    if (!clicked) {
+    if (!clicked && !await navigateAllowedHref()) {
         actionTrace.push({
             ...meta,
             clicked: false,
@@ -639,18 +778,53 @@ const clickAndWaitForGalleryChange = async (locator, meta = {}) => {
         return false;
     }
 
+    // Navigation can also land a beat after the click resolves (still inside
+    // the poll below) rather than immediately - readGalleryState/
+    // collectionSignature would then read the new page's DOM without
+    // throwing, misreported as "the gallery changed". Checked both here and
+    // on every poll iteration below for that reason.
+    const bailIfNavigatedAway = async () => {
+        if (onProductPage()) {
+            return false;
+        }
+
+        leftProductPage = true;
+        await page.goBack({ waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {});
+        actionTrace.push({
+            ...meta,
+            clicked: true,
+            changed: false,
+            navigated_away: true,
+            before_images: beforeState.observed_count || 0,
+            after_images: beforeState.observed_count || 0,
+            network_delta: 0,
+            duration_ms: Date.now() - startedAt,
+        });
+
+        return true;
+    };
+
+    if (await bailIfNavigatedAway()) {
+        return false;
+    }
+
     const deadline = Date.now() + Math.max(
         500,
         Math.min(3000, recipeNumber('wait_after_click_ms', 250, 3000) * 4),
     );
 
     while (Date.now() < deadline) {
+        if (await bailIfNavigatedAway()) {
+            return false;
+        }
+
         if (networkImages.length > beforeNetworkCount || await collectionSignature() !== beforeSignature) {
             const afterState = await readGalleryState();
             actionTrace.push({
                 ...meta,
                 clicked: true,
                 changed: true,
+                navigated_by_href: navigatedByHref,
                 before_images: beforeState.observed_count || 0,
                 after_images: afterState.observed_count || 0,
                 network_delta: Math.max(0, networkImages.length - beforeNetworkCount),
@@ -660,6 +834,23 @@ const clickAndWaitForGalleryChange = async (locator, meta = {}) => {
         }
 
         await page.waitForTimeout(100);
+    }
+
+    if (await navigateAllowedHref()) {
+        const afterState = await readGalleryState();
+        actionTrace.push({
+            ...meta,
+            clicked,
+            changed: true,
+            navigated_by_href: true,
+            navigation_target: page.url(),
+            before_images: beforeState.observed_count || 0,
+            after_images: afterState.observed_count || 0,
+            network_delta: Math.max(0, networkImages.length - beforeNetworkCount),
+            duration_ms: Date.now() - startedAt,
+        });
+
+        return true;
     }
 
     const afterState = await readGalleryState();
@@ -682,7 +873,7 @@ const captureInteractionScout = async () => page.evaluate(() => {
 
         for (const node of [clone, ...clone.querySelectorAll('*')]) {
             for (const attribute of [...node.attributes]) {
-                if (/^on/i.test(attribute.name) || ['style', 'nonce', 'integrity'].includes(attribute.name)) {
+                if (/^on/i.test(attribute.name) || ['style', 'nonce', 'integrity', 'srcset', 'data-srcset', 'data-bgset'].includes(attribute.name)) {
                     node.removeAttribute(attribute.name);
                 }
             }
@@ -704,10 +895,11 @@ const captureInteractionScout = async () => page.evaluate(() => {
     const interactiveControls = [...document.querySelectorAll('button,a,[role=button]')]
         .filter((element) => /(gallery|media|image|photo|thumbnail|carousel|slider|zoom|next|more)/i.test([
             element.getAttribute('aria-label'),
-            element.getAttribute('title'),
-            element.getAttribute('class'),
-            element.getAttribute('data-selenium'),
-            element.textContent,
+             element.getAttribute('title'),
+             element.getAttribute('class'),
+             element.getAttribute('data-selenium'),
+             element.getAttribute('href'),
+             element.textContent,
         ].filter(Boolean).join(' ')))
         .slice(0, 50)
         .map(sanitize)
@@ -742,9 +934,17 @@ try {
         await page.waitForLoadState('load', { timeout: 5_000 }).catch(() => {});
     }
 
+    // Use the browser's final product URL after redirects/interstitials as the
+    // logical root for later same-product Gallery/Media navigation checks.
+    productPageUrl = page.url();
+
     await page.locator('#sp-cc-accept').click({ timeout: 500 }).catch(() => {});
 
     for (const selector of preClickSelectors) {
+        if (leftProductPage) {
+            break;
+        }
+
         const control = page.locator(selector).first();
 
         if (await control.count().catch(() => 0)) {
@@ -767,7 +967,7 @@ try {
 
             for (const node of [clone, ...clone.querySelectorAll('*')]) {
                 for (const attribute of [...node.attributes]) {
-                    if (/^on/i.test(attribute.name) || ['style', 'nonce', 'integrity'].includes(attribute.name)) {
+                    if (/^on/i.test(attribute.name) || ['style', 'nonce', 'integrity', 'srcset', 'data-srcset', 'data-bgset'].includes(attribute.name)) {
                         node.removeAttribute(attribute.name);
                     }
                 }
@@ -792,10 +992,11 @@ try {
         const interactiveControls = [...document.querySelectorAll('button,a,[role="button"]')]
             .filter((element) => /(gallery|media|image|photo|thumbnail|carousel|slider|zoom|next|more)/i.test([
                 element.getAttribute('aria-label'),
-                element.getAttribute('title'),
-                element.getAttribute('class'),
-                element.getAttribute('data-selenium'),
-                element.textContent,
+                 element.getAttribute('title'),
+                 element.getAttribute('class'),
+                 element.getAttribute('data-selenium'),
+                 element.getAttribute('href'),
+                 element.textContent,
             ].filter(Boolean).join(' ')))
             .slice(0, 24)
             .map(sanitize)
@@ -840,7 +1041,7 @@ try {
         ? Math.min(await thumbnails.count(), recipeNumber('max_thumbnail_clicks', 20, 20))
         : 0;
 
-    for (let index = 0; index < thumbnailCount; index++) {
+    for (let index = 0; index < thumbnailCount && !leftProductPage && !outOfTime(); index++) {
         const thumbnail = thumbnails.nth(index);
         await thumbnail.scrollIntoViewIfNeeded({ timeout: 500 }).catch(() => {});
         await clickAndWaitForGalleryChange(thumbnail, {
@@ -849,12 +1050,16 @@ try {
             index,
         });
         await collect();
+
+        if (enoughCollected()) {
+            break;
+        }
     }
 
     const openMediaButtons = openSelectors.length ? page.locator(openSelectors.join(',')) : null;
     const openMediaCount = openMediaButtons ? Math.min(await openMediaButtons.count(), 5) : 0;
 
-    for (let index = 0; index < openMediaCount; index++) {
+    for (let index = 0; index < openMediaCount && !leftProductPage && !outOfTime(); index++) {
         const button = openMediaButtons.nth(index);
         const text = (await button.innerText({ timeout: 300 }).catch(() => '')).trim();
         const marker = `${await button.getAttribute('class') || ''} ${await button.getAttribute('data-selenium') || ''}`;
@@ -869,26 +1074,36 @@ try {
             index,
         });
         await collect();
+
+        if (enoughCollected()) {
+            break;
+        }
     }
 
     const nextButtons = nextSelectors.length ? page.locator(nextSelectors.join(',')) : null;
 
     if (nextButtons && await nextButtons.count()) {
-        for (let index = 0; index < Math.min(limit, recipeNumber('max_next_clicks', 15, 15)); index++) {
+        for (let index = 0; index < Math.min(limit, recipeNumber('max_next_clicks', 15, 15)) && !leftProductPage && !outOfTime(); index++) {
             await clickAndWaitForGalleryChange(nextButtons.first(), {
                 phase: 'next',
                 selector: nextSelectors.join(','),
                 index,
             });
             await collect();
+
+            if (enoughCollected()) {
+                break;
+            }
         }
     }
 
-    galleryReadiness = await waitForStableGallery();
-    postInteractionScout = await captureInteractionScout();
-    postInteractionScout.gallery_readiness = galleryReadiness;
-    postInteractionScout.observed_gallery_count = galleryReadiness.observed_count || 0;
-    postInteractionScout.expected_count_evidence = galleryReadiness.evidence || [];
+    if (!outOfTime()) {
+        galleryReadiness = await waitForStableGallery();
+        postInteractionScout = await captureInteractionScout().catch(() => ({}));
+        postInteractionScout.gallery_readiness = galleryReadiness;
+        postInteractionScout.observed_gallery_count = galleryReadiness.observed_count || 0;
+        postInteractionScout.expected_count_evidence = galleryReadiness.evidence || [];
+    }
     }
 } finally {
     await Promise.allSettled([...pendingPayloads]);
@@ -994,8 +1209,22 @@ const candidatesToProbe = candidates.slice(0, Math.max(30, limit * 3));
 const probes = [];
 
 if (!scoutOnly) {
-    for (let index = 0; index < candidatesToProbe.length; index += 4) {
+    for (let index = 0; index < candidatesToProbe.length && !outOfTime(); index += 4) {
         probes.push(...await Promise.all(candidatesToProbe.slice(index, index + 4).map(probeImage)));
+    }
+
+    // A candidate rejected only for being too small may still be the exact
+    // same photo available at a larger size through its own width/height
+    // query parameter (see withUpscaledSizeParam) - retry those before
+    // accepting the loss of a real, distinct product angle.
+    const upscaleAttempts = probes
+        .filter((probe) => !probe.ok && probe.reason === 'dimensions_below_minimum')
+        .map((probe) => withUpscaledSizeParam(probe.url))
+        .filter((url) => url !== null)
+        .slice(0, 20);
+
+    for (let index = 0; index < upscaleAttempts.length && !outOfTime(); index += 4) {
+        probes.push(...await Promise.all(upscaleAttempts.slice(index, index + 4).map(probeImage)));
     }
 }
 
@@ -1054,5 +1283,6 @@ process.stdout.write(JSON.stringify({
         gallery_wait_timed_out: galleryReadiness.timed_out || false,
         gallery_goal_reached: galleryGoalReached,
         effective_minimum_side: effectiveMinimumSide,
+        stopped_early: outOfTime(),
     },
 }));

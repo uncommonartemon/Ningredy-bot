@@ -8,6 +8,7 @@ use App\Models\AiRun;
 use App\Models\ProductGalleryRecipe;
 use App\Models\ProductGalleryRecipeVersion;
 use App\Services\Ai\AiSettings;
+use App\Services\Ai\OpenAiHeavyOperationGate;
 use App\Services\Ai\ProductSearchTimeBudget;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
@@ -32,6 +33,9 @@ class ProductGalleryRecipeTrainer
         bool $force = false,
         ?int $telegramUpdateId = null,
         array $context = [],
+        bool $forceInteractive = false,
+        ?array $previousRecipeImages = null,
+        ?string $userHint = null,
     ): array {
         $host = strtolower((string) parse_url($url, PHP_URL_HOST));
 
@@ -90,9 +94,17 @@ class ProductGalleryRecipeTrainer
                 'previous_recipe' => $recipe->recipe,
             ]);
 
+            if ($userHint !== null && trim($userHint) !== '') {
+                $debug?->__invoke('step', 'Подсказка оператора учтена: '.mb_substr(trim($userHint), 0, 300));
+            }
+
             $debug?->__invoke('step', "AI-тренер: Playwright собирает DOM, интерактивные элементы и сетевые изображения {$host}.");
             $scout = $this->browser->scout($url, $debug, $telegramUpdateId);
             $pageScout = is_array($scout['scout'] ?? null) ? $scout['scout'] : [];
+            // Persist even a rejected scout: an empty fragment list can still
+            // contain the exact Gallery/Media control needed to diagnose the
+            // page, and failed versions must remain auditable in Filament.
+            $version->update(['scout' => $pageScout]);
 
             if (($pageScout['rate_limited'] ?? false) === true) {
                 $failureKind = 'rate_limited';
@@ -105,7 +117,10 @@ class ProductGalleryRecipeTrainer
                 throw new RuntimeException("Playwright обнаружил защитную страницу: {$reason}.");
             }
 
-            if (($pageScout['fragments'] ?? []) === []) {
+            $hasFragments = ($pageScout['fragments'] ?? []) !== [];
+            $hasInteractiveGalleryControls = ($pageScout['interactive_controls'] ?? []) !== [];
+
+            if (! $hasFragments && ! $hasInteractiveGalleryControls) {
                 $failureKind = (string) ($scout['failure_kind'] ?? (
                     ($scout['error'] ?? null) ? 'browser_unavailable' : 'dom_unusable'
                 ));
@@ -122,9 +137,35 @@ class ProductGalleryRecipeTrainer
                 'retry_after' => null,
             ]);
 
-            $version->update(['status' => 'training', 'scout' => $pageScout]);
-            $preflight = $this->preflight($url, $pageScout, $scout['diagnostics'] ?? [], $context, $provider, $model, $version, $telegramUpdateId, $debug);
-            $preflightDecision = (string) ($preflight['decision'] ?? 'no_gallery');
+            $version->update(['status' => 'training']);
+            $preflight = [];
+            $preflightDecision = 'train_playwright';
+
+            if (! $forceInteractive) {
+                $preflight = $this->preflight($url, $pageScout, $scout['diagnostics'] ?? [], $context, $provider, $model, $version, $telegramUpdateId, $debug);
+                $preflightDecision = (string) ($preflight['decision'] ?? 'no_gallery');
+
+                // static_sufficient is an estimate from raw DOM markup (thumbnails
+                // and CDN size-variants can inflate expected_image_count - see the
+                // smarty.cz case: predicted 8, Vision-verified 3), not a verified
+                // count. Explicit user tradeoff: when a real gallery is present,
+                // train a real, reusable, Vision-verified recipe instead of
+                // trusting that estimate - slower and costlier per search, but the
+                // trained recipe is reused on every later visit to this domain.
+                if (
+                    $preflightDecision === 'static_sufficient'
+                    && ($preflight['gallery_likely'] ?? false)
+                    && $this->settings->galleryPreferPlaywrightFirst()
+                ) {
+                    $debug?->__invoke(
+                        'step',
+                        'Предфильтр сказал "статики достаточно", но найдена настоящая галерея - обучаю Playwright-рецепт вместо доверия оценке количества фото: '.$url,
+                    );
+                    $preflightDecision = 'train_playwright';
+                }
+            } else {
+                $debug?->__invoke('step', 'AI-предфильтр пропущен: предыдущая статичная галерея дала слишком мало разных фото, принудительно кликаю по слайдеру.');
+            }
 
             if ($preflightDecision === 'blocked') {
                 $failureKind = 'access_gate';
@@ -159,11 +200,23 @@ class ProductGalleryRecipeTrainer
                 return collect([
                     ...($pageScout['network_image_samples'] ?? []),
                     ...($context['static_image_urls'] ?? []),
-                ])->filter()->unique()->take(20)->values()->all();
+                ])
+                    ->filter(fn (mixed $url): bool => is_string($url) && $url !== '')
+                    ->map(fn (string $url): string => ProductImageStorage::normalizeCandidateUrl($url))
+                    ->unique()->take(20)->values()->all();
             }
             $oldImages = [];
 
-            if (is_array($recipe->recipe) && $recipe->recipe !== []) {
+            if ($previousRecipeImages !== null) {
+                // The caller (extract()) already just ran this exact recipe against
+                // this exact URL and measured its result - re-running it here would
+                // be a second, non-deterministic execution of the very recipe that
+                // was JUST found insufficient, and any drift between the two runs
+                // (browser/page timing flakiness) has no more claim to being "the
+                // real gallery" than the run that triggered retraining in the first
+                // place. Reuse that measurement instead of trusting a fresh one.
+                $oldImages = $previousRecipeImages;
+            } elseif (is_array($recipe->recipe) && $recipe->recipe !== []) {
                 $oldResult = $this->browser->executeRecipe($url, $recipe->recipe, 20, null, $telegramUpdateId);
                 $this->recordExecutionTrace($url, $version, 0, $recipe->recipe, $oldResult, $telegramUpdateId);
                 $oldImages = $oldResult['images'] ?? [];
@@ -203,8 +256,10 @@ class ProductGalleryRecipeTrainer
                     'current_recipe' => $recipe->recipe,
                     'page' => $roundScout,
                     'diagnostics' => $scout['diagnostics'] ?? [],
+                    'attempt_history' => $attempts,
                     'preflight' => $preflight,
                     'previous_attempt_feedback' => $feedback,
+                    'operator_hint' => $userHint,
                 ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
 
                 $debug?->__invoke(
@@ -223,13 +278,18 @@ class ProductGalleryRecipeTrainer
                 ]) : null;
 
                 try {
-                    $response = ProductGalleryRecipeTrainerAgent::make()->prompt(
-                        $prompt ?: '{}',
-                        provider: $provider,
-                        model: $model,
-                        timeout: $this->timeBudget->timeoutFor(
-                            $telegramUpdateId,
-                            $this->settings->galleryRecipeTimeoutSeconds(),
+                    $recipeTimeout = $this->timeBudget->timeoutFor(
+                        $telegramUpdateId,
+                        $this->settings->galleryRecipeTimeoutSeconds(),
+                    );
+                    $response = app(OpenAiHeavyOperationGate::class)->run(
+                        $provider,
+                        $recipeTimeout,
+                        fn () => ProductGalleryRecipeTrainerAgent::make()->prompt(
+                            $prompt ?: '{}',
+                            provider: $provider,
+                            model: $model,
+                            timeout: $recipeTimeout,
                         ),
                     );
                     $run?->update([
@@ -246,11 +306,23 @@ class ProductGalleryRecipeTrainer
                         'completed_at' => now(),
                     ]);
                     $failureKind = $this->failureKindForException($exception);
+                    $debug?->__invoke('warning', "AI-тренер: раунд {$attempt}/{$maxRounds} не удался ({$exception->getMessage()}), пробую следующий раунд.");
+                    $attempts[] = ['attempt' => $attempt, 'error' => 'ai_call_failed: '.$exception->getMessage()];
+                    $feedback = ['error' => 'The previous attempt failed to produce a response: '.mb_substr($exception->getMessage(), 0, 300)];
 
-                    throw $exception;
+                    continue;
                 }
 
-                $candidate = $this->validateRecipe($response->toArray());
+                try {
+                    $candidate = $this->validateRecipe($response->toArray());
+                } catch (Throwable $exception) {
+                    $debug?->__invoke('warning', "AI-тренер: раунд {$attempt}/{$maxRounds} вернул невалидный рецепт ({$exception->getMessage()}), пробую следующий раунд.");
+                    $attempts[] = ['attempt' => $attempt, 'error' => 'invalid_recipe: '.$exception->getMessage()];
+                    $feedback = ['error' => 'The previous attempt returned an invalid recipe: '.mb_substr($exception->getMessage(), 0, 300)];
+
+                    continue;
+                }
+
                 $debug?->__invoke('step', "AI-тренер: проверяю рецепт, раунд {$attempt}/{$maxRounds} · {$url}");
                 $candidateResult = $this->browser->executeRecipe($url, $candidate, 20, $debug, $telegramUpdateId);
                 $this->recordExecutionTrace(
@@ -271,6 +343,7 @@ class ProductGalleryRecipeTrainer
                     && (count($oldImages) < 2 || count($candidateImages) >= count($oldImages));
                 $attempts[] = [
                     'attempt' => $attempt,
+                    'selectors_tried' => $candidate,
                     'candidate_count' => count($candidateImages),
                     'validation' => $validation,
                     'diagnostics' => $candidateResult['diagnostics'] ?? [],
@@ -283,7 +356,13 @@ class ProductGalleryRecipeTrainer
                 }
 
                 $postInteractionScout = $candidateResult['post_interaction_scout'] ?? [];
-                if (is_array($postInteractionScout) && ($postInteractionScout['fragments'] ?? []) !== []) {
+                if (
+                    is_array($postInteractionScout)
+                    && (
+                        ($postInteractionScout['fragments'] ?? []) !== []
+                        || ($postInteractionScout['interactive_controls'] ?? []) !== []
+                    )
+                ) {
                     $roundScout = $postInteractionScout;
                 }
 
@@ -449,8 +528,16 @@ class ProductGalleryRecipeTrainer
             'url' => $url,
             'page' => $pageScout,
             'diagnostics' => $diagnostics,
+            // Two raw URLs can still be the exact same photo at another size
+            // (e.g. Adobe Scene7's wid/hei or $preset$ query forms) - counting
+            // them as distinct before the preflight AI ever sees them would
+            // let a single duplicated photo pass as "static_sufficient" and
+            // skip Playwright training entirely. Normalizing first keeps this
+            // headcount consistent with the one downloadCandidates() uses.
             'static_image_urls' => collect($context['static_image_urls'] ?? [])
-                ->filter()->unique()->take(20)->values()->all(),
+                ->filter(fn (mixed $url): bool => is_string($url) && $url !== '')
+                ->map(fn (string $url): string => ProductImageStorage::normalizeCandidateUrl($url))
+                ->unique()->take(20)->values()->all(),
         ];
         $prompt = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?: '{}';
         $startedAt = hrtime(true);
@@ -464,16 +551,34 @@ class ProductGalleryRecipeTrainer
         ]) : null;
 
         try {
-            $response = ProductGalleryPreflightAgent::make()->prompt(
-                $prompt,
-                provider: $provider,
-                model: $model,
-                timeout: $this->timeBudget->timeoutFor(
-                    $telegramUpdateId,
-                    $this->settings->galleryRecipeTimeoutSeconds(),
+            $preflightTimeout = $this->timeBudget->timeoutFor(
+                $telegramUpdateId,
+                $this->settings->galleryRecipeTimeoutSeconds(),
+            );
+            $response = app(OpenAiHeavyOperationGate::class)->run(
+                $provider,
+                $preflightTimeout,
+                fn () => ProductGalleryPreflightAgent::make()->prompt(
+                    $prompt,
+                    provider: $provider,
+                    model: $model,
+                    timeout: $preflightTimeout,
                 ),
             );
-            $data = Validator::make($response->toArray(), [
+            $preflightResponse = $response->toArray();
+            // The provider's own schema already caps these string lengths, but
+            // that constraint isn't always honored - truncate defensively so an
+            // overlong sentence doesn't throw away an otherwise-valid decision.
+            if (is_string($preflightResponse['reason'] ?? null)) {
+                $preflightResponse['reason'] = mb_substr($preflightResponse['reason'], 0, 1200);
+            }
+            if (is_array($preflightResponse['evidence'] ?? null)) {
+                $preflightResponse['evidence'] = collect($preflightResponse['evidence'])
+                    ->map(fn (mixed $item): mixed => is_string($item) ? mb_substr($item, 0, 500) : $item)
+                    ->all();
+            }
+
+            $data = Validator::make($preflightResponse, [
                 'decision' => ['required', 'in:static_sufficient,train_playwright,no_gallery,blocked'],
                 'gallery_likely' => ['required', 'boolean'],
                 'hidden_images_likely' => ['required', 'boolean'],
@@ -642,6 +747,14 @@ class ProductGalleryRecipeTrainer
         $data['wait_after_click_ms'] = $this->clampInt($data['wait_after_click_ms'] ?? null, 50, 1000, 150);
         $data['max_thumbnail_clicks'] = $this->clampInt($data['max_thumbnail_clicks'] ?? null, 0, 20, 5);
         $data['max_next_clicks'] = $this->clampInt($data['max_next_clicks'] ?? null, 0, 15, 5);
+        // Free-text reasoning fields: truncate an overlong AI answer instead of
+        // rejecting an otherwise-usable recipe outright over field length.
+        if (is_string($data['expected_count_evidence'] ?? null)) {
+            $data['expected_count_evidence'] = mb_substr($data['expected_count_evidence'], 0, 500);
+        }
+        if (is_string($data['reason'] ?? null)) {
+            $data['reason'] = mb_substr($data['reason'], 0, 1000);
+        }
 
         $data = Validator::make($data, [
             'gallery_present' => ['required', 'boolean'],

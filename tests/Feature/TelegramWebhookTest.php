@@ -4,7 +4,10 @@ namespace Tests\Feature;
 
 use App\Jobs\ProcessTelegramMessage;
 use App\Jobs\TranscribeTelegramVoice;
+use App\Models\TelegramChatState;
+use App\Models\TelegramUpdate;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
 use Tests\TestCase;
 
@@ -124,6 +127,79 @@ class TelegramWebhookTest extends TestCase
         $this->assertDatabaseHas('telegram_updates', [
             'update_id' => 1003,
             'reply_to_text' => '#28 · ROG NUC (2025) Gaming Mini PC',
+        ]);
+    }
+
+    public function test_reset_command_cancels_stuck_updates_and_clears_chat_state(): void
+    {
+        Queue::fake();
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => true])]);
+        $stuck = TelegramUpdate::create([
+            'update_id' => 5001,
+            'telegram_user_id' => '12345',
+            'chat_id' => '98765',
+            'text' => 'Найди Lenovo Legion 5',
+            'status' => 'received',
+            'payload' => [],
+        ]);
+        $otherChat = TelegramUpdate::create([
+            'update_id' => 5002,
+            'telegram_user_id' => '99999',
+            'chat_id' => '11111',
+            'text' => 'Найди Mac mini',
+            'status' => 'received',
+            'payload' => [],
+        ]);
+        TelegramChatState::create(['chat_id' => '98765', 'conversation_id' => 'conv-1']);
+
+        $payload = $this->messagePayload(updateId: 5003);
+        $payload['message']['text'] = '/reset';
+
+        $this->postJson('/api/telegram/webhook', $payload, [
+            'X-Telegram-Bot-Api-Secret-Token' => 'test-secret',
+        ])->assertOk()->assertJson(['ok' => true]);
+
+        $this->assertNotNull($stuck->refresh()->processed_at);
+        $this->assertSame('cancelled', $stuck->status);
+        $this->assertNull($otherChat->refresh()->processed_at);
+        $this->assertDatabaseMissing('telegram_chat_states', ['chat_id' => '98765']);
+        Queue::assertNothingPushed();
+    }
+
+    public function test_a_copied_progress_line_is_stripped_down_to_the_query(): void
+    {
+        // Real production bug (2026-08-05): the user re-asks a search by
+        // copying the bot's live progress line, which carries the timer
+        // chrome - and the bot then searched for "1с · Acer ..." verbatim,
+        // burning a full rate-limited search on garbage.
+        Queue::fake();
+        $payload = $this->messagePayload(updateId: 1010);
+        $payload['message']['text'] = '1с · Acer nitro V16 AI, R7 260, RTX 5060';
+
+        $this->postJson('/api/telegram/webhook', $payload, [
+            'X-Telegram-Bot-Api-Secret-Token' => 'test-secret',
+        ])->assertOk()->assertJson(['ok' => true]);
+
+        $this->assertDatabaseHas('telegram_updates', [
+            'update_id' => 1010,
+            'text' => 'Acer nitro V16 AI, R7 260, RTX 5060',
+        ]);
+        Queue::assertPushed(ProcessTelegramMessage::class, 1);
+    }
+
+    public function test_a_fully_copied_progress_line_strips_nested_timers_and_the_limit_tail(): void
+    {
+        Queue::fake();
+        $payload = $this->messagePayload(updateId: 1011);
+        $payload['message']['text'] = '⏳ 1с · 1с · Acer nitro V16 AI, R7 260, RTX 5060 · лимит 300 сек.';
+
+        $this->postJson('/api/telegram/webhook', $payload, [
+            'X-Telegram-Bot-Api-Secret-Token' => 'test-secret',
+        ])->assertOk();
+
+        $this->assertDatabaseHas('telegram_updates', [
+            'update_id' => 1011,
+            'text' => 'Acer nitro V16 AI, R7 260, RTX 5060',
         ]);
     }
 

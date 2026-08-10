@@ -103,6 +103,7 @@ class AiUsageReporter
             'cached_input' => 0,
             'output' => 0,
             'reasoning' => 0,
+            'web_search_calls' => 0,
             'total' => 0,
         ];
 
@@ -112,6 +113,7 @@ class AiUsageReporter
             $cachedInput = $this->integer($usage['cache_read_input_tokens'] ?? $usage['cached_input_tokens'] ?? 0);
             $output = $this->integer($usage['completion_tokens'] ?? $usage['output_tokens'] ?? 0);
             $reasoning = $this->integer($usage['reasoning_tokens'] ?? 0);
+            $webSearchCalls = $this->integer($usage['web_search_calls'] ?? 0);
 
             // Laravel AI already removes cached input from OpenAI's promptTokens.
             // OpenAI outputTokens already includes its reasoning-token detail.
@@ -123,6 +125,7 @@ class AiUsageReporter
             $totals['cached_input'] += $cachedInput;
             $totals['output'] += $output;
             $totals['reasoning'] += $reasoning;
+            $totals['web_search_calls'] += $webSearchCalls;
             $totals['total'] += $uncachedInput + $cachedInput + $output;
         }
 
@@ -152,6 +155,10 @@ class AiUsageReporter
             }
 
             $cost += ($tokens[$tokenKey] ?? 0) * ((float) $price) / 1_000_000;
+        }
+
+        if ($provider === 'openai') {
+            $cost += ($tokens['web_search_calls'] ?? 0) * 0.01;
         }
 
         return round($cost, 6);

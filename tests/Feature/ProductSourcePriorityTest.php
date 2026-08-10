@@ -101,6 +101,38 @@ class ProductSourcePriorityTest extends TestCase
         ], array_column($sorted, 'url'));
     }
 
+    public function test_an_image_hosted_on_an_unrelated_cdn_scores_by_its_source_page_domain(): void
+    {
+        // Manufacturer sites often host photos on a dedicated asset CDN (e.g.
+        // HP's page is www.hp.com but its photos are on hp.widen.net) - the
+        // CDN host itself never accumulates its own recipe/extraction history,
+        // so scoring the raw image host would leave it stuck at neutral
+        // forever even when it came from the very page with a proven recipe.
+        ProductGalleryRecipe::query()->create([
+            'domain' => 'manufacturer.example',
+            'path_pattern' => '*',
+            'status' => 'active',
+            'success_count' => 5,
+            'failure_count' => 0,
+            'recipe' => ['collect_selectors' => ['[data-gallery] img']],
+        ]);
+
+        $sorted = app(ProductSourcePriority::class)->sortUrls(
+            [
+                'https://unrelated-cdn.example/photo.jpg',
+                'https://cdn.manufacturer-assets.example/photo.jpg',
+            ],
+            'Example',
+            [],
+            ['https://cdn.manufacturer-assets.example/photo.jpg' => 'https://manufacturer.example/product'],
+        );
+
+        $this->assertSame([
+            'https://cdn.manufacturer-assets.example/photo.jpg',
+            'https://unrelated-cdn.example/photo.jpg',
+        ], $sorted);
+    }
+
     public function test_globally_blocked_source_is_removed_before_processing(): void
     {
         ProductGalleryRecipe::query()->create([

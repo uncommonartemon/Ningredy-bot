@@ -43,13 +43,14 @@ return [
     // whatever was already found. 0 disables the budget cutoff.
     'max_search_cost_usd' => (float) env('PRODUCT_IMAGE_MAX_SEARCH_COST_USD', 0.30),
 
-    // The queue worker has a larger hard timeout (1500s). Application work
+    // The queue worker has a larger hard timeout (2100s). Application work
     // stops earlier and keeps a reserve for persisting the draft and replying
     // to Telegram instead of being killed in the middle of finalization.
     'search_timing' => [
-        'max_seconds' => (int) env('PRODUCT_SEARCH_MAX_SECONDS', 1200),
+        'max_seconds' => (int) env('PRODUCT_SEARCH_MAX_SECONDS', 1800),
         'reserve_seconds' => (int) env('PRODUCT_SEARCH_RESERVE_SECONDS', 120),
-        'product_research_timeout_seconds' => (int) env('PRODUCT_SEARCH_RESEARCH_TIMEOUT', 360),
+        'product_research_timeout_seconds' => (int) env('PRODUCT_SEARCH_RESEARCH_TIMEOUT', 900),
+        'product_research_idle_timeout_seconds' => (int) env('PRODUCT_SEARCH_RESEARCH_IDLE_TIMEOUT', 90),
         'image_discovery_timeout_seconds' => (int) env('PRODUCT_SEARCH_IMAGE_DISCOVERY_TIMEOUT', 180),
         'gallery_recipe_timeout_seconds' => (int) env('PRODUCT_SEARCH_GALLERY_RECIPE_TIMEOUT', 240),
         'image_vision_timeout_seconds' => (int) env('PRODUCT_SEARCH_VISION_TIMEOUT', 90),

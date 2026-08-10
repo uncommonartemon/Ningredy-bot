@@ -49,16 +49,19 @@ class AiSettingsPage extends Page implements HasForms
                 ?: (string) config('services.gallery_recipe_training.model', 'gpt-5.4'),
             'gallery_browser_mode' => $settings->galleryBrowserMode(),
             'fallback_sources_enabled' => $settings->fallbackSourcesEnabled(),
+            'gallery_prefer_playwright_first' => $settings->galleryPreferPlaywrightFirst(),
             'max_search_cost_usd' => $settings->maxSearchCostUsd(),
             'search_max_seconds' => $settings->searchMaxSeconds(),
             'search_reserve_seconds' => $settings->searchReserveSeconds(),
             'product_research_timeout_seconds' => $settings->productResearchTimeoutSeconds(),
+            'product_research_idle_timeout_seconds' => $settings->productResearchIdleTimeoutSeconds(),
             'image_discovery_timeout_seconds' => $settings->imageDiscoveryTimeoutSeconds(),
             'gallery_recipe_timeout_seconds' => $settings->galleryRecipeTimeoutSeconds(),
             'image_vision_timeout_seconds' => $settings->imageVisionTimeoutSeconds(),
             'browser_timeout_seconds' => $settings->browserTimeoutSeconds(),
             'browser_scout_timeout_seconds' => $settings->browserScoutTimeoutSeconds(),
             'gallery_training_max_rounds' => $settings->galleryTrainingMaxRounds(),
+            'gallery_min_success_count' => $settings->galleryMinSuccessCount(),
         ]);
     }
 
@@ -123,6 +126,11 @@ class AiSettingsPage extends Page implements HasForms
                             ->helperText('Выключено — проверяется только первая выбранная карточка. Включено — при провале берётся следующая карточка, но галерея остаётся из одного источника.')
                             ->default(true)
                             ->inline(false),
+                        Toggle::make('gallery_prefer_playwright_first')
+                            ->label('Обучать Playwright даже когда статики "достаточно"')
+                            ->helperText('Оценка предфильтра по количеству фото (например "8") может быть завышена миниатюрами/повторами. Включено (по умолчанию) — при найденной галерее рецепт всё равно обучается и результат проверяется Vision, а не только оценкой. Медленнее и дороже за поиск, зато рецепт сохраняется для повторного использования.')
+                            ->default(true)
+                            ->inline(false),
                         ToggleButtons::make('gallery_browser_mode')
                             ->label('Режим браузерного поиска')
                             ->options(AiSettings::GALLERY_BROWSER_MODES)
@@ -149,6 +157,12 @@ class AiSettingsPage extends Page implements HasForms
                             ->default(AiSettings::DEFAULT_GALLERY_TRAINING_MAX_ROUNDS)
                             ->required()
                             ->helperText('Каждый новый раунд получает DOM после предыдущих кликов. 3 обычно хватает для двухслойной галереи.'),
+                        TextInput::make('gallery_min_success_count')
+                            ->label('Минимум фото для успеха рецепта')
+                            ->numeric()->minValue(1)->maxValue(AiSettings::GALLERY_MAX_IMAGE_COUNT)
+                            ->default(AiSettings::DEFAULT_GALLERY_MIN_SUCCESS_COUNT)
+                            ->required()
+                            ->helperText('Рецепт засчитан успешным, если извлёк хотя бы столько разных фото (максимум всегда '.AiSettings::GALLERY_MAX_IMAGE_COUNT.').'),
                     ])
                     ->columns(2),
                 Section::make('Лимиты поиска')
@@ -162,7 +176,7 @@ class AiSettingsPage extends Page implements HasForms
                             ->helperText('0 — без денежного ограничения.'),
                         TextInput::make('search_max_seconds')
                             ->label('Максимум всего цикла, сек')
-                            ->numeric()->minValue(300)->maxValue(1200)
+                            ->numeric()->minValue(300)->maxValue(1800)
                             ->default(AiSettings::DEFAULT_SEARCH_MAX_SECONDS)
                             ->required(),
                         TextInput::make('search_reserve_seconds')
@@ -177,8 +191,13 @@ class AiSettingsPage extends Page implements HasForms
                     ->schema([
                         TextInput::make('product_research_timeout_seconds')
                             ->label('Web Search товара, сек')
-                            ->numeric()->minValue(60)->maxValue(600)
+                            ->numeric()->minValue(60)->maxValue(900)
                             ->default(AiSettings::DEFAULT_PRODUCT_RESEARCH_TIMEOUT_SECONDS)
+                            ->required(),
+                        TextInput::make('product_research_idle_timeout_seconds')
+                            ->label('Web Search без активности, сек')
+                            ->numeric()->minValue(30)->maxValue(180)
+                            ->default(AiSettings::DEFAULT_PRODUCT_RESEARCH_IDLE_TIMEOUT_SECONDS)
                             ->required(),
                         TextInput::make('image_discovery_timeout_seconds')
                             ->label('Резервный Web Search, сек')
@@ -284,6 +303,7 @@ class AiSettingsPage extends Page implements HasForms
         $settings->saveGalleryRecipeTrainingModel($data['gallery_recipe_training_model'] ?? null);
         $settings->saveGalleryBrowserMode($data['gallery_browser_mode'] ?? null);
         $settings->saveFallbackSourcesEnabled((bool) ($data['fallback_sources_enabled'] ?? false));
+        $settings->saveGalleryPreferPlaywrightFirst((bool) ($data['gallery_prefer_playwright_first'] ?? false));
         $settings->saveMaxSearchCostUsd(
             isset($data['max_search_cost_usd']) && $data['max_search_cost_usd'] !== ''
                 ? (float) $data['max_search_cost_usd']
@@ -292,12 +312,14 @@ class AiSettingsPage extends Page implements HasForms
         $settings->saveSearchMaxSeconds(isset($data['search_max_seconds']) ? (int) $data['search_max_seconds'] : null);
         $settings->saveSearchReserveSeconds(isset($data['search_reserve_seconds']) ? (int) $data['search_reserve_seconds'] : null);
         $settings->saveProductResearchTimeoutSeconds(isset($data['product_research_timeout_seconds']) ? (int) $data['product_research_timeout_seconds'] : null);
+        $settings->saveProductResearchIdleTimeoutSeconds(isset($data['product_research_idle_timeout_seconds']) ? (int) $data['product_research_idle_timeout_seconds'] : null);
         $settings->saveImageDiscoveryTimeoutSeconds(isset($data['image_discovery_timeout_seconds']) ? (int) $data['image_discovery_timeout_seconds'] : null);
         $settings->saveGalleryRecipeTimeoutSeconds(isset($data['gallery_recipe_timeout_seconds']) ? (int) $data['gallery_recipe_timeout_seconds'] : null);
         $settings->saveImageVisionTimeoutSeconds(isset($data['image_vision_timeout_seconds']) ? (int) $data['image_vision_timeout_seconds'] : null);
         $settings->saveBrowserTimeoutSeconds(isset($data['browser_timeout_seconds']) ? (int) $data['browser_timeout_seconds'] : null);
         $settings->saveBrowserScoutTimeoutSeconds(isset($data['browser_scout_timeout_seconds']) ? (int) $data['browser_scout_timeout_seconds'] : null);
         $settings->saveGalleryTrainingMaxRounds(isset($data['gallery_training_max_rounds']) ? (int) $data['gallery_training_max_rounds'] : null);
+        $settings->saveGalleryMinSuccessCount(isset($data['gallery_min_success_count']) ? (int) $data['gallery_min_success_count'] : null);
 
         try {
             Artisan::call('queue:restart');

@@ -31,6 +31,7 @@ class RestageDraftGalleryPhotos implements ShouldQueue
     public function __construct(
         public int $draftId,
         public string $chatId,
+        public int $telegramUpdateId,
     ) {
         $this->onQueue('media');
     }
@@ -47,7 +48,7 @@ class RestageDraftGalleryPhotos implements ShouldQueue
             $progress = new TelegramProgressReporter($telegram, $this->chatId);
             $images->excludeCurrentDraftGallery($draft);
             $progress->step('Ищу другие фото без прежних источников и дублей', 1080);
-            $stored = $images->stage($draft, fn (string $message) => $progress->info($message));
+            $stored = $images->stage($draft, fn (string $message) => $progress->info($message), $this->telegramUpdateId);
 
             if ($stored > 0) {
                 $progress->done("Галерея обновлена, фото: {$stored}");

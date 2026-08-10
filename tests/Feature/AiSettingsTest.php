@@ -106,9 +106,10 @@ class AiSettingsTest extends TestCase
 
         $this->assertSame(0.30, $settings->maxSearchCostUsd());
         $this->assertTrue($settings->fallbackSourcesEnabled());
-        $this->assertSame(1200, $settings->searchMaxSeconds());
+        $this->assertSame(1800, $settings->searchMaxSeconds());
         $this->assertSame(120, $settings->searchReserveSeconds());
-        $this->assertSame(360, $settings->productResearchTimeoutSeconds());
+        $this->assertSame(900, $settings->productResearchTimeoutSeconds());
+        $this->assertSame(90, $settings->productResearchIdleTimeoutSeconds());
         $this->assertSame(180, $settings->imageDiscoveryTimeoutSeconds());
         $this->assertSame(240, $settings->galleryRecipeTimeoutSeconds());
         $this->assertSame(90, $settings->imageVisionTimeoutSeconds());
@@ -116,13 +117,17 @@ class AiSettingsTest extends TestCase
         $this->assertSame(120, $settings->browserScoutTimeoutSeconds());
 
         $settings->saveFallbackSourcesEnabled(false);
-        $settings->saveSearchMaxSeconds(9999);
+        $settings->saveSearchMaxSeconds(99999);
         $settings->saveSearchReserveSeconds(1);
         $settings->saveImageDiscoveryTimeoutSeconds(9999);
+        $settings->saveProductResearchTimeoutSeconds(9999);
+        $settings->saveProductResearchIdleTimeoutSeconds(9999);
 
         $this->assertFalse($settings->fallbackSourcesEnabled());
-        $this->assertSame(1200, $settings->searchMaxSeconds());
+        $this->assertSame(1800, $settings->searchMaxSeconds());
         $this->assertSame(30, $settings->searchReserveSeconds());
         $this->assertSame(300, $settings->imageDiscoveryTimeoutSeconds());
+        $this->assertSame(900, $settings->productResearchTimeoutSeconds());
+        $this->assertSame(180, $settings->productResearchIdleTimeoutSeconds());
     }
 }

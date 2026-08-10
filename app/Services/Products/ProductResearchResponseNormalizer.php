@@ -19,7 +19,6 @@ class ProductResearchResponseNormalizer
     public function normalize(array $data): array
     {
         foreach ([
-            'clarification_question' => 1000,
             'title' => 255,
             'brand' => 255,
             'model' => 255,

@@ -41,8 +41,7 @@ class StoreProductImages implements ShouldQueue
         ProductImageStorage $storage,
         TelegramClient $telegram,
         DraftTelegramMessageLifecycle $messageLifecycle,
-    ): void
-    {
+    ): void {
         // Decoding several full-size candidate images into GD bitmaps in the
         // same pass can exceed the default 128M CLI limit even after
         // filtering absurdly large ones; give this job more headroom so a
@@ -71,8 +70,7 @@ class StoreProductImages implements ShouldQueue
         ProductImageStorage $storage,
         TelegramClient $telegram,
         DraftTelegramMessageLifecycle $messageLifecycle,
-    ): void
-    {
+    ): void {
         $product = Product::query()->find($this->productId);
         $variant = ProductVariant::query()->find($this->variantId);
         $draft = ProductDraft::query()->with('telegramUpdate')->find($this->draftId);
@@ -239,7 +237,7 @@ class StoreProductImages implements ShouldQueue
      * Keep the existing draft album in chat and turn its caption into the
      * final catalog confirmation instead of sending the same photos again.
      *
-     * @param array{chat_id: string, message_id: int, has_media: bool} $reviewTarget
+     * @param  array{chat_id: string, message_id: int, has_media: bool}  $reviewTarget
      */
     private function updateDraftPost(
         TelegramClient $telegram,
@@ -249,7 +247,7 @@ class StoreProductImages implements ShouldQueue
         string $usageFootnote = '',
     ): bool {
         $caption = app(DraftTelegramMessageLifecycle::class)
-            ->finalizedReviewCaption($draft, $product->id);
+            ->finalizedReviewCaption($draft, "✅ Товар #{$product->id} добавлен в каталог");
 
         // Drafts created before telegram_review_caption was introduced still
         // need the old final-post fallback.

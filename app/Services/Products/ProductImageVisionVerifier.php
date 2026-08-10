@@ -6,6 +6,7 @@ use App\Ai\Agents\ProductImageVisionAgent;
 use App\Models\AiRun;
 use App\Models\ProductDraft;
 use App\Services\Ai\AiSettings;
+use App\Services\Ai\OpenAiHeavyOperationGate;
 use App\Services\Ai\ProductSearchTimeBudget;
 use GdImage;
 use Illuminate\Support\Facades\Validator;
@@ -64,12 +65,16 @@ class ProductImageVisionVerifier
                 'image/webp',
             )->as('candidate-'.($index + 1).'.webp')->withProviderOptions(['detail' => (string) config('product-images.vision_detail', 'low')]), $candidates, array_keys($candidates));
 
-            $response = ProductImageVisionAgent::make()->prompt(
-                $prompt,
-                attachments: $attachments,
-                provider: $provider,
-                model: $model,
-                timeout: $visionTimeout,
+            $response = app(OpenAiHeavyOperationGate::class)->run(
+                $provider,
+                $visionTimeout,
+                fn () => ProductImageVisionAgent::make()->prompt(
+                    $prompt,
+                    attachments: $attachments,
+                    provider: $provider,
+                    model: $model,
+                    timeout: $visionTimeout,
+                ),
             );
             $normalizedResponse = $response->toArray();
             $normalizedResponse['images'] = collect($normalizedResponse['images'] ?? [])

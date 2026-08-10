@@ -23,6 +23,7 @@ class RetrainDraftGalleryRecipe implements Tool
     {
         return 'Retrain the safe Playwright gallery recipe for the primary source of a pending product draft. '
             .'Use when the user says the source gallery is incomplete, low-resolution, duplicated, or asks to improve/retrain the source recipe. '
+            .'If the user describes a concrete problem they noticed (wrong model mixed in, wrong color picked up, a specific element to avoid, ...), pass it as hint. '
             .'The existing recipe and photos remain until the AI-generated candidate recipe passes a live comparison.';
     }
 
@@ -32,6 +33,9 @@ class RetrainDraftGalleryRecipe implements Tool
         throw_unless($draft, RuntimeException::class, 'Draft not found.');
         throw_unless($draft->status === 'pending_review', RuntimeException::class, 'Draft is no longer pending review.');
         throw_if(blank($draft->primary_source_url), RuntimeException::class, 'Draft has no primary product page URL.');
+
+        $hint = trim((string) $request->string('hint'));
+        $hint = $hint === '' ? null : mb_substr($hint, 0, 1000);
 
         $queuedKey = "draft-gallery-retrain:{$draft->id}:queued";
         throw_unless(
@@ -45,12 +49,13 @@ class RetrainDraftGalleryRecipe implements Tool
                 $this->update,
                 class_basename(self::class),
                 'retrain_draft_gallery_recipe',
-                ['draft_id' => $draft->id, 'url' => $draft->primary_source_url],
-                function () use ($draft): array {
+                ['draft_id' => $draft->id, 'url' => $draft->primary_source_url, 'hint' => $hint],
+                function () use ($draft, $hint): array {
                     TrainDraftGalleryRecipe::dispatch(
                         $draft->id,
                         $this->update->id,
                         (string) $this->update->chat_id,
+                        $hint,
                     );
 
                     return ['ok' => true, 'queued' => true, 'draft_id' => $draft->id];
@@ -71,6 +76,9 @@ class RetrainDraftGalleryRecipe implements Tool
     {
         return [
             'draft_id' => $schema->integer()->required(),
+            'hint' => $schema->string()->description(
+                'Optional concrete note from the user about what is wrong with the source/gallery (e.g. "mixes photos of different models", "picks the wrong color variant").',
+            ),
         ];
     }
 }

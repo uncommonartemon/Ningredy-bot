@@ -29,8 +29,14 @@ class ProductImageResolver
      * @param  null|callable(string, string): void  $debug
      * @return array<int, string>
      */
-    public function resolve(array $sources, int $limit = 5, ?callable $debug = null, ?int $telegramUpdateId = null): array
-    {
+    public function resolve(
+        array $sources,
+        int $limit = 5,
+        ?callable $debug = null,
+        ?int $telegramUpdateId = null,
+        bool $forceInteractive = false,
+        bool $staticOnly = false,
+    ): array {
         $images = [];
 
         foreach (array_slice($sources, 0, (int) config('product-images.max_sources_per_resolve', 10)) as $source) {
@@ -67,6 +73,10 @@ class ProductImageResolver
             $accessGateDetected = false;
             $browserImages = [];
             $failureKind = null;
+            $reportedSourceImages = collect(is_array($source['image_urls'] ?? null) ? $source['image_urls'] : [])
+                ->filter(fn (mixed $imageUrl): bool => is_string($imageUrl) && $this->isPublicUrl($imageUrl))
+                ->map(fn (string $imageUrl): string => ProductImageStorage::normalizeCandidateUrl($imageUrl))
+                ->unique()->values()->all();
 
             try {
                 [$response, $finalUrl] = $this->fetch($sourceUrl);
@@ -104,20 +114,27 @@ class ProductImageResolver
             }
 
             $staticSourceImages = array_slice($images, $sourceImageStart);
+            $browserSeedImages = array_values(array_unique([
+                ...$reportedSourceImages,
+                ...$staticSourceImages,
+            ]));
             $browserMode = $this->settings->galleryBrowserMode();
             $shouldUseBrowser = $browserEligible
+                && ! $staticOnly
                 && $browserMode !== AiSettings::GALLERY_BROWSER_OFF;
 
             if ($shouldUseBrowser) {
                 $browserResult = $debug
                     ? $this->browser->extract($browserUrl, $limit, $debug, $telegramUpdateId, [
-                        'static_image_urls' => $staticSourceImages,
-                    ])
+                        'static_image_urls' => $browserSeedImages,
+                    ], $forceInteractive)
                     : $this->browser->extract($browserUrl, $limit, telegramUpdateId: $telegramUpdateId, context: [
-                        'static_image_urls' => $staticSourceImages,
-                    ]);
+                        'static_image_urls' => $browserSeedImages,
+                    ], forceInteractive: $forceInteractive);
                 $browserImages = collect($browserResult)
                     ->filter(fn (mixed $imageUrl): bool => is_string($imageUrl) && $this->isPublicUrl($imageUrl))
+                    ->map(fn (string $imageUrl): string => ProductImageStorage::normalizeCandidateUrl($imageUrl))
+                    ->unique()
                     ->values()
                     ->all();
 
@@ -207,9 +224,11 @@ class ProductImageResolver
     /**
      * @return array{bytes: string, source_url: string, mime_type: string, width: int, height: int, confirmed_gallery: bool, partial_gallery: bool}|null
      */
-    public function download(string $url, int $maxBytes = 8_388_608): ?array
+    public function download(string $url, int $maxBytes = 8_388_608, ?string &$failureReason = null): ?array
     {
         if (! $this->isPublicUrl($url)) {
+            $failureReason = 'not_public_url';
+
             return null;
         }
 
@@ -217,13 +236,23 @@ class ProductImageResolver
             [$response, $finalUrl] = $this->fetch($url);
             $bytes = $response->body();
 
-            if ($bytes === '' || strlen($bytes) > $maxBytes) {
+            if ($bytes === '') {
+                $failureReason = 'empty_response';
+
+                return null;
+            }
+
+            if (strlen($bytes) > $maxBytes) {
+                $failureReason = 'exceeds_max_bytes';
+
                 return null;
             }
 
             $dimensions = @getimagesizefromstring($bytes);
 
             if (! is_array($dimensions) || ! isset($dimensions[0], $dimensions[1])) {
+                $failureReason = 'not_a_decodable_image';
+
                 return null;
             }
 
@@ -239,6 +268,7 @@ class ProductImageResolver
                     || $this->browser->isPartialGalleryImage($finalUrl),
             ];
         } catch (Throwable $exception) {
+            $failureReason = mb_substr($exception->getMessage(), 0, 200);
             Log::notice('Product image candidate was unavailable.', [
                 'host' => parse_url($url, PHP_URL_HOST),
                 'error' => $exception->getMessage(),
@@ -389,6 +419,12 @@ class ProductImageResolver
         return collect($images)
             ->map(fn (string $candidate): ?string => $this->normalizeImageCandidate($candidate, $pageUrl))
             ->filter()
+            // Two different query-string renditions of one CDN photo (Scene7
+            // wid/hei, $PRESET$, ASUS w48/64/96/184, ...) are not distinct
+            // photos - collapsing them here, at the root of every page scrape,
+            // keeps every downstream count and gallery-sufficiency decision
+            // from inheriting an inflated "distinct photo" count.
+            ->map(fn (string $url): string => ProductImageStorage::normalizeCandidateUrl($url))
             ->unique()
             ->take((int) config('product-images.max_urls_per_page', 60))
             ->values()

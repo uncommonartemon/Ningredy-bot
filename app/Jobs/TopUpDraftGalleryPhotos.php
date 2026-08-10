@@ -24,6 +24,7 @@ class TopUpDraftGalleryPhotos implements ShouldQueue
     public function __construct(
         public int $draftId,
         public string $chatId,
+        public int $telegramUpdateId,
     ) {
         $this->onQueue('media');
     }
@@ -39,7 +40,7 @@ class TopUpDraftGalleryPhotos implements ShouldQueue
 
             $progress = new TelegramProgressReporter($telegram, $this->chatId);
             $progress->step('Ищу дополнительные фото', 780);
-            $stored = $images->topUpDraftMedia($draft, fn (string $message) => $progress->info($message));
+            $stored = $images->topUpDraftMedia($draft, fn (string $message) => $progress->info($message), $this->telegramUpdateId);
 
             if ($stored > 0) {
                 $progress->done("Добавлено новых фото: {$stored}");

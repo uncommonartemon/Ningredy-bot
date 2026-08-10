@@ -10,11 +10,12 @@ class TelegramUpdate extends Model
     protected $fillable = [
         'update_id', 'telegram_user_id', 'chat_id', 'message_id', 'username',
         'text', 'reply_to_text', 'payload', 'status', 'error', 'processed_at',
+        'cancel_requested_at',
     ];
 
     protected function casts(): array
     {
-        return ['payload' => 'array', 'processed_at' => 'datetime'];
+        return ['payload' => 'array', 'processed_at' => 'datetime', 'cancel_requested_at' => 'datetime'];
     }
 
     public function aiRuns(): HasMany

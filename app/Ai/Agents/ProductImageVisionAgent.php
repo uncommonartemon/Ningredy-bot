@@ -3,14 +3,18 @@
 namespace App\Ai\Agents;
 
 use Illuminate\Contracts\JsonSchema\JsonSchema;
+use Laravel\Ai\Attributes\MaxTokens;
 use Laravel\Ai\Contracts\Agent;
 use Laravel\Ai\Contracts\HasStructuredOutput;
 use Laravel\Ai\Promptable;
 use Stringable;
 
+#[MaxTokens(self::MAX_OUTPUT_TOKENS)]
 class ProductImageVisionAgent implements Agent, HasStructuredOutput
 {
     use Promptable;
+
+    public const int MAX_OUTPUT_TOKENS = 8_000;
 
     public function instructions(): Stringable|string
     {

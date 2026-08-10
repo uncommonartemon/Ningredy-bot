@@ -11,6 +11,8 @@ use App\Models\Brand;
 use App\Models\Category;
 use App\Models\Product;
 use App\Models\ProductDraft;
+use App\Models\ProductSourceAttempt;
+use App\Models\ProductSourceStat;
 use App\Models\ProductVariant;
 use App\Models\TelegramUpdate;
 use App\Services\Products\ProductImageCandidateDiscovery;
@@ -559,6 +561,57 @@ class ProductImageStorageTest extends TestCase
         $this->assertSame(1, $product->media()->count());
     }
 
+    public function test_it_trusts_the_rest_of_a_confirmed_gallery_after_vision_accepts_one_photo(): void
+    {
+        // Deliberate trust policy (2026-08-05, explicit user confirmation
+        // given the risk that a same-page gallery can contain color-variant
+        // thumbnails): once Vision accepts one photo from a Playwright-
+        // confirmed gallery, the rest of that same gallery batch is trusted
+        // without spending a separate Vision call on each one.
+        Storage::fake('public');
+        $visionCalls = 0;
+        ProductImageVisionAgent::fake(function () use (&$visionCalls): array {
+            $visionCalls++;
+
+            return [
+                'images' => [[
+                    'index' => 1,
+                    'exact_match' => true,
+                    'color_match' => true,
+                    'publishable' => true,
+                    'kind' => 'product',
+                    'view' => 'front',
+                    'gallery_rank' => 1,
+                    'score' => 95,
+                    'reason' => 'Exact product image.',
+                ]],
+            ];
+        })->preventStrayPrompts();
+        config()->set('product-images.vision_candidates', 1);
+        config()->set('product-images.vision_max_batches', 5);
+        [, , $draft] = $this->records();
+        $draft->refresh();
+        $candidates = collect(range(1, 3))->map(fn (int $index): array => [
+            'bytes' => $this->jpeg($index),
+            'source_url' => "https://93.184.216.34/gallery-{$index}.jpg",
+            'mime_type' => 'image/jpeg',
+            'width' => 720,
+            'height' => 600,
+            'confirmed_gallery' => true,
+            'partial_gallery' => false,
+            'image' => imagecreatefromstring($this->jpeg($index)),
+        ])->all();
+
+        $method = new \ReflectionMethod(ProductImageStorage::class, 'verify');
+        $method->setAccessible(true);
+        $selected = $method->invoke(app(ProductImageStorage::class), $draft, $candidates, 3, null);
+
+        $this->assertCount(3, $selected);
+        $this->assertSame(1, $visionCalls);
+        $this->assertStringContainsString('Trusted without a separate Vision check', (string) $selected[1]['vision_reason']);
+        $this->assertStringContainsString('Trusted without a separate Vision check', (string) $selected[2]['vision_reason']);
+    }
+
     public function test_it_fails_closed_when_vision_is_unavailable(): void
     {
         Storage::fake('public');
@@ -712,6 +765,66 @@ class ProductImageStorageTest extends TestCase
             'source_url' => 'https://93.184.216.34/exact-product.jpg',
         ]);
         $this->assertContains('https://93.184.216.34/exact-product.jpg', $draft->fresh()->image_urls);
+    }
+
+    public function test_replacing_one_draft_photo_falls_back_to_ai_web_search_when_the_source_page_has_nothing_new(): void
+    {
+        // Real gap (2026-08-05): replaceDraftMedia()'s only fallback after a
+        // failed static scrape of the source page used to be re-scraping that
+        // exact same page again (same method, same URL) - which almost never
+        // finds anything new. This verifies it now reaches for the AI
+        // web-search-by-model discovery instead, the same one used for full
+        // gallery discovery/top-up elsewhere in this class.
+        Storage::fake('public');
+        ProductImageVisionAgent::fake(fn (string $prompt, $attachments): array => [
+            'images' => [[
+                'index' => 1,
+                'exact_match' => true,
+                'publishable' => true,
+                'color_match' => true,
+                'kind' => 'product',
+                'view' => 'front',
+                'gallery_rank' => 1,
+                'score' => 96,
+                'reason' => 'Exact physical product.',
+            ]],
+        ])->preventStrayPrompts();
+        $discovery = $this->mock(ProductImageCandidateDiscovery::class);
+        $discovery->shouldReceive('sourcePageForImage')->andReturn(null)->byDefault();
+        $discovery->shouldReceive('find')->once()->andReturn(['https://93.184.216.34/found-by-websearch.jpg']);
+        Http::fake(fn (Request $request) => Http::response(
+            $this->jpeg(9),
+            200,
+            ['Content-Type' => 'image/jpeg'],
+        ));
+        [, , $draft] = $this->records();
+        $draft->refresh();
+        $draft->update([
+            'primary_source_url' => 'https://93.184.216.34/product-page',
+            'sources' => [[
+                'title' => 'Exact retailer listing',
+                'url' => 'https://93.184.216.34/product-page',
+                'type' => 'retailer',
+            ]],
+        ]);
+        $oldPath = "drafts/{$draft->id}/old-photo.webp";
+        Storage::disk('public')->put($oldPath, 'old-photo-bytes');
+        $media = $draft->media()->create([
+            'disk' => 'public',
+            'path' => $oldPath,
+            'source_url' => 'https://93.184.216.34/old-photo.jpg',
+            'role' => 'primary',
+            'mime_type' => 'image/webp',
+            'checksum' => hash('sha256', 'old-photo-bytes'),
+            'verification_status' => 'verified',
+            'sort_order' => 0,
+            'is_primary' => true,
+        ]);
+
+        $updated = app(ProductImageStorage::class)->replaceDraftMedia($draft->fresh(), $media);
+
+        $this->assertSame('https://93.184.216.34/found-by-websearch.jpg', $updated->source_url);
+        $this->assertSame('verified', $updated->verification_status);
     }
 
     public function test_it_drops_near_duplicate_images_selected_by_vision(): void
@@ -927,6 +1040,68 @@ class ProductImageStorageTest extends TestCase
         }
     }
 
+    public function test_restaging_with_a_fresh_update_id_is_not_blocked_by_the_original_searchs_expired_budget(): void
+    {
+        Storage::fake('public');
+        config()->set('product-images.max_images_by_type.laptop', 3);
+        ProductImageVisionAgent::fake(fn (string $prompt, $attachments): array => [
+            'images' => $attachments->keys()->map(fn (int $index): array => [
+                'index' => $index + 1,
+                'exact_match' => true,
+                'color_match' => true,
+                'publishable' => true,
+                'kind' => 'product',
+                'view' => $index === 0 ? 'front' : 'angle',
+                'gallery_rank' => $index + 1,
+                'score' => 96 - $index,
+                'reason' => 'Exact product and selected color.',
+            ])->all(),
+        ])->preventStrayPrompts();
+        Http::fake(function (Request $request) {
+            if (str_contains($request->url(), '/product-page')) {
+                return Http::response('<html></html>', 200, ['Content-Type' => 'text/html']);
+            }
+
+            preg_match('/image-(\d+)/', $request->url(), $matches);
+
+            return Http::response($this->jpeg((int) ($matches[1] ?? 1)), 200, ['Content-Type' => 'image/jpeg']);
+        });
+        [, , $draft] = $this->records();
+        $draft->update([
+            'product_type' => 'laptop',
+            'brand' => 'Lenovo',
+            'model' => 'Test',
+            'color' => 'Black',
+            'primary_source_url' => 'https://93.184.216.34/product-page',
+            'sources' => [[
+                'title' => 'Exact retailer listing',
+                'url' => 'https://93.184.216.34/product-page',
+                'type' => 'retailer',
+            ]],
+        ]);
+        // Simulate a "find other photos" button pressed long after the
+        // original search's own time budget (searchMaxSeconds, 1200s by
+        // default) has elapsed - a realistic gap for a manual operator retry.
+        AiRun::query()->where('telegram_update_id', $draft->telegram_update_id)
+            ->update(['started_at' => now()->subSeconds(2000)]);
+
+        $storage = app(ProductImageStorage::class);
+
+        $staleAttempt = $storage->stage($draft->fresh());
+        $this->assertSame(0, $staleAttempt, 'Reusing the draft\'s original (expired) update id must not silently find nothing.');
+
+        $freshUpdate = TelegramUpdate::query()->create([
+            'update_id' => 99002,
+            'telegram_user_id' => '1',
+            'chat_id' => '1',
+            'payload' => [],
+            'status' => 'completed',
+        ]);
+        $retried = $storage->stage($draft->fresh(), telegramUpdateId: $freshUpdate->id);
+
+        $this->assertSame(3, $retried, 'A fresh update id must get its own full time budget instead of inheriting the expired one.');
+    }
+
     public function test_staging_skips_a_source_without_photos_and_uses_the_next_complete_card_source(): void
     {
         Storage::fake('public');
@@ -991,6 +1166,244 @@ class ProductImageStorageTest extends TestCase
         );
     }
 
+    public function test_staging_keeps_the_selected_primary_source_first_until_its_direct_images_are_verified(): void
+    {
+        Storage::fake('public');
+        AppSetting::put('ai.fallback_sources_enabled', '0');
+        AppSetting::put('ai.gallery_browser_mode', 'off');
+        config()->set('product-images.max_images_by_type.laptop', 2);
+        ProductSourceStat::query()->create([
+            'domain' => '93.184.216.34',
+            'attempt_count' => 1,
+            'failure_count' => 1,
+            'last_failure_kind' => 'http_error',
+        ]);
+        ProductSourceStat::query()->create([
+            'domain' => '93.184.216.35',
+            'attempt_count' => 1,
+            'accepted_gallery_count' => 1,
+            'accepted_image_count' => 2,
+        ]);
+        ProductImageVisionAgent::fake(fn (string $prompt, $attachments): array => [
+            'images' => $attachments->keys()->map(fn (int $index): array => [
+                'index' => $index + 1,
+                'exact_match' => true,
+                'color_match' => true,
+                'publishable' => true,
+                'kind' => 'product',
+                'view' => $index === 0 ? 'front' : 'angle',
+                'gallery_rank' => $index + 1,
+                'score' => 98 - $index,
+                'reason' => 'Exact primary-source product photo.',
+            ])->all(),
+        ])->preventStrayPrompts();
+        Http::fake(function (Request $request) {
+            if (str_ends_with($request->url(), '-card')) {
+                return Http::response('<html></html>', 200, ['Content-Type' => 'text/html']);
+            }
+
+            $seed = str_ends_with($request->url(), 'photo-2.jpg') ? 22 : 21;
+
+            return Http::response($this->jpeg($seed), 200, ['Content-Type' => 'image/jpeg']);
+        });
+        [, , $draft] = $this->records();
+        $draft->update([
+            'product_type' => 'laptop',
+            'primary_source_url' => 'https://93.184.216.34/primary-card',
+            'image_urls' => [
+                'https://93.184.216.34/primary-photo-1.jpg',
+                'https://93.184.216.34/primary-photo-2.jpg',
+            ],
+            'sources' => [
+                [
+                    'title' => 'Selected primary source with a failed page probe',
+                    'url' => 'https://93.184.216.34/primary-card',
+                    'type' => 'manufacturer',
+                    'image_urls' => [
+                        'https://93.184.216.34/primary-photo-1.jpg',
+                        'https://93.184.216.34/primary-photo-2.jpg',
+                    ],
+                ],
+                [
+                    'title' => 'Historically successful secondary source',
+                    'url' => 'https://93.184.216.35/secondary-card',
+                    'type' => 'retailer',
+                    'image_urls' => [
+                        'https://93.184.216.35/secondary-photo-1.jpg',
+                        'https://93.184.216.35/secondary-photo-2.jpg',
+                    ],
+                ],
+            ],
+        ]);
+
+        $stored = app(ProductImageStorage::class)->stage($draft->fresh());
+
+        $this->assertSame(2, $stored);
+        $this->assertSame('https://93.184.216.34/primary-card', $draft->fresh()->primary_source_url);
+        $this->assertTrue($draft->media->every(
+            fn ($media): bool => str_contains($media->source_url, '93.184.216.34/primary-photo-'),
+        ));
+        Http::assertNotSent(fn (Request $request): bool => str_contains($request->url(), '93.184.216.35'));
+    }
+
+    public function test_staging_reports_a_final_outcome_line_with_the_winning_source_and_method(): void
+    {
+        // Real gap: progress logs used to go from a mid-flight failure
+        // straight to "черновик готов, фото: N" with nothing in between
+        // explaining which source/mechanism actually produced the photos.
+        Storage::fake('public');
+        config()->set('product-images.max_images_by_type.laptop', 3);
+        ProductImageVisionAgent::fake(fn (string $prompt, $attachments): array => [
+            'images' => $attachments->keys()->map(fn (int $index): array => [
+                'index' => $index + 1,
+                'exact_match' => true,
+                'color_match' => true,
+                'publishable' => true,
+                'kind' => 'product',
+                'view' => 'front',
+                'gallery_rank' => $index + 1,
+                'score' => 98,
+                'reason' => 'Exact product and selected color.',
+            ])->all(),
+        ])->preventStrayPrompts();
+        Http::fake(function (Request $request) {
+            if ($request->url() === 'https://93.184.216.34/product-page') {
+                return Http::response('<html></html>', 200, ['Content-Type' => 'text/html']);
+            }
+
+            // Distinct seeds per URL - identical bytes would collide on
+            // checksum and get silently deduped down to 1 stored image.
+            $seed = str_ends_with($request->url(), 'photo-2.jpg') ? 3 : 2;
+
+            return Http::response($this->jpeg($seed), 200, ['Content-Type' => 'image/jpeg']);
+        });
+        [, , $draft] = $this->records();
+        $draft->update([
+            'product_type' => 'laptop',
+            'brand' => 'Lenovo',
+            'model' => 'Test',
+            'color' => 'Black',
+            'primary_source_url' => 'https://93.184.216.34/product-page',
+            'image_urls' => [],
+            'sources' => [[
+                'title' => 'Store',
+                'url' => 'https://93.184.216.34/product-page',
+                'type' => 'retailer',
+                'image_urls' => [
+                    'https://93.184.216.34/photo-1.jpg',
+                    'https://93.184.216.34/photo-2.jpg',
+                ],
+            ]],
+        ]);
+
+        $messages = [];
+        $stored = app(ProductImageStorage::class)->stage(
+            $draft->fresh(),
+            function (string $message) use (&$messages): void {
+                $messages[] = $message;
+            },
+        );
+
+        $this->assertSame(2, $stored);
+        $outcome = end($messages);
+        $this->assertStringContainsString('Итог: 2 фото', $outcome);
+        $this->assertStringContainsString('93.184.216.34', $outcome);
+        $this->assertStringContainsString('статичной HTML-галереи', $outcome);
+    }
+
+    public function test_staging_reports_no_gallery_found_when_nothing_is_stored(): void
+    {
+        Storage::fake('public');
+        Http::fake(fn (Request $request) => Http::response('<html><body>No product photos</body></html>', 200, ['Content-Type' => 'text/html']));
+        config()->set('product-images.fallback_discovery', false);
+        [, , $draft] = $this->records();
+        $draft->update([
+            'primary_source_url' => 'https://93.184.216.34/without-gallery',
+            'image_urls' => [],
+            'sources' => [[
+                'title' => 'Store without photos',
+                'url' => 'https://93.184.216.34/without-gallery',
+                'type' => 'retailer',
+                'image_urls' => [],
+            ]],
+        ]);
+
+        $messages = [];
+        $stored = app(ProductImageStorage::class)->stage(
+            $draft->fresh(),
+            function (string $message) use (&$messages): void {
+                $messages[] = $message;
+            },
+        );
+
+        $this->assertSame(0, $stored);
+        $this->assertStringContainsString('Итог: подходящая галерея не найдена', end($messages));
+    }
+
+    public function test_staging_records_the_reason_each_rejected_candidate_url_failed(): void
+    {
+        // Real gap (2026-08-05): download_candidates attempts only recorded
+        // aggregate counts (11 candidates in, 2 out) with no way to tell why
+        // the other 9 were dropped. This verifies a per-URL reason now lands
+        // in the attempt record.
+        Storage::fake('public');
+        ProductImageVisionAgent::fake(fn (string $prompt, $attachments): array => [
+            'images' => $attachments->keys()->map(fn (int $index): array => [
+                'index' => $index + 1,
+                'exact_match' => true,
+                'color_match' => true,
+                'publishable' => true,
+                'kind' => 'product',
+                'view' => 'front',
+                'gallery_rank' => 1,
+                'score' => 98,
+                'reason' => 'Exact product image.',
+            ])->all(),
+        ])->preventStrayPrompts();
+        [, , $draft] = $this->records();
+        $draft->refresh();
+        $draft->update([
+            'primary_source_url' => 'https://93.184.216.34/product-page',
+            'image_urls' => [],
+            'sources' => [[
+                'title' => 'Store',
+                'url' => 'https://93.184.216.34/product-page',
+                'type' => 'retailer',
+                'image_urls' => [
+                    'https://93.184.216.34/good-photo.jpg',
+                    'https://93.184.216.34/too-small.jpg',
+                    'https://93.184.216.34/empty-body.jpg',
+                ],
+            ]],
+        ]);
+        Http::fake(function (Request $request) {
+            if (str_contains($request->url(), 'too-small')) {
+                return Http::response($this->tinyJpeg(), 200, ['Content-Type' => 'image/jpeg']);
+            }
+
+            if (str_contains($request->url(), 'empty-body')) {
+                return Http::response('', 200, ['Content-Type' => 'image/jpeg']);
+            }
+
+            if (str_contains($request->url(), 'good-photo')) {
+                return Http::response($this->jpeg(3), 200, ['Content-Type' => 'image/jpeg']);
+            }
+
+            return Http::response('<html></html>', 200, ['Content-Type' => 'text/html']);
+        });
+
+        app(ProductImageStorage::class)->stage($draft->fresh());
+
+        $attempt = ProductSourceAttempt::query()
+            ->where('product_draft_id', $draft->id)
+            ->where('action', 'download_candidates')
+            ->firstOrFail();
+        $reasons = collect($attempt->output['rejected_candidates'] ?? [])->pluck('reason', 'url');
+
+        $this->assertSame(1, $attempt->output['downloaded_images']);
+        $this->assertStringStartsWith('too_small', (string) $reasons['https://93.184.216.34/too-small.jpg']);
+        $this->assertSame('empty_response', $reasons['https://93.184.216.34/empty-body.jpg']);
+    }
 
     public function test_staging_does_not_open_a_second_source_when_fallback_sources_are_disabled(): void
     {
@@ -1124,7 +1537,6 @@ class ProductImageStorageTest extends TestCase
         $this->assertSame(['https://93.184.216.34/exact-product.jpg'], $second);
         $this->assertDatabaseCount('ai_runs', 2);
     }
-
 
     public function test_optional_image_discovery_failure_returns_empty_result_without_crashing_the_product_cycle(): void
     {
@@ -1371,6 +1783,100 @@ class ProductImageStorageTest extends TestCase
         Http::assertNotSent(fn (Request $request): bool => str_contains($request->url(), '93.184.216.34'));
     }
 
+    public function test_scene7_named_size_modifier_variants_normalize_to_the_same_url(): void
+    {
+        $normalize = fn (string $url): string => $this->invokeNormalizeCandidateUrl($url);
+
+        // Samsung's CDN serves the exact same photo through this Scene7
+        // "named modifier" query form, seen both percent-encoded and raw
+        // depending on which page/template extracted it - without collapsing
+        // these to one URL, both get downloaded and stored as if they were
+        // two different photos (perceptual hashing alone measured a real
+        // distance of 10 between two such renditions, above the configured
+        // near-duplicate threshold of 6).
+        $encoded = $normalize('https://images.samsung.com/is/image/samsung/ca-870-qvo-sata-3-2-5-ssd-mz-77q4t0b-am-Black-262825305?%241164_776_PNG%24=');
+        $raw = $normalize('https://images.samsung.com/is/image/samsung/ca-870-qvo-sata-3-2-5-ssd-mz-77q4t0b-am-Black-262825305?$1164_776_PNG$');
+
+        $this->assertSame($encoded, $raw);
+        $this->assertSame('https://images.samsung.com/is/image/samsung/ca-870-qvo-sata-3-2-5-ssd-mz-77q4t0b-am-Black-262825305', $encoded);
+    }
+
+    public function test_scene7_wid_hei_params_still_upscale_and_drop_scl(): void
+    {
+        $normalized = $this->invokeNormalizeCandidateUrl(
+            'https://www.hp.com/is/image/HP/product?wid=90&hei=90&scl=3',
+        );
+
+        $this->assertSame('https://www.hp.com/is/image/HP/product?wid=1500&hei=1500', $normalized);
+    }
+
+    public function test_shopify_width_and_height_variants_normalize_to_the_same_url(): void
+    {
+        // Real case (draft #27, vishalperipherals.com): the exact same photo
+        // was staged twice as "two photos" because Shopify's CDN resizes via
+        // a &width=N query param on an otherwise identical URL - perceptual
+        // hashing alone measured a real distance of 7 between the two
+        // renditions, one bit above the configured near-duplicate threshold
+        // of 6, so URL-level normalization is the only reliable defense.
+        $original = $this->invokeNormalizeCandidateUrl(
+            'https://vishalperipherals.com/cdn/shop/files/x1605va_285f809a.png?v=1753955410',
+        );
+        $resized = $this->invokeNormalizeCandidateUrl(
+            'https://vishalperipherals.com/cdn/shop/files/x1605va_285f809a.png?v=1753955410&width=1445',
+        );
+
+        $this->assertSame($original, $resized);
+        $this->assertSame(
+            'https://vishalperipherals.com/cdn/shop/files/x1605va_285f809a.png?v=1753955410',
+            $original,
+        );
+    }
+
+    public function test_shopify_cdn_domain_variants_also_normalize(): void
+    {
+        $original = $this->invokeNormalizeCandidateUrl(
+            'https://cdn.shopify.com/s/files/1/0001/0002/products/laptop.jpg?v=1',
+        );
+        $resized = $this->invokeNormalizeCandidateUrl(
+            'https://cdn.shopify.com/s/files/1/0001/0002/products/laptop.jpg?v=1&width=800&height=800',
+        );
+
+        $this->assertSame($original, $resized);
+    }
+
+    public function test_shopify_filename_suffix_variants_normalize_to_the_master_url(): void
+    {
+        // Same real case as the query-param test above, but for Shopify's
+        // OTHER resize mechanism - a size suffix baked into the filename
+        // itself ("_180x", "_grande", "_1920x"), which the query-param strip
+        // never touches. Mirrors scripts/product-gallery-utils.mjs's
+        // imageAssetKey()/SHOPIFY_SIZE_SUFFIX - keep both in sync.
+        $master = $this->invokeNormalizeCandidateUrl(
+            'https://vishalperipherals.com/cdn/shop/files/x1605va_285f809a.png?v=1753955410',
+        );
+
+        $this->assertSame($master, $this->invokeNormalizeCandidateUrl(
+            'https://vishalperipherals.com/cdn/shop/files/x1605va_285f809a_180x.png?v=1753955410',
+        ));
+        $this->assertSame($master, $this->invokeNormalizeCandidateUrl(
+            'https://vishalperipherals.com/cdn/shop/files/x1605va_285f809a_grande.png?v=1753955410',
+        ));
+        $this->assertSame($master, $this->invokeNormalizeCandidateUrl(
+            'https://vishalperipherals.com/cdn/shop/files/x1605va_285f809a_1920x.png?v=1753955410',
+        ));
+        $this->assertNotSame($master, $this->invokeNormalizeCandidateUrl(
+            'https://vishalperipherals.com/cdn/shop/files/x1605va_9999999b_180x.png?v=1753955410',
+        ));
+    }
+
+    private function invokeNormalizeCandidateUrl(string $url): string
+    {
+        $method = new \ReflectionMethod(ProductImageStorage::class, 'normalizeCandidateUrl');
+        $method->setAccessible(true);
+
+        return $method->invoke(app(ProductImageStorage::class), $url);
+    }
+
     /** @return array{Product, ProductVariant, ProductDraft} */
     private function records(): array
     {
@@ -1428,6 +1934,20 @@ class ProductImageStorageTest extends TestCase
         ]);
 
         return [$product, $variant, $draft];
+    }
+
+    /** Below the production minimum_side (450) - deliberately, to exercise the too_small rejection path. */
+    private function tinyJpeg(): string
+    {
+        $image = imagecreatetruecolor(50, 50);
+        $white = imagecolorallocate($image, 255, 255, 255);
+        imagefill($image, 0, 0, $white);
+        ob_start();
+        imagejpeg($image, null, 80);
+        $jpeg = ob_get_clean();
+        imagedestroy($image);
+
+        return $jpeg;
     }
 
     private function jpeg(int $seed): string

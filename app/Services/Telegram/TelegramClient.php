@@ -34,8 +34,13 @@ class TelegramClient
         return $this->post('sendMessage', $payload);
     }
 
-    public function editMessageText(int|string $chatId, int $messageId, string $text, ?string $parseMode = null): array
-    {
+    public function editMessageText(
+        int|string $chatId,
+        int $messageId,
+        string $text,
+        ?string $parseMode = null,
+        ?array $replyMarkup = null,
+    ): array {
         $payload = [
             'chat_id' => $chatId,
             'message_id' => $messageId,
@@ -44,6 +49,9 @@ class TelegramClient
         ];
         if ($parseMode !== null) {
             $payload['parse_mode'] = $parseMode;
+        }
+        if ($replyMarkup !== null) {
+            $payload['reply_markup'] = $replyMarkup;
         }
 
         return $this->post('editMessageText', $payload);

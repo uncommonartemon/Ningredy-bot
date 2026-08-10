@@ -13,14 +13,18 @@ use App\Models\Category;
 use App\Models\Product;
 use App\Models\ProductDraft;
 use App\Models\ProductVariant;
+use App\Models\TelegramChatState;
 use App\Models\TelegramUpdate;
 use App\Services\Ai\AiErrorPresenter;
 use App\Services\Products\ProductIdentityKey;
 use App\Services\Products\ProductImageResolver;
 use App\Services\Products\ProductImageStorage;
 use App\Services\Telegram\TelegramClient;
+use GuzzleHttp\Psr7\Response as Psr7Response;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request as HttpRequest;
+use Illuminate\Http\Client\RequestException;
+use Illuminate\Http\Client\Response as HttpClientResponse;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
 use Laravel\Ai\Tools\Request;
@@ -53,6 +57,67 @@ class ProcessTelegramMessageTest extends TestCase
         Http::assertSent(fn (HttpRequest $request): bool => str_ends_with($request->url(), '/sendMessage')
             && $request['chat_id'] === '98765'
             && $request['text'] === 'Сервер работает нормально.');
+    }
+
+    public function test_a_conversation_left_over_from_a_previous_server_boot_starts_fresh(): void
+    {
+        config(['services.telegram.bot_token' => 'test-token', 'app.boot_id' => 'boot-current']);
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []])]);
+        ServerAssistantAgent::fake([[
+            'response_type' => 'answer',
+            'message' => 'Привет!',
+            'draft_id' => null,
+            'product_ids' => [],
+            'operation_ids' => [],
+        ]]);
+        $update = $this->update();
+        TelegramChatState::query()->create([
+            'chat_id' => $update->chat_id,
+            'telegram_user_id' => $update->telegram_user_id,
+            'conversation_id' => 'stale-conversation-from-before-restart',
+            'boot_id' => 'boot-previous',
+        ]);
+
+        (new ProcessTelegramMessage($update->id))->handle(
+            app(TelegramClient::class),
+            app(AiErrorPresenter::class),
+        );
+
+        $state = TelegramChatState::query()->where('chat_id', $update->chat_id)->firstOrFail();
+        $this->assertSame('boot-current', $state->boot_id);
+        // ServerAssistantAgent::fake() has no persistent conversation of its
+        // own, so a genuinely fresh conversation_id from this run would be
+        // null too - the point being proven is that the stale one is gone,
+        // not resolved to some particular new value.
+        $this->assertNull($state->conversation_id);
+    }
+
+    public function test_a_conversation_from_the_current_server_boot_is_left_untouched(): void
+    {
+        config(['services.telegram.bot_token' => 'test-token', 'app.boot_id' => 'boot-current']);
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []])]);
+        ServerAssistantAgent::fake([[
+            'response_type' => 'answer',
+            'message' => 'Привет!',
+            'draft_id' => null,
+            'product_ids' => [],
+            'operation_ids' => [],
+        ]]);
+        $update = $this->update();
+        TelegramChatState::query()->create([
+            'chat_id' => $update->chat_id,
+            'telegram_user_id' => $update->telegram_user_id,
+            'conversation_id' => 'same-boot-conversation',
+            'boot_id' => 'boot-current',
+        ]);
+
+        (new ProcessTelegramMessage($update->id))->handle(
+            app(TelegramClient::class),
+            app(AiErrorPresenter::class),
+        );
+
+        $state = TelegramChatState::query()->where('chat_id', $update->chat_id)->firstOrFail();
+        $this->assertSame('same-boot-conversation', $state->conversation_id);
     }
 
     public function test_ready_draft_is_sent_as_one_album_followed_by_compact_approval_controls(): void
@@ -132,8 +197,63 @@ class ProcessTelegramMessageTest extends TestCase
             && str_contains((string) ($request['text'] ?? ''), "Итого: черновик #{$draft->id}")
             && data_get($request['reply_markup'] ?? [], 'inline_keyboard.0.0.callback_data') === "draft:add:{$draft->id}"
             && data_get($request['reply_markup'] ?? [], 'inline_keyboard.1.0.callback_data') === "draft:enhance:{$draft->id}"
-            && data_get($request['reply_markup'] ?? [], 'inline_keyboard.2.0.callback_data') === "draft:restage:{$draft->id}"
-            && data_get($request['reply_markup'] ?? [], 'inline_keyboard.3.0.callback_data') === "draft:retrain:{$draft->id}");
+            && data_get($request['reply_markup'] ?? [], 'inline_keyboard.1.1.callback_data') === "draft:replace:{$draft->id}"
+            && data_get($request['reply_markup'] ?? [], 'inline_keyboard.2.0.callback_data') === "draft:source:{$draft->id}");
+    }
+
+    public function test_a_stale_draft_id_for_an_already_approved_draft_does_not_reshow_it_as_ready(): void
+    {
+        // Real production bug (2026-08-05): the AI can echo a draft_id from
+        // earlier in the same live conversation (its own memory of "the
+        // current draft") even after that draft was already approved in a
+        // prior turn - approval moves its photos onto the published product,
+        // so re-showing it as "ready to add" surfaces a 0-photo draft card
+        // for something that is already live in the catalog.
+        config(['services.telegram.bot_token' => 'test-token']);
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []])]);
+        $update = $this->update();
+        $researchRun = AiRun::query()->create([
+            'telegram_update_id' => $update->id,
+            'provider' => 'openai',
+            'model' => 'gpt-4.1-mini',
+            'status' => 'completed',
+            'prompt' => 'find product',
+            'started_at' => now(),
+            'completed_at' => now(),
+        ]);
+        $draft = ProductDraft::query()->create([
+            'telegram_update_id' => $update->id,
+            'ai_run_id' => $researchRun->id,
+            'requested_by_telegram_user_id' => $update->telegram_user_id,
+            'title' => 'Acer Nitro V 16 AI',
+            'status' => 'approved',
+            'brand' => 'Acer',
+            'model' => 'Nitro V 16 AI',
+            'specifications' => [],
+            'sources' => [],
+            'primary_source_url' => 'https://www.comfor.cz/acer',
+            'image_urls' => [],
+            'images_staged_at' => now(),
+            'confidence' => 0.98,
+        ]);
+        ServerAssistantAgent::fake([[
+            'response_type' => 'draft',
+            'message' => 'Черновик готов.',
+            'draft_id' => $draft->id,
+            'product_ids' => [],
+            'operation_ids' => [],
+        ]]);
+
+        (new ProcessTelegramMessage($update->id))->handle(
+            app(TelegramClient::class),
+            app(AiErrorPresenter::class),
+        );
+
+        Http::assertNotSent(fn (HttpRequest $request): bool => str_ends_with($request->url(), '/sendMediaGroup'));
+        Http::assertNotSent(fn (HttpRequest $request): bool => str_ends_with($request->url(), '/sendMessage')
+            && str_contains((string) ($request['text'] ?? ''), "Черновик #{$draft->id}"));
+        Http::assertSent(fn (HttpRequest $request): bool => str_ends_with($request->url(), '/sendMessage')
+            && $request['text'] === 'Черновик готов.');
     }
 
     public function test_reply_to_text_is_prepended_as_context_for_the_agent(): void
@@ -360,11 +480,63 @@ class ProcessTelegramMessageTest extends TestCase
         );
 
         Http::assertSent(fn (HttpRequest $request): bool => str_ends_with($request->url(), '/sendMessage')
-            && str_contains((string) ($request['text'] ?? ''), 'Оперативная память: 32 GB')
+            && str_contains((string) ($request['text'] ?? ''), '💾 Оперативная память: 32 GB')
             && str_contains((string) ($request['text'] ?? ''), 'lenovo.com/specs-test'));
     }
 
-    public function test_failed_hook_does_not_duplicate_the_notification_handle_already_sent(): void
+    public function test_catalog_card_does_not_double_the_unit_when_the_value_already_spells_it_out(): void
+    {
+        // Real production bug (2026-08-05): the spec line always appended
+        // " {$unit}" even when the value already spelled it out ("16 GB DDR5
+        // (2 x 8 GB)", "180 Hz"), producing visible doubles like "180 Hz Hz".
+        Storage::fake('public');
+        config(['services.telegram.bot_token' => 'test-token']);
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []])]);
+        $category = Category::query()->where('slug', 'laptops')->firstOrFail();
+        $brand = Brand::query()->firstOrCreate(['slug' => 'acer'], ['name' => 'Acer', 'is_active' => true]);
+        $product = Product::query()->create([
+            'category_id' => $category->id,
+            'brand_id' => $brand->id,
+            'canonical_key' => 'acer-unit-double-test',
+            'product_type' => 'laptop',
+            'status' => 'published',
+            'slug' => 'acer-unit-double-test',
+            'title' => 'Acer Unit Double Test',
+            'is_active' => true,
+            'published_at' => now(),
+        ]);
+        $variant = ProductVariant::query()->create([
+            'product_id' => $product->id,
+            'fingerprint' => 'acer-unit-double-test-variant',
+            'name' => 'Default',
+            'is_default' => true,
+            'is_active' => true,
+        ]);
+        $refreshRate = AttributeDefinition::query()->firstOrCreate(
+            ['key' => 'refresh_rate'],
+            ['label' => 'Частота экрана', 'data_type' => 'text', 'is_filterable' => true, 'is_variant' => true],
+        );
+        $variant->attributes()->create(['attribute_definition_id' => $refreshRate->id, 'value' => '180 Hz', 'unit' => 'Hz']);
+        ServerAssistantAgent::fake([[
+            'response_type' => 'catalog_results',
+            'message' => 'Вот товар:',
+            'draft_id' => null,
+            'product_ids' => [$product->id],
+            'operation_ids' => [],
+        ]]);
+        $update = $this->update();
+
+        (new ProcessTelegramMessage($update->id))->handle(
+            app(TelegramClient::class),
+            app(AiErrorPresenter::class),
+        );
+
+        Http::assertSent(fn (HttpRequest $request): bool => str_ends_with($request->url(), '/sendMessage')
+            && str_contains((string) ($request['text'] ?? ''), '🔄 Частота экрана: 180 Hz')
+            && ! str_contains((string) ($request['text'] ?? ''), '180 Hz Hz'));
+    }
+
+    public function test_failed_hook_sends_one_final_notification_after_hidden_attempts(): void
     {
         // Real production bug (2026-07-23): on the final retry attempt,
         // handle()'s catch block notifies the user and re-throws (tries
@@ -386,14 +558,116 @@ class ProcessTelegramMessageTest extends TestCase
 
         Http::assertSentCount(1);
         Http::assertSent(fn (HttpRequest $request): bool => str_ends_with($request->url(), '/sendMessage')
-            && str_contains((string) $request['text'], 'Повторю запрос автоматически'));
+            && str_contains((string) $request['text'], 'Автоматические попытки исчерпаны')
+            && ! str_contains((string) $request['text'], 'Повторю запрос автоматически'));
+    }
+
+    public function test_the_last_allowed_attempt_does_not_falsely_promise_another_automatic_retry(): void
+    {
+        // Real production bug (2026-08-04): tries=2, so the 2nd attempt's
+        // failure is final - but handle() kept reusing the "Повторю запрос
+        // автоматически" wording built for a retry that was still coming,
+        // leaving the user waiting on a search that had already died.
+        config(['services.telegram.bot_token' => 'test-token']);
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []])]);
+        ServerAssistantAgent::fake(fn () => throw new \RuntimeException('Request timed out.'))
+            ->preventStrayPrompts();
+        $update = $this->update();
+        $job = (new ProcessTelegramMessage($update->id))->withFakeQueueInteractions();
+        $job->job->attempts = 2;
+
+        try {
+            $job->handle(app(TelegramClient::class), app(AiErrorPresenter::class));
+            $this->fail('Retryable error should have been re-thrown.');
+        } catch (\RuntimeException) {
+            // expected: handle() still rethrows so the queue's own failed-job
+            // bookkeeping runs, even though no further retry actually happens.
+        }
+
+        Http::assertSent(fn (HttpRequest $request): bool => str_ends_with($request->url(), '/sendMessage')
+            && str_contains((string) $request['text'], 'Автоматические попытки исчерпаны')
+            && ! str_contains((string) $request['text'], 'Повторю запрос автоматически'));
+    }
+
+    public function test_a_rate_limited_attempt_waits_for_the_providers_own_retry_after(): void
+    {
+        // Real production bug (2026-08-05): OpenAI's 429 body says exactly
+        // when the TPM window resets ("Please try again in 20.008s."), but
+        // the job retried on a blind fixed 30s backoff - firing while the
+        // limit was still active (another guaranteed 429 burning a second
+        // full search) or idling far longer than the provider asked for.
+        config(['services.telegram.bot_token' => 'test-token']);
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []])]);
+        $requestException = new RequestException(new HttpClientResponse(new Psr7Response(429, [], json_encode([
+            'error' => [
+                'message' => 'Rate limit reached for gpt-5-mini on tokens per min (TPM): '
+                    .'Limit 200000, Used 199000, Requested 8000. Please try again in 20.008s.',
+            ],
+        ]))));
+        ServerAssistantAgent::fake(fn () => throw new \RuntimeException(
+            'Application rate limited by AI provider [openai].', 429, $requestException,
+        ))->preventStrayPrompts();
+        $update = $this->update();
+        $job = (new ProcessTelegramMessage($update->id))->withFakeQueueInteractions();
+
+        $job->handle(app(TelegramClient::class), app(AiErrorPresenter::class));
+
+        // 20.008s from the provider, rounded up + 2s clock-skew buffer.
+        $job->assertReleased(23);
+        Http::assertNothingSent();
+    }
+
+    public function test_the_final_attempt_ignores_retry_after_and_fails_as_before(): void
+    {
+        config(['services.telegram.bot_token' => 'test-token']);
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []])]);
+        $requestException = new RequestException(new HttpClientResponse(new Psr7Response(429, [], json_encode([
+            'error' => ['message' => 'Rate limit reached. Please try again in 20s.'],
+        ]))));
+        ServerAssistantAgent::fake(fn () => throw new \RuntimeException(
+            'Application rate limited by AI provider [openai].', 429, $requestException,
+        ))->preventStrayPrompts();
+        $update = $this->update();
+        $job = (new ProcessTelegramMessage($update->id))->withFakeQueueInteractions();
+        $job->job->attempts = 2;
+
+        try {
+            $job->handle(app(TelegramClient::class), app(AiErrorPresenter::class));
+            $this->fail('The exhausted retryable error should still be re-thrown.');
+        } catch (\RuntimeException) {
+            // expected: no fourth chance is scheduled past tries=2, the
+            // queue's own failed-job bookkeeping runs instead.
+        }
+
+        $job->assertNotReleased();
+        Http::assertSent(fn (HttpRequest $request): bool => str_ends_with($request->url(), '/sendMessage')
+            && str_contains((string) $request['text'], 'Автоматические попытки исчерпаны'));
+    }
+
+    public function test_a_retryable_error_without_a_provider_retry_after_rethrows_to_the_fixed_backoff(): void
+    {
+        config(['services.telegram.bot_token' => 'test-token']);
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []])]);
+        ServerAssistantAgent::fake(fn () => throw new \RuntimeException('Request timed out.'))
+            ->preventStrayPrompts();
+        $update = $this->update();
+        $job = (new ProcessTelegramMessage($update->id))->withFakeQueueInteractions();
+
+        try {
+            $job->handle(app(TelegramClient::class), app(AiErrorPresenter::class));
+            $this->fail('Retryable error without a provider retry-after should be re-thrown.');
+        } catch (\RuntimeException) {
+            // expected: the queue retries it on the job's fixed $backoff.
+        }
+
+        $job->assertNotReleased();
+        Http::assertNothingSent();
     }
 
     public function test_research_tool_creates_an_audited_pending_draft(): void
     {
         ProductResearchAgent::fake([[
             'status' => 'found',
-            'clarification_question' => null,
             'title' => 'Lenovo Legion 5 16IRX9',
             'brand' => 'Lenovo',
             'model' => 'Legion 5 16IRX9',
@@ -445,6 +719,81 @@ class ProcessTelegramMessageTest extends TestCase
         $this->assertCount(10, ProductDraft::query()->firstOrFail()->image_urls);
     }
 
+    public function test_research_tool_never_returns_a_clarification_question_after_web_search(): void
+    {
+        ProductResearchAgent::fake([[
+            'status' => 'not_found',
+            // Backward-compatibility guard: even a stale provider response
+            // containing the removed field must not expose a question.
+            'clarification_question' => 'Single module or a kit?',
+            'title' => null,
+            'brand' => null,
+            'model' => null,
+            'category' => null,
+            'product_type' => null,
+            'color' => null,
+            'description' => null,
+            'research_notes' => null,
+            'specifications' => [],
+            'sources' => [],
+            'primary_source_url' => null,
+            'official_source_url' => null,
+            'image_urls' => [],
+            'confidence' => 0,
+        ]]);
+        $update = $this->update();
+        $resolver = $this->mock(ProductImageResolver::class);
+        $resolver->shouldNotReceive('resolve');
+
+        $result = json_decode((new ResearchProduct($update, $resolver))->handle(new Request([
+            'query' => 'DDR4 256GB 3200MHz ECC RDIMM',
+        ])), true, flags: JSON_THROW_ON_ERROR);
+
+        $this->assertSame([
+            'ok' => true,
+            'status' => 'not_found',
+        ], $result);
+        $this->assertSame(0, ProductDraft::query()->count());
+    }
+
+    public function test_research_tool_discards_the_result_when_cancellation_was_requested(): void
+    {
+        // The cancel button can't abort the blocking AI call already in
+        // flight (see TelegramProgressReporter::withCancelButton()) - it
+        // only marks intent. Once that call returns, the tool must honor
+        // cancel_requested_at instead of building a draft nobody asked for
+        // anymore.
+        ProductResearchAgent::fake([[
+            'status' => 'found',
+            'title' => 'Lenovo Legion 5 16IRX9',
+            'brand' => 'Lenovo',
+            'model' => 'Legion 5 16IRX9',
+            'category' => 'laptops',
+            'product_type' => 'laptop',
+            'color' => 'Luna Grey',
+            'description' => 'Игровой ноутбук.',
+            'specifications' => [],
+            'sources' => [['title' => 'Amazon', 'url' => 'https://www.amazon.com/dp/LEGION', 'type' => 'marketplace']],
+            'primary_source_url' => 'https://www.amazon.com/dp/LEGION',
+            'official_source_url' => null,
+            'research_notes' => null,
+            'image_urls' => [],
+            'confidence' => 0.95,
+        ]]);
+        $update = $this->update();
+        $update->update(['cancel_requested_at' => now()]);
+        $resolver = $this->mock(ProductImageResolver::class);
+        $resolver->shouldNotReceive('resolve');
+
+        $result = json_decode((new ResearchProduct($update, $resolver))->handle(new Request([
+            'query' => 'Lenovo Legion 5 32 GB',
+        ])), true, flags: JSON_THROW_ON_ERROR);
+
+        $this->assertTrue($result['ok']);
+        $this->assertSame('cancelled', $result['status']);
+        $this->assertSame(0, ProductDraft::query()->count());
+    }
+
     public function test_research_recognizes_a_product_already_in_the_catalog_instead_of_duplicating_it(): void
     {
         // Real production bug (2026-07-24): a later message about a product
@@ -466,7 +815,6 @@ class ProcessTelegramMessageTest extends TestCase
         ]);
         ProductResearchAgent::fake([[
             'status' => 'found',
-            'clarification_question' => null,
             'title' => 'Lenovo Legion 5 16IRX9',
             'brand' => 'Lenovo',
             'model' => 'Legion 5 16IRX9',
@@ -497,6 +845,78 @@ class ProcessTelegramMessageTest extends TestCase
         $this->assertSame('already_in_catalog', $result['status']);
         $this->assertSame($existing->id, $result['product_id']);
         $this->assertSame(0, ProductDraft::query()->count());
+    }
+
+    public function test_research_sends_the_real_catalog_card_when_it_recognizes_an_existing_product(): void
+    {
+        // A free-text "you already have this" from the AI is a worse answer
+        // than just showing the real, current card - especially since the
+        // AI can't be trusted to always phrase it, or to attach the photo.
+        // This must not depend on the AI's wording at all.
+        Storage::fake('public');
+        config(['services.telegram.bot_token' => 'test-token']);
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []])]);
+        $category = Category::query()->where('slug', 'laptops')->firstOrFail();
+        $brand = Brand::query()->firstOrCreate(['slug' => 'lenovo'], ['name' => 'Lenovo', 'is_active' => true]);
+        $existing = Product::query()->create([
+            'category_id' => $category->id,
+            'brand_id' => $brand->id,
+            'canonical_key' => ProductIdentityKey::for('Lenovo', 'Legion 5 16IRX9', 'Lenovo Legion 5 16IRX9'),
+            'product_type' => 'laptop',
+            'status' => 'published',
+            'slug' => 'lenovo-legion-5-16irx9',
+            'title' => 'Lenovo Legion 5 16IRX9',
+            'is_active' => true,
+            'published_at' => now(),
+        ]);
+        $path = "products/{$existing->id}/photo.webp";
+        Storage::disk('public')->put($path, 'fake-image');
+        $existing->media()->create([
+            'type' => 'image',
+            'disk' => 'public',
+            'path' => $path,
+            'source_url' => 'https://example.com/legion.jpg',
+            'verification_status' => 'verified',
+            'is_primary' => true,
+            'sort_order' => 0,
+        ]);
+        ProductResearchAgent::fake([[
+            'status' => 'found',
+            'title' => 'Lenovo Legion 5 16IRX9',
+            'brand' => 'Lenovo',
+            'model' => 'Legion 5 16IRX9',
+            'category' => 'laptops',
+            'product_type' => 'laptop',
+            'color' => 'Luna Grey',
+            'description' => 'Игровой ноутбук.',
+            'specifications' => [],
+            'sources' => [['title' => 'Amazon', 'url' => 'https://www.amazon.com/dp/LEGION', 'type' => 'marketplace']],
+            'primary_source_url' => 'https://www.amazon.com/dp/LEGION',
+            'official_source_url' => null,
+            'research_notes' => null,
+            'image_urls' => [],
+            'confidence' => 0.95,
+        ]]);
+        $update = $this->update();
+        $resolver = $this->mock(ProductImageResolver::class);
+        $resolver->shouldReceive('resolve')->once()->andReturn([]);
+
+        json_decode((new ResearchProduct($update, $resolver))->handle(new Request([
+            'query' => 'Lenovo Legion 5 32 GB',
+        ])), true, flags: JSON_THROW_ON_ERROR);
+
+        // A single attached photo goes out via /sendPhoto (TelegramClient
+        // only uses /sendMediaGroup for 2+ images), with a plain caption field.
+        Http::assertSent(function (HttpRequest $request) use ($existing): bool {
+            if (! str_ends_with($request->url(), '/sendPhoto')) {
+                return false;
+            }
+
+            $caption = (string) collect($request->data())->firstWhere('name', 'caption')['contents'];
+
+            return str_contains($caption, '✅ Такой товар уже есть в каталоге')
+                && str_contains($caption, "#{$existing->id} · {$existing->title}");
+        });
     }
 
     /** @return array{Product, Product} */

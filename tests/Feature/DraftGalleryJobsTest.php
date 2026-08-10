@@ -35,7 +35,7 @@ class DraftGalleryJobsTest extends TestCase
         $presenter->shouldReceive('sendReview')->once();
         $telegram = $this->telegramMock();
 
-        (new RestageDraftGalleryPhotos($draft->id, '100'))->handle($images, $presenter, $telegram);
+        (new RestageDraftGalleryPhotos($draft->id, '100', $draft->telegram_update_id))->handle($images, $presenter, $telegram);
 
         $this->assertFalse(Cache::has("draft-gallery-restage:{$draft->id}:queued"));
     }
@@ -53,7 +53,7 @@ class DraftGalleryJobsTest extends TestCase
         $presenter->shouldReceive('sendReview')->once();
         $telegram = $this->telegramMock();
 
-        (new TopUpDraftGalleryPhotos($draft->id, '100'))->handle($images, $presenter, $telegram);
+        (new TopUpDraftGalleryPhotos($draft->id, '100', $draft->telegram_update_id))->handle($images, $presenter, $telegram);
 
         $this->assertFalse(Cache::has("draft-gallery-topup:{$draft->id}:queued"));
     }

@@ -24,6 +24,7 @@ use App\Models\TelegramUpdate;
 use App\Services\Products\ProductDraftWorkflow;
 use App\Services\Products\ProductImageResolver;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
+use Laravel\Ai\Attributes\MaxTokens;
 use Laravel\Ai\Concerns\RemembersConversations;
 use Laravel\Ai\Contracts\Agent;
 use Laravel\Ai\Contracts\Conversational;
@@ -32,9 +33,12 @@ use Laravel\Ai\Contracts\HasTools;
 use Laravel\Ai\Promptable;
 use Stringable;
 
+#[MaxTokens(self::MAX_OUTPUT_TOKENS)]
 class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput, HasTools
 {
     use Promptable, RemembersConversations;
+
+    public const int MAX_OUTPUT_TOKENS = 16_000;
 
     public function __construct(private readonly TelegramUpdate $update) {}
 

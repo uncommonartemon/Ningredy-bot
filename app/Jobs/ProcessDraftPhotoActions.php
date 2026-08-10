@@ -63,7 +63,7 @@ class ProcessDraftPhotoActions implements ShouldQueue
                     $enhancer->enhance($media, $this->telegramUpdateId, $draft);
                 } elseif ($action['action'] === 'replace') {
                     $progress->step("{$number}/".count($this->actions)." · поиск замены фото {$action['position']}", 180);
-                    $images->replaceDraftMedia($draft, $media, fn (string $message) => $progress->info($message));
+                    $images->replaceDraftMedia($draft, $media, fn (string $message) => $progress->info($message), $this->telegramUpdateId);
                 } elseif ($action['action'] === 'delete') {
                     $progress->step("{$number}/".count($this->actions)." · удаление фото {$action['position']}", 10);
                     $manager->delete($draft, $media);
@@ -78,6 +78,24 @@ class ProcessDraftPhotoActions implements ShouldQueue
         } catch (Throwable $exception) {
             $this->updateOperation('failed', null, $exception);
             $progress->failed('Обработка фотографий остановлена', $exception);
+
+            // A failed action (no match found, provider error, ...) used to
+            // leave the operator stuck with no way back into the draft - the
+            // photo-selection menu was already deleted when the action was
+            // queued, and nothing replaced it. Bring the control panel back
+            // whenever the draft is still there to act on.
+            if (isset($draft)) {
+                $refreshedDraft = $draft->fresh('media');
+
+                if ($refreshedDraft?->status === 'pending_review') {
+                    try {
+                        $presenter->sendControls($telegram, $this->chatId, $refreshedDraft);
+                    } catch (Throwable $controlsException) {
+                        report($controlsException);
+                    }
+                }
+            }
+
             throw $exception;
         } finally {
             Cache::forget("draft-photo-actions:{$this->draftId}:queued");

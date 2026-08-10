@@ -10,20 +10,28 @@ use App\Models\Product;
 use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
 use App\Services\Ai\AiSettings;
+use App\Services\Ai\AiErrorPresenter;
 use App\Services\Ai\ProductSearchTimeBudget;
+use App\Services\Ai\StreamingProductResearch;
 use App\Services\Products\ProductIdentityKey;
 use App\Services\Products\ProductImageResolver;
 use App\Services\Products\ProductImageStorage;
 use App\Services\Products\ProductPublicDescription;
 use App\Services\Products\ProductResearchResponseNormalizer;
-use App\Services\Products\ProductSourcePriority;
 use App\Services\Products\ProductSourceAttemptRecorder;
+use App\Services\Products\ProductSourcePriority;
+use App\Services\Telegram\ProductCardPresenter;
 use App\Services\Telegram\TelegramClient;
 use App\Services\Telegram\TelegramProgressReporter;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Validation\Rule;
 use Laravel\Ai\Contracts\Tool;
+use Laravel\Ai\Streaming\Events\ProviderToolEvent;
+use Laravel\Ai\Streaming\Events\StreamEnd;
+use Laravel\Ai\Streaming\Events\StreamEvent;
+use Laravel\Ai\Streaming\Events\StreamStart;
+use Laravel\Ai\Streaming\Events\TextStart;
 use Laravel\Ai\Tools\Request;
 use Stringable;
 use Throwable;
@@ -39,6 +47,8 @@ class ResearchProduct implements Tool
         private readonly ?ProductPublicDescription $publicDescription = null,
         private readonly ?ProductImageStorage $imageStorage = null,
         private readonly ?ProductResearchResponseNormalizer $responseNormalizer = null,
+        private readonly ?ProductCardPresenter $productCards = null,
+        private readonly ?StreamingProductResearch $streamingResearch = null,
     ) {}
 
     public function description(): Stringable|string
@@ -49,7 +59,25 @@ class ResearchProduct implements Tool
     public function handle(Request $request): Stringable|string
     {
         $query = trim((string) $request->string('query'));
-        $progress = new TelegramProgressReporter(app(TelegramClient::class), (string) $this->update->chat_id);
+        $payload = is_array($this->update->payload) ? $this->update->payload : [];
+        $existingProgressMessageId = (int) ($payload['_progress_message_id'] ?? 0);
+        $progress = new TelegramProgressReporter(
+            app(TelegramClient::class),
+            (string) $this->update->chat_id,
+            existingMessageId: $existingProgressMessageId > 0 ? $existingProgressMessageId : null,
+            onMessageCreated: function (int $messageId): void {
+                $update = $this->update->fresh();
+
+                if (! $update) {
+                    return;
+                }
+
+                $payload = is_array($update->payload) ? $update->payload : [];
+                $payload['_progress_message_id'] = $messageId;
+                $update->update(['payload' => $payload]);
+                $this->update->setAttribute('payload', $payload);
+            },
+        );
         $settings = app(AiSettings::class);
         $timeBudget = app(ProductSearchTimeBudget::class);
 
@@ -67,6 +95,8 @@ class ResearchProduct implements Tool
             $this->update->id,
             $settings->productResearchTimeoutSeconds(),
         );
+        $researchIdleTimeout = min($researchTimeout, $settings->productResearchIdleTimeoutSeconds());
+        $progress->withCancelButton($this->update->id);
         $progress->step('1/4 · поиск точной карточки и характеристик', $researchTimeout, $query);
         $provider = $settings->providerFor('product_research');
         $model = $settings->modelFor('product_research');
@@ -83,13 +113,104 @@ class ResearchProduct implements Tool
         ]);
 
         try {
-            $response = ProductResearchAgent::make()->prompt($researchPrompt, provider: $provider, model: $model, timeout: $researchTimeout);
-            $progress->info('Карточка получена; проверяю модель, цвет и источники.');
+            $activity = [];
+            $lastActivityWrite = 0.0;
+            $reportedActivity = [];
+            $webSearchItems = [];
+            $recordActivity = function (StreamEvent $event) use (
+                $run,
+                $progress,
+                &$activity,
+                &$lastActivityWrite,
+                &$reportedActivity,
+                &$webSearchItems,
+            ): void {
+                $now = microtime(true);
+                $stage = $event instanceof ProviderToolEvent
+                    ? $event->type.'.'.$event->status
+                    : $event->type();
+                $traceable = $event instanceof StreamStart
+                    || $event instanceof ProviderToolEvent
+                    || $event instanceof TextStart
+                    || $event instanceof StreamEnd;
+
+                if ($traceable && count($activity) < 50) {
+                    $activity[] = [
+                        'at' => now()->toIso8601String(),
+                        'stage' => $stage,
+                    ];
+                }
+
+                if ($traceable || $now - $lastActivityWrite >= 5) {
+                    $run->update([
+                        'activity' => $activity,
+                        'last_activity_at' => now(),
+                    ]);
+                    $lastActivityWrite = $now;
+                }
+
+                if ($event instanceof StreamStart && ! isset($reportedActivity['connected'])) {
+                    $reportedActivity['connected'] = true;
+                    $progress->info('OpenAI ответил; поток Web Search подключён.');
+                }
+
+                if ($event instanceof ProviderToolEvent && $event->type === 'web_search_call') {
+                    if ($event->itemId !== '') {
+                        $webSearchItems[$event->itemId] = true;
+                    }
+
+                    $key = 'web_search.'.$event->status;
+
+                    if (isset($reportedActivity[$key])) {
+                        return;
+                    }
+
+                    $reportedActivity[$key] = true;
+                    $message = match ($event->status) {
+                        'in_progress' => 'Web Search запущен.',
+                        'searching' => 'Web Search ищет точные страницы товара.',
+                        'completed' => 'Web Search завершён; анализирую результаты.',
+                        default => null,
+                    };
+
+                    if ($message !== null) {
+                        $progress->info($message);
+                    }
+                }
+            };
+
+            try {
+                $response = ($this->streamingResearch ?? app(StreamingProductResearch::class))->prompt(
+                    ProductResearchAgent::make(),
+                    $researchPrompt,
+                    $provider,
+                    $model,
+                    $researchTimeout,
+                    $researchIdleTimeout,
+                    $recordActivity,
+                    fn (int $seconds) => $progress->info(
+                        'Другой тяжёлый AI-этап ещё выполняется; этот поиск продолжится примерно через '.$seconds.' сек.',
+                    ),
+                );
+            } finally {
+                $progress->clearCancelButton();
+            }
+
+            // Cancellation is still checked after the provider returns; the
+            // streamed transport now limits silent waits, but it cannot
+            // interrupt local post-processing already in progress.
+            if ($this->update->fresh()?->cancel_requested_at !== null) {
+                $run->update(['status' => 'completed', 'response' => ['status' => 'cancelled'], 'completed_at' => now()]);
+                $progress->done('🚫 Поиск отменён по запросу');
+
+                return $this->json(['ok' => true, 'status' => 'cancelled']);
+            }
+
+            $progress->info('Результат поиска получен; проверяю совпадение и источники.');
             $normalizedResponse = ($this->responseNormalizer ?? app(ProductResearchResponseNormalizer::class))
                 ->normalize($response->toArray());
             $data = Validator::make($normalizedResponse, [
                 'status' => ['required', 'in:found,not_found'],
-                'clarification_question' => ['nullable', 'string', 'max:1000'],
                 'title' => ['nullable', 'string', 'max:255'],
                 'brand' => ['nullable', 'string', 'max:255'],
                 'model' => ['nullable', 'string', 'max:255'],
@@ -185,7 +306,10 @@ class ResearchProduct implements Tool
                 'invocation_id' => $response->invocationId,
                 'status' => 'completed',
                 'response' => $data,
-                'usage' => $response->usage->toArray(),
+                'usage' => [
+                    ...$response->usage->toArray(),
+                    'web_search_calls' => count($webSearchItems),
+                ],
                 'completed_at' => now(),
             ]);
 
@@ -193,7 +317,6 @@ class ResearchProduct implements Tool
                 return $this->json([
                     'ok' => true,
                     'status' => $data['status'],
-                    'clarification_question' => $data['clarification_question'],
                 ]);
             }
 
@@ -202,6 +325,22 @@ class ResearchProduct implements Tool
                 ->first();
 
             if ($existingProduct) {
+                // Deterministic, not left to the AI's own wording: the exact
+                // same identity match that would otherwise create a new
+                // draft instead shows the real published card straight away
+                // - a free-text "you already have this" without the photo
+                // and current data is a worse answer than the card itself.
+                try {
+                    ($this->productCards ?? app(ProductCardPresenter::class))->send(
+                        app(TelegramClient::class),
+                        (string) $this->update->chat_id,
+                        $existingProduct,
+                        '✅ Такой товар уже есть в каталоге',
+                    );
+                } catch (Throwable $exception) {
+                    report($exception);
+                }
+
                 return $this->json([
                     'ok' => true,
                     'status' => 'already_in_catalog',
@@ -297,7 +436,16 @@ class ResearchProduct implements Tool
 
             return $this->json($result);
         } catch (Throwable $exception) {
-            $progress->failed('Поиск товара', $exception);
+            $errors = app(AiErrorPresenter::class);
+
+            if ($errors->present($exception)['retryable']) {
+                $retryAfter = $errors->retryAfterSeconds($exception);
+                $progress->info($retryAfter !== null
+                    ? 'Временная пауза AI; поиск продолжится автоматически примерно через '.$retryAfter.' сек.'
+                    : 'Временная пауза AI; поиск продолжится автоматически.');
+            } else {
+                $progress->failed('Поиск товара', $exception);
+            }
             $run->update([
                 'status' => 'failed',
                 'error' => mb_substr($exception->getMessage(), 0, 5000),

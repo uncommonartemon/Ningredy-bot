@@ -6,6 +6,7 @@ use App\Ai\Agents\ProductImageDiscoveryAgent;
 use App\Models\AiRun;
 use App\Models\ProductDraft;
 use App\Services\Ai\AiSettings;
+use App\Services\Ai\OpenAiHeavyOperationGate;
 use App\Services\Ai\ProductSearchTimeBudget;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Validator;
@@ -29,8 +30,14 @@ class ProductImageCandidateDiscovery
 
     /** @return array<int, string> */
     /** @param null|callable(string): void $progress */
-    public function find(ProductDraft $draft, array $excludedUrls = [], bool $skipKnownSources = false, ?callable $progress = null): array
+    public function find(ProductDraft $draft, array $excludedUrls = [], bool $skipKnownSources = false, ?callable $progress = null, ?int $telegramUpdateId = null): array
     {
+        // Callers acting long after the draft's original search (retry/top-up
+        // buttons pressed minutes or hours later) must pass their own fresh
+        // update id here - falling back to the draft's original one would
+        // measure time budget and AI-cost attribution against a search that
+        // already ended, making canStart() report zero time left immediately.
+        $telegramUpdateId ??= $draft->telegram_update_id;
         $this->sourcePagesByImageUrl = [];
         $excludedUrls = collect($excludedUrls)
             ->filter(fn (mixed $url): bool => is_string($url) && $url !== '')
@@ -51,7 +58,7 @@ class ProductImageCandidateDiscovery
         ));
         $knownSourceUrls = $skipKnownSources
             ? []
-            : $this->resolveSourcesIndividually($sources, $draft);
+            : $this->resolveSourcesIndividually($sources, $draft, telegramUpdateId: $telegramUpdateId);
         $preferredUrls = $this->withoutExcluded($this->sourcePriority->sortUrls(
             $knownSourceUrls,
             $draft->brand,
@@ -77,21 +84,21 @@ class ProductImageCandidateDiscovery
         $settings = app(AiSettings::class);
         $timeBudget = app(ProductSearchTimeBudget::class);
 
-        if (! $timeBudget->canStart($draft->telegram_update_id, 30)) {
+        if (! $timeBudget->canStart($telegramUpdateId, 30)) {
             $progress?->__invoke('Резерв времени достигнут: дополнительный AI-поиск источников пропущен, сохраняю уже полученный результат.');
 
             return $availableUrls;
         }
 
         $discoveryTimeout = $timeBudget->timeoutFor(
-            $draft->telegram_update_id,
+            $telegramUpdateId,
             $settings->imageDiscoveryTimeoutSeconds(),
         );
         $provider = $settings->providerFor('product_image_discovery');
         $model = $settings->modelFor('product_image_discovery');
         $prompt = $this->prompt($draft, $excludedUrls, $excludedSourceUrls);
         $cached = AiRun::query()
-            ->where('telegram_update_id', $draft->telegram_update_id)
+            ->where('telegram_update_id', $telegramUpdateId)
             ->where('provider', $provider)
             ->where('model', $model)
             ->where('status', 'completed')
@@ -102,12 +109,12 @@ class ProductImageCandidateDiscovery
         if ($cached && is_array($cached->response)) {
             return $this->withoutExcluded($this->sourcePriority->sortUrls([
                 ...$availableUrls,
-                ...$this->candidateUrls($cached->response, $draft, $sources, $progress),
+                ...$this->candidateUrls($cached->response, $draft, $sources, $progress, $telegramUpdateId),
             ], $draft->brand, $sources), $excludedUrls);
         }
 
         $run = AiRun::query()->create([
-            'telegram_update_id' => $draft->telegram_update_id,
+            'telegram_update_id' => $telegramUpdateId,
             'provider' => $provider,
             'model' => $model,
             'status' => 'running',
@@ -116,25 +123,34 @@ class ProductImageCandidateDiscovery
         ]);
 
         try {
-            $response = ProductImageDiscoveryAgent::make()->prompt(
-                $prompt,
-                provider: $provider,
-                model: $model,
-                timeout: $discoveryTimeout,
+            $response = app(OpenAiHeavyOperationGate::class)->run(
+                $provider,
+                $discoveryTimeout,
+                fn () => ProductImageDiscoveryAgent::make()->prompt(
+                    $prompt,
+                    provider: $provider,
+                    model: $model,
+                    timeout: $discoveryTimeout,
+                ),
             );
             $normalizedResponse = $response->toArray();
 
             foreach (['image_urls', 'page_urls'] as $urlField) {
-                $normalizedResponse[$urlField] = collect($normalizedResponse[$urlField] ?? [])
+                $candidates = collect($normalizedResponse[$urlField] ?? [])
                     ->filter(fn (mixed $url): bool => is_string($url))
                     ->map(fn (string $url): string => trim($url))
                     ->filter(fn (string $url): bool => mb_strlen($url) <= 2048
                         && filter_var($url, FILTER_VALIDATE_URL) !== false
-                        && in_array(parse_url($url, PHP_URL_SCHEME), ['http', 'https'], true))
-                    ->unique()
-                    ->take(12)
-                    ->values()
-                    ->all();
+                        && in_array(parse_url($url, PHP_URL_SCHEME), ['http', 'https'], true));
+
+                // Only image_urls can be two renditions of one photo (Scene7
+                // wid/hei, $PRESET$, ...) - page_urls are product page links,
+                // where that CDN-size normalization doesn't apply.
+                if ($urlField === 'image_urls') {
+                    $candidates = $candidates->map(fn (string $url): string => ProductImageStorage::normalizeCandidateUrl($url));
+                }
+
+                $normalizedResponse[$urlField] = $candidates->unique()->take(12)->values()->all();
             }
 
             $normalizedResponse['sources'] = collect($normalizedResponse['sources'] ?? [])
@@ -147,6 +163,7 @@ class ProductImageCandidateDiscovery
                         ->filter(fn (string $url): bool => mb_strlen($url) <= 2048
                             && filter_var($url, FILTER_VALIDATE_URL) !== false
                             && in_array(parse_url($url, PHP_URL_SCHEME), ['http', 'https'], true))
+                        ->map(fn (string $url): string => ProductImageStorage::normalizeCandidateUrl($url))
                         ->unique()
                         ->take(12)
                         ->values()
@@ -181,7 +198,7 @@ class ProductImageCandidateDiscovery
 
             return $this->withoutExcluded($this->sourcePriority->sortUrls([
                 ...$availableUrls,
-                ...$this->candidateUrls($data, $draft, $sources, $progress),
+                ...$this->candidateUrls($data, $draft, $sources, $progress, $telegramUpdateId),
             ], $draft->brand, $sources), $excludedUrls);
         } catch (Throwable $exception) {
             $run->update([
@@ -322,7 +339,7 @@ class ProductImageCandidateDiscovery
     }
 
     /** @param array<string, mixed> $data @return array<int, string> */
-    private function candidateUrls(array $data, ProductDraft $draft, array $sources, ?callable $progress = null): array
+    private function candidateUrls(array $data, ProductDraft $draft, array $sources, ?callable $progress = null, ?int $telegramUpdateId = null): array
     {
         $excludedSources = $draft->excluded_gallery_source_urls ?? [];
         $pairedSources = collect($data['sources'] ?? [])
@@ -356,6 +373,7 @@ class ProductImageCandidateDiscovery
             array_map(fn (string $url): array => ['url' => $url], $pageUrls),
             $draft,
             $progress,
+            $telegramUpdateId,
         );
 
         return array_slice($this->sourcePriority->sortUrls(
@@ -372,8 +390,9 @@ class ProductImageCandidateDiscovery
      * @param  array<int, array<string, mixed>>  $sources
      * @return array<int, string>
      */
-    private function resolveSourcesIndividually(array $sources, ProductDraft $draft, ?callable $progress = null): array
+    private function resolveSourcesIndividually(array $sources, ProductDraft $draft, ?callable $progress = null, ?int $telegramUpdateId = null): array
     {
+        $telegramUpdateId ??= $draft->telegram_update_id;
         $resolved = [];
         $resolveLimit = (int) config('product-images.resolve_limit', 16);
 
@@ -389,9 +408,9 @@ class ProductImageCandidateDiscovery
                     [$source],
                     $resolveLimit,
                     fn (string $level, string $message) => $progress($message),
-                    $draft->telegram_update_id,
+                    $telegramUpdateId,
                 )
-                : $this->resolver->resolve([$source], $resolveLimit, telegramUpdateId: $draft->telegram_update_id);
+                : $this->resolver->resolve([$source], $resolveLimit, telegramUpdateId: $telegramUpdateId);
 
             foreach ($pageImages as $imageUrl) {
                 $this->sourcePagesByImageUrl[$imageUrl] = $pageUrl;

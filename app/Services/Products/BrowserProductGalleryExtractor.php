@@ -35,8 +35,8 @@ class BrowserProductGalleryExtractor
         ?callable $debug = null,
         ?int $telegramUpdateId = null,
         array $context = [],
-    ): array
-    {
+        bool $forceInteractive = false,
+    ): array {
         if (! $this->available($limit, $debug)) {
             return [];
         }
@@ -71,14 +71,26 @@ class BrowserProductGalleryExtractor
             return [];
         }
 
+        $previousRecipeImages = null;
+
         if ($recipe?->status === 'active') {
             $debug?->__invoke('step', "Playwright: применяю AI-рецепт для {$host}.");
             $result = $this->executeRecipe($url, $recipe->recipe ?? [], $limit, $debug, $telegramUpdateId);
             $this->recordBrowserResult($url, $result, $telegramUpdateId, 'active_recipe');
             $images = $result['images'] ?? [];
+            $previousRecipeImages = $images;
             $validation = $this->resultValidator->validate($recipe->recipe ?? [], $result);
+            // A recipe is cached per domain, but the same domain can serve a
+            // different page markup (a different regional storefront, an A/B
+            // layout, ...) where the recipe's own selectors match nothing at
+            // all. The runner then silently falls back to whatever raw
+            // network traffic it happened to observe, which can still clear
+            // the image-count validator without a single real click ever
+            // happening - so that success is not trusted here even when the
+            // count alone looks sufficient.
+            $selectorsMismatched = $this->recipeSelectorsMismatchPage($recipe->recipe ?? [], $result);
 
-            if ($validation['passed']) {
+            if ($validation['passed'] && ! $selectorsMismatched) {
                 $this->rememberConfirmedGalleryImages($images);
                 $recipe->increment('success_count', 1, [
                     'last_success_at' => now(),
@@ -89,15 +101,24 @@ class BrowserProductGalleryExtractor
                 return $images;
             }
 
-            $debug?->__invoke(
-                'warning',
-                'Галерея неполная: получено '.$validation['extracted']
-                    .' из '.$validation['expected'].'. Рецепт не засчитан.',
-            );
+            if ($selectorsMismatched) {
+                $debug?->__invoke(
+                    'warning',
+                    "Сохранённый рецепт для {$host} не нашёл ни одного своего селектора на этой странице (другая вёрстка); переобучаю специально под неё.",
+                );
+            } else {
+                $debug?->__invoke(
+                    'warning',
+                    'Галерея неполная: получено '.$validation['extracted']
+                        .' из '.$validation['expected'].'. Рецепт не засчитан.',
+                );
+            }
 
             $recipe->increment('failure_count', 1, [
                 'last_failure_at' => now(),
-                'last_error' => $validation['reason'],
+                'last_error' => $selectorsMismatched
+                    ? 'Recipe selectors matched nothing on this page (layout mismatch).'
+                    : $validation['reason'],
             ]);
             $debug?->__invoke('warning', 'Сохранённый рецепт перестал давать галерею; запускаю AI-переобучение.');
         } else {
@@ -110,6 +131,8 @@ class BrowserProductGalleryExtractor
             $debug,
             telegramUpdateId: $telegramUpdateId,
             context: $context,
+            forceInteractive: $forceInteractive,
+            previousRecipeImages: $previousRecipeImages,
         );
 
         $trainedRecipe = ProductGalleryRecipe::query()
@@ -138,12 +161,12 @@ class BrowserProductGalleryExtractor
 
     public function isConfirmedGalleryImage(string $url): bool
     {
-        return isset($this->confirmedGalleryImages[hash('sha256', $url)]);
+        return isset($this->confirmedGalleryImages[$this->galleryImageKey($url)]);
     }
 
     public function isPartialGalleryImage(string $url): bool
     {
-        return isset($this->partialGalleryImages[hash('sha256', $url)]);
+        return isset($this->partialGalleryImages[$this->galleryImageKey($url)]);
     }
 
     /** @return array<string, mixed> */
@@ -179,6 +202,10 @@ class BrowserProductGalleryExtractor
         $script = base_path((string) config('product-images.browser_fallback.script', 'scripts/extract-product-gallery.mjs'));
 
         try {
+            $configuredTimeout = $scoutOnly
+                ? $this->settings->browserScoutTimeoutSeconds()
+                : $this->settings->browserTimeoutSeconds();
+            $timeoutSeconds = $this->timeBudget->timeoutFor($telegramUpdateId, $configuredTimeout);
             $process = new Process([
                 (string) config('product-images.browser_fallback.node_binary', 'node'),
                 $script,
@@ -194,11 +221,13 @@ class BrowserProductGalleryExtractor
                     'product-images.browser_fallback.confirmed_gallery_minimum_side',
                     400,
                 ),
+                // The script must finish - with whatever it already gathered -
+                // before this process is killed at the timeout; on Windows that
+                // kill is a hard TerminateProcess, so this reserve is the
+                // script's only chance to serialize a partial result.
+                'PRODUCT_GALLERY_DEADLINE_MS' => (string) max(10000, ($timeoutSeconds - 12) * 1000),
             ]);
-            $configuredTimeout = $scoutOnly
-                ? $this->settings->browserScoutTimeoutSeconds()
-                : $this->settings->browserTimeoutSeconds();
-            $process->setTimeout((float) $this->timeBudget->timeoutFor($telegramUpdateId, $configuredTimeout));
+            $process->setTimeout((float) $timeoutSeconds);
             $process->run();
 
             if (! $process->isSuccessful()) {
@@ -320,7 +349,7 @@ class BrowserProductGalleryExtractor
     {
         foreach ($images as $image) {
             if (is_string($image) && $image !== '') {
-                $this->confirmedGalleryImages[hash('sha256', $image)] = true;
+                $this->confirmedGalleryImages[$this->galleryImageKey($image)] = true;
             }
         }
     }
@@ -330,8 +359,62 @@ class BrowserProductGalleryExtractor
     {
         foreach ($images as $image) {
             if (is_string($image) && $image !== '') {
-                $this->partialGalleryImages[hash('sha256', $image)] = true;
+                $this->partialGalleryImages[$this->galleryImageKey($image)] = true;
             }
         }
+    }
+
+    /**
+     * ProductImageResolver::download() looks these up by an already-
+     * normalized URL (its caller runs every candidate through
+     * ProductImageStorage::normalizeCandidateUrl() first), but Playwright
+     * returns the raw URLs it saw on the page - hashing both sides through
+     * the same normalization keeps a confirmed/partial gallery photo from
+     * silently losing that flag just because its query string got rewritten
+     * (Scene7 wid/hei upgraded, a $PRESET$ modifier stripped, ...) between
+     * when it was remembered and when it's looked up.
+     */
+    private function galleryImageKey(string $url): string
+    {
+        return hash('sha256', ProductImageStorage::normalizeCandidateUrl($url));
+    }
+
+    /**
+     * When applying a cached recipe, the runner only sends the recipe's own
+     * collect/thumbnail selectors to the browser (see extract-product-gallery.mjs's
+     * strictRecipe mode) - no generic fallback selectors are mixed in. So if
+     * learned_recipe comes back with both lists empty while the recipe itself
+     * configured at least one selector, every single one of them matched zero
+     * elements on this exact page: the recipe belongs to a different markup
+     * version of the domain, not a working-but-incomplete gallery.
+     *
+     * @param  array<string, mixed>  $recipe
+     * @param  array<string, mixed>  $result
+     */
+    private function recipeSelectorsMismatchPage(array $recipe, array $result): bool
+    {
+        $configuredSelectors = [
+            ...(is_array($recipe['collect_selectors'] ?? null) ? $recipe['collect_selectors'] : []),
+            ...(is_array($recipe['thumbnail_selectors'] ?? null) ? $recipe['thumbnail_selectors'] : []),
+        ];
+
+        if ($configuredSelectors === []) {
+            return false;
+        }
+
+        // Absence of the field (an older script version, an unexpected
+        // result shape) must not be read as evidence of a mismatch - only a
+        // learned_recipe that was actually computed and came back empty
+        // counts.
+        if (! array_key_exists('learned_recipe', $result) || ! is_array($result['learned_recipe'])) {
+            return false;
+        }
+
+        $learned = $result['learned_recipe'];
+
+        $matchedCollect = is_array($learned['collect_selectors'] ?? null) ? $learned['collect_selectors'] : [];
+        $matchedThumbnails = is_array($learned['thumbnail_selectors'] ?? null) ? $learned['thumbnail_selectors'] : [];
+
+        return $matchedCollect === [] && $matchedThumbnails === [];
     }
 }

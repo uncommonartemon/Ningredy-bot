@@ -24,6 +24,7 @@ class TrainDraftGalleryRecipe implements ShouldQueue
         public int $draftId,
         public int $telegramUpdateId,
         public string $chatId,
+        public ?string $hint = null,
     ) {
         $this->onQueue('media');
     }
@@ -55,6 +56,7 @@ class TrainDraftGalleryRecipe implements ShouldQueue
             },
             true,
             $this->telegramUpdateId,
+            userHint: $this->hint,
         );
         throw_if(count($images) < 2, RuntimeException::class, 'Новый рецепт не прошёл проверку; старый рецепт и фото сохранены.');
 

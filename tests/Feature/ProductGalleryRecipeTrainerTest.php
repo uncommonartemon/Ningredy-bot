@@ -4,7 +4,9 @@ namespace Tests\Feature;
 
 use App\Ai\Agents\ProductGalleryPreflightAgent;
 use App\Ai\Agents\ProductGalleryRecipeTrainerAgent;
+use App\Models\AppSetting;
 use App\Models\ProductGalleryRecipe;
+use App\Models\ProductGalleryRecipeVersion;
 use App\Services\Products\BrowserProductGalleryExtractor;
 use App\Services\Products\ProductGalleryRecipeTrainer;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -57,6 +59,67 @@ class ProductGalleryRecipeTrainerTest extends TestCase
         $this->assertNull($recipe->retry_after);
 
         $this->assertSame([], $trainer->train('https://blocked.example/product-two'));
+    }
+
+    public function test_gallery_control_without_fragments_reaches_recipe_training(): void
+    {
+        $seenPrompt = null;
+        ProductGalleryRecipeTrainerAgent::fake(function (string $prompt) use (&$seenPrompt): array {
+            $seenPrompt = json_decode($prompt, true);
+
+            return [
+                'gallery_present' => true,
+                'expected_image_count' => 3,
+                'expected_count_evidence' => 'The same-product Gallery tab exposes three photos.',
+                'pre_click_selectors' => ['a[href*="/Gallery"]'],
+                'collect_selectors' => ['.gallery img'],
+                'thumbnail_selectors' => [],
+                'open_selectors' => [],
+                'next_selectors' => [],
+                'attributes' => ['src', 'data-src'],
+                'max_thumbnail_clicks' => 0,
+                'max_next_clicks' => 0,
+                'wait_after_click_ms' => 200,
+                'confidence' => 0.95,
+                'reason' => 'Open the internal Gallery tab, then collect its images.',
+            ];
+        })->preventStrayPrompts();
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('scout')->once()->andReturn([
+                'scout' => [
+                    'title' => 'MSI Katana 17 HX',
+                    'fragments' => [],
+                    'interactive_controls' => [
+                        '<a class="productMenu__item" href="/Laptop/Katana-17-HX-B14WX/Gallery">GALLERY</a>',
+                    ],
+                    'network_image_samples' => [],
+                    'access_gate' => false,
+                    'rate_limited' => false,
+                ],
+                'diagnostics' => [],
+            ]);
+            $mock->shouldReceive('executeRecipe')->once()->andReturn([
+                'images' => [
+                    'https://storage.example/one.webp',
+                    'https://storage.example/two.webp',
+                    'https://storage.example/three.webp',
+                ],
+            ]);
+        });
+
+        $images = app(ProductGalleryRecipeTrainer::class)->train(
+            'https://us.msi.com/Laptop/Katana-17-HX-B14WX/Specification',
+            force: true,
+        );
+
+        $this->assertCount(3, $images);
+        $this->assertStringContainsString('/Gallery', $seenPrompt['page']['interactive_controls'][0]);
+        $recipe = ProductGalleryRecipe::query()->where('domain', 'us.msi.com')->firstOrFail();
+        $this->assertSame('active', $recipe->status);
+        $this->assertSame(
+            ['a[href*="/Gallery"]'],
+            $recipe->recipe['pre_click_selectors'],
+        );
     }
 
     public function test_repeated_browser_timeouts_disable_playwright_after_the_retry_budget(): void
@@ -220,8 +283,9 @@ class ProductGalleryRecipeTrainerTest extends TestCase
                         'images' => [
                             'https://cdn.example/one.jpg',
                             'https://cdn.example/two.jpg',
+                            'https://cdn.example/three.jpg',
                         ],
-                        'diagnostics' => ['dom_candidates' => 2],
+                        'diagnostics' => ['dom_candidates' => 3],
                     ],
                 );
         });
@@ -237,6 +301,7 @@ class ProductGalleryRecipeTrainerTest extends TestCase
         $this->assertSame([
             'https://cdn.example/one.jpg',
             'https://cdn.example/two.jpg',
+            'https://cdn.example/three.jpg',
         ], $images);
         $recipe = ProductGalleryRecipe::query()->where('domain', 'shop.example')->firstOrFail();
         $this->assertSame('active', $recipe->status);
@@ -254,6 +319,119 @@ class ProductGalleryRecipeTrainerTest extends TestCase
             'action' => 'pre_click',
             'decision' => 'dom_changed',
         ]);
+    }
+
+    public function test_operator_hint_is_included_in_the_training_prompt(): void
+    {
+        $prompts = [];
+        ProductGalleryRecipeTrainerAgent::fake(function (string $prompt) use (&$prompts): array {
+            $prompts[] = $prompt;
+
+            return [
+                'gallery_present' => true,
+                'expected_image_count' => 3,
+                'expected_count_evidence' => 'n/a',
+                'pre_click_selectors' => [],
+                'collect_selectors' => ['.gallery img'],
+                'thumbnail_selectors' => [],
+                'open_selectors' => [],
+                'next_selectors' => [],
+                'attributes' => ['src'],
+                'max_thumbnail_clicks' => 0,
+                'max_next_clicks' => 0,
+                'wait_after_click_ms' => 100,
+                'confidence' => 0.5,
+                'reason' => 'Candidate recipe.',
+            ];
+        })->preventStrayPrompts();
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('scout')->once()->andReturn([
+                'scout' => [
+                    'title' => 'Product',
+                    'fragments' => ['<div class="gallery"></div>'],
+                    'interactive_controls' => [],
+                    'network_image_samples' => [],
+                    'access_gate' => false,
+                    'rate_limited' => false,
+                ],
+                'diagnostics' => [],
+            ]);
+            $mock->shouldReceive('executeRecipe')->once()->andReturn([
+                'images' => ['https://cdn.example/one.jpg', 'https://cdn.example/two.jpg', 'https://cdn.example/three.jpg'],
+                'diagnostics' => [],
+            ]);
+        });
+
+        app(ProductGalleryRecipeTrainer::class)->train(
+            'https://hinted.example/product',
+            force: true,
+            userHint: 'На странице таблица с разными моделями.',
+        );
+
+        $this->assertNotEmpty($prompts);
+        $decoded = json_decode($prompts[0], true);
+        $this->assertSame('На странице таблица с разными моделями.', $decoded['operator_hint']);
+    }
+
+    public function test_retraining_reuses_the_callers_already_measured_old_recipe_result_instead_of_rerunning_it(): void
+    {
+        // Real production bug (2026-08-04): when a saved recipe is re-verified
+        // and found broken, the trainer used to independently re-execute that
+        // same (already-failing) recipe against the same URL a second time just
+        // to seed the partial-success fallback - a non-deterministic re-run of
+        // the very thing that just failed, which could spuriously report
+        // "success" with stale/mismatched images even though every real
+        // training round found nothing. The caller already has that
+        // measurement; the trainer should reuse it, not re-derive it.
+        ProductGalleryRecipe::query()->create([
+            'domain' => 'legacy.example',
+            'path_pattern' => '*',
+            'status' => 'active',
+            'recipe' => ['collect_selectors' => ['.old-gallery img'], 'confidence' => 0.8, 'reason' => 'Old.'],
+        ]);
+        ProductGalleryRecipeTrainerAgent::fake(fn (): array => [
+            'gallery_present' => true,
+            'expected_image_count' => 2,
+            'expected_count_evidence' => 'n/a',
+            'pre_click_selectors' => [],
+            'collect_selectors' => ['.still-broken img'],
+            'thumbnail_selectors' => [],
+            'open_selectors' => [],
+            'next_selectors' => [],
+            'attributes' => ['src'],
+            'max_thumbnail_clicks' => 0,
+            'max_next_clicks' => 0,
+            'wait_after_click_ms' => 100,
+            'confidence' => 0.5,
+            'reason' => 'Still nothing.',
+        ])->preventStrayPrompts();
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('scout')->once()->andReturn([
+                'scout' => [
+                    'fragments' => ['<div class="old-gallery"><img src="/one.jpg"></div>'],
+                    'interactive_controls' => [], 'network_image_samples' => [],
+                    'access_gate' => false, 'rate_limited' => false,
+                ],
+                'diagnostics' => [],
+            ]);
+            // Exactly one call per training round (3) - not 4, which would mean
+            // the old, already-failing recipe got silently re-run a second time.
+            $mock->shouldReceive('executeRecipe')->times(3)->andReturn([
+                'images' => [],
+                'diagnostics' => [],
+            ]);
+        });
+
+        $images = app(ProductGalleryRecipeTrainer::class)->train(
+            'https://legacy.example/product',
+            'automatic_failure',
+            force: true,
+            previousRecipeImages: ['https://cdn.example/stale-but-real.jpg'],
+        );
+
+        $this->assertSame(['https://cdn.example/stale-but-real.jpg'], $images);
+        $version = ProductGalleryRecipeVersion::query()->where('domain', 'legacy.example')->latest('id')->firstOrFail();
+        $this->assertSame('partial', $version->status);
     }
 
     public function test_recipe_is_rejected_when_it_extracts_only_two_of_seven_observed_images(): void
@@ -313,12 +491,16 @@ class ProductGalleryRecipeTrainerTest extends TestCase
         $version = $recipe->versions()->latest('id')->firstOrFail();
         $this->assertSame('partial', $version->status);
         $this->assertFalse($version->result['validation']['passed']);
-        $this->assertSame(7, $version->result['validation']['expected']);
+        $this->assertSame(3, $version->result['validation']['expected']);
         $this->assertSame(2, $version->result['validation']['extracted']);
     }
 
-    public function test_preflight_skips_recipe_training_when_static_gallery_is_sufficient(): void
+    public function test_preflight_skips_recipe_training_when_static_gallery_is_sufficient_and_playwright_first_is_disabled(): void
     {
+        // gallery_prefer_playwright_first defaults to true (see the next
+        // test) - this covers the opt-out path, where a static_sufficient
+        // verdict is still trusted as-is.
+        AppSetting::put('ai.gallery_prefer_playwright_first', '0');
         ProductGalleryPreflightAgent::fake(fn (): array => [
             'decision' => 'static_sufficient',
             'gallery_likely' => true,
@@ -357,5 +539,116 @@ class ProductGalleryRecipeTrainerTest extends TestCase
             ->firstOrFail()->versions()->latest('id')->firstOrFail();
         $this->assertSame('skipped', $version->status);
         ProductGalleryRecipeTrainerAgent::assertNeverPrompted();
+    }
+
+    public function test_static_sufficient_with_a_real_gallery_trains_a_recipe_by_default(): void
+    {
+        // Real production decision (2026-08-06): the preflight's photo-count
+        // estimate can be inflated by thumbnails/CDN size-variants (smarty.cz
+        // case: predicted 8, Vision-verified 3 real photos). By default,
+        // finding a real gallery (gallery_likely) trains a proper, reusable,
+        // Vision-verified recipe instead of trusting that raw estimate - even
+        // though the preflight said static_sufficient.
+        ProductGalleryPreflightAgent::fake(fn (): array => [
+            'decision' => 'static_sufficient',
+            'gallery_likely' => true,
+            'hidden_images_likely' => false,
+            'interaction_required' => false,
+            'expected_image_count' => 8,
+            'evidence' => ['Eight img src references.'],
+            'confidence' => 0.97,
+            'reason' => 'Looks like enough static photos are already listed.',
+        ])->preventStrayPrompts();
+        ProductGalleryRecipeTrainerAgent::fake([[
+            'gallery_present' => true,
+            'expected_image_count' => 3,
+            'expected_count_evidence' => 'Three real product photos.',
+            'pre_click_selectors' => [],
+            'collect_selectors' => ['.gallery img'],
+            'thumbnail_selectors' => [],
+            'open_selectors' => [],
+            'next_selectors' => [],
+            'attributes' => ['src'],
+            'max_thumbnail_clicks' => 0,
+            'max_next_clicks' => 0,
+            'wait_after_click_ms' => 100,
+            'confidence' => 0.9,
+            'reason' => 'Trained recipe collects the three real photos.',
+        ]])->preventStrayPrompts();
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('scout')->once()->andReturn([
+                'scout' => [
+                    'fragments' => ['<div data-gallery></div>'],
+                    'access_gate' => false,
+                    'rate_limited' => false,
+                ],
+                'diagnostics' => [],
+            ]);
+            $mock->shouldReceive('executeRecipe')->once()->andReturn([
+                'images' => [
+                    'https://cdn.example/one.jpg',
+                    'https://cdn.example/two.jpg',
+                    'https://cdn.example/three.jpg',
+                ],
+            ]);
+        });
+
+        $images = app(ProductGalleryRecipeTrainer::class)->train(
+            'https://shop.example/product',
+            force: true,
+            context: ['static_image_urls' => ['https://cdn.example/front.jpg', 'https://cdn.example/back.jpg']],
+        );
+
+        $this->assertSame([
+            'https://cdn.example/one.jpg',
+            'https://cdn.example/two.jpg',
+            'https://cdn.example/three.jpg',
+        ], $images);
+        $recipe = ProductGalleryRecipe::query()->where('domain', 'shop.example')->firstOrFail();
+        $this->assertSame('active', $recipe->status);
+    }
+
+    public function test_preflight_does_not_count_two_scene7_renditions_of_one_photo_as_distinct(): void
+    {
+        $seenStaticUrls = null;
+        ProductGalleryPreflightAgent::fake(function (string $prompt) use (&$seenStaticUrls): array {
+            $seenStaticUrls = json_decode($prompt, true)['static_image_urls'] ?? null;
+
+            return [
+                'decision' => 'no_gallery',
+                'gallery_likely' => false,
+                'hidden_images_likely' => false,
+                'interaction_required' => false,
+                'expected_image_count' => 0,
+                'evidence' => [],
+                'confidence' => 0.9,
+                'reason' => 'Only one distinct photo, requested at two sizes.',
+            ];
+        })->preventStrayPrompts();
+        ProductGalleryRecipeTrainerAgent::fake()->preventStrayPrompts();
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('scout')->once()->andReturn([
+                'scout' => [
+                    'fragments' => ['<div data-gallery></div>'],
+                    'access_gate' => false,
+                    'rate_limited' => false,
+                ],
+                'diagnostics' => [],
+            ]);
+        });
+
+        app(ProductGalleryRecipeTrainer::class)->train(
+            'https://shop.example/product',
+            force: true,
+            context: ['static_image_urls' => [
+                'https://images.samsung.com/is/image/samsung/product?%241164_776_PNG%24=',
+                'https://images.samsung.com/is/image/samsung/product?$1164_776_PNG$',
+            ]],
+        );
+
+        $this->assertSame(
+            ['https://images.samsung.com/is/image/samsung/product'],
+            $seenStaticUrls,
+        );
     }
 }

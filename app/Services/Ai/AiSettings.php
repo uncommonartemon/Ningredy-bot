@@ -11,11 +11,13 @@ class AiSettings
 {
     public const DEFAULT_MAX_SEARCH_COST_USD = 0.30;
 
-    public const DEFAULT_SEARCH_MAX_SECONDS = 1200;
+    public const DEFAULT_SEARCH_MAX_SECONDS = 1800;
 
     public const DEFAULT_SEARCH_RESERVE_SECONDS = 120;
 
-    public const DEFAULT_PRODUCT_RESEARCH_TIMEOUT_SECONDS = 360;
+    public const DEFAULT_PRODUCT_RESEARCH_TIMEOUT_SECONDS = 900;
+
+    public const DEFAULT_PRODUCT_RESEARCH_IDLE_TIMEOUT_SECONDS = 90;
 
     public const DEFAULT_IMAGE_DISCOVERY_TIMEOUT_SECONDS = 180;
 
@@ -28,6 +30,10 @@ class AiSettings
     public const DEFAULT_BROWSER_SCOUT_TIMEOUT_SECONDS = 120;
 
     public const DEFAULT_GALLERY_TRAINING_MAX_ROUNDS = 3;
+
+    public const DEFAULT_GALLERY_MIN_SUCCESS_COUNT = 3;
+
+    public const GALLERY_MAX_IMAGE_COUNT = 10;
 
     public const GALLERY_BROWSER_AUTO = 'auto';
 
@@ -154,19 +160,44 @@ class AiSettings
         AppSetting::put('ai.fallback_sources_enabled', $enabled ? '1' : '0');
     }
 
+    /**
+     * The AI preflight's static_sufficient verdict is an estimate from raw
+     * DOM markup (thumbnails/size-variants can inflate it - see the smarty.cz
+     * "8 predicted, 3 real" case), not a verified count. When true, a
+     * static_sufficient verdict that also reports a real gallery
+     * (gallery_likely) is overridden into training a real, reusable
+     * Playwright recipe instead of trusting the estimate - slower and
+     * costlier per search, but the recipe is saved for reuse and the final
+     * count is Vision-verified rather than guessed. Explicit user tradeoff
+     * (2026-08-06); defaults to true.
+     */
+    public function galleryPreferPlaywrightFirst(): bool
+    {
+        $value = AppSetting::valueFor('ai.gallery_prefer_playwright_first');
+
+        return $value === null
+            ? true
+            : filter_var($value, FILTER_VALIDATE_BOOLEAN);
+    }
+
+    public function saveGalleryPreferPlaywrightFirst(bool $enabled): void
+    {
+        AppSetting::put('ai.gallery_prefer_playwright_first', $enabled ? '1' : '0');
+    }
+
     public function searchMaxSeconds(): int
     {
         return $this->integerSetting(
             'ai.search_max_seconds',
             (int) config('product-images.search_timing.max_seconds', self::DEFAULT_SEARCH_MAX_SECONDS),
             300,
-            1200,
+            1800,
         );
     }
 
     public function saveSearchMaxSeconds(?int $seconds): void
     {
-        $this->saveIntegerSetting('ai.search_max_seconds', $seconds, 300, 1200);
+        $this->saveIntegerSetting('ai.search_max_seconds', $seconds, 300, 1800);
     }
 
     public function searchReserveSeconds(): int
@@ -190,13 +221,28 @@ class AiSettings
             'ai.product_research_timeout_seconds',
             (int) config('product-images.search_timing.product_research_timeout_seconds', self::DEFAULT_PRODUCT_RESEARCH_TIMEOUT_SECONDS),
             60,
-            600,
+            900,
         );
     }
 
     public function saveProductResearchTimeoutSeconds(?int $seconds): void
     {
-        $this->saveIntegerSetting('ai.product_research_timeout_seconds', $seconds, 60, 600);
+        $this->saveIntegerSetting('ai.product_research_timeout_seconds', $seconds, 60, 900);
+    }
+
+    public function productResearchIdleTimeoutSeconds(): int
+    {
+        return $this->integerSetting(
+            'ai.product_research_idle_timeout_seconds',
+            (int) config('product-images.search_timing.product_research_idle_timeout_seconds', self::DEFAULT_PRODUCT_RESEARCH_IDLE_TIMEOUT_SECONDS),
+            30,
+            180,
+        );
+    }
+
+    public function saveProductResearchIdleTimeoutSeconds(?int $seconds): void
+    {
+        $this->saveIntegerSetting('ai.product_research_idle_timeout_seconds', $seconds, 30, 180);
     }
 
     public function imageDiscoveryTimeoutSeconds(): int
@@ -287,6 +333,21 @@ class AiSettings
     public function saveGalleryTrainingMaxRounds(?int $rounds): void
     {
         $this->saveIntegerSetting('ai.gallery_training_max_rounds', $rounds, 1, 4);
+    }
+
+    public function galleryMinSuccessCount(): int
+    {
+        return $this->integerSetting(
+            'ai.gallery_min_success_count',
+            self::DEFAULT_GALLERY_MIN_SUCCESS_COUNT,
+            1,
+            self::GALLERY_MAX_IMAGE_COUNT,
+        );
+    }
+
+    public function saveGalleryMinSuccessCount(?int $count): void
+    {
+        $this->saveIntegerSetting('ai.gallery_min_success_count', $count, 1, self::GALLERY_MAX_IMAGE_COUNT);
     }
 
     public function galleryBrowserMode(): string
