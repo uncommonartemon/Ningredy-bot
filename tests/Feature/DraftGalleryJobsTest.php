@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Jobs\ContinueDraftGallerySearch;
 use App\Jobs\RestageDraftGalleryPhotos;
 use App\Jobs\TopUpDraftGalleryPhotos;
 use App\Models\AiRun;
@@ -56,6 +57,41 @@ class DraftGalleryJobsTest extends TestCase
         (new TopUpDraftGalleryPhotos($draft->id, '100', $draft->telegram_update_id))->handle($images, $presenter, $telegram);
 
         $this->assertFalse(Cache::has("draft-gallery-topup:{$draft->id}:queued"));
+    }
+
+    public function test_continue_job_reuses_original_progress_message_and_calls_resume_pipeline(): void
+    {
+        $draft = $this->draft();
+        $draft->telegramUpdate()->update(['payload' => ['_progress_message_id' => 77]]);
+        $continueUpdate = TelegramUpdate::query()->create([
+            'update_id' => random_int(100_000, 999_999),
+            'telegram_user_id' => '1',
+            'chat_id' => '100',
+            'payload' => [],
+            'status' => 'completed',
+        ]);
+        Cache::put("draft-gallery-continue:{$draft->id}:queued", true, 600);
+        $images = $this->mock(ProductImageStorage::class);
+        $images->shouldReceive('continueStage')
+            ->once()
+            ->withArgs(fn (ProductDraft $argument, mixed $progress, int $updateId): bool =>
+                $argument->is($draft) && is_callable($progress) && $updateId === $continueUpdate->id
+            )
+            ->andReturn(0);
+        $presenter = $this->mock(DraftTelegramPresenter::class);
+        $presenter->shouldReceive('sendReview')->once();
+        $telegram = $this->mock(TelegramClient::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('editMessageText')
+                ->twice()
+                ->withArgs(fn (string $chatId, int $messageId): bool => $chatId === '100' && $messageId === 77)
+                ->andReturn(['ok' => true]);
+            $mock->shouldNotReceive('sendMessage');
+        });
+
+        (new ContinueDraftGallerySearch($draft->id, '100', $continueUpdate->id))
+            ->handle($images, $presenter, $telegram);
+
+        $this->assertFalse(Cache::has("draft-gallery-continue:{$draft->id}:queued"));
     }
 
     private function draft(): ProductDraft

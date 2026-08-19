@@ -4,6 +4,7 @@ namespace App\Services\Products;
 
 use App\Ai\Agents\ProductImageVisionAgent;
 use App\Models\AiRun;
+use App\Models\Category;
 use App\Models\ProductDraft;
 use App\Services\Ai\AiSettings;
 use App\Services\Ai\OpenAiHeavyOperationGate;
@@ -36,6 +37,22 @@ class ProductImageVisionVerifier
         $maxCandidates = (int) config('product-images.vision_candidates', 4);
         $minimumScore = (int) config('product-images.vision_min_score', 60);
         $candidates = array_slice($candidates, 0, $maxCandidates);
+        $candidates = array_map(function (array $candidate) use ($draft): array {
+            $pageContext = is_array($candidate['page_source_context'] ?? null)
+                ? $candidate['page_source_context']
+                : null;
+            $pageIdentityConfirmed = $pageContext !== null
+                && ! $this->identityMatcher->conflictsSource($draft, $pageContext)
+                && $this->identityMatcher->supportsSource($draft, $pageContext);
+
+            return [
+                ...$candidate,
+                'product_page_url' => $candidate['product_page_url']
+                    ?? ($pageContext['url'] ?? $candidate['page_source_url'] ?? null),
+                'source_identity_confirmed' => (bool) ($candidate['source_identity_confirmed'] ?? false)
+                    || $pageIdentityConfirmed,
+            ];
+        }, $candidates);
         $settings = app(AiSettings::class);
         $timeBudget = app(ProductSearchTimeBudget::class);
 
@@ -123,7 +140,8 @@ class ProductImageVisionVerifier
                         ...$review,
                         'hero' => $review['kind'] === 'product'
                             && in_array($review['view'], ['front', 'angle'], true),
-                        'source_supported' => $this->identityMatcher->supports($draft, (string) ($candidate['source_url'] ?? '')),
+                        'source_supported' => (bool) ($candidate['source_identity_confirmed'] ?? false)
+                            || $this->identityMatcher->supports($draft, (string) ($candidate['source_url'] ?? '')),
                     ];
                 });
 
@@ -183,9 +201,15 @@ class ProductImageVisionVerifier
         $specifications = collect($draft->specifications ?? [])->map(function (array $item): string {
             return trim(($item['name'] ?? '').': '.($item['value'] ?? ''), ': ');
         })->filter()->take(12)->implode('; ');
+        $categoryHint = Category::query()
+            ->where('slug', trim((string) $draft->category))
+            ->value('product_search_hint');
+        $categoryHint = trim((string) $categoryHint);
         $candidateSources = collect($candidates)->map(
             fn (array $candidate, int $index): string => '#'.($index + 1)
                 .' source: '.($candidate['source_url'] ?? 'unknown')
+                .' product_page: '.($candidate['product_page_url'] ?? 'unknown')
+                .' exact_page_identity: '.(($candidate['source_identity_confirmed'] ?? false) ? 'yes' : 'no')
                 .' resolution: '.($candidate['width'] ?? '?').'x'.($candidate['height'] ?? '?')
                 .(($candidate['confirmed_gallery'] ?? false)
                     ? ' confirmed_playwright_gallery_frame: yes; best resolution exposed by this complete gallery'
@@ -198,6 +222,7 @@ class ProductImageVisionVerifier
             Brand: {$draft->brand}
             Model: {$draft->model}
             Required color/version: {$draft->color}
+            Trusted category instruction: {$categoryHint}
 
             Judge every source type by identical rules. A manufacturer, marketplace, or retailer URL is evidence only
             and must never override a visible mismatch. A visibly different product color requires color_match=false.
@@ -213,6 +238,10 @@ class ProductImageVisionVerifier
             usefulness rather than penalizing the angle itself. Still reject a confirmed-gallery frame that is a logo,
             banner, screenshot, accessory-only shot, or that visibly conflicts on model or color - gallery membership
             is not identity or color evidence by itself, only a pass on resolution and camera angle.
+            A candidate marked exact_page_identity=yes came from a page whose URL/title deterministically contains
+            the requested SKU/MPN/model. Do not require that identifier to be visibly printed on the photographed
+            product. Use that page evidence for identity unless the pixels visibly contradict it. It never overrides
+            a visible conflict, wrong color, wrong product type, prohibited packaging, or insufficient quality.
 
             Prefer a sharp, clean, full-product hero view first, then distinct useful angles/details. Near-identical
             shots, resized copies, and crops of the same photograph must not all be selected. Do not infer exact model,

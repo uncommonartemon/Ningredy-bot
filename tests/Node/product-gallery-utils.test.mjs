@@ -2,15 +2,41 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import {
+    galleryCollectionTarget,
+    galleryContextLooksExcluded,
     galleryProbeMinimumSide,
     imageAssetKey,
+    imageDimensionsMeetMinimum,
     isAllowedProductNavigation,
     normalizeImageCandidate,
+    normalizeRecipeActions,
+    prioritizeCandidateRenditions,
+    recipeActionOpensGallery,
+    recipeActionPlanStatus,
+    recipeActionTraversesGallery,
     urlQualityScore,
     withUpscaledSizeParam,
 } from '../../scripts/product-gallery-utils.mjs';
 
 const productUrl = 'https://www.cdw.com/product/example/8501080';
+test('rejects recommendation, related-product and review carousel contexts', () => {
+    assert.equal(
+        galleryContextLooksExcluded('What other items do customers buy after viewing this item?'),
+        true,
+    );
+    assert.equal(galleryContextLooksExcluded('relatedProducts a-carousel'), true);
+    assert.equal(galleryContextLooksExcluded('customer review media slider'), true);
+    assert.equal(galleryContextLooksExcluded('sponsored product carousel'), true);
+});
+
+test('keeps the primary product media gallery context', () => {
+    assert.equal(
+        galleryContextLooksExcluded('imageBlock product media gallery thumbnails'),
+        false,
+    );
+    assert.equal(galleryContextLooksExcluded('main lightbox zoom viewer'), false);
+});
+
 
 test('allows a same-product internal gallery route but rejects unrelated navigation', () => {
     const specification = 'https://us.msi.com/Laptop/Katana-17-HX-B14WX/Specification';
@@ -47,6 +73,117 @@ test('accepts extensionless dynamic image URLs', () => {
     );
 });
 
+test('upgrades every B&H thumbnail rendition to the verified 2500px endpoint', () => {
+    const page = 'https://www.bhphotovideo.com/c/product/1932364-REG/example.html/accessories';
+
+    assert.equal(
+        normalizeImageCandidate(
+            'https://static.bhphoto.com/images/multiple_images/thumbnails/1767181436_IMG_2646502.jpg',
+            page,
+        ),
+        'https://static.bhphoto.com/images/multiple_images/images2500x2500/1767181436_IMG_2646502.jpg',
+    );
+    assert.equal(
+        normalizeImageCandidate(
+            'https://static.bhphoto.com/images/multiple_images/images500x500/1767181436_IMG_2646502.jpg',
+            page,
+        ),
+        'https://static.bhphoto.com/images/multiple_images/images2500x2500/1767181436_IMG_2646502.jpg',
+    );
+    assert.equal(
+        normalizeImageCandidate(
+            'https://static.bhphoto.com/images/images750x750/1767181363_1932364.jpg',
+            page,
+        ),
+        'https://static.bhphoto.com/images/images2500x2500/1767181363_1932364.jpg',
+    );
+});
+
+test('requires the complete ordered action plan regardless of already collected URLs', () => {
+    const actions = [
+        {
+            kind: 'click',
+            selector: 'button[data-gallery]',
+            index: 0,
+            limit: 1,
+            wait_after_ms: 100,
+            purpose: 'Open the expanded gallery',
+        },
+        {
+            kind: 'click_each',
+            selector: 'button[data-thumbnail]',
+            index: 0,
+            limit: 16,
+            wait_after_ms: 100,
+            purpose: 'Click each thumbnail',
+        },
+    ];
+    const opener = {
+        action: 'click',
+        action_index: 0,
+        clicked: true,
+        changed: true,
+        selector_match_count: 1,
+    };
+    const oneThumbnail = {
+        action: 'click_each',
+        action_index: 1,
+        repetition: 0,
+        clicked: true,
+        changed: true,
+        selector_match_count: 16,
+    };
+
+    assert.equal(recipeActionOpensGallery(actions[0]), true);
+    assert.equal(recipeActionTraversesGallery(actions[0]), false);
+    assert.equal(recipeActionTraversesGallery(actions[1]), true);
+    const partial = recipeActionPlanStatus({
+        actions,
+        actionTrace: [opener, oneThumbnail],
+    });
+    assert.equal(partial.complete, false);
+    assert.equal(partial.completed_actions, 1);
+    assert.equal(partial.steps[1].required_clicks, 16);
+
+    const complete = recipeActionPlanStatus({
+        actions,
+        actionTrace: [
+            opener,
+            ...Array.from({ length: 16 }, (_, repetition) => ({
+                ...oneThumbnail,
+                repetition,
+            })),
+        ],
+    });
+    assert.equal(complete.complete, true);
+    assert.equal(complete.completed_actions, 2);
+});
+
+test('requires arrow traversal to reach no-change or its declared limit', () => {
+    const actions = [{
+        kind: 'click_until_no_change',
+        selector: 'button.next',
+        index: 0,
+        limit: 5,
+        wait_after_ms: 100,
+        purpose: 'Traverse next until exhausted',
+    }];
+    const changed = (repetition) => ({
+        action: 'click_until_no_change',
+        action_index: 0,
+        repetition,
+        clicked: true,
+        changed: true,
+        selector_match_count: 1,
+    });
+
+    assert.equal(recipeActionPlanStatus({ actions, actionTrace: [changed(0), changed(1)] }).complete, false);
+    assert.equal(recipeActionPlanStatus({
+        actions,
+        actionTrace: [changed(0), { ...changed(1), changed: false }],
+    }).complete, true);
+});
+
 test('lowers the probe threshold only for a structurally complete Playwright gallery', () => {
     assert.equal(galleryProbeMinimumSide({
         minimumSide: 600,
@@ -64,6 +201,27 @@ test('lowers the probe threshold only for a structurally complete Playwright gal
     }), 600);
 });
 
+test('keeps narrow side views only inside a confirmed complete gallery', () => {
+    assert.equal(imageDimensionsMeetMinimum({
+        width: 720,
+        height: 120,
+        minimumSide: 400,
+        confirmedGallery: true,
+    }), true);
+    assert.equal(imageDimensionsMeetMinimum({
+        width: 720,
+        height: 120,
+        minimumSide: 400,
+        confirmedGallery: false,
+    }), false);
+    assert.equal(imageDimensionsMeetMinimum({
+        width: 720,
+        height: 90,
+        minimumSide: 400,
+        confirmedGallery: true,
+    }), false);
+});
+
 test('rejects known non-image resources before the browser probe', () => {
     assert.equal(normalizeImageCandidate('/manual.pdf', productUrl), null);
     assert.equal(normalizeImageCandidate('/assets/logo.svg', productUrl), null);
@@ -78,6 +236,15 @@ test('uses browser-valid quoted attribute selectors for non-photo media', () => 
     assert.match(extractor, /\[class\*="video" i\]/);
     assert.match(extractor, /\[class\*="360" i\]/);
 });
+
+test('counts Swiper data-image frames and declared product gallery size', () => {
+    const extractor = readFileSync(new URL('../../scripts/extract-product-gallery.mjs', import.meta.url), 'utf8');
+
+    assert.match(extractor, /\.swiper-slide\[data-image\]/);
+    assert.match(extractor, /dataImageCount/);
+    assert.match(extractor, /declaredImageCount/);
+});
+
 test('deduplicates resized dynamic-image variants without merging gallery frames', () => {
     const original = 'https://webobjects2.cdw.com/is/image/CDW/8501080a';
     const thumbnail = original+'?$product-200x144$';
@@ -142,6 +309,34 @@ test('scores a Shopify filename-suffix variant by its encoded width', () => {
     );
 });
 
+test('probes every Shopify gallery frame before extra renditions consume the budget', () => {
+    const candidates = [];
+
+    for (let frame = 1; frame <= 13; frame++) {
+        for (const width of [246, 493, 600, 823, 1100, 1445, 1680, 2200]) {
+            candidates.push(`https://shop.example/cdn/shop/files/frame-${frame}.jpg?width=${width}`);
+        }
+    }
+
+    const prioritized = prioritizeCandidateRenditions(candidates);
+    const firstPass = prioritized.slice(0, 13);
+
+    assert.equal(new Set(firstPass.map(imageAssetKey)).size, 13);
+    assert.ok(firstPass.every((url) => url.endsWith('width=2200')));
+});
+
+test('stops gallery traversal at the observed target instead of an unreachable runner limit', () => {
+    assert.equal(galleryCollectionTarget(20, 13), 13);
+    assert.equal(galleryCollectionTarget(10, 13), 10);
+    assert.equal(galleryCollectionTarget(10, 0), 10);
+});
+
+test('never sends a complete srcset value to URL normalization as one image', () => {
+    const extractor = readFileSync(new URL('../../scripts/extract-product-gallery.mjs', import.meta.url), 'utf8');
+
+    assert.match(extractor, /\['srcset', 'data-srcset'\]\.includes\(attribute\.toLowerCase\(\)\)/);
+});
+
 test('upscales a Shopify filename-suffix variant by stripping it down to the master asset', () => {
     assert.equal(
         withUpscaledSizeParam('https://vishalperipherals.com/cdn/shop/files/photo_180x.png?v=1'),
@@ -155,4 +350,149 @@ test('upscales a Shopify filename-suffix variant by stripping it down to the mas
         withUpscaledSizeParam('https://vishalperipherals.com/cdn/shop/files/photo.png?v=1'),
         null,
     );
+});
+
+test('retries a too-small UUID rendition through its large AVIF variant', () => {
+    assert.equal(
+        withUpscaledSizeParam(
+            'https://static01.example/productimages/01988206-a540-7b98-ad88-30febd1c240b_720.jpeg',
+        ),
+        'https://static01.example/productimages/01988206-a540-7b98-ad88-30febd1c240b_2880.avif',
+    );
+});
+
+test('deduplicates named rendition directories and keeps xlarge ahead of large', () => {
+    const large = 'https://cdn.example/Images/Product/Default/large/108438004_8959892653.jpg';
+    const xlarge = 'https://cdn.example/Images/Product/Default/xlarge/108438004_8959892653.jpg';
+    const other = 'https://cdn.example/Images/Product/Default/xlarge/another-frame.jpg';
+
+    assert.equal(imageAssetKey(large), imageAssetKey(xlarge));
+    assert.notEqual(imageAssetKey(xlarge), imageAssetKey(other));
+    assert.ok(urlQualityScore(xlarge) > urlQualityScore(large));
+});
+
+test('deduplicates BigCommerce Stencil WxH/Nw path-segment renditions and keeps the largest', () => {
+    // Regression: a real fleetnetwork.ca search staged the same hero photo
+    // four times (500x500, 640w, 840w, 1280x1280) as distinct gallery
+    // frames. The size sits in its own path segment between "/stencil/" and
+    // "/products/", not adjacent to the filename like the named
+    // /large//xlarge/ buckets above, and not a query param either.
+    const thumb = 'https://cdn11.bigcommerce.com/s-xwx16vh8tc/images/stencil/500x500/products/689686/3683749/1086710301__09195.1766340706.jpg?c=2';
+    const srcsetMid = 'https://cdn11.bigcommerce.com/s-xwx16vh8tc/images/stencil/640w/products/689686/3683749/1086710301__09195.1766340706.jpg?c=2';
+    const zoom = 'https://cdn11.bigcommerce.com/s-xwx16vh8tc/images/stencil/1280x1280/products/689686/3683749/1086710301__09195.1766340706.jpg?c=2';
+    const otherAngle = 'https://cdn11.bigcommerce.com/s-xwx16vh8tc/images/stencil/1280x1280/products/689686/3683750/1086710301__24458.1766340706.jpg?c=2';
+
+    assert.equal(imageAssetKey(thumb), imageAssetKey(srcsetMid));
+    assert.equal(imageAssetKey(srcsetMid), imageAssetKey(zoom));
+    assert.notEqual(imageAssetKey(zoom), imageAssetKey(otherAngle));
+    assert.ok(urlQualityScore(zoom) > urlQualityScore(srcsetMid));
+    assert.ok(urlQualityScore(srcsetMid) > urlQualityScore(thumb));
+});
+
+test('deduplicates UUID filename renditions and keeps the larger rendition', () => {
+    const frame = '01988206-a137-7bfd-912b-69d69304d643';
+    const thumb = `https://static01.example/productimages/${frame}_720.jpeg`;
+    const expanded = `https://static01.example/productimages/${frame}_sea.jpeg`;
+    const alternateFormat = `https://static01.example/productimages/${frame}_1000.avif`;
+    const other = 'https://static01.example/productimages/01988206-a1a1-73fc-a9cf-83cc4b7d9198_720.jpeg';
+
+    assert.equal(imageAssetKey(thumb), imageAssetKey(expanded));
+    assert.equal(imageAssetKey(expanded), imageAssetKey(alternateFormat));
+    assert.notEqual(imageAssetKey(expanded), imageAssetKey(other));
+    assert.ok(urlQualityScore(expanded) > urlQualityScore(thumb));
+});
+
+test('respects the explicit action plan and keeps the automatic opener only for legacy traversal', () => {
+    const extractor = readFileSync(new URL('../../scripts/extract-product-gallery.mjs', import.meta.url), 'utf8');
+    const actionFallback = extractor.indexOf('await attemptExpandedGallery(priorViewerOpenAction)');
+    const actionTraversal = extractor.indexOf('const locator = page.locator(action.selector)', actionFallback);
+    const legacyFallback = extractor.indexOf('await attemptExpandedGallery();');
+    const legacyTraversal = extractor.indexOf('const thumbnails = thumbnailSelectors.length', legacyFallback);
+
+    assert.ok(actionFallback >= 0 && actionFallback < actionTraversal);
+    assert.match(extractor, /!expandedGalleryAttempted && priorViewerOpenAction && actionTraversesGallery/);
+    assert.match(extractor, /strictRecipe\s*\? \[\.\.\.new Set\(domImages\)\]/);
+    assert.match(extractor, /source: domKeys\.has\(key\) \? 'recipe_dom'/);
+    assert.ok(legacyFallback >= 0 && legacyFallback < legacyTraversal);
+    assert.match(extractor, /includePageFallbacks: !strictRecipe/);
+    assert.doesNotMatch(extractor, /break actionPlanLoop/);
+    assert.doesNotMatch(extractor, /enoughCollected\(\) && thumbnailClicks/);
+});
+
+test('sanitize strips inline svg from DOM fragments sent to the AI trainer', () => {
+    // A single star-rating or icon svg can be thousands of characters of
+    // path/gradient data - never a gallery photo source in this pipeline
+    // (photos are always <img src>/network requests) but enough on its own
+    // to consume the whole 1600-char per-fragment budget before any of the
+    // actually useful text (captions, price, SKU) is reached.
+    const extractor = readFileSync(new URL('../../scripts/extract-product-gallery.mjs', import.meta.url), 'utf8');
+    const sanitizeStart = extractor.indexOf('const sanitize = (element) => {');
+    const sanitizeEnd = extractor.indexOf('const visible = (element) => {', sanitizeStart);
+    const sanitizeBody = extractor.slice(sanitizeStart, sanitizeEnd);
+
+    assert.match(sanitizeBody, /querySelectorAll\('script,style,noscript,iframe,object,embed,form,input,textarea,svg'\)/);
+});
+
+test('scopes video and 360 filtering to standalone media items', () => {
+    const extractor = readFileSync(new URL('../../scripts/extract-product-gallery.mjs', import.meta.url), 'utf8');
+
+    assert.match(extractor, /element\.closest\?\.\('video,\[data-type\],\[data-media-type\],li,figure,\[role="option"\]'/);
+    assert.match(extractor, /li\[class\*="video" i\],figure\[class\*="video" i\],\[role="option"\]\[class\*="video" i\]/);
+    assert.doesNotMatch(extractor, /element\.closest\?\.\('\[class\*="video" i\],\[class\*="360" i\]'/);
+});
+
+test('normalizes the safe ordered AI action plan and rejects executable selectors', () => {
+    const actions = normalizeRecipeActions([
+        {
+            kind: 'click',
+            selector: ' button[data-gallery] ',
+            index: 99,
+            limit: 0,
+            wait_after_ms: 9999,
+            purpose: 'Open the gallery',
+        },
+        {
+            kind: 'click_each',
+            selector: '[data-thumbnail]',
+            index: 0,
+            limit: 8,
+            wait_after_ms: 150,
+            purpose: 'Visit each photo',
+        },
+        {
+            kind: 'click',
+            selector: 'a[href="javascript:alert(1)"]',
+            index: 0,
+            limit: 1,
+            wait_after_ms: 100,
+            purpose: 'Unsafe',
+        },
+        {
+            kind: 'evaluate',
+            selector: '.gallery',
+            index: 0,
+            limit: 1,
+            wait_after_ms: 100,
+            purpose: 'Unsupported',
+        },
+    ]);
+
+    assert.deepEqual(actions, [
+        {
+            kind: 'click',
+            selector: 'button[data-gallery]',
+            index: 20,
+            limit: 1,
+            wait_after_ms: 1500,
+            purpose: 'Open the gallery',
+        },
+        {
+            kind: 'click_each',
+            selector: '[data-thumbnail]',
+            index: 0,
+            limit: 8,
+            wait_after_ms: 150,
+            purpose: 'Visit each photo',
+        },
+    ]);
 });

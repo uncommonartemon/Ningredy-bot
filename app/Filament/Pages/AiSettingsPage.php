@@ -62,6 +62,8 @@ class AiSettingsPage extends Page implements HasForms
             'browser_scout_timeout_seconds' => $settings->browserScoutTimeoutSeconds(),
             'gallery_training_max_rounds' => $settings->galleryTrainingMaxRounds(),
             'gallery_min_success_count' => $settings->galleryMinSuccessCount(),
+            'image_minimum_side' => $settings->imageMinimumSide(),
+            'confirmed_gallery_minimum_side' => $settings->confirmedGalleryMinimumSide(),
         ]);
     }
 
@@ -163,6 +165,22 @@ class AiSettingsPage extends Page implements HasForms
                             ->default(AiSettings::DEFAULT_GALLERY_MIN_SUCCESS_COUNT)
                             ->required()
                             ->helperText('Рецепт засчитан успешным, если извлёк хотя бы столько разных фото (максимум всегда '.AiSettings::GALLERY_MAX_IMAGE_COUNT.').'),
+                        TextInput::make('image_minimum_side')
+                            ->label('Минимальная сторона обычного фото, px')
+                            ->numeric()
+                            ->minValue(AiSettings::MIN_IMAGE_SIDE)
+                            ->maxValue(AiSettings::MAX_IMAGE_SIDE)
+                            ->default(AiSettings::DEFAULT_IMAGE_MINIMUM_SIDE)
+                            ->required()
+                            ->helperText('Применяется к статичным фото, резервному поиску, Vision и проверке перед публикацией.'),
+                        TextInput::make('confirmed_gallery_minimum_side')
+                            ->label('Минимальная сторона подтверждённого слайдера, px')
+                            ->numeric()
+                            ->minValue(AiSettings::MIN_IMAGE_SIDE)
+                            ->maxValue(AiSettings::MAX_IMAGE_SIDE)
+                            ->default(AiSettings::DEFAULT_CONFIRMED_GALLERY_MINIMUM_SIDE)
+                            ->required()
+                            ->helperText('Пониженный порог только для полной Playwright-галереи точной модели. Значение выше общего минимума автоматически ограничивается общим.'),
                     ])
                     ->columns(2),
                 Section::make('Лимиты поиска')
@@ -320,6 +338,8 @@ class AiSettingsPage extends Page implements HasForms
         $settings->saveBrowserScoutTimeoutSeconds(isset($data['browser_scout_timeout_seconds']) ? (int) $data['browser_scout_timeout_seconds'] : null);
         $settings->saveGalleryTrainingMaxRounds(isset($data['gallery_training_max_rounds']) ? (int) $data['gallery_training_max_rounds'] : null);
         $settings->saveGalleryMinSuccessCount(isset($data['gallery_min_success_count']) ? (int) $data['gallery_min_success_count'] : null);
+        $settings->saveImageMinimumSide(isset($data['image_minimum_side']) ? (int) $data['image_minimum_side'] : null);
+        $settings->saveConfirmedGalleryMinimumSide(isset($data['confirmed_gallery_minimum_side']) ? (int) $data['confirmed_gallery_minimum_side'] : null);
 
         try {
             Artisan::call('queue:restart');

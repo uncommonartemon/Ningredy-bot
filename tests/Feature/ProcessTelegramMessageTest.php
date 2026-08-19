@@ -562,6 +562,32 @@ class ProcessTelegramMessageTest extends TestCase
             && ! str_contains((string) $request['text'], 'Повторю запрос автоматически'));
     }
 
+    public function test_failed_hook_finalizes_an_update_when_the_queue_rejects_it_before_handle_runs(): void
+    {
+        config(['services.telegram.bot_token' => 'test-token']);
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []])]);
+        $update = $this->update();
+        $update->update(['status' => 'processing', 'processed_at' => null]);
+        $run = AiRun::query()->create([
+            'telegram_update_id' => $update->id,
+            'provider' => 'openai',
+            'model' => 'gpt-test',
+            'status' => 'running',
+            'prompt' => 'stuck request',
+            'started_at' => now(),
+        ]);
+
+        (new ProcessTelegramMessage($update->id))->failed(new \RuntimeException('Too many attempts.'));
+
+        $this->assertSame('failed', $update->fresh()->status);
+        $this->assertSame('Too many attempts.', $update->fresh()->error);
+        $this->assertNotNull($update->fresh()->processed_at);
+        $this->assertSame('failed', $run->fresh()->status);
+        $this->assertSame('Too many attempts.', $run->fresh()->error);
+        $this->assertNotNull($run->fresh()->completed_at);
+        Http::assertSentCount(1);
+    }
+
     public function test_the_last_allowed_attempt_does_not_falsely_promise_another_automatic_retry(): void
     {
         // Real production bug (2026-08-04): tries=2, so the 2nd attempt's
@@ -691,7 +717,7 @@ class ProcessTelegramMessageTest extends TestCase
         $update = $this->update();
 
         $resolver = $this->mock(ProductImageResolver::class);
-        $resolver->shouldReceive('resolve')->once()->andReturn([]);
+        $resolver->shouldNotReceive('resolve');
         $imageStorage = $this->mock(ProductImageStorage::class);
         $imageStorage->shouldReceive('stage')->once()->andReturnUsing(function (ProductDraft $draft): int {
             $draft->update(['images_staged_at' => now()]);
@@ -719,6 +745,58 @@ class ProcessTelegramMessageTest extends TestCase
         $this->assertCount(10, ProductDraft::query()->firstOrFail()->image_urls);
     }
 
+    public function test_research_keeps_a_zero_photo_draft_pending_when_gallery_budget_stops(): void
+    {
+        ProductResearchAgent::fake([[
+            'status' => 'found',
+            'title' => 'Razer Blade 14 RTX 5070',
+            'brand' => 'Razer',
+            'model' => 'Blade 14',
+            'category' => 'laptops',
+            'product_type' => 'laptop',
+            'color' => 'Black',
+            'description' => 'Gaming laptop.',
+            'specifications' => [],
+            'sources' => [[
+                'title' => 'PBTech',
+                'url' => 'https://www.pbtech.com/product/NBKRAZ530633/model',
+                'type' => 'retailer',
+            ]],
+            'primary_source_url' => 'https://www.pbtech.com/product/NBKRAZ530633/model',
+            'official_source_url' => null,
+            'research_notes' => null,
+            'image_urls' => [],
+            'confidence' => 0.95,
+        ]]);
+        $update = $this->update();
+        $resolver = $this->mock(ProductImageResolver::class);
+        $resolver->shouldNotReceive('resolve');
+        $imageStorage = $this->mock(ProductImageStorage::class);
+        $imageStorage->shouldReceive('stage')->once()->andReturnUsing(function (ProductDraft $draft): int {
+            $draft->update([
+                'images_staged_at' => now(),
+                'gallery_status' => 'missing',
+                'gallery_search_stop_reason' => 'cost_budget',
+            ]);
+
+            return 0;
+        });
+
+        $result = json_decode((new ResearchProduct($update, $resolver, imageStorage: $imageStorage))->handle(new Request([
+            'query' => 'Razer Blade 14 RTX 5070',
+        ])), true, flags: JSON_THROW_ON_ERROR);
+
+        $draft = ProductDraft::query()->firstOrFail();
+
+        $this->assertTrue($result['ok']);
+        $this->assertSame('gallery_search_paused', $result['status']);
+        $this->assertSame($draft->id, $result['draft_id']);
+        $this->assertSame(0, $result['image_count']);
+        $this->assertSame('pending_review', $draft->status);
+        $this->assertSame('cost_budget', $draft->gallery_search_stop_reason);
+        $this->assertNull($draft->reviewed_at);
+    }
+
     public function test_research_tool_never_returns_a_clarification_question_after_web_search(): void
     {
         ProductResearchAgent::fake([[
@@ -733,7 +811,7 @@ class ProcessTelegramMessageTest extends TestCase
             'product_type' => null,
             'color' => null,
             'description' => null,
-            'research_notes' => null,
+            'research_notes' => 'Exact requested configuration was not verified: available modules use a different form factor.',
             'specifications' => [],
             'sources' => [],
             'primary_source_url' => null,
@@ -752,6 +830,8 @@ class ProcessTelegramMessageTest extends TestCase
         $this->assertSame([
             'ok' => true,
             'status' => 'not_found',
+            'web_search_calls' => 0,
+            'reason' => 'Exact requested configuration was not verified: available modules use a different form factor.',
         ], $result);
         $this->assertSame(0, ProductDraft::query()->count());
     }
@@ -835,7 +915,7 @@ class ProcessTelegramMessageTest extends TestCase
         ]]);
         $update = $this->update();
         $resolver = $this->mock(ProductImageResolver::class);
-        $resolver->shouldReceive('resolve')->once()->andReturn([]);
+        $resolver->shouldNotReceive('resolve');
 
         $result = json_decode((new ResearchProduct($update, $resolver))->handle(new Request([
             'query' => 'Lenovo Legion 5 32 GB',
@@ -899,7 +979,7 @@ class ProcessTelegramMessageTest extends TestCase
         ]]);
         $update = $this->update();
         $resolver = $this->mock(ProductImageResolver::class);
-        $resolver->shouldReceive('resolve')->once()->andReturn([]);
+        $resolver->shouldNotReceive('resolve');
 
         json_decode((new ResearchProduct($update, $resolver))->handle(new Request([
             'query' => 'Lenovo Legion 5 32 GB',

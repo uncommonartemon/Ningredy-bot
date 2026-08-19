@@ -17,7 +17,7 @@ class ProductDraft extends Model
         'excluded_gallery_source_urls', 'excluded_gallery_image_urls', 'excluded_gallery_hashes',
         'telegram_review_chat_id', 'telegram_review_message_ids', 'telegram_review_has_media', 'telegram_review_caption',
         'telegram_control_message_ids', 'telegram_review_finalized_at',
-        'images_staged_at', 'gallery_status', 'gallery_notes', 'confidence',
+        'images_staged_at', 'gallery_status', 'gallery_notes', 'gallery_search_stop_reason', 'confidence',
     ];
 
     protected function casts(): array

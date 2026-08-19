@@ -2,11 +2,14 @@
 
 namespace Tests\Feature;
 
+use App\Jobs\StoreProductImages;
 use App\Models\AiRun;
 use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
+use App\Services\Ai\AiSettings;
 use App\Services\Products\ProductDraftWorkflow;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Queue;
 use Tests\TestCase;
 
 class ProductDraftTypeTest extends TestCase
@@ -63,6 +66,82 @@ class ProductDraftTypeTest extends TestCase
         $this->assertSame('laptops', $product->category->slug);
     }
 
+    public function test_catalog_identifiers_are_saved_on_the_default_variant(): void
+    {
+        $draft = $this->draft('Lenovo LOQ 15APH8', '82XT003GUS', 'laptop');
+        $draft->update(['specifications' => [
+            ...$draft->specifications,
+            ['key' => 'sku', 'name' => 'SKU', 'value' => '82XT003GUS'],
+            ['key' => 'mpn', 'name' => 'MPN', 'value' => '82XT003GUS'],
+            ['key' => 'ean', 'name' => 'EAN', 'value' => '0197529234567'],
+        ]]);
+
+        $variant = app(ProductDraftWorkflow::class)->approve($draft->fresh())->defaultVariant;
+
+        $this->assertSame('82XT003GUS', $variant->sku);
+        $this->assertSame('82XT003GUS', $variant->mpn);
+        $this->assertSame('0197529234567', $variant->gtin);
+    }
+
+    public function test_complete_source_verified_gallery_uses_its_confirmed_minimum_side(): void
+    {
+        Queue::fake([StoreProductImages::class]);
+        config()->set('product-images.minimum_side', 450);
+        config()->set('product-images.browser_fallback.confirmed_gallery_minimum_side', 400);
+        $draft = $this->draft('Lenovo LOQ 15APH8', '82XT003GUS', 'laptop');
+        $draft->update(['gallery_status' => 'complete']);
+        $this->addMedia($draft, 420, 420, 'source_verified');
+
+        $product = app(ProductDraftWorkflow::class)->approve($draft->fresh());
+
+        $this->assertSame('published', $product->status);
+        $this->assertSame('approved', $draft->fresh()->status);
+        Queue::assertPushed(StoreProductImages::class);
+    }
+
+    public function test_unconfirmed_gallery_still_rejects_an_image_below_the_general_minimum_side(): void
+    {
+        Queue::fake([StoreProductImages::class]);
+        config()->set('product-images.minimum_side', 450);
+        config()->set('product-images.browser_fallback.confirmed_gallery_minimum_side', 400);
+        $draft = $this->draft('Lenovo LOQ 15APH8', '82XT003GUS', 'laptop');
+        $draft->update(['gallery_status' => 'complete']);
+        $this->addMedia($draft, 420, 420, 'verified');
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('меньше 450px');
+
+        app(ProductDraftWorkflow::class)->approve($draft->fresh());
+    }
+
+    public function test_source_verified_gallery_still_rejects_an_image_below_its_lower_minimum_side(): void
+    {
+        Queue::fake([StoreProductImages::class]);
+        config()->set('product-images.minimum_side', 450);
+        config()->set('product-images.browser_fallback.confirmed_gallery_minimum_side', 400);
+        $draft = $this->draft('Lenovo LOQ 15APH8', '82XT003GUS', 'laptop');
+        $draft->update(['gallery_status' => 'complete']);
+        $this->addMedia($draft, 99, 600, 'source_verified');
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('меньше 400px');
+
+        app(ProductDraftWorkflow::class)->approve($draft->fresh());
+    }
+
+    public function test_filament_image_minimum_setting_changes_the_approval_threshold(): void
+    {
+        Queue::fake([StoreProductImages::class]);
+        app(AiSettings::class)->saveImageMinimumSide(430);
+        $draft = $this->draft('Lenovo LOQ 15APH8', '82XT003GUS', 'laptop');
+        $this->addMedia($draft, 440, 440, 'verified');
+
+        $product = app(ProductDraftWorkflow::class)->approve($draft->fresh());
+
+        $this->assertSame('published', $product->status);
+        Queue::assertPushed(StoreProductImages::class);
+    }
+
     private function draft(string $title, string $model, ?string $productType, ?string $category = null): ProductDraft
     {
         $update = TelegramUpdate::query()->create([
@@ -83,7 +162,9 @@ class ProductDraftTypeTest extends TestCase
             'started_at' => now(),
         ]);
 
-        return ProductDraft::query()->create([
+        Queue::fake([StoreProductImages::class]);
+
+        $draft = ProductDraft::query()->create([
             'telegram_update_id' => $update->id,
             'ai_run_id' => $run->id,
             'requested_by_telegram_user_id' => '12345',
@@ -101,6 +182,31 @@ class ProductDraftTypeTest extends TestCase
             'sources' => [['title' => 'Store', 'url' => 'https://example.com/product']],
             'image_urls' => [],
             'confidence' => 0.9,
+        ]);
+        $this->addMedia($draft, 600, 600, 'verified');
+
+        return $draft;
+    }
+
+    private function addMedia(
+        ProductDraft $draft,
+        int $width,
+        int $height,
+        string $verificationStatus,
+    ): void {
+        $draft->media()->create([
+            'disk' => 'public',
+            'path' => 'drafts/'.$draft->id.'/test-'.$width.'x'.$height.'.webp',
+            'source_url' => 'https://example.com/test-'.$width.'x'.$height.'.webp',
+            'role' => 'primary',
+            'mime_type' => 'image/webp',
+            'width' => $width,
+            'height' => $height,
+            'file_size' => 1024,
+            'checksum' => hash('sha256', $draft->id.':'.$width.':'.$height.':'.$verificationStatus),
+            'verification_status' => $verificationStatus,
+            'sort_order' => 0,
+            'is_primary' => true,
         ]);
     }
 }

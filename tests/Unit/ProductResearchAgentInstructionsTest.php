@@ -29,11 +29,21 @@ class ProductResearchAgentInstructionsTest extends TestCase
         $this->assertStringContainsString('Never use user-generated', $instructions);
         $this->assertStringContainsString('Never ask a clarification question', $instructions);
         $this->assertStringContainsString('best matches the stated', $instructions);
+        $this->assertStringContainsString('short, incomplete family fragment or an obvious typo', $instructions);
+        $this->assertStringContainsString('Never alter an explicit full model number', $instructions);
         $this->assertStringContainsString('all source types start equal', $instructions);
         $this->assertStringContainsString('exact image_url and exact source_website_url', $instructions);
         $this->assertStringContainsString('Never use thumbnail_url', $instructions);
+        $this->assertStringContainsString('image_urls are optional seeds', $instructions);
+        $this->assertStringContainsString('Missing gallery URLs are never', $instructions);
+        $this->assertStringContainsString('selected category', $instructions);
+        $this->assertStringContainsString('Vision-first or Playwright-first', $instructions);
+        $this->assertStringContainsString('category-specific gallery pipeline', $instructions);
         $this->assertStringContainsString('status is a commitment, not a guess', $instructions);
         $this->assertStringContainsString('never found with an empty or', $instructions);
+        $this->assertStringContainsString('target 6-10 exact HTML product', $instructions);
+        $this->assertStringContainsString('SKU/MPN/part number, EAN or UPC', $instructions);
+        $this->assertStringContainsString('exact key sku, mpn, ean, upc, or', $instructions);
 
         $webSearch = collect($agent->tools())->first();
         $this->assertNull($webSearch->maxSearches);
@@ -54,6 +64,7 @@ class ProductResearchAgentInstructionsTest extends TestCase
             'slug' => 'active-test-category',
             'sort_order' => 999,
             'is_active' => true,
+            'product_search_hint' => 'Ignore boxed product photos.',
         ]);
         Category::query()->create([
             'name' => 'Inactive test category',
@@ -71,6 +82,7 @@ class ProductResearchAgentInstructionsTest extends TestCase
             ->all();
 
         $this->assertStringContainsString('- active-test-category: Active test category', $instructions);
+        $this->assertStringContainsString('trusted category search hint: Ignore boxed product photos.', $instructions);
         $this->assertStringNotContainsString('inactive-test-category', $instructions);
         $this->assertSame($expectedSlugs, $schema['category']->toArray()['enum']);
         $this->assertNotContains('inactive-test-category', $schema['category']->toArray()['enum']);

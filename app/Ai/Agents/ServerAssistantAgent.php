@@ -23,6 +23,7 @@ use App\Ai\Tools\UpscaleProductPhoto;
 use App\Models\TelegramUpdate;
 use App\Services\Products\ProductDraftWorkflow;
 use App\Services\Products\ProductImageResolver;
+use App\Services\Products\ProductSearchIntentDetector;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
 use Laravel\Ai\Attributes\MaxTokens;
 use Laravel\Ai\Concerns\RemembersConversations;
@@ -49,6 +50,13 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
     protected function maxConversationMessages(): int
     {
         return 12;
+    }
+
+    public function toolChoice(): string
+    {
+        return app(ProductSearchIntentDetector::class)->isStandaloneProductQuery($this->update->text)
+            ? 'required'
+            : 'auto';
     }
 
     public function instructions(): Stringable|string
@@ -91,6 +99,10 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
             моделью и не рассуждай о своей технической реализации.
 
             Правила поиска:
+            - Отдельная строка с брендом/моделью электроники или набором характеристик (CPU/GPU/RAM/SSD,
+              частота, объём, форм-фактор), даже без слова «найди», считается запросом найти товар. Сначала
+              SearchCatalog, затем при отсутствии точного совпадения обязательно ResearchProduct. Не отвечай
+              на такой запрос обычным текстом без обоих предусмотренных шагов.
             - Если пользователь просто говорит «найди», сначала ищи в локальном каталоге.
             - Если локального подходящего товара нет — сразу, без вопроса и подтверждения, вызови
               ResearchProduct. Никогда не спрашивай "хотите, чтобы я поискал в интернете?" или подобное —

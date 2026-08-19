@@ -4,8 +4,10 @@ namespace App\Services\Products;
 
 use App\Ai\Agents\ProductImageDiscoveryAgent;
 use App\Models\AiRun;
+use App\Models\Category;
 use App\Models\ProductDraft;
 use App\Services\Ai\AiSettings;
+use App\Services\Ai\AiErrorPresenter;
 use App\Services\Ai\OpenAiHeavyOperationGate;
 use App\Services\Ai\ProductSearchTimeBudget;
 use Illuminate\Support\Facades\Log;
@@ -17,21 +19,45 @@ class ProductImageCandidateDiscovery
     /** @var array<string, string> */
     private array $sourcePagesByImageUrl = [];
 
+    /** @var array<string, array<string, mixed>> */
+    private array $sourceContextsByImageUrl = [];
+
+    private bool $terminalFailure = false;
+
     public function __construct(
         private readonly ProductImageResolver $resolver,
         private readonly WikimediaImageSearch $wikimedia,
         private readonly ProductSourcePriority $sourcePriority,
+        private readonly AiErrorPresenter $errors,
     ) {}
 
     public function sourcePageForImage(string $imageUrl): ?string
     {
-        return $this->sourcePagesByImageUrl[$imageUrl] ?? null;
+        return $this->sourcePagesByImageUrl[ProductImageStorage::normalizeCandidateUrl($imageUrl)] ?? null;
+    }
+
+    /** @return array<string, mixed>|null */
+    public function sourceContextForImage(string $imageUrl): ?array
+    {
+        return $this->sourceContextsByImageUrl[ProductImageStorage::normalizeCandidateUrl($imageUrl)] ?? null;
+    }
+
+    public function hasTerminalFailure(): bool
+    {
+        return $this->terminalFailure;
     }
 
     /** @return array<int, string> */
     /** @param null|callable(string): void $progress */
-    public function find(ProductDraft $draft, array $excludedUrls = [], bool $skipKnownSources = false, ?callable $progress = null, ?int $telegramUpdateId = null): array
-    {
+    public function find(
+        ProductDraft $draft,
+        array $excludedUrls = [],
+        bool $skipKnownSources = false,
+        ?callable $progress = null,
+        ?int $telegramUpdateId = null,
+        array $additionalExcludedSourceUrls = [],
+        int $searchAttempt = 0,
+    ): array {
         // Callers acting long after the draft's original search (retry/top-up
         // buttons pressed minutes or hours later) must pass their own fresh
         // update id here - falling back to the draft's original one would
@@ -39,13 +65,23 @@ class ProductImageCandidateDiscovery
         // already ended, making canStart() report zero time left immediately.
         $telegramUpdateId ??= $draft->telegram_update_id;
         $this->sourcePagesByImageUrl = [];
+        $this->sourceContextsByImageUrl = [];
+        $this->terminalFailure = false;
         $excludedUrls = collect($excludedUrls)
             ->filter(fn (mixed $url): bool => is_string($url) && $url !== '')
             ->unique()
             ->values()
             ->all();
+        $knownDraftSourceUrls = $skipKnownSources
+            ? collect($draft->sources ?? [])
+                ->filter(fn (mixed $source): bool => is_array($source) && is_string($source['url'] ?? null))
+                ->pluck('url')
+                ->all()
+            : [];
         $excludedSourceUrls = collect([
             ...($draft->excluded_gallery_source_urls ?? []),
+            ...$additionalExcludedSourceUrls,
+            ...$knownDraftSourceUrls,
             ...array_map(fn (string $domain): string => 'https://'.$domain, $this->sourcePriority->blockedDomains()),
         ])
             ->filter(fn (mixed $url): bool => is_string($url) && $url !== '')
@@ -96,7 +132,7 @@ class ProductImageCandidateDiscovery
         );
         $provider = $settings->providerFor('product_image_discovery');
         $model = $settings->modelFor('product_image_discovery');
-        $prompt = $this->prompt($draft, $excludedUrls, $excludedSourceUrls);
+        $prompt = $this->prompt($draft, $excludedUrls, $excludedSourceUrls, $searchAttempt);
         $cached = AiRun::query()
             ->where('telegram_update_id', $telegramUpdateId)
             ->where('provider', $provider)
@@ -109,7 +145,7 @@ class ProductImageCandidateDiscovery
         if ($cached && is_array($cached->response)) {
             return $this->withoutExcluded($this->sourcePriority->sortUrls([
                 ...$availableUrls,
-                ...$this->candidateUrls($cached->response, $draft, $sources, $progress, $telegramUpdateId),
+                ...$this->candidateUrls($cached->response, $draft, $sources, $progress, $telegramUpdateId, $excludedSourceUrls),
             ], $draft->brand, $sources), $excludedUrls);
         }
 
@@ -198,9 +234,11 @@ class ProductImageCandidateDiscovery
 
             return $this->withoutExcluded($this->sourcePriority->sortUrls([
                 ...$availableUrls,
-                ...$this->candidateUrls($data, $draft, $sources, $progress, $telegramUpdateId),
+                ...$this->candidateUrls($data, $draft, $sources, $progress, $telegramUpdateId, $excludedSourceUrls),
             ], $draft->brand, $sources), $excludedUrls);
         } catch (Throwable $exception) {
+            $presented = $this->errors->present($exception);
+            $this->terminalFailure = ! ($presented['retryable'] ?? false);
             $run->update([
                 'status' => 'failed',
                 'error' => mb_substr($exception->getMessage(), 0, 5000),
@@ -211,7 +249,9 @@ class ProductImageCandidateDiscovery
                 'available_candidates' => count($availableUrls),
                 'error' => $exception->getMessage(),
             ]);
-            $progress?->__invoke('Дополнительный AI-поиск не ответил вовремя; продолжаю без него, основной запрос не перезапускаю.');
+            $progress?->__invoke($this->terminalFailure
+                ? 'Дополнительный AI-поиск остановлен: '.($presented['message'] ?? $exception->getMessage())
+                : 'Дополнительный AI-поиск временно недоступен; сохраняю текущий результат.');
 
             return $availableUrls;
         }
@@ -268,7 +308,7 @@ class ProductImageCandidateDiscovery
     }
 
     /** @param array<int, string> $excludedUrls @param array<int, string> $excludedSourceUrls */
-    private function prompt(ProductDraft $draft, array $excludedUrls = [], array $excludedSourceUrls = []): string
+    private function prompt(ProductDraft $draft, array $excludedUrls = [], array $excludedSourceUrls = [], int $searchAttempt = 0): string
     {
         $specifications = collect($draft->specifications ?? [])
             ->map(fn (mixed $item): string => is_array($item)
@@ -284,6 +324,9 @@ class ProductImageCandidateDiscovery
             ->implode("\n");
         $excluded = collect($excludedUrls)->take(20)->implode("\n");
         $excludedSources = collect($excludedSourceUrls)->take(20)->implode("\n");
+        $attemptInstruction = $searchAttempt > 0
+            ? "Independent fallback search pass: {$searchAttempt}. Return new sources not excluded above."
+            : '';
 
         return <<<PROMPT
             [product-image-discovery:v8]
@@ -299,6 +342,7 @@ class ProductImageCandidateDiscovery
             {$excluded}
             Previously rejected source pages/domains that must not be searched again:
             {$excludedSources}
+            {$attemptInstruction}
 
             Search the exact model and required color/version using professional manufacturer, retailer, or marketplace
             product pages. Do not prefer a source by its type; extraction history is ranked by the application. Never use
@@ -339,15 +383,25 @@ class ProductImageCandidateDiscovery
     }
 
     /** @param array<string, mixed> $data @return array<int, string> */
-    private function candidateUrls(array $data, ProductDraft $draft, array $sources, ?callable $progress = null, ?int $telegramUpdateId = null): array
-    {
-        $excludedSources = $draft->excluded_gallery_source_urls ?? [];
-        $pairedSources = collect($data['sources'] ?? [])
+    private function candidateUrls(
+        array $data,
+        ProductDraft $draft,
+        array $sources,
+        ?callable $progress = null,
+        ?int $telegramUpdateId = null,
+        array $excludedSourceUrls = [],
+    ): array {
+        $excludedSources = array_values(array_unique([
+            ...($draft->excluded_gallery_source_urls ?? []),
+            ...$excludedSourceUrls,
+        ]));
+        $rawPairedSources = collect($data['sources'] ?? [])
             ->filter(fn (mixed $source): bool => is_array($source)
-                && is_string($source['page_url'] ?? null)
-                && ! $this->sourceExcluded($source['page_url'], $excludedSources))
+                && is_string($source['page_url'] ?? null));
+        $pairedSources = $rawPairedSources
+            ->filter(fn (array $source): bool => ! $this->sourceExcluded($source['page_url'], $excludedSources))
             ->values();
-        $imageUrls = $pairedSources->isEmpty()
+        $imageUrls = $rawPairedSources->isEmpty()
             ? array_values(array_filter(
                 $data['image_urls'] ?? [],
                 fn (mixed $url): bool => is_string($url) && ! $this->sourceExcluded($url, $excludedSources),
@@ -357,7 +411,11 @@ class ProductImageCandidateDiscovery
 
                 return collect($source['image_urls'] ?? [])
                     ->filter(fn (mixed $url): bool => is_string($url))
-                    ->each(fn (string $url) => $this->sourcePagesByImageUrl[$url] = $pageUrl)
+                    ->each(function (string $url) use ($pageUrl): void {
+                        $key = ProductImageStorage::normalizeCandidateUrl($url);
+                        $this->sourcePagesByImageUrl[$key] = $pageUrl;
+                        $this->sourceContextsByImageUrl[$key] = ['url' => $pageUrl];
+                    })
                     ->values()
                     ->all();
             })->unique()->values()->all();
@@ -376,11 +434,30 @@ class ProductImageCandidateDiscovery
             $telegramUpdateId,
         );
 
-        return array_slice($this->sourcePriority->sortUrls(
+        $sorted = $this->sourcePriority->sortUrls(
             [...$resolved, ...$imageUrls],
             $draft->brand,
             $sources,
-        ), 0, (int) config('product-images.ai_result_limit', 20));
+        );
+
+        // A newly trained complete gallery must survive the global result cap
+        // even when an older high-scoring domain produced many loose URLs.
+        return collect($sorted)
+            ->values()
+            ->map(fn (string $url, int $index): array => [
+                'url' => $url,
+                'index' => $index,
+                'gallery_rank' => $this->resolver->isConfirmedGalleryImage($url)
+                    ? 2
+                    : ($this->resolver->isPartialGalleryImage($url) ? 1 : 0),
+            ])
+            ->sort(fn (array $left, array $right): int =>
+                ($right['gallery_rank'] <=> $left['gallery_rank'])
+                ?: ($left['index'] <=> $right['index'])
+            )
+            ->take((int) config('product-images.ai_result_limit', 20))
+            ->pluck('url')
+            ->all();
     }
 
     /**
@@ -394,6 +471,12 @@ class ProductImageCandidateDiscovery
     {
         $telegramUpdateId ??= $draft->telegram_update_id;
         $resolved = [];
+        $category = Category::query()
+            ->where('slug', trim((string) $draft->category))
+            ->first();
+        $categoryStrategy = $category?->gallerySearchStrategy() ?? Category::GALLERY_SEARCH_AUTO;
+        $minimumVerifiedImages = $category?->minimumVerifiedImages() ?? 3;
+        $activeRecipeOnly = $categoryStrategy === Category::GALLERY_SEARCH_VISION_FIRST;
         $resolveLimit = (int) config('product-images.resolve_limit', 16);
 
         foreach ($sources as $source) {
@@ -402,6 +485,7 @@ class ProductImageCandidateDiscovery
             if (! $pageUrl) {
                 continue;
             }
+            $source['_minimum_verified_images'] = $minimumVerifiedImages;
 
             $pageImages = $progress
                 ? $this->resolver->resolve(
@@ -409,11 +493,18 @@ class ProductImageCandidateDiscovery
                     $resolveLimit,
                     fn (string $level, string $message) => $progress($message),
                     $telegramUpdateId,
+                    activeRecipeOnly: $activeRecipeOnly,
                 )
-                : $this->resolver->resolve([$source], $resolveLimit, telegramUpdateId: $telegramUpdateId);
+                : $this->resolver->resolve(
+                    [$source], $resolveLimit, telegramUpdateId: $telegramUpdateId, activeRecipeOnly: $activeRecipeOnly
+                );
 
             foreach ($pageImages as $imageUrl) {
-                $this->sourcePagesByImageUrl[$imageUrl] = $pageUrl;
+                $key = ProductImageStorage::normalizeCandidateUrl($imageUrl);
+                $context = $this->resolver->sourceContextForImage($imageUrl) ?? ['url' => $pageUrl];
+                $finalPageUrl = is_string($context['url'] ?? null) ? $context['url'] : $pageUrl;
+                $this->sourcePagesByImageUrl[$key] = $finalPageUrl;
+                $this->sourceContextsByImageUrl[$key] = $context;
             }
 
             $resolved = [...$resolved, ...$pageImages];

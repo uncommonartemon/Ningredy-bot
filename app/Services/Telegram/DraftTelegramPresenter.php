@@ -3,6 +3,7 @@
 namespace App\Services\Telegram;
 
 use App\Models\ProductDraft;
+use App\Services\Ai\AiSettings;
 use App\Services\Products\ProductSourcePriority;
 use Illuminate\Support\Facades\Storage;
 
@@ -57,6 +58,11 @@ class DraftTelegramPresenter
     public function clearControls(TelegramClient $telegram, ProductDraft $draft, string $chatId): void
     {
         $this->messageLifecycle->clearControlMessages($telegram, $draft, $chatId);
+    }
+
+    public function clearForSearchContinuation(TelegramClient $telegram, ProductDraft $draft): void
+    {
+        $this->messageLifecycle->clearForRefresh($telegram, $draft);
     }
 
     public function sendControls(TelegramClient $telegram, string $chatId, ProductDraft $draft): array
@@ -119,6 +125,28 @@ class DraftTelegramPresenter
 
     private function controlMarkup(ProductDraft $draft): array
     {
+        $mediaCount = $draft->media()->count();
+        $searchPaused = in_array($draft->gallery_search_stop_reason, ['cost_budget', 'time_budget'], true);
+
+        if ($searchPaused && $mediaCount === 0) {
+            $limit = number_format(app(AiSettings::class)->maxSearchCostUsd(), 2);
+
+            return ['inline_keyboard' => [
+                [[
+                    'text' => '▶️ Продолжить поиск фото (+$'.$limit.')',
+                    'callback_data' => "draft:continue-search:{$draft->id}",
+                ]],
+                [[
+                    'text' => '🔗 Источник',
+                    'callback_data' => "draft:source:{$draft->id}",
+                ]],
+                [[
+                    'text' => '✖ Отменить',
+                    'callback_data' => "draft:reject:{$draft->id}",
+                ]],
+            ]];
+        }
+
         $rows = [
             [
                 ['text' => '✅ Добавить', 'callback_data' => "draft:add:{$draft->id}"],
@@ -130,7 +158,13 @@ class DraftTelegramPresenter
             ],
         ];
 
-        if ($draft->media()->count() <= 2) {
+        if (in_array($draft->gallery_search_stop_reason, ['cost_budget', 'time_budget'], true)) {
+            $limit = number_format(app(AiSettings::class)->maxSearchCostUsd(), 2);
+            $rows[] = [[
+                'text' => "▶️ Продолжить поиск (+\${$limit})",
+                'callback_data' => "draft:continue-search:{$draft->id}",
+            ]];
+        } elseif ($draft->media()->count() <= 2) {
             $rows[] = [
                 ['text' => '🔍 Найти ещё доп. фото', 'callback_data' => "draft:findmore:{$draft->id}"],
             ];
@@ -212,6 +246,15 @@ class DraftTelegramPresenter
             "🏷 {$draft->title}",
             implode(' · ', array_filter([$draft->brand, $draft->model, $draft->color])),
         ]));
+        $searchPaused = in_array($draft->gallery_search_stop_reason, ['cost_budget', 'time_budget'], true);
+
+        if ($searchPaused && $galleryCount === 0) {
+            $header = "⏸ Черновик #{$draft->id}: поиск фотографий приостановлен\n"
+                ."🏷 {$draft->title}\n"
+                .implode(' / ', array_filter([$draft->brand, $draft->model, $draft->color]));
+            $usageFootnote = "\nЛимит текущего запуска достигнут. Нажмите «Продолжить поиск фото», чтобы начать новый бюджетный цикл.".$usageFootnote;
+        }
+
         $fixed = $header."\n\n".$footer.$usageFootnote;
         $available = max(0, 1024 - mb_strlen($fixed) - 8);
         $body = implode("\n\n", array_filter([

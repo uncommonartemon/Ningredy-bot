@@ -9,7 +9,7 @@ use Throwable;
 
 class AiSettings
 {
-    public const DEFAULT_MAX_SEARCH_COST_USD = 0.30;
+    public const DEFAULT_MAX_SEARCH_COST_USD = 0.50;
 
     public const DEFAULT_SEARCH_MAX_SECONDS = 1800;
 
@@ -32,6 +32,14 @@ class AiSettings
     public const DEFAULT_GALLERY_TRAINING_MAX_ROUNDS = 3;
 
     public const DEFAULT_GALLERY_MIN_SUCCESS_COUNT = 3;
+
+    public const DEFAULT_IMAGE_MINIMUM_SIDE = 500;
+
+    public const DEFAULT_CONFIRMED_GALLERY_MINIMUM_SIDE = 400;
+
+    public const MIN_IMAGE_SIDE = 100;
+
+    public const MAX_IMAGE_SIDE = 2000;
 
     public const GALLERY_MAX_IMAGE_COUNT = 10;
 
@@ -348,6 +356,47 @@ class AiSettings
     public function saveGalleryMinSuccessCount(?int $count): void
     {
         $this->saveIntegerSetting('ai.gallery_min_success_count', $count, 1, self::GALLERY_MAX_IMAGE_COUNT);
+    }
+
+    public function imageMinimumSide(): int
+    {
+        return $this->integerSetting(
+            'ai.image_minimum_side',
+            (int) config('product-images.minimum_side', self::DEFAULT_IMAGE_MINIMUM_SIDE),
+            self::MIN_IMAGE_SIDE,
+            self::MAX_IMAGE_SIDE,
+        );
+    }
+
+    public function saveImageMinimumSide(?int $pixels): void
+    {
+        $this->saveIntegerSetting('ai.image_minimum_side', $pixels, self::MIN_IMAGE_SIDE, self::MAX_IMAGE_SIDE);
+    }
+
+    public function confirmedGalleryMinimumSide(): int
+    {
+        return min(
+            $this->imageMinimumSide(),
+            $this->integerSetting(
+                'ai.confirmed_gallery_minimum_side',
+                (int) config(
+                    'product-images.browser_fallback.confirmed_gallery_minimum_side',
+                    self::DEFAULT_CONFIRMED_GALLERY_MINIMUM_SIDE,
+                ),
+                self::MIN_IMAGE_SIDE,
+                self::MAX_IMAGE_SIDE,
+            ),
+        );
+    }
+
+    public function saveConfirmedGalleryMinimumSide(?int $pixels): void
+    {
+        $this->saveIntegerSetting(
+            'ai.confirmed_gallery_minimum_side',
+            $pixels,
+            self::MIN_IMAGE_SIDE,
+            self::MAX_IMAGE_SIDE,
+        );
     }
 
     public function galleryBrowserMode(): string

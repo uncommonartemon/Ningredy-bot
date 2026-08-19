@@ -9,11 +9,53 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Category extends Model
 {
-    protected $fillable = ['parent_id', 'name', 'slug', 'icon', 'sort_order', 'is_active'];
+    public const GALLERY_SEARCH_AUTO = 'auto';
+
+    public const GALLERY_SEARCH_VISION_FIRST = 'vision_first';
+
+    public const GALLERY_SEARCH_PLAYWRIGHT_FIRST = 'playwright_first';
+
+    protected $fillable = [
+        'parent_id', 'name', 'slug', 'icon', 'sort_order', 'is_active', 'gallery_search_strategy',
+        'minimum_verified_images', 'product_search_hint',
+    ];
 
     protected function casts(): array
     {
-        return ['is_active' => 'boolean'];
+        return [
+            'is_active' => 'boolean',
+            'minimum_verified_images' => 'integer',
+        ];
+    }
+
+    public function gallerySearchStrategy(): string
+    {
+        return in_array($this->gallery_search_strategy, self::gallerySearchStrategies(), true)
+            ? $this->gallery_search_strategy
+            : self::GALLERY_SEARCH_AUTO;
+    }
+
+    /** @return array<int, string> */
+    public static function gallerySearchStrategies(): array
+    {
+        return [
+            self::GALLERY_SEARCH_AUTO,
+            self::GALLERY_SEARCH_VISION_FIRST,
+            self::GALLERY_SEARCH_PLAYWRIGHT_FIRST,
+        ];
+    }
+
+    public function minimumVerifiedImages(): int
+    {
+        return max(1, min(10, (int) ($this->minimum_verified_images ?: 3)));
+    }
+
+    public function productSearchPromptLine(): string
+    {
+        $hint = trim((string) $this->product_search_hint);
+
+        return '- '.$this->slug.': '.$this->name
+            .($hint !== '' ? ' | trusted category search hint: '.$hint : '');
     }
 
     public function parent(): BelongsTo

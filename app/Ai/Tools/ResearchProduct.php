@@ -9,8 +9,8 @@ use App\Models\Category;
 use App\Models\Product;
 use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
-use App\Services\Ai\AiSettings;
 use App\Services\Ai\AiErrorPresenter;
+use App\Services\Ai\AiSettings;
 use App\Services\Ai\ProductSearchTimeBudget;
 use App\Services\Ai\StreamingProductResearch;
 use App\Services\Products\ProductIdentityKey;
@@ -97,7 +97,7 @@ class ResearchProduct implements Tool
         );
         $researchIdleTimeout = min($researchTimeout, $settings->productResearchIdleTimeoutSeconds());
         $progress->withCancelButton($this->update->id);
-        $progress->step('1/4 · поиск точной карточки и характеристик', $researchTimeout, $query);
+        $progress->step('1/3 · поиск точной карточки и характеристик', $researchTimeout, $query);
         $provider = $settings->providerFor('product_research');
         $model = $settings->modelFor('product_research');
         $sourcePriority = $this->sourcePriority ?? app(ProductSourcePriority::class);
@@ -264,7 +264,6 @@ class ResearchProduct implements Tool
                     'primary_source_url' => ['required', 'url:http,https'],
                 ])->validate();
 
-                $reportedPrimaryUrl = $data['primary_source_url'];
                 $primarySource = collect($data['sources'])->first(
                     fn (array $source): bool => in_array($source['type'] ?? null, ['manufacturer', 'retailer', 'marketplace'], true),
                 );
@@ -275,30 +274,12 @@ class ResearchProduct implements Tool
                 ])->validate();
 
                 $data['primary_source_url'] = $primarySource['url'];
-                $galleryTimeout = $timeBudget->timeoutFor(
-                    $this->update->id,
-                    $settings->browserScoutTimeoutSeconds()
-                        + ($settings->galleryRecipeTimeoutSeconds() * (1 + $settings->galleryTrainingMaxRounds()))
-                        + ($settings->browserTimeoutSeconds() * $settings->galleryTrainingMaxRounds()),
-                );
-                $progress->step('2/4 · галерея страницы и AI-переобучение при необходимости', $galleryTimeout, parse_url($data['primary_source_url'], PHP_URL_HOST) ?: null);
-                $resolvedGallery = $this->imageResolver->resolve(
-                    [$primarySource],
-                    10,
-                    function (string $level, string $message) use ($progress): void {
-                        match ($level) {
-                            'error' => $progress->warning($message),
-                            'warning', 'blocked' => $progress->warning($message),
-                            default => $progress->info($message),
-                        };
-                    },
-                    $this->update->id,
-                );
-                $legacyPrimaryImages = $reportedPrimaryUrl === $data['primary_source_url'] ? $data['image_urls'] : [];
+                // Direct image URLs are optional seeds. stage() owns the one
+                // Playwright pass after the draft is persisted, so research
+                // never repeats the browser work or requires gallery URLs.
                 $data['image_urls'] = $sourcePriority->sortUrls([
                     ...($primarySource['image_urls'] ?? []),
-                    ...$legacyPrimaryImages,
-                    ...$resolvedGallery,
+                    ...($data['image_urls'] ?? []),
                 ], $data['brand'], [$primarySource]);
             }
 
@@ -314,10 +295,18 @@ class ResearchProduct implements Tool
             ]);
 
             if ($data['status'] !== 'found') {
-                return $this->json([
+                $notFound = [
                     'ok' => true,
                     'status' => $data['status'],
-                ]);
+                    'web_search_calls' => count($webSearchItems),
+                ];
+                $reason = trim((string) ($data['research_notes'] ?? ''));
+
+                if ($reason !== '') {
+                    $notFound['reason'] = mb_substr($reason, 0, 2000);
+                }
+
+                return $this->json($notFound);
             }
 
             $existingProduct = Product::query()
@@ -402,16 +391,40 @@ class ResearchProduct implements Tool
             if ($draft && $draft->status === 'pending_review' && ! $draft->images_staged_at) {
                 $imageStageTimeout = $timeBudget->timeoutFor(
                     $this->update->id,
-                    $settings->imageDiscoveryTimeoutSeconds()
+                    $settings->browserScoutTimeoutSeconds()
+                        + ($settings->galleryRecipeTimeoutSeconds() * (1 + $settings->galleryTrainingMaxRounds()))
+                        + ($settings->browserTimeoutSeconds() * $settings->galleryTrainingMaxRounds())
+                        + $settings->imageDiscoveryTimeoutSeconds()
                         + (2 * $settings->imageVisionTimeoutSeconds()),
                 );
-                $progress->step('3/4 · загрузка, резервный поиск и vision-проверка фото', $imageStageTimeout);
+                $progress->step(
+                    '2/3 · Playwright-галерея, загрузка и резервный поиск',
+                    $imageStageTimeout,
+                    $draft->primary_source_url ?: null,
+                );
                 $imageCount = ($this->imageStorage ?? app(ProductImageStorage::class))->stage(
                     $draft,
                     fn (string $message) => $progress->info($message),
                 );
             } else {
                 $imageCount = $draft?->media()->count() ?? 0;
+            }
+
+            $galleryPaused = $draft
+                && $imageCount === 0
+                && in_array($draft->fresh()->gallery_search_stop_reason, ['cost_budget', 'time_budget'], true);
+
+            if ($galleryPaused) {
+                $progress->warning('Лимит текущего запуска достигнут. Черновик сохранён, поиск можно продолжить отдельным бюджетным циклом.');
+
+                return $this->json([
+                    ...$result,
+                    'ok' => true,
+                    'status' => 'gallery_search_paused',
+                    'draft_id' => $draft->id,
+                    'image_count' => 0,
+                    'message' => 'Информация сохранена; поиск фотографий приостановлен лимитом и доступен для продолжения.',
+                ]);
             }
 
             if ($draft && $imageCount === 0) {
@@ -432,7 +445,12 @@ class ResearchProduct implements Tool
             }
 
             $result['image_count'] = $imageCount;
-            $progress->done("4/4 · черновик #{$draft->id} готов, фото: {$imageCount}");
+            $draft->refresh();
+            $sourceUrl = trim((string) $draft->primary_source_url);
+            $progress->done(
+                '3/3 · черновик #'.$draft->id.' готов, фото: '.$imageCount
+                .($sourceUrl !== '' ? "\n🔗 {$sourceUrl}" : ''),
+            );
 
             return $this->json($result);
         } catch (Throwable $exception) {

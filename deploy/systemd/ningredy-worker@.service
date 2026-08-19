@@ -7,7 +7,7 @@ Type=simple
 User=www-data
 Group=www-data
 WorkingDirectory=/var/www/ningredy
-ExecStart=/usr/bin/php artisan queue:work --queue=%i --sleep=2 --tries=3 --timeout=300 --max-time=3600
+ExecStart=/usr/bin/php artisan queue:work --queue=%i --sleep=2 --tries=3 --timeout=2160 --max-time=3600
 ExecReload=/bin/kill -USR2 $MAINPID
 Restart=always
 RestartSec=5

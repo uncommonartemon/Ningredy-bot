@@ -26,3 +26,11 @@ Thumbs.db
 /output
 /.playwright-cli
 /graphify-out
+
+# Scratch/debug files AI coding agents sometimes drop in the repo root while
+# investigating (e.g. Codex's .codex-diagnose-*.php) - never meant to be committed.
+.codex-*
+.claude-*
+.kimi-*
+*-scratch.*
+*-debug.*

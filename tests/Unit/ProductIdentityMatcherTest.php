@@ -3,6 +3,7 @@
 namespace Tests\Unit;
 
 use App\Models\ProductDraft;
+use App\Models\TelegramUpdate;
 use App\Services\Products\ProductIdentityMatcher;
 use Tests\TestCase;
 
@@ -86,5 +87,59 @@ class ProductIdentityMatcherTest extends TestCase
 
         $this->assertFalse($matcher->supports($draft, ''));
         $this->assertFalse($matcher->supports($draft, 'https://example.com/unrelated-banner.jpg'));
+    }
+
+    public function test_it_confirms_an_exact_source_and_rejects_a_nearby_but_different_sku(): void
+    {
+        $draft = new ProductDraft([
+            'title' => 'Origin Storage 256GB DDR4-3200 ECC RDIMM',
+            'brand' => 'Origin Storage',
+            'model' => 'OM256G43200R8RX4E12',
+        ]);
+        $matcher = new ProductIdentityMatcher;
+
+        $this->assertTrue($matcher->supportsSource($draft, [
+            'title' => 'Origin Storage OM256G43200R8RX4E12',
+            'url' => 'https://shop.example/products/om256g43200r8rx4e12',
+        ]));
+        $this->assertTrue($matcher->conflicts(
+            $draft,
+            'https://origin.example/server/origin-storage-om256g43200lr8rx4e12/',
+        ));
+        $this->assertFalse($matcher->conflicts(
+            $draft,
+            'https://shop.example/products/memory-module',
+        ));
+    }
+
+    public function test_inferred_regional_sku_does_not_reject_an_exact_card_requested_by_model(): void
+    {
+        $draft = new ProductDraft([
+            'telegram_update_id' => 123,
+            'title' => 'Razer Blade 14 2025 Ryzen AI 9 365 RTX 5070',
+            'brand' => 'Razer',
+            'model' => 'Razer Blade 14 (2025)',
+            'specifications' => [
+                ['key' => 'sku', 'name' => 'SKU', 'value' => 'RZ09-05306ES3-R3U1'],
+            ],
+        ]);
+        $draft->setRelation('telegramUpdate', new TelegramUpdate([
+            'text' => 'Razer Blade 14 (2025), Ryzen AI 9 365, RTX 5070',
+        ]));
+
+        $source = [
+            'url' => 'https://www.pbtech.com/product/NBKRAZ530633/Razer-Blade-14-GeForce-RTX-5070',
+            'title' => 'Razer Blade 14 GeForce RTX 5070',
+            '_preflight_identity_evidence' => implode(' ', [
+                'Razer Blade 14 GeForce RTX 5070 Gaming Laptop',
+                'AMD Ryzen AI 9 365',
+                'RZ09-05306ES3-R3B1',
+            ]),
+        ];
+
+        $matcher = new ProductIdentityMatcher;
+
+        $this->assertTrue($matcher->supportsSource($draft, $source));
+        $this->assertFalse($matcher->conflicts($draft, $source['_preflight_identity_evidence']));
     }
 }

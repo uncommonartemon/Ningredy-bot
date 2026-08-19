@@ -2,6 +2,8 @@
 
 namespace App\Services\Products;
 
+use App\Exceptions\LowResolutionDraftMediaException;
+use App\Exceptions\MissingDraftMediaException;
 use App\Jobs\StoreProductImages;
 use App\Models\AttributeDefinition;
 use App\Models\Brand;
@@ -10,6 +12,7 @@ use App\Models\Product;
 use App\Models\ProductDraft;
 use App\Models\ProductVariant;
 use App\Models\User;
+use App\Services\Ai\AiSettings;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -22,6 +25,7 @@ class ProductDraftWorkflow
 
     public function __construct(
         private readonly ProductPublicDescription $publicDescription,
+        private readonly AiSettings $settings,
     ) {}
 
     public function approve(
@@ -29,15 +33,32 @@ class ProductDraftWorkflow
         ?User $reviewer = null,
         ?string $telegramReviewerId = null,
     ): Product {
-        $minimumSide = (int) config('product-images.minimum_side', 480);
-        $hasLowResolutionMedia = $draft->media()
-            ->where(fn ($query) => $query
-                ->where('width', '<', $minimumSide)
-                ->orWhere('height', '<', $minimumSide))
-            ->exists();
+        $minimumSide = $this->settings->imageMinimumSide();
+        $confirmedGalleryMinimumSide = $this->settings->confirmedGalleryMinimumSide();
+        $media = $draft->media()->get(['width', 'height', 'verification_status']);
         throw_if(
-            $hasLowResolutionMedia,
-            \RuntimeException::class,
+            $media->isEmpty(),
+            MissingDraftMediaException::class,
+            'Черновик не содержит проверенных фотографий и не может быть опубликован.',
+        );
+        $lowResolutionMedia = $media
+            ->first(function ($media) use ($draft, $minimumSide, $confirmedGalleryMinimumSide): bool {
+                $confirmedGallery = $draft->gallery_status === 'complete'
+                    && $media->verification_status === 'source_verified';
+
+                if ($confirmedGallery) {
+                    return max((int) $media->width, (int) $media->height) < $confirmedGalleryMinimumSide
+                        || min((int) $media->width, (int) $media->height) < 100;
+                }
+
+                return min((int) $media->width, (int) $media->height) < $minimumSide;
+            });
+        if ($draft->gallery_status === 'complete' && $lowResolutionMedia?->verification_status === 'source_verified') {
+            $minimumSide = $confirmedGalleryMinimumSide;
+        }
+        throw_if(
+            $lowResolutionMedia !== null,
+            LowResolutionDraftMediaException::class,
             "Черновик содержит фото меньше {$minimumSide}px и не может быть опубликован. Сначала замените фотографии.",
         );
 
@@ -162,12 +183,20 @@ class ProductDraftWorkflow
 
     private function upsertVariant(Product $product, ProductDraft $draft): ProductVariant
     {
+        $identifiers = collect($draft->specifications ?? [])
+            ->filter(fn (mixed $item): bool => is_array($item))
+            ->mapWithKeys(fn (array $item): array => [
+                Str::lower((string) ($item['key'] ?? $item['name'] ?? '')) => trim((string) ($item['value'] ?? '')),
+            ]);
         $specifications = collect($draft->specifications ?? [])
             ->mapWithKeys(fn (mixed $item, mixed $key): array => [
                 Str::lower((string) (is_array($item) ? ($item['name'] ?? $key) : $key)) => Str::lower(trim((string) (is_array($item) ? ($item['value'] ?? '') : $item))),
             ])->sortKeys()->all();
         $fingerprint = sha1(json_encode([
             'color' => Str::lower((string) $draft->color),
+            'sku' => $identifiers->get('sku'),
+            'mpn' => $identifiers->get('mpn'),
+            'gtin' => $identifiers->get('gtin') ?: $identifiers->get('ean') ?: $identifiers->get('upc'),
             'specifications' => $specifications,
         ], JSON_UNESCAPED_UNICODE));
         $variant = ProductVariant::query()->firstOrNew([
@@ -177,6 +206,9 @@ class ProductDraftWorkflow
 
         $variant->fill([
             'name' => $draft->color ?: 'Базовая конфигурация',
+            'sku' => $identifiers->get('sku'),
+            'mpn' => $identifiers->get('mpn'),
+            'gtin' => $identifiers->get('gtin') ?: $identifiers->get('ean') ?: $identifiers->get('upc'),
             'color' => $draft->color,
             'condition' => 'new',
             'currency' => 'CZK',

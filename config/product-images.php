@@ -6,15 +6,15 @@
 
 return [
     // Public catalog limits. The original files are stored locally as WebP.
-    'max_images' => 3,
+    'max_images' => 10,
     'max_images_by_type' => [
-        'laptop' => 5,
-        'desktop' => 5,
+        'laptop' => 10,
+        'desktop' => 10,
     ],
     'download_limit' => 20,
-    'download_candidates' => 8,
+    'download_candidates' => 10,
     // Reject genuinely tiny thumbnails while allowing clean medium-size shop photos.
-    'minimum_side' => 450,
+    'minimum_side' => 500,
     'minimum_ratio' => 0.28,
     'maximum_ratio' => 3.5,
     'public_source_target' => 6,
@@ -41,7 +41,11 @@ return [
     // gallery-recipe training, and discovery calls), ProductImageResolver
     // stops opening further candidate sources and the search gives up with
     // whatever was already found. 0 disables the budget cutoff.
-    'max_search_cost_usd' => (float) env('PRODUCT_IMAGE_MAX_SEARCH_COST_USD', 0.30),
+    'max_search_cost_usd' => (float) env('PRODUCT_IMAGE_MAX_SEARCH_COST_USD', 0.50),
+    // Once useful candidates exist, stop training new domains at this share
+    // and preserve the rest for Vision plus the independent fallback search.
+    'source_exploration_budget_fraction' => (float) env('PRODUCT_IMAGE_SOURCE_BUDGET_FRACTION', 0.70),
+    'source_preflight' => env('PRODUCT_IMAGE_SOURCE_PREFLIGHT', env('APP_ENV') !== 'testing'),
 
     // The queue worker has a larger hard timeout (2100s). Application work
     // stops earlier and keeps a reserve for persisting the draft and replying
@@ -62,7 +66,10 @@ return [
     // publication images are selected.
     'vision_candidates' => 4,
     'vision_detail' => env('PRODUCT_IMAGE_VISION_DETAIL', 'low'),
-    'vision_max_batches' => 2,
+    'vision_max_batches' => 3,
+    // Keep independent page galleries separate and let Vision try the best
+    // few sequentially. Images from different pages are never mixed.
+    'vision_source_sets' => max(1, (int) env('PRODUCT_IMAGE_VISION_SOURCE_SETS', 3)),
     'vision_min_score' => 60,
     'vision_official_min_score' => 55,
 
@@ -82,6 +89,10 @@ return [
     // Run a separate web image search only when the research result produced
     // no downloadable candidate, or every downloaded candidate was rejected.
     'fallback_discovery' => true,
+    // Safety cap only when the price budget is disabled or there is no search
+    // id (mainly deterministic tests). Normal searches retry until the
+    // configured cost or total-time boundary is reached.
+    'fallback_search_rounds' => max(1, (int) env('PRODUCT_IMAGE_FALLBACK_SEARCH_ROUNDS', 3)),
     'discover_after_rejection' => true,
 
     // In auto mode a browser scout and mandatory AI gate decide whether the

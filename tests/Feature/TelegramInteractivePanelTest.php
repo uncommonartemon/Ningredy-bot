@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Jobs\ContinueDraftGallerySearch;
 use App\Jobs\ProcessDraftPhotoActions;
 use App\Jobs\ProcessTelegramMessage;
 use App\Jobs\StoreProductImages;
@@ -101,6 +102,20 @@ class TelegramInteractivePanelTest extends TestCase
             'sources' => [['title' => 'Store', 'url' => 'https://example.com/product']],
             'image_urls' => ['https://example.com/product.jpg'],
             'confidence' => 0.8,
+        ]);
+        $draft->media()->create([
+            'disk' => 'public',
+            'path' => "drafts/{$draft->id}/photo-1.webp",
+            'source_url' => 'https://example.com/product.jpg',
+            'role' => 'primary',
+            'mime_type' => 'image/webp',
+            'width' => 900,
+            'height' => 700,
+            'file_size' => 1024,
+            'checksum' => hash('sha256', 'approve-'.$draft->id),
+            'verification_status' => 'verified',
+            'sort_order' => 0,
+            'is_primary' => true,
         ]);
 
         $this->postJson('/api/telegram/webhook', [
@@ -601,6 +616,93 @@ class TelegramInteractivePanelTest extends TestCase
         $this->assertNull($finished->fresh()->cancel_requested_at);
         Http::assertSent(fn (ClientRequest $request): bool => str_ends_with($request->url(), '/answerCallbackQuery')
             && str_contains((string) $request['text'], 'уже завершён'));
+    }
+
+    public function test_budget_stopped_draft_shows_continue_search_instead_of_generic_top_up(): void
+    {
+        $draft = $this->pendingDraftWithMedia();
+        $draft->update(['gallery_search_stop_reason' => 'cost_budget']);
+
+        app(\App\Services\Telegram\DraftTelegramPresenter::class)
+            ->sendControls(app(TelegramClient::class), '98765', $draft);
+
+        Http::assertSent(function (ClientRequest $request) use ($draft): bool {
+            if (! str_ends_with($request->url(), '/sendMessage')) {
+                return false;
+            }
+
+            $buttons = collect(data_get($request['reply_markup'] ?? [], 'inline_keyboard', []))->flatten(1);
+            $continue = $buttons->firstWhere('callback_data', "draft:continue-search:{$draft->id}");
+
+            return $continue !== null
+                && str_contains((string) $continue['text'], '$0.50')
+                && $buttons->firstWhere('callback_data', "draft:findmore:{$draft->id}") === null;
+        });
+    }
+
+    public function test_budget_stopped_zero_photo_draft_only_offers_continue_source_and_cancel(): void
+    {
+        $draft = $this->pendingDraftWithMedia();
+        $draft->media()->delete();
+        $draft->update(['gallery_search_stop_reason' => 'time_budget']);
+
+        app(\App\Services\Telegram\DraftTelegramPresenter::class)
+            ->sendControls(app(TelegramClient::class), '98765', $draft->fresh());
+
+        Http::assertSent(function (ClientRequest $request) use ($draft): bool {
+            if (! str_ends_with($request->url(), '/sendMessage')) {
+                return false;
+            }
+
+            $callbacks = collect(data_get($request['reply_markup'] ?? [], 'inline_keyboard', []))
+                ->flatten(1)
+                ->pluck('callback_data')
+                ->all();
+
+            return in_array("draft:continue-search:{$draft->id}", $callbacks, true)
+                && in_array("draft:source:{$draft->id}", $callbacks, true)
+                && in_array("draft:reject:{$draft->id}", $callbacks, true)
+                && ! in_array("draft:add:{$draft->id}", $callbacks, true)
+                && ! in_array("draft:enhance:{$draft->id}", $callbacks, true)
+                && ! in_array("draft:replace:{$draft->id}", $callbacks, true)
+                && ! in_array("draft:delete:{$draft->id}", $callbacks, true);
+        });
+    }
+
+    public function test_continue_search_callback_removes_old_review_ui_and_queues_resume_job(): void
+    {
+        Queue::fake();
+        $draft = $this->pendingDraftWithMedia();
+        $draft->forceFill([
+            'gallery_search_stop_reason' => 'cost_budget',
+            'telegram_review_chat_id' => '98765',
+            'telegram_review_message_ids' => [81, 82, 83],
+            'telegram_control_message_ids' => [84],
+        ])->save();
+
+        $this->postJson('/api/telegram/webhook', [
+            'update_id' => 3401,
+            'callback_query' => [
+                'id' => 'callback-continue-search',
+                'from' => ['id' => 12345, 'username' => 'admin'],
+                'data' => "draft:continue-search:{$draft->id}",
+                'message' => [
+                    'message_id' => 84,
+                    'chat' => ['id' => 98765],
+                ],
+            ],
+        ], $this->headers())->assertOk();
+
+        Queue::assertPushed(ContinueDraftGallerySearch::class, fn (ContinueDraftGallerySearch $job): bool =>
+            $job->draftId === $draft->id && $job->chatId === '98765'
+        );
+        $fresh = $draft->fresh();
+        $this->assertSame([], $fresh->telegram_review_message_ids);
+        $this->assertSame([], $fresh->telegram_control_message_ids);
+        $this->assertNull($fresh->telegram_review_finalized_at);
+        $this->assertSame(3, $fresh->media()->count());
+        Http::assertSent(fn (ClientRequest $request): bool => str_ends_with($request->url(), '/answerCallbackQuery')
+            && $request['callback_query_id'] === 'callback-continue-search');
     }
 
     private function pendingDraftWithMedia(): ProductDraft

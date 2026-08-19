@@ -40,7 +40,11 @@ return [
             'connection' => env('DB_QUEUE_CONNECTION'),
             'table' => env('DB_QUEUE_TABLE', 'jobs'),
             'queue' => env('DB_QUEUE', 'default'),
-            'retry_after' => max(1650, (int) env('DB_QUEUE_RETRY_AFTER', 1650)),
+            // ProcessTelegramMessage may legitimately run for 2100 seconds.
+            // A shorter retry_after makes the database queue hand the same
+            // still-running job to another worker, consuming its second try
+            // and eventually leaving the Telegram update stuck in processing.
+            'retry_after' => max(2220, (int) env('DB_QUEUE_RETRY_AFTER', 2220)),
             'after_commit' => false,
         ],
 

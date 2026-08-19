@@ -198,6 +198,22 @@ class DraftTelegramMessageLifecycle
         $this->deleteTracked($telegram, $draft, includeReview: true);
     }
 
+    /**
+     * Remove the temporary review album and controls while a continuation is
+     * running. This is not a finalization: the same draft will be posted again
+     * with either a better gallery or its previous safe fallback.
+     */
+    public function clearForRefresh(TelegramClient $telegram, ProductDraft $draft): void
+    {
+        $this->deleteTracked($telegram, $draft, includeReview: true);
+        $draft->refresh();
+        $draft->forceFill([
+            'telegram_review_message_ids' => [],
+            'telegram_control_message_ids' => [],
+            'telegram_review_finalized_at' => null,
+        ])->save();
+    }
+
     /** @return array{chat_id: string, message_id: int, has_media: bool}|null */
     public function reviewTarget(ProductDraft $draft): ?array
     {

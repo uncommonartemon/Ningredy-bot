@@ -153,6 +153,11 @@ class ProcessTelegramMessage implements ShouldQueue
             // photos onto the published product).
             $draft = empty($data['draft_id']) ? null : ProductDraft::query()->find($data['draft_id']);
             $draft = $draft?->status === 'pending_review' ? $draft : null;
+            $draft ??= ProductDraft::query()
+                ->where('telegram_update_id', $update->id)
+                ->where('status', 'pending_review')
+                ->latest('id')
+                ->first();
             $failedGalleryDraft = ProductDraft::query()
                 ->where('telegram_update_id', $update->id)
                 ->where('status', 'rejected')
@@ -264,11 +269,38 @@ class ProcessTelegramMessage implements ShouldQueue
     public function failed(?Throwable $exception): void
     {
         $update = TelegramUpdate::query()->find($this->telegramUpdateId);
-        if (! $update?->chat_id || $update->processed_at) {
+        if (! $update) {
             return;
         }
 
         $run = $update->aiRuns()->latest('id')->first();
+        $wasProcessed = (bool) $update->processed_at;
+        $error = mb_substr(
+            $exception?->getMessage() ?: (string) ($run?->error ?: 'Queue job failed before completion.'),
+            0,
+            5000,
+        );
+
+        $update->aiRuns()
+            ->where('status', 'running')
+            ->update([
+                'status' => 'failed',
+                'error' => $error,
+                'completed_at' => now(),
+                'updated_at' => now(),
+            ]);
+        $update->update([
+            'status' => 'failed',
+            'error' => $error,
+            'processed_at' => $update->processed_at ?: now(),
+        ]);
+
+        // handle() already sent the final notification before rethrowing a
+        // retryable error. The failed hook is still responsible for database
+        // finalization, but must not send that notification twice.
+        if (! $update->chat_id || $wasProcessed) {
+            return;
+        }
 
         try {
             $presented = app(AiErrorPresenter::class)->present($exception ?: $run?->error, $run?->id);

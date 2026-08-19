@@ -99,12 +99,11 @@ class AiSettingsTest extends TestCase
         $this->assertSame(AiSettings::GALLERY_BROWSER_AUTO, $settings->galleryBrowserMode());
     }
 
-
     public function test_search_limits_have_safe_defaults_and_are_clamped(): void
     {
         $settings = app(AiSettings::class);
 
-        $this->assertSame(0.30, $settings->maxSearchCostUsd());
+        $this->assertSame(0.50, $settings->maxSearchCostUsd());
         $this->assertTrue($settings->fallbackSourcesEnabled());
         $this->assertSame(1800, $settings->searchMaxSeconds());
         $this->assertSame(120, $settings->searchReserveSeconds());
@@ -129,5 +128,30 @@ class AiSettingsTest extends TestCase
         $this->assertSame(300, $settings->imageDiscoveryTimeoutSeconds());
         $this->assertSame(900, $settings->productResearchTimeoutSeconds());
         $this->assertSame(180, $settings->productResearchIdleTimeoutSeconds());
+    }
+
+    public function test_image_minimum_sides_are_saved_clamped_and_keep_confirmed_below_general(): void
+    {
+        $settings = app(AiSettings::class);
+
+        $this->assertSame(500, $settings->imageMinimumSide());
+        $this->assertSame(400, $settings->confirmedGalleryMinimumSide());
+
+        $settings->saveImageMinimumSide(600);
+        $settings->saveConfirmedGalleryMinimumSide(550);
+        $this->assertSame(600, $settings->imageMinimumSide());
+        $this->assertSame(550, $settings->confirmedGalleryMinimumSide());
+
+        $settings->saveConfirmedGalleryMinimumSide(700);
+        $this->assertSame(600, $settings->confirmedGalleryMinimumSide());
+
+        $settings->saveImageMinimumSide(50);
+        $this->assertSame(AiSettings::MIN_IMAGE_SIDE, $settings->imageMinimumSide());
+        $this->assertSame(AiSettings::MIN_IMAGE_SIDE, $settings->confirmedGalleryMinimumSide());
+
+        $settings->saveImageMinimumSide(9999);
+        $settings->saveConfirmedGalleryMinimumSide(9999);
+        $this->assertSame(AiSettings::MAX_IMAGE_SIDE, $settings->imageMinimumSide());
+        $this->assertSame(AiSettings::MAX_IMAGE_SIDE, $settings->confirmedGalleryMinimumSide());
     }
 }

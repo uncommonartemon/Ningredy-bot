@@ -3,6 +3,7 @@
 namespace App\Services\Products;
 
 use App\Models\ProductDraft;
+use App\Services\Ai\AiSettings;
 use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
@@ -11,6 +12,8 @@ use Throwable;
 
 class WikimediaImageSearch
 {
+    public function __construct(private readonly AiSettings $settings) {}
+
     /** @return array<int, string> */
     public function find(ProductDraft $draft, int $limit = 10): array
     {
@@ -135,7 +138,7 @@ class WikimediaImageSearch
         $width = (int) ($info['thumbwidth'] ?? $info['width'] ?? 0);
         $height = (int) ($info['thumbheight'] ?? $info['height'] ?? 0);
 
-        if (min($width, $height) < (int) config('product-images.minimum_side', 480)) {
+        if (min($width, $height) < $this->settings->imageMinimumSide()) {
             return false;
         }
 

@@ -3,11 +3,13 @@
 namespace App\Jobs;
 
 use App\Models\ProductDraft;
+use App\Models\Category;
 use App\Services\Products\ProductGalleryRecipeTrainer;
 use App\Services\Telegram\TelegramClient;
 use App\Services\Telegram\TelegramProgressReporter;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
+use Illuminate\Queue\Middleware\WithoutOverlapping;
 use Illuminate\Support\Facades\Cache;
 use RuntimeException;
 use Throwable;
@@ -18,7 +20,10 @@ class TrainDraftGalleryRecipe implements ShouldQueue
 
     public int $tries = 1;
 
-    public int $timeout = 1380;
+    // Same reasoning as ContinueDraftGallerySearch/RestageDraftGalleryPhotos:
+    // must clear the search-cycle ceiling (1800s) with margin and stay under
+    // the queue worker's --timeout (2160s).
+    public int $timeout = 2040;
 
     public function __construct(
         public int $draftId,
@@ -29,6 +34,12 @@ class TrainDraftGalleryRecipe implements ShouldQueue
         $this->onQueue('media');
     }
 
+    /** @return array<int, object> */
+    public function middleware(): array
+    {
+        return [(new WithoutOverlapping("draft-gallery-retrain:{$this->draftId}"))->releaseAfter($this->timeout + 60)];
+    }
+
     public function handle(
         ProductGalleryRecipeTrainer $trainer,
         TelegramClient $telegram,
@@ -37,6 +48,9 @@ class TrainDraftGalleryRecipe implements ShouldQueue
         throw_unless($draft->status === 'pending_review', RuntimeException::class, 'Черновик уже обработан.');
         $url = trim((string) $draft->primary_source_url);
         throw_if($url === '', RuntimeException::class, 'У черновика нет ссылки на товарную карточку.');
+        $minimumVerifiedImages = Category::query()
+            ->where('slug', trim((string) $draft->category))
+            ->first()?->minimumVerifiedImages() ?? 3;
 
         $progress = new TelegramProgressReporter($telegram, $this->chatId);
         $progress->step('1/2 · AI изучает DOM и проверяет новый Playwright-рецепт', 1080);
@@ -56,6 +70,7 @@ class TrainDraftGalleryRecipe implements ShouldQueue
             },
             true,
             $this->telegramUpdateId,
+            context: ['minimum_verified_images' => $minimumVerifiedImages],
             userHint: $this->hint,
         );
         throw_if(count($images) < 2, RuntimeException::class, 'Новый рецепт не прошёл проверку; старый рецепт и фото сохранены.');

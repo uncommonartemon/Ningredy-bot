@@ -3,6 +3,7 @@
 namespace App\Providers;
 
 use App\Services\Ai\AiSettings;
+use App\Services\Products\ProductImageResolver;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\ServiceProvider;
@@ -16,7 +17,14 @@ class AppServiceProvider extends ServiceProvider
      */
     public function register(): void
     {
-        //
+        // Gallery confirmation is intentionally kept in the resolver's browser
+        // extractor while one product-search job runs. ProductImageStorage and
+        // ProductImageCandidateDiscovery are separate object graphs, so a
+        // transient resolver loses that provenance between discovery and the
+        // downloader and applies the ordinary (higher) size threshold to a
+        // structurally confirmed gallery. A scoped resolver is shared inside
+        // one queue job and discarded before the next job.
+        $this->app->scoped(ProductImageResolver::class);
     }
 
     /**

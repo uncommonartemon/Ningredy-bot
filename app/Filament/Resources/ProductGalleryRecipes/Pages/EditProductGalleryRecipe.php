@@ -61,6 +61,9 @@ class EditProductGalleryRecipe extends EditRecord
         $storedRecipe = is_array($this->record->recipe) ? $this->record->recipe : [];
         $recipe['confidence'] = $storedRecipe['confidence'] ?? null;
         $recipe['reason'] = $storedRecipe['reason'] ?? null;
+        $recipe['actions'] = is_array($storedRecipe['actions'] ?? null)
+            ? $storedRecipe['actions']
+            : [];
 
         foreach (['gallery_present', 'expected_image_count', 'expected_count_evidence'] as $key) {
             if (array_key_exists($key, $storedRecipe)) {

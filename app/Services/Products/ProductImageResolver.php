@@ -2,11 +2,13 @@
 
 namespace App\Services\Products;
 
+use App\Models\ProductGalleryRecipe;
 use App\Services\Ai\AiSettings;
-use App\Services\Ai\AiUsageReporter;
+use App\Services\Ai\ProductSearchCostBudget;
 use App\Services\Ai\ProductSearchTimeBudget;
 use DOMDocument;
 use DOMXPath;
+use Illuminate\Http\Client\RequestException;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
@@ -18,11 +20,98 @@ class ProductImageResolver
     public function __construct(
         private readonly BrowserProductGalleryExtractor $browser,
         private readonly AiSettings $settings,
-        private readonly AiUsageReporter $usageReporter,
         private readonly ProductSourceMetrics $metrics,
         private readonly ProductSearchTimeBudget $timeBudget,
+        private readonly ProductSearchCostBudget $costBudget,
         private readonly ProductSourceAttemptRecorder $attempts,
     ) {}
+
+    /** @var array<int, true> */
+    private array $reportedBudgetExhaustion = [];
+
+    /** @var array<string, array<string, mixed>> */
+    private array $sourceContextsByImageUrl = [];
+
+    /** @return array<string, mixed>|null */
+    public function sourceContextForImage(string $imageUrl): ?array
+    {
+        return $this->sourceContextsByImageUrl[ProductImageStorage::normalizeCandidateUrl($imageUrl)] ?? null;
+    }
+
+    /** @param array<string, mixed> $source @return array<string, mixed> */
+    public function preflightSource(array $source, ?int $telegramUpdateId = null): array
+    {
+        $url = is_string($source['url'] ?? null) ? $source['url'] : '';
+        $host = strtolower((string) parse_url($url, PHP_URL_HOST));
+        $result = [
+            'blocked' => false,
+            'unavailable' => false,
+            'reason' => null,
+            'static_image_urls' => [],
+            'active_recipe' => false,
+            'browser_probe_required' => false,
+            'final_url' => $url,
+            'identity_evidence' => '',
+        ];
+
+        if ($url === '' || ! $this->isPublicUrl($url) || $this->looksLikeNonHtmlDocumentUrl($url)) {
+            return [...$result, 'unavailable' => true, 'reason' => 'invalid_or_non_html_url'];
+        }
+
+        try {
+            $recipe = ProductGalleryRecipe::query()
+                ->where('domain', $host)
+                ->where('path_pattern', '*')
+                ->first();
+            $result['active_recipe'] = $recipe?->status === 'active';
+
+            if ($recipe?->source_blocked) {
+                $result['blocked'] = true;
+                $result['reason'] = 'known_domain_block';
+            } else {
+                [$response, $finalUrl] = $this->fetch($url);
+
+                if (! $this->isHtmlResponse($response)) {
+                    $result['unavailable'] = true;
+                    $result['reason'] = 'non_html';
+                } elseif ($this->looksLikeAccessGate($response->body())) {
+                    // An HTTP client can see a JS/cookie gate while the real
+                    // Chromium session still opens the product. Disable only
+                    // the static preflight result; let Playwright make the
+                    // authoritative accessibility decision.
+                    $result['browser_probe_required'] = true;
+                    $result['reason'] = 'access_gate';
+                } else {
+                    $html = $response->body();
+                    $result['final_url'] = $finalUrl;
+                    $result['identity_evidence'] = $this->extractPageIdentityEvidence($html, $finalUrl);
+                    $result['static_image_urls'] = $this->extractPageImages($html, $finalUrl);
+                }
+            }
+        } catch (Throwable $exception) {
+            $status = $exception instanceof RequestException ? $exception->response->status() : null;
+            $result['browser_probe_required'] = in_array($status, [401, 403, 429], true);
+            $result['unavailable'] = in_array($status, [404, 410], true);
+            $result['reason'] = $status ? 'http_'.$status : 'http_error';
+        }
+
+        $this->attempts->record([
+            'telegram_update_id' => $telegramUpdateId,
+            'product_url' => $url,
+            'actor' => 'http_preflight',
+            'phase' => 'gallery_preflight',
+            'action' => 'check_source_access',
+            'status' => ($result['blocked'] || $result['unavailable']) ? 'failed' : 'completed',
+            'decision' => $result['reason'] ?: 'candidate_ranked',
+            'output' => [
+                'active_recipe' => $result['active_recipe'],
+                'static_count' => count($result['static_image_urls']),
+                'identity_evidence_present' => $result['identity_evidence'] !== '',
+            ],
+        ]);
+
+        return $result;
+    }
 
     /**
      * @param  array<int, array<string, mixed>>  $sources
@@ -36,6 +125,7 @@ class ProductImageResolver
         ?int $telegramUpdateId = null,
         bool $forceInteractive = false,
         bool $staticOnly = false,
+        bool $activeRecipeOnly = false,
     ): array {
         $images = [];
 
@@ -45,11 +135,14 @@ class ProductImageResolver
                 break;
             }
 
-            if ($telegramUpdateId !== null && $this->searchBudgetExceeded($telegramUpdateId)) {
-                $debug?->__invoke('warning', sprintf(
-                    'Бюджет поиска исчерпан (~$%.2f); прекращаю проверку источников.',
-                    $this->settings->maxSearchCostUsd(),
-                ));
+            if ($this->costBudget->exceeded($telegramUpdateId)) {
+                if (! isset($this->reportedBudgetExhaustion[$telegramUpdateId])) {
+                    $debug?->__invoke('warning', sprintf(
+                        'Бюджет поиска исчерпан (~$%.2f); текущий источник завершён, новые источники не открываю.',
+                        $this->costBudget->limit(),
+                    ));
+                    $this->reportedBudgetExhaustion[$telegramUpdateId] = true;
+                }
 
                 break;
             }
@@ -73,6 +166,7 @@ class ProductImageResolver
             $accessGateDetected = false;
             $browserImages = [];
             $failureKind = null;
+            $identityEvidence = '';
             $reportedSourceImages = collect(is_array($source['image_urls'] ?? null) ? $source['image_urls'] : [])
                 ->filter(fn (mixed $imageUrl): bool => is_string($imageUrl) && $this->isPublicUrl($imageUrl))
                 ->map(fn (string $imageUrl): string => ProductImageStorage::normalizeCandidateUrl($imageUrl))
@@ -89,6 +183,7 @@ class ProductImageResolver
                         $accessGateDetected = true;
                         $failureKind = 'access_gate';
                     } else {
+                        $identityEvidence = $this->extractPageIdentityEvidence($html, $finalUrl);
                         foreach ($this->extractPageImages($html, $finalUrl) as $imageUrl) {
                             if ($this->isPublicUrl($imageUrl)) {
                                 $images[] = $imageUrl;
@@ -124,13 +219,36 @@ class ProductImageResolver
                 && $browserMode !== AiSettings::GALLERY_BROWSER_OFF;
 
             if ($shouldUseBrowser) {
-                $browserResult = $debug
-                    ? $this->browser->extract($browserUrl, $limit, $debug, $telegramUpdateId, [
-                        'static_image_urls' => $browserSeedImages,
-                    ], $forceInteractive)
-                    : $this->browser->extract($browserUrl, $limit, telegramUpdateId: $telegramUpdateId, context: [
-                        'static_image_urls' => $browserSeedImages,
-                    ], forceInteractive: $forceInteractive);
+                $browserContext = [
+                    'static_image_urls' => $browserSeedImages,
+                    'minimum_verified_images' => max(1, (int) ($source['_minimum_verified_images'] ?? 3)),
+                ];
+                $browserResult = $activeRecipeOnly
+                    ? $this->browser->extract(
+                        $browserUrl,
+                        $limit,
+                        $debug,
+                        $telegramUpdateId,
+                        $browserContext,
+                        $forceInteractive,
+                        true,
+                    )
+                    : ($debug
+                        ? $this->browser->extract(
+                            $browserUrl,
+                            $limit,
+                            $debug,
+                            $telegramUpdateId,
+                            $browserContext,
+                            $forceInteractive,
+                        )
+                        : $this->browser->extract(
+                            $browserUrl,
+                            $limit,
+                            telegramUpdateId: $telegramUpdateId,
+                            context: $browserContext,
+                            forceInteractive: $forceInteractive,
+                        ));
                 $browserImages = collect($browserResult)
                     ->filter(fn (mixed $imageUrl): bool => is_string($imageUrl) && $this->isPublicUrl($imageUrl))
                     ->map(fn (string $imageUrl): string => ProductImageStorage::normalizeCandidateUrl($imageUrl))
@@ -142,9 +260,11 @@ class ProductImageResolver
                     $accessGateDetected = false;
                     $failureKind = null;
                     $previousSourceImages = array_slice($images, 0, $sourceImageStart);
-                    $images = count($browserImages) >= 2
-                        ? [...$previousSourceImages, ...$browserImages]
-                        : [...$previousSourceImages, ...$browserImages, ...$staticSourceImages];
+                    // Browser output is preferred, but the full-resolution
+                    // attributes already present in HTML remain a safety net.
+                    // A partial or broken recipe must never erase usable
+                    // static originals collected before Playwright started.
+                    $images = [...$previousSourceImages, ...$browserImages, ...$staticSourceImages];
                 }
             }
 
@@ -154,6 +274,15 @@ class ProductImageResolver
 
             $images = array_values(array_unique($images));
             $sourceImageCount = max(0, count($images) - $sourceImageStart);
+            foreach (array_slice($images, $sourceImageStart) as $imageUrl) {
+                $this->sourceContextsByImageUrl[ProductImageStorage::normalizeCandidateUrl($imageUrl)] = [
+                    'url' => $browserUrl,
+                    'original_url' => $sourceUrl,
+                    'title' => is_string($source['title'] ?? null) ? $source['title'] : null,
+                    '_preflight_final_url' => $browserUrl,
+                    '_preflight_identity_evidence' => $identityEvidence,
+                ];
+            }
             if ($browserImages !== []) {
                 $this->metrics->recordExtraction($sourceUrl, count($browserImages));
             } elseif ($sourceImageCount === 0) {
@@ -167,7 +296,11 @@ class ProductImageResolver
                 'action' => 'extract_page_images',
                 'status' => $sourceImageCount > 0 ? 'completed' : 'failed',
                 'decision' => $failureKind ?: ($browserImages !== [] ? 'playwright_images' : 'static_images'),
-                'input' => ['final_url' => $browserUrl, 'browser_mode' => $browserMode],
+                'input' => [
+                    'final_url' => $browserUrl,
+                    'browser_mode' => $browserMode,
+                    'active_recipe_only' => $activeRecipeOnly,
+                ],
                 'output' => [
                     'static_count' => count($staticSourceImages),
                     'browser_count' => count($browserImages),
@@ -278,6 +411,16 @@ class ProductImageResolver
         }
     }
 
+    public function isConfirmedGalleryImage(string $url): bool
+    {
+        return $this->browser->isConfirmedGalleryImage($url);
+    }
+
+    public function isPartialGalleryImage(string $url): bool
+    {
+        return $this->browser->isPartialGalleryImage($url);
+    }
+
     /** @return array{Response, string} */
     private function fetch(string $url): array
     {
@@ -327,6 +470,52 @@ class ProductImageResolver
         return $scheme.'://'.$host.($port ? ':'.$port : '');
     }
 
+    private function extractPageIdentityEvidence(string $html, string $pageUrl): string
+    {
+        if ($html === '' || strlen($html) > 5_000_000) {
+            return $pageUrl;
+        }
+
+        $previous = libxml_use_internal_errors(true);
+        $document = new DOMDocument;
+        $loaded = $document->loadHTML($html, LIBXML_NOERROR | LIBXML_NOWARNING | LIBXML_NONET);
+        libxml_clear_errors();
+        libxml_use_internal_errors($previous);
+
+        if (! $loaded) {
+            return $pageUrl;
+        }
+
+        $xpath = new DOMXPath($document);
+        $values = [$pageUrl];
+        $queries = [
+            '//title',
+            '//h1[1]',
+            '//meta[@property="og:title"]/@content',
+            '//meta[@name="twitter:title"]/@content',
+            '//*[@itemprop="sku" or @itemprop="mpn" or @itemprop="model" or @itemprop="name"]/@content',
+            '//*[@itemprop="sku" or @itemprop="mpn" or @itemprop="model" or @itemprop="name"]',
+        ];
+
+        foreach ($queries as $query) {
+            foreach ($xpath->query($query) ?: [] as $node) {
+                $value = trim(html_entity_decode(strip_tags($node->nodeValue), ENT_QUOTES | ENT_HTML5));
+
+                if ($value !== '') {
+                    $values[] = $value;
+                }
+            }
+        }
+
+        foreach ($xpath->query('//script[@type="application/ld+json"]') ?: [] as $node) {
+            if (preg_match_all('/"(?:sku|mpn|model|name)"\\s*:\\s*"((?:\\\\.|[^"\\\\])+)"/iu', $node->nodeValue, $matches)) {
+                $values = [...$values, ...($matches[1] ?? [])];
+            }
+        }
+
+        return Str::limit(Str::squish(implode(' ', array_unique($values))), 2500, '');
+    }
+
     /** @return array<int, string> */
     private function extractPageImages(string $html, string $pageUrl): array
     {
@@ -347,6 +536,7 @@ class ProductImageResolver
         $xpath = new DOMXPath($document);
         $galleryScope = '//*[contains(translate(concat(" ", @class, " ", @id, " "), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "gallery") or contains(translate(concat(" ", @class, " ", @id, " "), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "slider") or contains(translate(concat(" ", @class, " ", @id, " "), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "swiper") or contains(translate(concat(" ", @class, " ", @id, " "), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "carousel") or contains(translate(concat(" ", @class, " ", @id, " "), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "product-image") or contains(translate(concat(" ", @class, " ", @id, " "), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "product-media")]';
         $directQueries = [
+            $galleryScope.'//*[@data-big]/@data-big',
             $galleryScope.'//*[@data-old-hires]/@data-old-hires',
             $galleryScope.'//img/@data-zoom-image',
             $galleryScope.'//img/@data-large_image',
@@ -365,6 +555,7 @@ class ProductImageResolver
             '//meta[@name="twitter:image:src"]/@content',
             '//meta[@itemprop="image"]/@content',
             '//link[@rel="image_src"]/@href',
+            '//*[@data-big]/@data-big',
             '//*[@data-old-hires]/@data-old-hires',
             '//img/@data-full',
             '//img/@data-full-src',
@@ -558,24 +749,6 @@ class ProductImageResolver
         $directory = str_ends_with($path, '/') ? $path : dirname($path).'/';
 
         return "{$scheme}://{$host}{$port}{$directory}{$candidate}";
-    }
-
-    /**
-     * Stops opening more candidate sources once this search has already
-     * spent the configured budget - replaces a fixed source-count cutoff
-     * with one tied to what the search has actually cost so far.
-     */
-    private function searchBudgetExceeded(int $telegramUpdateId): bool
-    {
-        $maxCost = $this->settings->maxSearchCostUsd();
-
-        if ($maxCost <= 0) {
-            return false;
-        }
-
-        $spent = $this->usageReporter->forTelegramUpdate($telegramUpdateId)['estimated_cost_usd'] ?? null;
-
-        return is_numeric($spent) && (float) $spent >= $maxCost;
     }
 
     private function isPublicUrl(string $url): bool

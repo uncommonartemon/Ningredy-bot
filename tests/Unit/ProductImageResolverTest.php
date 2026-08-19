@@ -127,6 +127,7 @@ class ProductImageResolverTest extends TestCase
             ->once()
             ->with('https://93.184.216.34/javascript-product', 5, null, null, [
                 'static_image_urls' => ['https://93.184.216.34/static-fallback.jpg'],
+                'minimum_verified_images' => 3,
             ], false)
             ->andReturn([
                 'https://93.184.216.34/browser-product-front.jpg',
@@ -140,6 +141,61 @@ class ProductImageResolverTest extends TestCase
         $this->assertSame([
             'https://93.184.216.34/browser-product-front.jpg',
             'https://93.184.216.34/browser-product-back.jpg',
+            'https://93.184.216.34/static-fallback.jpg',
+        ], $images);
+    }
+
+    public function test_vision_first_only_allows_an_existing_active_browser_recipe(): void
+    {
+        Http::fake([
+            'https://93.184.216.34/component' => Http::response(
+                '<html><head><meta property=og:image content=/static.jpg></head></html>',
+                200,
+                ['Content-Type' => 'text/html'],
+            ),
+        ]);
+        $browser = $this->mock(BrowserProductGalleryExtractor::class);
+        $browser->shouldReceive('extract')
+            ->once()
+            ->with(
+                'https://93.184.216.34/component',
+                5,
+                null,
+                null,
+                ['static_image_urls' => ['https://93.184.216.34/static.jpg'], 'minimum_verified_images' => 3],
+                false,
+                true,
+            )
+            ->andReturn([]);
+
+        $images = app(ProductImageResolver::class)->resolve(
+            [['url' => 'https://93.184.216.34/component']],
+            5,
+            activeRecipeOnly: true,
+        );
+
+        $this->assertSame(['https://93.184.216.34/static.jpg'], $images);
+    }
+
+    public function test_it_prioritizes_full_resolution_data_big_before_thumbnail_src(): void
+    {
+        Http::fake([
+            'https://93.184.216.34/product' => Http::response(<<<'HTML'
+                <html><body><div class='product-gallery'>
+                    <img data-big='/i/products/front.jpg' src='/i/products/mini/front.jpg?w=80'>
+                    <img data-big='/i/products/back.jpg' src='/i/products/mini/back.jpg?w=60'>
+                </div></body></html>
+                HTML, 200, ['Content-Type' => 'text/html']),
+        ]);
+        $this->mock(BrowserProductGalleryExtractor::class)->shouldReceive('extract')->andReturn([]);
+
+        $images = app(ProductImageResolver::class)->resolve([
+            ['url' => 'https://93.184.216.34/product'],
+        ], 2);
+
+        $this->assertSame([
+            'https://93.184.216.34/i/products/front.jpg',
+            'https://93.184.216.34/i/products/back.jpg',
         ], $images);
     }
 
@@ -187,6 +243,7 @@ class ProductImageResolverTest extends TestCase
             ->once()
             ->with('https://93.184.216.34/headerless-product', 5, null, null, [
                 'static_image_urls' => ['https://93.184.216.34/hero.jpg'],
+                'minimum_verified_images' => 3,
             ], false)
             ->andReturn([]);
 

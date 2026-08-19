@@ -15,7 +15,7 @@ class ImageUrlHeuristics
     public const COMMON_MARKERS = ['logo', 'favicon', 'sprite', 'placeholder'];
 
     /** Small thumbnails and size-suffixed variants. */
-    public const THUMBNAIL_MARKERS = ['thumb', 'thumbnail', '/small/', '_small'];
+    public const THUMBNAIL_MARKERS = ['thumb', 'thumbnail', '/small/', '_small', '/mini/'];
 
     /** Analytics beacons. */
     public const TRACKING_MARKERS = ['tracking', 'pixel.'];

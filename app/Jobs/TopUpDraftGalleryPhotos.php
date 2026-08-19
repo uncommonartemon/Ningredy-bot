@@ -9,6 +9,7 @@ use App\Services\Telegram\TelegramClient;
 use App\Services\Telegram\TelegramProgressReporter;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
+use Illuminate\Queue\Middleware\WithoutOverlapping;
 use Illuminate\Support\Facades\Cache;
 use RuntimeException;
 use Throwable;
@@ -27,6 +28,15 @@ class TopUpDraftGalleryPhotos implements ShouldQueue
         public int $telegramUpdateId,
     ) {
         $this->onQueue('media');
+    }
+
+    /** @return array<int, object> */
+    public function middleware(): array
+    {
+        // Shares its lock key with RestageDraftGalleryPhotos/
+        // ContinueDraftGallerySearch so none of the three jobs that mutate
+        // this draft's media can run concurrently with each other.
+        return [(new WithoutOverlapping("draft-gallery-search:{$this->draftId}"))->releaseAfter($this->timeout + 60)];
     }
 
     public function handle(

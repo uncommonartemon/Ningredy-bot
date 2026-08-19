@@ -36,10 +36,16 @@ class BrowserProductGalleryExtractor
         ?int $telegramUpdateId = null,
         array $context = [],
         bool $forceInteractive = false,
+        bool $activeRecipeOnly = false,
     ): array {
         if (! $this->available($limit, $debug)) {
             return [];
         }
+
+        $minimumSuccessCount = max(1, min(
+            AiSettings::GALLERY_MAX_IMAGE_COUNT,
+            (int) ($context['minimum_verified_images'] ?? $this->settings->galleryMinSuccessCount()),
+        ));
 
         $host = strtolower((string) parse_url($url, PHP_URL_HOST));
         $recipe = null;
@@ -76,10 +82,20 @@ class BrowserProductGalleryExtractor
         if ($recipe?->status === 'active') {
             $debug?->__invoke('step', "Playwright: применяю AI-рецепт для {$host}.");
             $result = $this->executeRecipe($url, $recipe->recipe ?? [], $limit, $debug, $telegramUpdateId);
+            $observedLayoutFingerprint = app(ProductPageLayoutFingerprint::class)->make(
+                is_array($result['scout'] ?? null) ? $result['scout'] : [],
+            );
+            if ($observedLayoutFingerprint !== null) {
+                $recipe->update(['last_observed_layout_fingerprint' => $observedLayoutFingerprint]);
+            }
             $this->recordBrowserResult($url, $result, $telegramUpdateId, 'active_recipe');
             $images = $result['images'] ?? [];
             $previousRecipeImages = $images;
-            $validation = $this->resultValidator->validate($recipe->recipe ?? [], $result);
+            $validation = $this->resultValidator->validate(
+                $recipe->recipe ?? [],
+                $result,
+                minimumSuccessCount: $minimumSuccessCount,
+            );
             // A recipe is cached per domain, but the same domain can serve a
             // different page markup (a different regional storefront, an A/B
             // layout, ...) where the recipe's own selectors match nothing at
@@ -102,9 +118,14 @@ class BrowserProductGalleryExtractor
             }
 
             if ($selectorsMismatched) {
+                $layoutChanged = $recipe->layout_fingerprint !== null
+                    && $observedLayoutFingerprint !== null
+                    && $recipe->layout_fingerprint !== $observedLayoutFingerprint;
                 $debug?->__invoke(
                     'warning',
-                    "Сохранённый рецепт для {$host} не нашёл ни одного своего селектора на этой странице (другая вёрстка); переобучаю специально под неё.",
+                    "Сохранённый рецепт для {$host} не нашёл ни одного своего селектора на этой странице"
+                        .($layoutChanged ? ' (layout fingerprint изменился)' : '')
+                        .'; переобучаю специально под неё.',
                 );
             } else {
                 $debug?->__invoke(
@@ -120,8 +141,22 @@ class BrowserProductGalleryExtractor
                     ? 'Recipe selectors matched nothing on this page (layout mismatch).'
                     : $validation['reason'],
             ]);
+            if ($activeRecipeOnly) {
+                $debug?->__invoke(
+                    'warning',
+                    'Готовый рецепт для '.$host.' не подтвердил полную галерею; в режиме Vision-first не переобучаю его, а передаю найденные кадры в Vision.',
+                );
+
+                return $images;
+            }
+
             $debug?->__invoke('warning', 'Сохранённый рецепт перестал давать галерею; запускаю AI-переобучение.');
         } else {
+            if ($activeRecipeOnly) {
+                $debug?->__invoke('step', 'Для '.$host.' нет активного рецепта; режим Vision-first продолжает со статичными фотографиями без обучения Playwright.');
+
+                return [];
+            }
             $debug?->__invoke('step', "Для {$host} ещё нет AI-рецепта; запускаю первичное обучение.");
         }
 
@@ -144,9 +179,20 @@ class BrowserProductGalleryExtractor
         if ($latestVersion?->status === 'partial') {
             $this->rememberPartialGalleryImages($images);
         } elseif ($trainedRecipe?->status === 'active') {
+            $latestResult = is_array($latestVersion?->result) ? $latestVersion->result : [];
             $validation = $this->resultValidator->validate(
                 $trainedRecipe->recipe ?? [],
-                ['images' => $images],
+                [
+                    'images' => $images,
+                    'diagnostics' => is_array($latestResult['diagnostics'] ?? null)
+                        ? $latestResult['diagnostics']
+                        : [],
+                    'action_trace' => is_array($latestResult['action_trace'] ?? null)
+                        ? $latestResult['action_trace']
+                        : [],
+                    'failure_kind' => $latestResult['failure_kind'] ?? null,
+                ],
+                minimumSuccessCount: $minimumSuccessCount,
             );
 
             if ($validation['passed']) {
@@ -183,7 +229,38 @@ class BrowserProductGalleryExtractor
         ?callable $debug = null,
         ?int $telegramUpdateId = null,
     ): array {
+        $recipe = $this->normalizeRecipeForExecution($recipe);
+
         return $this->runScript($url, $recipe, $limit, false, $debug, $telegramUpdateId);
+    }
+
+    /** @param array<string, mixed> $recipe */
+    private function normalizeRecipeForExecution(array $recipe): array
+    {
+        $collectSelectors = collect(is_array($recipe['collect_selectors'] ?? null)
+            ? $recipe['collect_selectors']
+            : [])
+            ->filter(fn (mixed $selector): bool => is_string($selector) && trim($selector) !== '')
+            ->map(fn (string $selector): string => trim($selector))
+            ->unique()
+            ->values();
+
+        $recipe['collect_selectors'] = $collectSelectors
+            ->reject(function (string $selector) use ($collectSelectors): bool {
+                return $collectSelectors->contains(function (string $other) use ($selector): bool {
+                    if ($other === $selector || ! str_ends_with($other, $selector)) {
+                        return false;
+                    }
+
+                    $prefix = substr($other, 0, -strlen($selector));
+
+                    return preg_match('/(?:\\s|>|\\+|~)\\s*$/', $prefix) === 1;
+                });
+            })
+            ->values()
+            ->all();
+
+        return $recipe;
     }
 
     /** @return array<string, mixed> */
@@ -216,11 +293,8 @@ class BrowserProductGalleryExtractor
                 'PRODUCT_GALLERY_SCOUT_ONLY' => $scoutOnly ? '1' : '0',
                 'PRODUCT_GALLERY_DOM_WAIT_MS' => (string) config('product-images.browser_fallback.dom_wait_ms', 12000),
                 'PRODUCT_GALLERY_PROBE_TIMEOUT_MS' => (string) config('product-images.browser_fallback.image_probe_timeout_ms', 5000),
-                'PRODUCT_GALLERY_MINIMUM_SIDE' => (string) config('product-images.minimum_side', 500),
-                'PRODUCT_GALLERY_CONFIRMED_MINIMUM_SIDE' => (string) config(
-                    'product-images.browser_fallback.confirmed_gallery_minimum_side',
-                    400,
-                ),
+                'PRODUCT_GALLERY_MINIMUM_SIDE' => (string) $this->settings->imageMinimumSide(),
+                'PRODUCT_GALLERY_CONFIRMED_MINIMUM_SIDE' => (string) $this->settings->confirmedGalleryMinimumSide(),
                 // The script must finish - with whatever it already gathered -
                 // before this process is killed at the timeout; on Windows that
                 // kill is a hard TerminateProcess, so this reserve is the
@@ -252,6 +326,17 @@ class BrowserProductGalleryExtractor
                     && filter_var($image, FILTER_VALIDATE_URL) !== false
                     && in_array(parse_url($image, PHP_URL_SCHEME), ['http', 'https'], true))
                 ->unique()->take($limit)->values()->all();
+
+            if (! $scoutOnly && collect($result['action_trace'] ?? [])->contains(
+                fn (mixed $action): bool => is_array($action)
+                    && ($action['phase'] ?? null) === 'open_expanded_gallery'
+                    && ($action['clicked'] ?? false) === true,
+            )) {
+                $debug?->__invoke(
+                    'step',
+                    'Playwright открыл увеличенный viewer и собирает полноразмерные кадры внутри него.',
+                );
+            }
 
             return $result;
         } catch (ProcessTimedOutException $exception) {
@@ -337,7 +422,14 @@ class BrowserProductGalleryExtractor
                 'action' => (string) ($action['action'] ?? 'click'),
                 'status' => ($action['clicked'] ?? false) ? 'completed' : 'skipped',
                 'decision' => ($action['changed'] ?? false) ? 'dom_changed' : 'no_change',
-                'input' => ['selector' => $action['selector'] ?? null],
+                'input' => [
+                    'selector' => $action['selector'] ?? null,
+                    'index' => $action['index'] ?? null,
+                    'action_index' => $action['action_index'] ?? null,
+                    'repetition' => $action['repetition'] ?? null,
+                    'purpose' => $action['purpose'] ?? null,
+                    'selector_match_count' => $action['selector_match_count'] ?? null,
+                ],
                 'output' => $action,
                 'duration_ms' => isset($action['duration_ms']) ? (int) $action['duration_ms'] : null,
             ]);
@@ -376,7 +468,7 @@ class BrowserProductGalleryExtractor
      */
     private function galleryImageKey(string $url): string
     {
-        return hash('sha256', ProductImageStorage::normalizeCandidateUrl($url));
+        return hash('sha256', ProductImageStorage::imageAssetKey($url));
     }
 
     /**
@@ -396,6 +488,10 @@ class BrowserProductGalleryExtractor
         $configuredSelectors = [
             ...(is_array($recipe['collect_selectors'] ?? null) ? $recipe['collect_selectors'] : []),
             ...(is_array($recipe['thumbnail_selectors'] ?? null) ? $recipe['thumbnail_selectors'] : []),
+            ...collect(is_array($recipe['actions'] ?? null) ? $recipe['actions'] : [])
+                ->pluck('selector')
+                ->filter(fn (mixed $selector): bool => is_string($selector) && $selector !== '')
+                ->all(),
         ];
 
         if ($configuredSelectors === []) {
@@ -414,7 +510,8 @@ class BrowserProductGalleryExtractor
 
         $matchedCollect = is_array($learned['collect_selectors'] ?? null) ? $learned['collect_selectors'] : [];
         $matchedThumbnails = is_array($learned['thumbnail_selectors'] ?? null) ? $learned['thumbnail_selectors'] : [];
+        $matchedActions = is_array($learned['actions'] ?? null) ? $learned['actions'] : [];
 
-        return $matchedCollect === [] && $matchedThumbnails === [];
+        return $matchedCollect === [] && $matchedThumbnails === [] && $matchedActions === [];
     }
 }

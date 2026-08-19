@@ -17,6 +17,39 @@ class ProductGalleryRecipeTrainerTest extends TestCase
 {
     use RefreshDatabase;
 
+    public function test_an_overlong_action_purpose_is_truncated_instead_of_rejecting_the_recipe(): void
+    {
+        $method = new \ReflectionMethod(ProductGalleryRecipeTrainer::class, 'validateRecipe');
+        $method->setAccessible(true);
+        $recipe = $method->invoke(app(ProductGalleryRecipeTrainer::class), [
+            'gallery_present' => true,
+            'content_confirmed_product' => true,
+            'expected_image_count' => 4,
+            'expected_count_evidence' => 'Four visible gallery thumbnails.',
+            'actions' => [[
+                'kind' => 'click',
+                'selector' => '.gallery-button',
+                'index' => 0,
+                'limit' => 1,
+                'wait_after_ms' => 100,
+                'purpose' => str_repeat('long explanation ', 30),
+            ]],
+            'pre_click_selectors' => [],
+            'collect_selectors' => ['.gallery img'],
+            'thumbnail_selectors' => ['.thumb'],
+            'open_selectors' => ['.gallery-button'],
+            'next_selectors' => [],
+            'attributes' => ['src'],
+            'max_thumbnail_clicks' => 4,
+            'max_next_clicks' => 0,
+            'wait_after_click_ms' => 100,
+            'confidence' => 0.9,
+            'reason' => 'Usable gallery recipe.',
+        ]);
+
+        $this->assertSame(200, mb_strlen($recipe['actions'][0]['purpose']));
+    }
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -31,6 +64,20 @@ class ProductGalleryRecipeTrainerTest extends TestCase
             'confidence' => 0.95,
             'reason' => 'Fixture requires browser interaction.',
         ])->preventStrayPrompts();
+    }
+
+    public function test_agent_requires_opening_the_expanded_viewer_before_thumbnail_traversal(): void
+    {
+        $instructions = (string) (new ProductGalleryRecipeTrainerAgent)->instructions();
+
+        $this->assertStringContainsString(
+            'opening its dedicated media viewer is the first gallery',
+            $instructions,
+        );
+        $this->assertStringContainsString(
+            'Page-level thumbnails are only a fallback when the viewer cannot be opened.',
+            $instructions,
+        );
     }
 
     public function test_confirmed_access_gate_immediately_disables_playwright_for_the_domain(): void
@@ -69,6 +116,7 @@ class ProductGalleryRecipeTrainerTest extends TestCase
 
             return [
                 'gallery_present' => true,
+                'content_confirmed_product' => true,
                 'expected_image_count' => 3,
                 'expected_count_evidence' => 'The same-product Gallery tab exposes three photos.',
                 'pre_click_selectors' => ['a[href*="/Gallery"]'],
@@ -122,6 +170,260 @@ class ProductGalleryRecipeTrainerTest extends TestCase
         );
     }
 
+    public function test_scout_current_src_alias_is_normalized_without_spending_a_correction_round(): void
+    {
+        $promptCount = 0;
+        $seenRecipe = null;
+
+        ProductGalleryRecipeTrainerAgent::fake(function () use (&$promptCount): array {
+            $promptCount++;
+
+            return [
+                'gallery_present' => true,
+                'content_confirmed_product' => true,
+                'expected_image_count' => 3,
+                'expected_count_evidence' => 'Three distinct product slides are present.',
+                'pre_click_selectors' => [],
+                'collect_selectors' => ['.product-gallery img'],
+                'thumbnail_selectors' => [],
+                'open_selectors' => [],
+                'next_selectors' => [],
+                'attributes' => ['current_src', 'src'],
+                'max_thumbnail_clicks' => 0,
+                'max_next_clicks' => 0,
+                'wait_after_click_ms' => 150,
+                'confidence' => 0.98,
+                'reason' => 'Rendered images already expose both product photos.',
+            ];
+        })->preventStrayPrompts();
+
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock) use (&$seenRecipe): void {
+            $mock->shouldReceive('scout')->once()->andReturn([
+                'scout' => [
+                    'title' => 'Product gallery',
+                    'fragments' => ['<section class="product-gallery"><img></section>'],
+                    'interactive_controls' => [],
+                    'network_image_samples' => [],
+                    'access_gate' => false,
+                    'rate_limited' => false,
+                ],
+                'diagnostics' => [],
+            ]);
+            $mock->shouldReceive('executeRecipe')->once()
+                ->andReturnUsing(function (string $url, array $recipe) use (&$seenRecipe): array {
+                    $seenRecipe = $recipe;
+
+                    return ['images' => [
+                        'https://cdn.example/one.jpg',
+                        'https://cdn.example/two.jpg',
+                        'https://cdn.example/three.jpg',
+                    ]];
+                });
+        });
+
+        $images = app(ProductGalleryRecipeTrainer::class)->train(
+            'https://shop.example/product',
+            force: true,
+        );
+
+        $this->assertCount(3, $images);
+        $this->assertSame(1, $promptCount);
+        $this->assertSame(['src'], $seenRecipe['attributes']);
+    }
+
+    public function test_broad_collect_selector_is_removed_when_gallery_scoped_variant_exists(): void
+    {
+        $seenRecipe = null;
+
+        ProductGalleryRecipeTrainerAgent::fake([[
+            'gallery_present' => true,
+            'content_confirmed_product' => true,
+            'expected_image_count' => 6,
+            'expected_count_evidence' => 'Six product thumbnails are inside the gallery controls.',
+            'pre_click_selectors' => [],
+            'collect_selectors' => [
+                'img.w-full.h-full',
+                'button.w-16.h-16 img.w-full.h-full',
+            ],
+            'thumbnail_selectors' => ['button.w-16.h-16'],
+            'open_selectors' => [],
+            'next_selectors' => [],
+            'attributes' => ['src'],
+            'max_thumbnail_clicks' => 6,
+            'max_next_clicks' => 0,
+            'wait_after_click_ms' => 150,
+            'confidence' => 0.96,
+            'reason' => 'The nested selector is scoped to the product gallery.',
+        ]])->preventStrayPrompts();
+
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock) use (&$seenRecipe): void {
+            $mock->shouldReceive('scout')->once()->andReturn([
+                'scout' => [
+                    'title' => 'Product gallery',
+                    'fragments' => ['<button class=w-16><img class=w-full></button>'],
+                    'interactive_controls' => [],
+                    'network_image_samples' => [],
+                    'access_gate' => false,
+                    'rate_limited' => false,
+                ],
+                'diagnostics' => [],
+            ]);
+            $mock->shouldReceive('executeRecipe')->once()
+                ->andReturnUsing(function (string $url, array $recipe) use (&$seenRecipe): array {
+                    $seenRecipe = $recipe;
+
+                    return ['images' => [
+                        'https://cdn.example/one.jpg',
+                        'https://cdn.example/two.jpg',
+                        'https://cdn.example/three.jpg',
+                        'https://cdn.example/four.jpg',
+                        'https://cdn.example/five.jpg',
+                        'https://cdn.example/six.jpg',
+                    ]];
+                });
+        });
+
+        $images = app(ProductGalleryRecipeTrainer::class)->train(
+            'https://shop.example/product',
+            force: true,
+        );
+
+        $this->assertCount(6, $images);
+        $this->assertSame(
+            ['button.w-16.h-16 img.w-full.h-full'],
+            $seenRecipe['collect_selectors'],
+        );
+    }
+
+    public function test_ai_can_send_an_ordered_safe_action_plan_to_playwright(): void
+    {
+        $seenPrompt = null;
+        $seenRecipe = null;
+        ProductGalleryRecipeTrainerAgent::fake(function (string $prompt) use (&$seenPrompt): array {
+            $seenPrompt = json_decode($prompt, true);
+
+            return [
+                'gallery_present' => true,
+                'content_confirmed_product' => true,
+                'expected_image_count' => 3,
+                'expected_count_evidence' => 'A gallery button reveals three thumbnail controls.',
+                'actions' => [
+                    [
+                        'kind' => 'click',
+                        'selector' => 'button[data-gallery]',
+                        'index' => 0,
+                        'limit' => 1,
+                        'wait_after_ms' => 300,
+                        'purpose' => 'Open the product media viewer.',
+                    ],
+                    [
+                        'kind' => 'click_each',
+                        'selector' => 'button[data-thumbnail]',
+                        'index' => 0,
+                        'limit' => 3,
+                        'wait_after_ms' => 150,
+                        'purpose' => 'Load every distinct product photo.',
+                    ],
+                ],
+                'pre_click_selectors' => [],
+                'collect_selectors' => ['[data-gallery-image]'],
+                'thumbnail_selectors' => ['button[data-thumbnail]'],
+                'open_selectors' => ['button[data-gallery]'],
+                'next_selectors' => [],
+                'attributes' => ['src', 'data-full'],
+                'max_thumbnail_clicks' => 3,
+                'max_next_clicks' => 0,
+                'wait_after_click_ms' => 150,
+                'confidence' => 0.97,
+                'reason' => 'Use the supplied stable controls in page order.',
+            ];
+        })->preventStrayPrompts();
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock) use (&$seenRecipe): void {
+            $mock->shouldReceive('scout')->once()->andReturn([
+                'scout' => [
+                    'title' => 'Layered product gallery',
+                    'fragments' => ['<section data-gallery-image></section>'],
+                    'interactive_controls' => [],
+                    'action_candidates' => [[
+                        'selector' => 'button[data-gallery]',
+                        'selector_match_count' => 1,
+                        'text' => '',
+                        'aria_label' => 'Open media',
+                        'within_media' => true,
+                        'rect' => ['x' => 20, 'y' => 50, 'width' => 600, 'height' => 500],
+                    ]],
+                    'image_candidates' => [[
+                        'selector' => '[data-gallery-image]',
+                        'natural_width' => 1600,
+                        'natural_height' => 1200,
+                        'parent_control_selector' => 'button[data-gallery]',
+                    ]],
+                    'network_image_samples' => [],
+                    'access_gate' => false,
+                    'rate_limited' => false,
+                ],
+                'diagnostics' => [],
+            ]);
+            $mock->shouldReceive('executeRecipe')->once()
+                ->andReturnUsing(function (string $url, array $recipe) use (&$seenRecipe): array {
+                    $seenRecipe = $recipe;
+
+                    return [
+                        'images' => [
+                            'https://cdn.example/one.jpg',
+                            'https://cdn.example/two.jpg',
+                            'https://cdn.example/three.jpg',
+                        ],
+                        'action_trace' => [[
+                            'action' => 'click',
+                            'selector' => 'button[data-gallery]',
+                            'action_index' => 0,
+                            'clicked' => true,
+                            'changed' => true,
+                        ], [
+                            'action' => 'click_each',
+                            'selector' => 'button[data-thumbnail]',
+                            'action_index' => 1,
+                            'repetition' => 0,
+                            'selector_match_count' => 3,
+                            'clicked' => true,
+                            'changed' => true,
+                        ], [
+                            'action' => 'click_each',
+                            'selector' => 'button[data-thumbnail]',
+                            'action_index' => 1,
+                            'repetition' => 1,
+                            'selector_match_count' => 3,
+                            'clicked' => true,
+                            'changed' => true,
+                        ], [
+                            'action' => 'click_each',
+                            'selector' => 'button[data-thumbnail]',
+                            'action_index' => 1,
+                            'repetition' => 2,
+                            'selector_match_count' => 3,
+                            'clicked' => true,
+                            'changed' => true,
+                        ]],
+                    ];
+                });
+        });
+
+        $images = app(ProductGalleryRecipeTrainer::class)->train(
+            'https://shop.example/layered-product',
+            force: true,
+        );
+
+        $this->assertCount(3, $images);
+        $this->assertSame('button[data-gallery]', $seenPrompt['page']['action_candidates'][0]['selector']);
+        $this->assertSame('click', $seenRecipe['actions'][0]['kind']);
+        $this->assertSame('click_each', $seenRecipe['actions'][1]['kind']);
+        $this->assertSame(
+            $seenRecipe['actions'],
+            ProductGalleryRecipe::query()->where('domain', 'shop.example')->firstOrFail()->recipe['actions'],
+        );
+    }
+
     public function test_repeated_browser_timeouts_disable_playwright_after_the_retry_budget(): void
     {
         $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock): void {
@@ -152,6 +454,7 @@ class ProductGalleryRecipeTrainerTest extends TestCase
     {
         ProductGalleryRecipeTrainerAgent::fake(fn (): array => [
             'gallery_present' => true,
+            'content_confirmed_product' => true,
             'expected_image_count' => 2,
             'expected_count_evidence' => 'Two gallery items in the supplied DOM.',
             'pre_click_selectors' => [],
@@ -180,8 +483,11 @@ class ProductGalleryRecipeTrainerTest extends TestCase
                     ],
                     'diagnostics' => [],
                 ]);
+            // 2 per session (not 3): round 2 returns the exact same empty
+            // result as round 1, so the stagnation check stops before a 3rd,
+            // more expensive-for-nothing round.
             $mock->shouldReceive('executeRecipe')
-                ->times(6)
+                ->times(4)
                 ->andReturn(['images' => [], 'diagnostics' => ['dom_candidates' => 0]]);
         });
         $trainer = app(ProductGalleryRecipeTrainer::class);
@@ -236,6 +542,7 @@ class ProductGalleryRecipeTrainerTest extends TestCase
 
             return [
                 'gallery_present' => true,
+                'content_confirmed_product' => true,
                 'expected_image_count' => 2,
                 'expected_count_evidence' => 'Two image items in the gallery.',
                 'pre_click_selectors' => [],
@@ -329,6 +636,7 @@ class ProductGalleryRecipeTrainerTest extends TestCase
 
             return [
                 'gallery_present' => true,
+                'content_confirmed_product' => true,
                 'expected_image_count' => 3,
                 'expected_count_evidence' => 'n/a',
                 'pre_click_selectors' => [],
@@ -391,6 +699,7 @@ class ProductGalleryRecipeTrainerTest extends TestCase
         ]);
         ProductGalleryRecipeTrainerAgent::fake(fn (): array => [
             'gallery_present' => true,
+            'content_confirmed_product' => true,
             'expected_image_count' => 2,
             'expected_count_evidence' => 'n/a',
             'pre_click_selectors' => [],
@@ -414,9 +723,11 @@ class ProductGalleryRecipeTrainerTest extends TestCase
                 ],
                 'diagnostics' => [],
             ]);
-            // Exactly one call per training round (3) - not 4, which would mean
-            // the old, already-failing recipe got silently re-run a second time.
-            $mock->shouldReceive('executeRecipe')->times(3)->andReturn([
+            // 2, not 4: the old, already-failing recipe must not be silently
+            // re-run a second time to seed the partial fallback - and round 2
+            // returns the exact same empty result as round 1, so the
+            // stagnation check stops before a 3rd round.
+            $mock->shouldReceive('executeRecipe')->times(2)->andReturn([
                 'images' => [],
                 'diagnostics' => [],
             ]);
@@ -438,6 +749,7 @@ class ProductGalleryRecipeTrainerTest extends TestCase
     {
         ProductGalleryRecipeTrainerAgent::fake(fn (): array => [
             'gallery_present' => true,
+            'content_confirmed_product' => true,
             'expected_image_count' => 7,
             'expected_count_evidence' => 'Alt text reports Thumbnail 1 of 7.',
             'pre_click_selectors' => [],
@@ -465,7 +777,10 @@ class ProductGalleryRecipeTrainerTest extends TestCase
                 ],
                 'diagnostics' => ['observed_gallery_count' => 7],
             ]);
-            $mock->shouldReceive('executeRecipe')->times(3)->andReturn([
+            // 2, not 3: round 2 returns the exact same 2 images as round 1,
+            // so the stagnation check stops before a 3rd round that could
+            // only repeat the same shortfall.
+            $mock->shouldReceive('executeRecipe')->times(2)->andReturn([
                 'images' => [
                     'https://cdn.example/image/one',
                     'https://cdn.example/image/two',
@@ -491,7 +806,7 @@ class ProductGalleryRecipeTrainerTest extends TestCase
         $version = $recipe->versions()->latest('id')->firstOrFail();
         $this->assertSame('partial', $version->status);
         $this->assertFalse($version->result['validation']['passed']);
-        $this->assertSame(3, $version->result['validation']['expected']);
+        $this->assertSame(7, $version->result['validation']['expected']);
         $this->assertSame(2, $version->result['validation']['extracted']);
     }
 
@@ -561,6 +876,7 @@ class ProductGalleryRecipeTrainerTest extends TestCase
         ])->preventStrayPrompts();
         ProductGalleryRecipeTrainerAgent::fake([[
             'gallery_present' => true,
+            'content_confirmed_product' => true,
             'expected_image_count' => 3,
             'expected_count_evidence' => 'Three real product photos.',
             'pre_click_selectors' => [],

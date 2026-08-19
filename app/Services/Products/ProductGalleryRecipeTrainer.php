@@ -101,6 +101,7 @@ class ProductGalleryRecipeTrainer
             $debug?->__invoke('step', "AI-тренер: Playwright собирает DOM, интерактивные элементы и сетевые изображения {$host}.");
             $scout = $this->browser->scout($url, $debug, $telegramUpdateId);
             $pageScout = is_array($scout['scout'] ?? null) ? $scout['scout'] : [];
+            $layoutFingerprint = app(ProductPageLayoutFingerprint::class)->make($pageScout);
             // Persist even a rejected scout: an empty fragment list can still
             // contain the exact Gallery/Media control needed to diagnose the
             // page, and failed versions must remain auditable in Filament.
@@ -118,7 +119,8 @@ class ProductGalleryRecipeTrainer
             }
 
             $hasFragments = ($pageScout['fragments'] ?? []) !== [];
-            $hasInteractiveGalleryControls = ($pageScout['interactive_controls'] ?? []) !== [];
+            $hasInteractiveGalleryControls = ($pageScout['interactive_controls'] ?? []) !== []
+                || ($pageScout['action_candidates'] ?? []) !== [];
 
             if (! $hasFragments && ! $hasInteractiveGalleryControls) {
                 $failureKind = (string) ($scout['failure_kind'] ?? (
@@ -203,7 +205,8 @@ class ProductGalleryRecipeTrainer
                 ])
                     ->filter(fn (mixed $url): bool => is_string($url) && $url !== '')
                     ->map(fn (string $url): string => ProductImageStorage::normalizeCandidateUrl($url))
-                    ->unique()->take(20)->values()->all();
+                    ->unique(fn (string $url): string => ProductImageStorage::imageAssetKey($url))
+                    ->take(20)->values()->all();
             }
             $oldImages = [];
 
@@ -232,6 +235,7 @@ class ProductGalleryRecipeTrainer
             $promote = false;
             $maxRounds = $this->settings->galleryTrainingMaxRounds();
             $roundScout = $pageScout;
+            $previousCandidateImages = null;
 
             for ($attempt = 1; $attempt <= $maxRounds; $attempt++) {
                 if (! $this->timeBudget->canStart($telegramUpdateId, 30)) {
@@ -249,17 +253,31 @@ class ProductGalleryRecipeTrainer
                     break;
                 }
 
+                // Field order matters for OpenAI's automatic prompt caching,
+                // which only discounts a request's longest prefix that is
+                // byte-identical to a recent previous request. Every field
+                // below the fixed line is the same on every round of this
+                // one training session (same url/recipe/scout diagnostics/
+                // preflight/hint); everything that actually changes round to
+                // round (attempt number, current DOM, growing history and
+                // feedback) is pushed after it so round 2/3 can still cache
+                // that shared prefix instead of invalidating it with the
+                // round counter alone. A prior real search only ever cached
+                // the ~1800-token system instructions for this reason - nothing
+                // from this payload, despite most of it being unchanged
+                // between its 3 rounds.
                 $prompt = json_encode([
                     'url' => $url,
-                    'attempt' => $attempt,
                     'max_attempts' => $maxRounds,
                     'current_recipe' => $recipe->recipe,
-                    'page' => $roundScout,
                     'diagnostics' => $scout['diagnostics'] ?? [],
-                    'attempt_history' => $attempts,
                     'preflight' => $preflight,
-                    'previous_attempt_feedback' => $feedback,
                     'operator_hint' => $userHint,
+                    // --- everything below changes every round ---
+                    'attempt' => $attempt,
+                    'page' => $roundScout,
+                    'attempt_history' => $attempts,
+                    'previous_attempt_feedback' => $feedback,
                 ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
 
                 $debug?->__invoke(
@@ -316,9 +334,16 @@ class ProductGalleryRecipeTrainer
                 try {
                     $candidate = $this->validateRecipe($response->toArray());
                 } catch (Throwable $exception) {
+                    // The operator-facing progress line stays in the app
+                    // locale (Russian); the AI trainer prompt is entirely
+                    // English, so its feedback/history use englishMessage
+                    // when available instead of leaking a Russian sentence.
+                    $aiFacingMessage = $exception instanceof \App\Exceptions\InvalidGalleryRecipeException
+                        ? $exception->englishMessage
+                        : $exception->getMessage();
                     $debug?->__invoke('warning', "AI-тренер: раунд {$attempt}/{$maxRounds} вернул невалидный рецепт ({$exception->getMessage()}), пробую следующий раунд.");
-                    $attempts[] = ['attempt' => $attempt, 'error' => 'invalid_recipe: '.$exception->getMessage()];
-                    $feedback = ['error' => 'The previous attempt returned an invalid recipe: '.mb_substr($exception->getMessage(), 0, 300)];
+                    $attempts[] = ['attempt' => $attempt, 'error' => 'invalid_recipe: '.$aiFacingMessage];
+                    $feedback = ['error' => 'The previous attempt returned an invalid recipe: '.mb_substr($aiFacingMessage, 0, 300)];
 
                     continue;
                 }
@@ -338,7 +363,12 @@ class ProductGalleryRecipeTrainer
                     $bestPartialImages = $candidateImages;
                     $bestPartialResult = $candidateResult;
                 }
-                $validation = $this->resultValidator->validate($candidate, $candidateResult);
+                $contextMinimum = max(0, (int) ($context['minimum_verified_images'] ?? 0));
+                $validation = $this->resultValidator->validate(
+                    $candidate,
+                    $candidateResult,
+                    minimumSuccessCount: $contextMinimum > 0 ? $contextMinimum : null,
+                );
                 $promote = $validation['passed']
                     && (count($oldImages) < 2 || count($candidateImages) >= count($oldImages));
                 $attempts[] = [
@@ -355,14 +385,34 @@ class ProductGalleryRecipeTrainer
                     break;
                 }
 
+                // Every correction round resends this page's whole DOM
+                // scout plus the growing attempt_history, so a round that
+                // changes nothing is not merely wasted, it is the single
+                // most expensive round yet (a real search paid full price
+                // for a 3rd round that produced byte-for-byte the same 2
+                // images as the 2nd - the correction attempt made no
+                // difference, but the growing context did). Stop as soon as
+                // a round's images exactly match the previous round's,
+                // rather than paying for a 3rd retry of something that has
+                // already visibly stopped responding to feedback.
+                if ($previousCandidateImages !== null && $this->sameImageSet($candidateImages, $previousCandidateImages)) {
+                    $debug?->__invoke(
+                        'warning',
+                        "AI-тренер: раунд {$attempt}/{$maxRounds} не изменил результат по сравнению с предыдущим (".count($candidateImages)." фото); дальнейшие раунды не запускаю.",
+                    );
+
+                    break;
+                }
+                $previousCandidateImages = $candidateImages;
+
                 $postInteractionScout = $candidateResult['post_interaction_scout'] ?? [];
-                if (
-                    is_array($postInteractionScout)
+                $postInteractionScoutUsable = is_array($postInteractionScout)
                     && (
                         ($postInteractionScout['fragments'] ?? []) !== []
                         || ($postInteractionScout['interactive_controls'] ?? []) !== []
-                    )
-                ) {
+                        || ($postInteractionScout['action_candidates'] ?? []) !== []
+                    );
+                if ($postInteractionScoutUsable) {
                     $roundScout = $postInteractionScout;
                 }
 
@@ -374,8 +424,15 @@ class ProductGalleryRecipeTrainer
                     'failure_kind' => $candidateResult['failure_kind'] ?? null,
                     'error' => $candidateResult['error'] ?? $validation['reason'],
                     'action_trace' => $candidateResult['action_trace'] ?? [],
-                    'post_interaction_scout' => $postInteractionScout,
-                    'instruction' => 'Use the post-interaction DOM and action trace. Decide whether another safe click opens a deeper gallery layer; do not repeat failed actions.',
+                    // Sent as the next round's top-level "page" instead of
+                    // duplicated here too when it was usable - a real search
+                    // sent the exact same ~120KB DOM snapshot twice in one
+                    // prompt (here and as page), roughly doubling every
+                    // correction round's cost for zero extra information.
+                    'post_interaction_scout' => $postInteractionScoutUsable ? null : $postInteractionScout,
+                    'instruction' => $postInteractionScoutUsable
+                        ? 'The page field already reflects the DOM after these actions. Use it plus action_trace below. Decide whether another safe click opens a deeper gallery layer; do not repeat failed actions.'
+                        : 'Use the post-interaction DOM and action trace. Decide whether another safe click opens a deeper gallery layer; do not repeat failed actions.',
                 ];
             }
 
@@ -392,6 +449,9 @@ class ProductGalleryRecipeTrainer
                     'validation' => $validation ?? null,
                     'attempts' => $attempts,
                     'diagnostics' => $candidateResult['diagnostics'] ?? [],
+                    'action_trace' => $candidateResult['action_trace'] ?? [],
+                    'failure_kind' => $candidateResult['failure_kind'] ?? null,
+                    'error' => $candidateResult['error'] ?? null,
                 ],
                 'score' => $score,
                 'promoted_at' => $promote ? now() : null,
@@ -421,6 +481,10 @@ class ProductGalleryRecipeTrainer
             $recipe->update([
                 'recipe' => $candidate,
                 'status' => 'active',
+                'region' => $this->regionForUrl($url),
+                'sample_path' => mb_substr((string) (parse_url($url, PHP_URL_PATH) ?: '/'), 0, 1024),
+                'layout_fingerprint' => $layoutFingerprint,
+                'last_observed_layout_fingerprint' => $layoutFingerprint,
                 'success_count' => $recipe->success_count + 1,
                 'consecutive_hard_blocks' => 0,
                 'hard_block_urls' => [],
@@ -459,6 +523,22 @@ class ProductGalleryRecipeTrainer
         } finally {
             $lock->release();
         }
+    }
+
+    private function regionForUrl(string $url): ?string
+    {
+        $host = strtolower((string) parse_url($url, PHP_URL_HOST));
+        $parts = array_values(array_filter(explode('.', $host)));
+        $topLevel = end($parts) ?: null;
+
+        if (is_string($topLevel) && strlen($topLevel) === 2) {
+            return $topLevel;
+        }
+
+        $firstPathPart = collect(explode('/', trim((string) parse_url($url, PHP_URL_PATH), '/')))
+            ->first(fn (string $part): bool => preg_match('/^[a-z]{2}(?:-[a-z]{2})?$/i', $part) === 1);
+
+        return is_string($firstPathPart) ? strtolower($firstPathPart) : null;
     }
 
     private function recordExecutionTrace(
@@ -505,6 +585,10 @@ class ProductGalleryRecipeTrainer
                 'input' => [
                     'selector' => $action['selector'] ?? null,
                     'index' => $action['index'] ?? null,
+                    'action_index' => $action['action_index'] ?? null,
+                    'repetition' => $action['repetition'] ?? null,
+                    'purpose' => $action['purpose'] ?? null,
+                    'selector_match_count' => $action['selector_match_count'] ?? null,
                 ],
                 'output' => $action,
                 'duration_ms' => isset($action['duration_ms']) ? (int) $action['duration_ms'] : null,
@@ -537,7 +621,8 @@ class ProductGalleryRecipeTrainer
             'static_image_urls' => collect($context['static_image_urls'] ?? [])
                 ->filter(fn (mixed $url): bool => is_string($url) && $url !== '')
                 ->map(fn (string $url): string => ProductImageStorage::normalizeCandidateUrl($url))
-                ->unique()->take(20)->values()->all(),
+                ->unique(fn (string $url): string => ProductImageStorage::imageAssetKey($url))
+                ->take(20)->values()->all(),
         ];
         $prompt = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?: '{}';
         $startedAt = hrtime(true);
@@ -744,6 +829,23 @@ class ProductGalleryRecipeTrainer
     /** @return array<string, mixed> */
     private function validateRecipe(array $data): array
     {
+        // Stored recipes and test fixtures created before ordered actions
+        // remain valid; new strict AI responses always include this field.
+        $data['actions'] = is_array($data['actions'] ?? null) ? $data['actions'] : [];
+        $data['actions'] = collect($data['actions'])
+            ->map(function (mixed $action): mixed {
+                if (! is_array($action)) {
+                    return $action;
+                }
+
+                if (is_string($action['purpose'] ?? null)) {
+                    $action['purpose'] = mb_substr(trim($action['purpose']), 0, 200);
+                }
+
+                return $action;
+            })
+            ->values()
+            ->all();
         $data['wait_after_click_ms'] = $this->clampInt($data['wait_after_click_ms'] ?? null, 50, 1000, 150);
         $data['max_thumbnail_clicks'] = $this->clampInt($data['max_thumbnail_clicks'] ?? null, 0, 20, 5);
         $data['max_next_clicks'] = $this->clampInt($data['max_next_clicks'] ?? null, 0, 15, 5);
@@ -756,10 +858,109 @@ class ProductGalleryRecipeTrainer
             $data['reason'] = mb_substr($data['reason'], 0, 1000);
         }
 
-        $data = Validator::make($data, [
+        // Scout exposes the DOM property as `current_src`, while the browser
+        // runner already reads element.currentSrc automatically and recipe
+        // attributes are deliberately limited to real HTML attribute names.
+        // Normalize that observation alias before validation so one harmless
+        // naming mismatch cannot burn every paid correction round.
+        $data['attributes'] = collect(is_array($data['attributes'] ?? null) ? $data['attributes'] : [])
+            ->filter(fn (mixed $attribute): bool => is_string($attribute))
+            ->map(function (string $attribute): string {
+                $attribute = strtolower(trim($attribute));
+
+                return match ($attribute) {
+                    'currentsrc', 'current_src', 'current-src' => 'src',
+                    'source_srcset', 'source-srcset' => 'srcset',
+                    default => str_starts_with($attribute, 'data_')
+                        ? str_replace('_', '-', $attribute)
+                        : $attribute,
+                };
+            })
+            ->unique()
+            ->values()
+            ->all();
+
+        try {
+            $data = Validator::make(
+                $data,
+                $this->recipeValidationRules(),
+                $this->recipeValidationMessages(app()->getLocale()),
+            )->validate();
+        } catch (\Illuminate\Validation\ValidationException $exception) {
+            throw new \App\Exceptions\InvalidGalleryRecipeException(
+                $exception->getMessage(),
+                $this->englishValidationMessage($data),
+            );
+        }
+
+        foreach (['pre_click_selectors', 'collect_selectors', 'thumbnail_selectors', 'open_selectors', 'next_selectors'] as $key) {
+            $data[$key] = collect($data[$key] ?? [])
+                ->filter(fn (mixed $selector): bool => is_string($selector) && $this->safeSelector($selector))
+                ->map(fn (string $selector): string => trim($selector))
+                ->unique()->values()->all();
+        }
+
+        // Prefer a selector scoped to the product gallery over its broad suffix.
+        // AI may return both `img.foo` and `.gallery img.foo`; executing both can
+        // collect unrelated recommendation, recently-viewed or cart images that
+        // happen to share the same utility classes with the real gallery.
+        $collectSelectors = collect($data['collect_selectors']);
+        $data['collect_selectors'] = $collectSelectors
+            ->reject(function (string $selector) use ($collectSelectors): bool {
+                return $collectSelectors->contains(function (string $other) use ($selector): bool {
+                    if ($other === $selector || ! str_ends_with($other, $selector)) {
+                        return false;
+                    }
+
+                    $prefix = substr($other, 0, -strlen($selector));
+
+                    return preg_match('/(?:\\s|>|\\+|~)\\s*$/', $prefix) === 1;
+                });
+            })
+            ->values()
+            ->all();
+
+        $data['actions'] = collect($data['actions'])
+            ->filter(fn (mixed $action): bool => is_array($action)
+                && is_string($action['selector'] ?? null)
+                && $this->safeSelector($action['selector']))
+            ->map(fn (array $action): array => [
+                'kind' => $action['kind'],
+                'selector' => trim($action['selector']),
+                'index' => (int) $action['index'],
+                'limit' => (int) $action['limit'],
+                'wait_after_ms' => (int) $action['wait_after_ms'],
+                'purpose' => trim($action['purpose']),
+            ])
+            ->values()
+            ->all();
+
+        $data['attributes'] = collect($data['attributes'] ?? [])
+            ->map(fn (string $attribute): string => strtolower(trim($attribute)))
+            ->unique()->values()->all();
+
+        if ($data['collect_selectors'] === []) {
+            throw new RuntimeException('AI не вернул безопасный селектор сбора изображений.');
+        }
+
+        return $data;
+    }
+
+    /** @return array<string, array<int, string>> */
+    private function recipeValidationRules(): array
+    {
+        return [
             'gallery_present' => ['required', 'boolean'],
             'expected_image_count' => ['required', 'integer', 'between:0,20'],
             'expected_count_evidence' => ['required', 'string', 'max:500'],
+            'content_confirmed_product' => ['required', 'boolean'],
+            'actions' => ['present', 'array', 'max:12'],
+            'actions.*.kind' => ['required', 'in:click,click_each,click_until_no_change'],
+            'actions.*.selector' => ['required', 'string', 'max:300'],
+            'actions.*.index' => ['required', 'integer', 'between:0,20'],
+            'actions.*.limit' => ['required', 'integer', 'between:1,20'],
+            'actions.*.wait_after_ms' => ['required', 'integer', 'between:50,1500'],
+            'actions.*.purpose' => ['required', 'string', 'max:200'],
             'pre_click_selectors' => ['present', 'array', 'max:5'],
             'collect_selectors' => ['present', 'array', 'max:12'],
             'thumbnail_selectors' => ['present', 'array', 'max:8'],
@@ -777,24 +978,58 @@ class ProductGalleryRecipeTrainer
             'wait_after_click_ms' => ['required', 'integer', 'between:50,1000'],
             'confidence' => ['required', 'numeric', 'between:0,1'],
             'reason' => ['required', 'string', 'max:1000'],
-        ])->validate();
+        ];
+    }
 
-        foreach (['pre_click_selectors', 'collect_selectors', 'thumbnail_selectors', 'open_selectors', 'next_selectors'] as $key) {
-            $data[$key] = collect($data[$key] ?? [])
-                ->filter(fn (mixed $selector): bool => is_string($selector) && $this->safeSelector($selector))
-                ->map(fn (string $selector): string => trim($selector))
-                ->unique()->values()->all();
+    /**
+     * The app locale is Russian (operator-facing Telegram text), but this
+     * message is fed back to the AI trainer as previous_attempt_feedback and
+     * attempt_history, alongside an otherwise entirely English prompt - so it
+     * is rendered in English regardless of APP_LOCALE.
+     */
+    private function englishValidationMessage(array $data): string
+    {
+        $locale = app()->getLocale();
+        app()->setLocale('en');
+
+        try {
+            Validator::make($data, $this->recipeValidationRules(), $this->recipeValidationMessages('en'))->validate();
+
+            return 'The recipe failed schema validation.';
+        } catch (\Illuminate\Validation\ValidationException $exception) {
+            return $exception->getMessage();
+        } finally {
+            app()->setLocale($locale);
         }
+    }
 
-        $data['attributes'] = collect($data['attributes'] ?? [])
-            ->map(fn (string $attribute): string => strtolower(trim($attribute)))
-            ->unique()->values()->all();
+    /**
+     * Laravel's default regex-failure message ("the attributes.2 field
+     * format is invalid") doesn't say what format IS valid, which let the AI
+     * repeat the same rejected value for all 3 rounds of a real training run
+     * (it kept adding "alt" - not a URL-bearing attribute - to identify a
+     * placeholder/logo carousel slide, a case the app already handles by
+     * URL pattern after collection; see instructions() for the matching
+     * prompt guidance). Only this one rule gets a clearer message; the rest
+     * already get Laravel's normal localized text.
+     *
+     * @return array<string, string>
+     */
+    private function recipeValidationMessages(string $locale): array
+    {
+        return [
+            'attributes.*.regex' => $locale === 'ru'
+                ? 'Каждый элемент attributes должен быть ровно "src", "href", "srcset" либо именем атрибута "data-*" - другие атрибуты (например "alt") сюда не годятся; заглушки/логотипы приложение и так отсеивает по URL после сбора.'
+                : 'Each attributes entry must be exactly "src", "href", "srcset", or a "data-*" attribute name - other attributes such as "alt" are not accepted here; the app already filters placeholder/logo images by URL pattern after collection, so there is no need to identify them via attributes.',
+        ];
+    }
 
-        if ($data['collect_selectors'] === []) {
-            throw new RuntimeException('AI не вернул безопасный селектор сбора изображений.');
-        }
-
-        return $data;
+    /** @param array<int, string> $left @param array<int, string> $right */
+    private function sameImageSet(array $left, array $right): bool
+    {
+        return count($left) === count($right)
+            && array_diff($left, $right) === []
+            && array_diff($right, $left) === [];
     }
 
     private function clampInt(mixed $value, int $min, int $max, int $default): int

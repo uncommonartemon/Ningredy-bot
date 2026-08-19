@@ -21,7 +21,7 @@ class AiErrorPresenter
         $suffix .= $providerDetail !== '' ? " Ответ провайдера: {$providerDetail}" : '';
 
         return match (true) {
-            str_contains($raw, 'insufficient_quota'), str_contains($raw, 'billing'), str_contains($raw, 'credit balance'), str_contains($raw, 'quota') => [
+            str_contains($raw, 'insufficient_quota'), str_contains($raw, 'billing'), str_contains($raw, 'credit'), str_contains($raw, 'quota') => [
                 'retryable' => false, 'message' => 'У AI-провайдера закончилась квота или средства. Пополните баланс/лимит и повторите запрос.'.$suffix,
             ],
             str_contains($raw, 'does not exist'), str_contains($raw, 'model_not_found'), str_contains($raw, 'invalid model'), str_contains($raw, 'no such model'), str_contains($raw, 'unknown model') => [

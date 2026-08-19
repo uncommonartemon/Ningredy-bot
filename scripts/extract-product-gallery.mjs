@@ -2,10 +2,17 @@ import dns from 'node:dns/promises';
 import net from 'node:net';
 import { chromium } from 'playwright-core';
 import {
+    EXCLUDED_GALLERY_CONTEXT_PATTERN_SOURCE,
+    galleryCollectionTarget,
     galleryProbeMinimumSide,
     imageAssetKey,
     isAllowedProductNavigation,
     normalizeImageCandidate,
+    normalizeRecipeActions,
+    prioritizeCandidateRenditions,
+    recipeActionOpensGallery,
+    recipeActionPlanStatus,
+    recipeActionTraversesGallery,
     urlQualityScore,
     withUpscaledSizeParam,
 } from './product-gallery-utils.mjs';
@@ -60,6 +67,7 @@ const recipeAttributes = Array.isArray(recipe.attributes)
             && /^(?:src|href|srcset|data-[a-z0-9_-]+)$/i.test(attribute))
         .slice(0, 12)
     : [];
+const recipeActions = normalizeRecipeActions(recipe.actions);
 
 if (!sourceUrl) {
     process.stderr.write('A product URL is required.\n');
@@ -192,6 +200,8 @@ const networkImages = [];
 const payloadImages = [];
 const pendingPayloads = new Set();
 const gathered = [];
+const excludedGalleryContexts = [];
+const collectionErrors = [];
 const priorityImages = [];
 let learnedRecipe = {};
 let scout = {};
@@ -246,6 +256,7 @@ const emitCrashResult = (error) => {
             partial: true,
             dom_candidates: gathered.length,
             network_candidates: networkImages.length,
+            action_plan: recipeActionPlanStatus({ actions: recipeActions, actionTrace }),
         },
     }));
 
@@ -309,11 +320,44 @@ const genericGallerySelectors = [
     '[class*="product-media" i] img',
     'img[itemprop="image"]',
 ];
+const expandedGalleryContainers = [
+    `[role='dialog']`,
+    `[aria-modal='true']`,
+    'dialog[open]',
+    `[class*='lightbox' i]`,
+    `[class*='fullscreen' i]`,
+    `[class*='media-viewer' i]`,
+    `[class*='image-viewer' i]`,
+    `[class*='zoom' i]`,
+];
+const expandedGallerySelectors = expandedGalleryContainers.flatMap((container) => [
+    `${container} img`,
+    `${container} picture`,
+    `${container} source`,
+    `${container} [data-old-hires]`,
+    `${container} [data-zoom-image]`,
+    `${container} [data-large_image]`,
+    `${container} [data-full]`,
+    `${container} [data-full-src]`,
+]);
+const mainGalleryImageSelectors = [
+    `[data-selenium*='mainimage' i]`,
+    `[data-selenium*='main-image' i]`,
+    `img[itemprop='image']`,
+    `[class*='product-image' i] img`,
+    `[class*='product-media' i] img`,
+    `[class*='gallery' i] img`,
+    `[class*='slider' i] img`,
+    `[class*='carousel' i] img`,
+    `[class*='swiper' i] img`,
+];
 const strictRecipe = Object.keys(recipe).length > 0 && !scoutOnly;
-const preClickSelectors = [...new Set(recipeSelectors('pre_click_selectors'))];
+const preClickSelectors = recipeActions.length > 0
+    ? []
+    : [...new Set(recipeSelectors('pre_click_selectors'))];
 const gallerySelectors = [...new Set([
     ...recipeSelectors('collect_selectors'),
-    ...(strictRecipe ? [] : genericGallerySelectors),
+    ...(strictRecipe ? [] : [...expandedGallerySelectors, ...genericGallerySelectors]),
 ])];
 const thumbnailSelectors = [...new Set([
     ...recipeSelectors('thumbnail_selectors'),
@@ -339,9 +383,10 @@ const nextSelectors = [...new Set([
 ])];
 
 const galleryStateSelectors = [...new Set([
-    ...genericGallerySelectors,
+    ...(strictRecipe ? [] : genericGallerySelectors),
     ...gallerySelectors,
     ...thumbnailSelectors,
+    ...recipeActions.map((action) => action.selector),
     '[data-type=image][data-image-id]',
     'button[data-type=image]',
     '[class*=thumbnail i] li',
@@ -355,10 +400,44 @@ const galleryStateSelectors = [...new Set([
 // re-read the (now different) gallery state instead of dying.
 const isTornDownContextError = (error) => /execution context was destroyed|context or browser has been closed/i
     .test(String(error?.message ?? error ?? ''));
-const readGalleryStateOnce = () => page.evaluate(({ selectors, expectedFromRecipe }) => {
+const readGalleryStateOnce = () => page.evaluate(({
+    selectors,
+    expectedFromRecipe,
+    excludedContextPatternSource,
+}) => {
+    const excludedContextPattern = new RegExp(excludedContextPatternSource.replaceAll('\\\\', '\\'), 'i');
+    const semanticContext = (element) => {
+        const parts = [];
+        let current = element;
+
+        for (let depth = 0; current && depth < 8; depth++, current = current.parentElement) {
+            for (const attribute of [
+                'id', 'class', 'role', 'aria-label', 'title', 'data-testid',
+                'data-component-type', 'data-feature-name', 'data-cel-widget',
+            ]) {
+                const value = current.getAttribute?.(attribute);
+                if (value) parts.push(value);
+            }
+
+            if (current.matches?.('section,aside,[role="region"],[role="dialog"],dialog')) {
+                const heading = current.querySelector?.('h1,h2,h3,h4,[role="heading"]');
+                if (heading?.textContent) parts.push(heading.textContent.slice(0, 240));
+            }
+        }
+
+        return parts.join(' ').replace(/([a-z])([A-Z])/g, '$1 $2');
+    };
+    const excludedContext = (element) => excludedContextPattern.test(semanticContext(element));
+    const safeElements = (selector) => {
+        try {
+            return [...document.querySelectorAll(selector)].filter((element) => !excludedContext(element));
+        } catch {
+            return [];
+        }
+    };
     const safeCount = (selector) => {
         try {
-            return document.querySelectorAll(selector).length;
+            return safeElements(selector).length;
         } catch {
             return 0;
         }
@@ -374,7 +453,7 @@ const readGalleryStateOnce = () => page.evaluate(({ selectors, expectedFromRecip
     ];
     const imageThumbnailCount = (selector) => {
         try {
-            return [...document.querySelectorAll(selector)].filter((node) => {
+            return safeElements(selector).filter((node) => {
                 const marker = [
                     node.getAttribute('class'),
                     node.getAttribute('data-type'),
@@ -397,6 +476,24 @@ const readGalleryStateOnce = () => page.evaluate(({ selectors, expectedFromRecip
         }
     };
     const thumbnailCount = Math.max(0, ...thumbnailStrategies.map(imageThumbnailCount));
+    const dataImageValues = new Set(safeElements([
+        '[class*="gallery" i] [data-image]',
+        '[class*="swiper" i] .swiper-slide[data-image]',
+        '[class*="product-media" i] [data-image]',
+    ].join(','))
+        .map((node) => node.getAttribute('data-image'))
+        .filter(Boolean));
+    const dataImageCount = dataImageValues.size;
+    const declaredImageCount = Math.max(0, ...safeElements('[data-image-count]')
+        .filter((node) => {
+            const context = semanticContext(node);
+            return /gallery|swiper|product[\s_-]*(?:image|media)/i.test(context);
+        })
+        .map((node) => {
+            const value = Number.parseInt(node.getAttribute('data-image-count') || '', 10);
+
+            return Number.isInteger(value) && value >= 2 && value <= 20 ? value : 0;
+        }));
     let explicitCount = 0;
     const imageOrdinals = new Set();
     const nonImageOrdinals = new Set();
@@ -405,7 +502,7 @@ const readGalleryStateOnce = () => page.evaluate(({ selectors, expectedFromRecip
 
     for (const selector of selectors) {
         try {
-            for (const element of document.querySelectorAll(selector)) {
+            for (const element of safeElements(selector)) {
                 evidenceNodes.add(element);
 
                 for (const child of element.querySelectorAll('[alt],[aria-label],[title]')) {
@@ -465,11 +562,15 @@ const readGalleryStateOnce = () => page.evaluate(({ selectors, expectedFromRecip
     const explicitImageCount = imageOrdinals.size > 0
         ? imageOrdinals.size
         : Math.max(0, explicitCount - nonImageOrdinals.size);
-    const observedCount = Math.min(20, Math.max(explicitImageCount, thumbnailCount));
+    const observedCount = Math.min(20, Math.max(
+        explicitImageCount, thumbnailCount, dataImageCount, declaredImageCount,
+    ));
     const targetCount = Math.min(20, Math.max(observedCount, expectedFromRecipe || 0));
     const signature = JSON.stringify({
         selectorCounts,
         thumbnailCount,
+        dataImageCount,
+        declaredImageCount,
         explicitCount,
         explicitImageCount,
     });
@@ -478,6 +579,8 @@ const readGalleryStateOnce = () => page.evaluate(({ selectors, expectedFromRecip
         selector_counts: selectorCounts,
         selector_max_count: selectorMax,
         thumbnail_count: thumbnailCount,
+        data_image_count: dataImageCount,
+        declared_image_count: declaredImageCount,
         explicit_image_count: explicitImageCount,
         observed_count: observedCount,
         target_count: targetCount,
@@ -487,6 +590,7 @@ const readGalleryStateOnce = () => page.evaluate(({ selectors, expectedFromRecip
 }, {
     selectors: galleryStateSelectors,
     expectedFromRecipe: recipeNumber('expected_image_count', 0, 20),
+    excludedContextPatternSource: EXCLUDED_GALLERY_CONTEXT_PATTERN_SOURCE,
 });
 const readGalleryState = async () => {
     for (let attempt = 0; ; attempt++) {
@@ -541,8 +645,37 @@ const waitForStableGallery = async () => {
     };
 };
 
-const collectDomImages = async () => page.evaluate(({ selectors, extraAttributes }) => {
+const collectDomImages = async () => page.evaluate(({
+    selectors,
+    extraAttributes,
+    includePageFallbacks,
+    excludedContextPatternSource,
+}) => {
+    const excludedContextPattern = new RegExp(excludedContextPatternSource.replaceAll('\\\\', '\\'), 'i');
+    const semanticContext = (element) => {
+        const parts = [];
+        let current = element;
+
+        for (let depth = 0; current && depth < 8; depth++, current = current.parentElement) {
+            for (const attribute of [
+                'id', 'class', 'role', 'aria-label', 'title', 'data-testid',
+                'data-component-type', 'data-feature-name', 'data-cel-widget',
+            ]) {
+                const value = current.getAttribute?.(attribute);
+                if (value) parts.push(value);
+            }
+
+            if (current.matches?.('section,aside,[role="region"],[role="dialog"],dialog')) {
+                const heading = current.querySelector?.('h1,h2,h3,h4,[role="heading"]');
+                if (heading?.textContent) parts.push(heading.textContent.slice(0, 240));
+            }
+        }
+
+        return parts.join(' ').replace(/([a-z])([A-Z])/g, '$1 $2');
+    };
+    const excludedContext = (element) => excludedContextPattern.test(semanticContext(element));
     const urls = [];
+    const excludedContexts = [];
     const add = (value) => {
         if (typeof value === 'string' && value.trim() !== '') {
             urls.push(value.trim());
@@ -569,10 +702,19 @@ const collectDomImages = async () => page.evaluate(({ selectors, extraAttributes
             element.getAttribute?.('aria-label'),
             element.getAttribute?.('title'),
         ].filter(Boolean).join(' ');
+        const mediaItem = element.closest?.('video,[data-type],[data-media-type],li,figure,[role="option"]');
+        const mediaItemMarker = mediaItem ? [
+            mediaItem.getAttribute?.('class'),
+            mediaItem.getAttribute?.('data-type'),
+            mediaItem.getAttribute?.('data-media-type'),
+            mediaItem.getAttribute?.('aria-label'),
+            mediaItem.getAttribute?.('title'),
+        ].filter(Boolean).join(' ') : '';
+
 
         return element.matches?.('video,[data-type="video"],[data-media-type="video"]')
-            || element.closest?.('video,[data-type="video"],[data-media-type="video"],[class*="video" i],[class*="360" i]')
-            || /(?:^|\W)(?:video|360(?:\W|$))/i.test(marker);
+            || mediaItem?.matches?.('video,[data-type="video"],[data-media-type="video"],[class*="video" i],[class*="360" i]')
+            || /(?:^|\W)(?:video|360)(?:\W|$)/i.test(`${marker} ${mediaItemMarker}`);
     };
     const addNode = (element) => {
         if (!element) {
@@ -593,6 +735,13 @@ const collectDomImages = async () => page.evaluate(({ selectors, extraAttributes
             'src',
             'href',
         ])]) {
+            // A srcset is a comma-separated list, not one URL. It is parsed
+            // immediately below; treating the complete value as a scalar URL
+            // produced malformed source URLs containing every rendition.
+            if (['srcset', 'data-srcset'].includes(attribute.toLowerCase())) {
+                continue;
+            }
+
             add(element.getAttribute?.(attribute));
         }
 
@@ -609,6 +758,11 @@ const collectDomImages = async () => page.evaluate(({ selectors, extraAttributes
         add(element.closest?.('a[href]')?.href);
     };
     const addElement = (element) => {
+        if (excludedContext(element)) {
+            excludedContexts.push(semanticContext(element).slice(0, 700));
+            return;
+        }
+
         if (isNonPhotoMedia(element)) {
             return;
         }
@@ -645,6 +799,7 @@ const collectDomImages = async () => page.evaluate(({ selectors, extraAttributes
         }
     }
 
+    if (includePageFallbacks) {
     for (const element of document.querySelectorAll(
         'meta[property="og:image"], meta[property="og:image:url"], meta[property="og:image:secure_url"], '
         + 'meta[name="twitter:image"], meta[itemprop="image"], link[rel="image_src"]',
@@ -667,23 +822,38 @@ const collectDomImages = async () => page.evaluate(({ selectors, extraAttributes
         }
     }
 
-    return urls;
+    }
+
+    return { urls, excluded_contexts: excludedContexts };
 }, {
     selectors: [...new Set([...gallerySelectors, ...thumbnailSelectors])],
     extraAttributes: recipeAttributes,
+    includePageFallbacks: !strictRecipe,
+    excludedContextPatternSource: EXCLUDED_GALLERY_CONTEXT_PATTERN_SOURCE,
 });
 
+const collectionTarget = galleryCollectionTarget(limit, recipeNumber('expected_image_count', 0, 20));
 const enoughCollected = () => new Set(
-    gathered.map((url) => normalizeImageCandidate(url, sourceUrl)).filter(Boolean),
-).size >= Math.max(limit, recipeNumber('expected_image_count', 0, 20));
+    gathered
+        .map((url) => normalizeImageCandidate(url, sourceUrl))
+        .filter(Boolean)
+        .map(imageAssetKey),
+).size >= collectionTarget;
 const collect = async () => {
-    gathered.push(...await collectDomImages().catch(() => []));
+    const collection = await collectDomImages().catch((error) => {
+        collectionErrors.push(String(error?.message || error || 'unknown collection error').slice(0, 1000));
+        return { urls: [], excluded_contexts: [] };
+    });
+    gathered.push(...(collection.urls || []));
+    excludedGalleryContexts.push(...(collection.excluded_contexts || []));
+    if (!strictRecipe) {
     priorityImages.push(...await page.locator('[data-old-hires]').evaluateAll(
         (elements) => elements
             .filter((element) => !element.closest('video,[data-type="video"],[data-media-type="video"],[class*="video" i],[class*="360" i]'))
             .map((element) => element.getAttribute('data-old-hires'))
             .filter(Boolean),
     ).catch(() => []));
+    }
 };
 const collectionSignature = async () => page.evaluate(({ selectors, attributes }) => {
     const values = [];
@@ -808,9 +978,12 @@ const clickAndWaitForGalleryChange = async (locator, meta = {}) => {
         return false;
     }
 
+    const actionWaitMs = Number.isInteger(meta.wait_after_ms)
+        ? Math.max(50, Math.min(1500, meta.wait_after_ms))
+        : recipeNumber('wait_after_click_ms', 250, 3000);
     const deadline = Date.now() + Math.max(
         500,
-        Math.min(3000, recipeNumber('wait_after_click_ms', 250, 3000) * 4),
+        Math.min(6000, actionWaitMs * 4),
     );
 
     while (Date.now() < deadline) {
@@ -867,7 +1040,196 @@ const clickAndWaitForGalleryChange = async (locator, meta = {}) => {
     return true;
 };
 
-const captureInteractionScout = async () => page.evaluate(() => {
+let expandedGalleryAttempted = false;
+const expandedGalleryVisible = async () => page.locator(expandedGalleryContainers.join(',')).evaluateAll((elements) => {
+    const viewportArea = Math.max(1, innerWidth * innerHeight);
+
+    return elements.some((element) => {
+        const rect = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        const visible = rect.width > 2
+            && rect.height > 2
+            && style.display !== 'none'
+            && style.visibility !== 'hidden'
+            && Number.parseFloat(style.opacity || '1') > 0;
+        const modalSignal = element.matches(`[role='dialog'],[aria-modal='true'],dialog[open]`)
+            || ['fixed', 'sticky'].includes(style.position)
+            || (rect.width * rect.height) / viewportArea >= 0.35;
+
+        return visible && modalSignal && Boolean(element.querySelector('img,picture,source'));
+    });
+}).catch(() => false);
+const actionOpensExpandedGallery = (action) => openSelectors.includes(action.selector)
+    || recipeActionOpensGallery(action);
+const actionTraversesGallery = recipeActionTraversesGallery;
+const attemptExpandedGallery = async (skipExplicitSelectors = false) => {
+    if (expandedGalleryAttempted || leftProductPage || outOfTime()) {
+        return expandedGalleryVisible();
+    }
+
+    expandedGalleryAttempted = true;
+
+    if (recipe.gallery_present !== true || recipeNumber('expected_image_count', 0, 20) < 2) {
+        return false;
+    }
+
+    if (await expandedGalleryVisible()) {
+        await collect();
+        return true;
+    }
+
+    if (!skipExplicitSelectors) {
+        for (const selector of openSelectors) {
+            const controls = page.locator(selector);
+            const count = Math.min(await controls.count().catch(() => 0), 5);
+
+            for (let index = 0; index < count && !leftProductPage && !outOfTime(); index++) {
+                const control = controls.nth(index);
+
+                if (!await control.isVisible().catch(() => false)) {
+                    continue;
+                }
+
+                await control.scrollIntoViewIfNeeded({ timeout: 700 }).catch(() => {});
+                const clicked = await clickAndWaitForGalleryChange(control, {
+                    phase: 'open_expanded_gallery',
+                    selector,
+                    index,
+                });
+                await collect();
+                const trace = actionTrace.at(-1) || {};
+
+                if (clicked && (trace.changed === true || await expandedGalleryVisible())) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    const scoutMediaControls = (Array.isArray(scout.action_candidates) ? scout.action_candidates : [])
+        .filter((candidate) => candidate
+            && candidate.contains_image === true
+            && candidate.in_viewport === true
+            && typeof candidate.selector === 'string'
+            && candidate.selector !== ''
+            && !candidate.href
+            && Number(candidate.rect?.width || 0) >= 160
+            && Number(candidate.rect?.height || 0) >= 160
+            && !/(?:buy|cart|checkout|account|sign.?in|wishlist|share|review|recommend|related)/i.test(
+                `${candidate.text || ''} ${candidate.aria_label || ''} ${candidate.title || ''}`,
+            ))
+        .sort((left, right) => (
+            Number(right.rect?.width || 0) * Number(right.rect?.height || 0)
+        ) - (
+            Number(left.rect?.width || 0) * Number(left.rect?.height || 0)
+        ));
+
+    for (const candidate of scoutMediaControls.slice(0, 3)) {
+        const controls = page.locator(candidate.selector);
+        const count = await controls.count().catch(() => 0);
+
+        if (count < 1) {
+            continue;
+        }
+
+        const index = Math.min(Math.max(0, Number(candidate.selector_index || 0)), count - 1);
+        const control = controls.nth(index);
+
+        if (!await control.isVisible().catch(() => false)) {
+            continue;
+        }
+
+        await control.scrollIntoViewIfNeeded({ timeout: 700 }).catch(() => {});
+        const clicked = await clickAndWaitForGalleryChange(control, {
+            phase: 'open_scout_media_control',
+            selector: candidate.selector,
+            index,
+        });
+        await collect();
+        const trace = actionTrace.at(-1) || {};
+
+        if (clicked && (trace.changed === true || await expandedGalleryVisible())) {
+            return true;
+        }
+    }
+
+    const mainImages = page.locator(mainGalleryImageSelectors.join(','));
+    const bestIndex = await mainImages.evaluateAll((elements) => {
+        let selected = -1;
+        let selectedScore = 0;
+
+        elements.forEach((element, index) => {
+            const rect = element.getBoundingClientRect();
+            const style = getComputedStyle(element);
+            const excluded = element.closest([
+                `[class*='thumbnail' i]`, `[class*='thumbs' i]`, `[role='option']`,
+                `[aria-label*='thumbnail' i]`, `[class*='recommend' i]`, `[class*='related' i]`,
+                `[class*='review' i]`, `[class*='video' i]`, `[class*='360' i]`,
+            ].join(','));
+            const visible = rect.width >= 160
+                && rect.height >= 160
+                && style.display !== 'none'
+                && style.visibility !== 'hidden'
+                && Number.parseFloat(style.opacity || '1') > 0;
+            const naturalArea = Math.max(0, element.naturalWidth || 0) * Math.max(0, element.naturalHeight || 0);
+            const score = rect.width * rect.height + Math.min(naturalArea, 4_000_000) / 10;
+
+            if (!excluded && visible && score > selectedScore) {
+                selected = index;
+                selectedScore = score;
+            }
+        });
+
+        return selected;
+    }).catch(() => -1);
+
+    if (bestIndex < 0) {
+        actionTrace.push({
+            phase: 'open_main_image_fallback',
+            clicked: false,
+            changed: false,
+            selector_missing: true,
+        });
+        return false;
+    }
+
+    const mainImage = mainImages.nth(bestIndex);
+    await mainImage.scrollIntoViewIfNeeded({ timeout: 700 }).catch(() => {});
+    const clicked = await clickAndWaitForGalleryChange(mainImage, {
+        phase: 'open_main_image_fallback',
+        selector: mainGalleryImageSelectors.join(','),
+        index: bestIndex,
+    });
+    await collect();
+    const trace = actionTrace.at(-1) || {};
+
+    return clicked && (trace.changed === true || await expandedGalleryVisible());
+};
+
+const captureInteractionScout = async () => page.evaluate((excludedContextPatternSource) => {
+    const excludedContextPattern = new RegExp(excludedContextPatternSource.replaceAll('\\\\', '\\'), 'i');
+    const semanticContext = (element) => {
+        const parts = [];
+        let current = element;
+
+        for (let depth = 0; current && depth < 8; depth++, current = current.parentElement) {
+            for (const attribute of [
+                'id', 'class', 'role', 'aria-label', 'title', 'data-testid',
+                'data-component-type', 'data-feature-name', 'data-cel-widget',
+            ]) {
+                const value = current.getAttribute?.(attribute);
+                if (value) parts.push(value);
+            }
+
+            if (current.matches?.('section,aside,[role="region"],[role="dialog"],dialog')) {
+                const heading = current.querySelector?.('h1,h2,h3,h4,[role="heading"]');
+                if (heading?.textContent) parts.push(heading.textContent.slice(0, 240));
+            }
+        }
+
+        return parts.join(' ').replace(/([a-z])([A-Z])/g, '$1 $2');
+    };
+    const excludedContext = (element) => excludedContextPattern.test(semanticContext(element));
     const sanitize = (element) => {
         const clone = element.cloneNode(true);
 
@@ -879,21 +1241,103 @@ const captureInteractionScout = async () => page.evaluate(() => {
             }
         }
 
-        for (const node of clone.querySelectorAll('script,style,noscript,iframe,object,embed,form,input,textarea')) {
+        // svg is never a gallery photo source in this pipeline (product
+        // photos are always <img src>/network requests, never inline paths)
+        // but a single star-rating or icon svg can be thousands of
+        // characters of path/gradient data - enough on its own to consume
+        // the whole per-fragment budget below before any of the actually
+        // useful text (captions, price, SKU) is reached.
+        for (const node of clone.querySelectorAll('script,style,noscript,iframe,object,embed,form,input,textarea,svg')) {
             node.remove();
         }
 
         return clone.outerHTML.replace(/\s+/g, ' ').slice(0, 1600);
     };
+    const visible = (element) => {
+        const rect = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+
+        return rect.width > 1 && rect.height > 1
+            && style.display !== 'none'
+            && style.visibility !== 'hidden';
+    };
+    const inViewport = (element) => {
+        const rect = element.getBoundingClientRect();
+
+        return visible(element)
+            && rect.bottom > 0
+            && rect.right > 0
+            && rect.top < innerHeight
+            && rect.left < innerWidth;
+    };
+    const attributeSelector = (element, name, value) =>
+        `${element.tagName.toLowerCase()}[${name}=${JSON.stringify(value)}]`;
+    const selectorFor = (element) => {
+        const id = element.getAttribute('id');
+
+        if (id && id.length <= 100) {
+            const selector = `#${CSS.escape(id)}`;
+
+            if (document.querySelectorAll(selector).length === 1) {
+                return selector;
+            }
+        }
+
+        for (const name of ['data-testid', 'data-test', 'data-selenium', 'data-qa', 'aria-label', 'name']) {
+            const value = element.getAttribute(name);
+
+            if (!value || value.length > 160) {
+                continue;
+            }
+
+            const selector = attributeSelector(element, name, value);
+
+            try {
+                if (document.querySelectorAll(selector).length > 0) {
+                    return selector;
+                }
+            } catch {
+                // Try the next stable attribute.
+            }
+        }
+
+        const classTokens = [...element.classList]
+            .filter((token) => token.length >= 3
+                && token.length <= 60
+                && !/^\d/.test(token)
+                && !/[a-f0-9]{8,}/i.test(token))
+            .slice(0, 2);
+
+        if (classTokens.length) {
+            return element.tagName.toLowerCase()+classTokens.map((token) => `.${CSS.escape(token)}`).join('');
+        }
+
+        return element.tagName.toLowerCase();
+    };
+    const rectFor = (element) => {
+        const rect = element.getBoundingClientRect();
+
+        return {
+            x: Math.round(rect.x),
+            y: Math.round(rect.y),
+            width: Math.round(rect.width),
+            height: Math.round(rect.height),
+        };
+    };
+    const mediaContainerSelector = [
+        '[class*=gallery i]', '[class*=thumbnail i]', '[class*=slider i]',
+        '[class*=carousel i]', '[class*=swiper i]', '[class*=zoom i]',
+        '[class*=product-image i]', '[class*=product-media i]', '[data-selenium*=media i]',
+    ].join(',');
     const candidates = [...document.querySelectorAll([
         '[data-old-hires]', '[data-zoom-image]', '[data-large_image]', '[data-full]', '[itemprop=image]',
         '[class*=gallery i]', '[class*=thumbnail i]', '[class*=slider i]',
         '[class*=carousel i]', '[class*=swiper i]', '[class*=zoom i]',
         '[class*=product-image i]', '[class*=product-media i]', '[data-selenium*=media i]',
         'button[aria-label*=next i]', 'button[aria-label*=image i]',
-    ].join(','))].slice(0, 70);
+    ].join(','))].filter((element) => !excludedContext(element)).slice(0, 70);
     const interactiveControls = [...document.querySelectorAll('button,a,[role=button]')]
-        .filter((element) => /(gallery|media|image|photo|thumbnail|carousel|slider|zoom|next|more)/i.test([
+        .filter((element) => /\b(gallery|media|image|photo|thumbnail|carousel|slider|zoom|next|more)\b/i.test([
             element.getAttribute('aria-label'),
              element.getAttribute('title'),
              element.getAttribute('class'),
@@ -901,17 +1345,109 @@ const captureInteractionScout = async () => page.evaluate(() => {
              element.getAttribute('href'),
              element.textContent,
         ].filter(Boolean).join(' ')))
+        .filter((element) => !excludedContext(element))
         .slice(0, 50)
         .map(sanitize)
         .filter(Boolean);
+    const actionCandidates = [...document.querySelectorAll('button,a,[role=button],summary')]
+        .filter(visible)
+        .filter((element) => !excludedContext(element))
+        .map((element, documentIndex) => {
+            const selector = selectorFor(element);
+            const signal = [
+                element.getAttribute('aria-label'),
+                element.getAttribute('title'),
+                element.getAttribute('class'),
+                element.getAttribute('data-selenium'),
+                element.getAttribute('href'),
+                element.textContent,
+            ].filter(Boolean).join(' ');
+            const withinMedia = Boolean(element.closest(mediaContainerSelector));
+            const containsImage = Boolean(element.querySelector('img,picture'));
+            let selectorCount = 0;
+            let selectorIndex = 0;
+
+            try {
+                const selectorMatches = [...document.querySelectorAll(selector)];
+                selectorCount = selectorMatches.length;
+                selectorIndex = Math.max(0, selectorMatches.indexOf(element));
+            } catch {
+                // The AI still receives the element, but knows the selector is unusable.
+            }
+
+            return {
+                document_index: documentIndex,
+                selector,
+                selector_match_count: selectorCount,
+                selector_index: selectorIndex,
+                tag: element.tagName.toLowerCase(),
+                role: element.getAttribute('role') || null,
+                text: (element.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 180),
+                aria_label: (element.getAttribute('aria-label') || '').slice(0, 180),
+                title: (element.getAttribute('title') || '').slice(0, 180),
+                href: (element.getAttribute('href') || '').slice(0, 500),
+                disabled: element.matches(':disabled,[aria-disabled=true]'),
+                in_viewport: inViewport(element),
+                within_media: withinMedia,
+                contains_image: containsImage,
+                rect: rectFor(element),
+                relevance: (withinMedia ? 4 : 0)
+                    + (containsImage ? 2 : 0)
+                    + (inViewport(element) ? 1 : 0)
+                    + (/\b(gallery|media|image|photo|thumbnail|carousel|slider|zoom|next|more)\b/i.test(signal) ? 5 : 0),
+            };
+        })
+        .sort((left, right) => right.relevance - left.relevance || left.document_index - right.document_index)
+        .slice(0, 80)
+        .map(({ relevance, ...candidate }) => candidate);
+    const imageCandidates = [...document.images].filter((element) => !excludedContext(element))
+        .map((element, documentIndex) => {
+            const dataAttributes = Object.fromEntries(
+                [...element.attributes]
+                    .filter((attribute) => /^data-/i.test(attribute.name)
+                        && /(src|image|zoom|large|full|hires|original)/i.test(attribute.name))
+                    .slice(0, 10)
+                    .map((attribute) => [attribute.name, attribute.value.slice(0, 500)]),
+            );
+            const parentControl = element.closest('button,a,[role=button]');
+
+            return {
+                document_index: documentIndex,
+                selector: selectorFor(element),
+                src: (element.getAttribute('src') || '').slice(0, 500),
+                current_src: (element.currentSrc || '').slice(0, 500),
+                alt: (element.getAttribute('alt') || '').slice(0, 180),
+                natural_width: element.naturalWidth || 0,
+                natural_height: element.naturalHeight || 0,
+                rendered: rectFor(element),
+                visible: visible(element),
+                in_viewport: inViewport(element),
+                within_media: Boolean(element.closest(mediaContainerSelector)),
+                parent_control_selector: parentControl ? selectorFor(parentControl) : null,
+                data_attributes: dataAttributes,
+            };
+        })
+        .sort((left, right) =>
+            Number(right.within_media) - Number(left.within_media)
+            || (right.natural_width * right.natural_height) - (left.natural_width * left.natural_height))
+        .slice(0, 50);
 
     return {
         final_url: location.href,
         title: document.title.slice(0, 500),
         fragments: candidates.map(sanitize).filter(Boolean).slice(0, 32),
         interactive_controls: interactiveControls,
+        action_candidates: actionCandidates,
+        image_candidates: imageCandidates,
+        page_geometry: {
+            viewport_width: innerWidth,
+            viewport_height: innerHeight,
+            document_width: document.documentElement.scrollWidth,
+            document_height: document.documentElement.scrollHeight,
+            visible_dialogs: [...document.querySelectorAll('[role=dialog],dialog[open]')].filter(visible).length,
+        },
     };
-});
+}, EXCLUDED_GALLERY_CONTEXT_PATTERN_SOURCE);
 
 try {
     const navigation = await page.goto(sourceUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 });
@@ -954,31 +1490,8 @@ try {
 
     galleryReadiness = await waitForStableGallery();
 
-    scout = await page.evaluate((httpStatus) => {
-        const candidates = [...document.querySelectorAll([
-            '[data-old-hires]', '[data-zoom-image]', '[data-large_image]', '[itemprop="image"]',
-            '[class*="gallery" i]', '[class*="thumbnail" i]', '[class*="slider" i]',
-            '[class*="carousel" i]', '[class*="swiper" i]', '[class*="product-image" i]',
-            '[class*="product-media" i]', '[data-selenium*="media" i]',
-            'button[aria-label*="next" i]', 'button[aria-label*="image" i]',
-        ].join(','))].slice(0, 40);
-        const sanitize = (element) => {
-            const clone = element.cloneNode(true);
-
-            for (const node of [clone, ...clone.querySelectorAll('*')]) {
-                for (const attribute of [...node.attributes]) {
-                    if (/^on/i.test(attribute.name) || ['style', 'nonce', 'integrity', 'srcset', 'data-srcset', 'data-bgset'].includes(attribute.name)) {
-                        node.removeAttribute(attribute.name);
-                    }
-                }
-            }
-
-            for (const node of clone.querySelectorAll('script,style,noscript,iframe,object,embed,form,input,textarea')) {
-                node.remove();
-            }
-
-            return clone.outerHTML.replace(/\s+/g, ' ').slice(0, 1000);
-        };
+    scout = await captureInteractionScout();
+    const accessState = await page.evaluate((httpStatus) => {
         const pageText = `${document.title}\n${document.body?.innerText || ''}`.slice(0, 20_000);
         const accessSignals = [
             ['captcha', /captcha|verify you are human|are you a robot|robot or human/i],
@@ -989,30 +1502,15 @@ try {
         const accessGateReason = httpStatus === 403
             ? 'http_403'
             : (matchedSignal?.[0] || null);
-        const interactiveControls = [...document.querySelectorAll('button,a,[role="button"]')]
-            .filter((element) => /(gallery|media|image|photo|thumbnail|carousel|slider|zoom|next|more)/i.test([
-                element.getAttribute('aria-label'),
-                 element.getAttribute('title'),
-                 element.getAttribute('class'),
-                 element.getAttribute('data-selenium'),
-                 element.getAttribute('href'),
-                 element.textContent,
-            ].filter(Boolean).join(' ')))
-            .slice(0, 24)
-            .map(sanitize)
-            .filter(Boolean);
 
         return {
-            final_url: location.href,
-            title: document.title.slice(0, 500),
             http_status: httpStatus,
             access_gate: accessGateReason !== null,
             access_gate_reason: accessGateReason,
             rate_limited: httpStatus === 429,
-            fragments: candidates.map(sanitize).filter(Boolean).slice(0, 18),
-            interactive_controls: interactiveControls,
         };
     }, navigationStatus);
+    scout = { ...scout, ...accessState };
     scout.gallery_readiness = galleryReadiness;
     scout.observed_gallery_count = galleryReadiness.observed_count || 0;
     scout.expected_count_evidence = galleryReadiness.evidence || [];
@@ -1025,6 +1523,7 @@ try {
         ...thumbnailSelectors,
         ...openSelectors,
         ...nextSelectors,
+        ...recipeActions.map((action) => action.selector),
     ])]) {
         selectorCounts[selector] = await page.locator(selector).count().catch(() => 0);
     }
@@ -1033,73 +1532,204 @@ try {
         thumbnail_selectors: thumbnailSelectors.filter((selector) => selectorCounts[selector] > 1).slice(0, 8),
         open_selectors: openSelectors.filter((selector) => selectorCounts[selector] > 0).slice(0, 5),
         next_selectors: nextSelectors.filter((selector) => selectorCounts[selector] > 0).slice(0, 5),
+        actions: recipeActions.filter((action) => selectorCounts[action.selector] > 0),
     };
 
     if (!scoutOnly) {
+    if (recipeActions.length > 0) {
+        for (let actionIndex = 0; actionIndex < recipeActions.length && !leftProductPage && !outOfTime(); actionIndex++) {
+            const action = recipeActions[actionIndex];
+            const priorViewerOpenAction = recipeActions
+                .slice(0, actionIndex)
+                .some(actionOpensExpandedGallery);
+
+            if (!expandedGalleryAttempted && priorViewerOpenAction && actionTraversesGallery(action)) {
+                await attemptExpandedGallery(priorViewerOpenAction);
+            }
+
+            const locator = page.locator(action.selector);
+            const matched = await locator.count().catch(() => 0);
+
+            if (matched < 1) {
+                actionTrace.push({
+                    action: action.kind,
+                    phase: 'ai_action',
+                    selector: action.selector,
+                    action_index: actionIndex,
+                    purpose: action.purpose,
+                    clicked: false,
+                    changed: false,
+                    selector_missing: true,
+                    selector_match_count: 0,
+                });
+                continue;
+            }
+
+            const repetitions = action.kind === 'click'
+                ? 1
+                : Math.min(action.limit, action.kind === 'click_each' ? matched : action.limit);
+
+            for (let repetition = 0; repetition < repetitions && !leftProductPage && !outOfTime(); repetition++) {
+                const currentCount = await locator.count().catch(() => 0);
+
+                if (currentCount < 1) {
+                    break;
+                }
+
+                const targetIndex = action.kind === 'click_each'
+                    ? Math.min(action.index + repetition, currentCount - 1)
+                    : Math.min(action.index, currentCount - 1);
+                const target = locator.nth(targetIndex);
+                const controlSafety = await target.evaluate((element, { purpose, excludedContextPatternSource }) => {
+                    const signal = [
+                        element.getAttribute('id'),
+                        element.getAttribute('class'),
+                        element.getAttribute('aria-label'),
+                        element.getAttribute('title'),
+                        element.getAttribute('data-selenium'),
+                        element.getAttribute('href'),
+                        element.textContent,
+                    ].filter(Boolean).join(' ');
+                    const contextParts = [];
+                    let current = element;
+                    for (let depth = 0; current && depth < 8; depth++, current = current.parentElement) {
+                        for (const attribute of [
+                            'id', 'class', 'role', 'aria-label', 'title', 'data-testid',
+                            'data-component-type', 'data-feature-name', 'data-cel-widget',
+                        ]) {
+                            const value = current.getAttribute?.(attribute);
+                            if (value) contextParts.push(value);
+                        }
+
+                        if (current.matches?.('section,aside,[role="region"],[role="dialog"],dialog')) {
+                            const heading = current.querySelector?.('h1,h2,h3,h4,[role="heading"]');
+                            if (heading?.textContent) contextParts.push(heading.textContent.slice(0, 240));
+                        }
+                    }
+                    const contextSignal = contextParts.join(' ').replace(/([a-z])([A-Z])/g, '$1 $2');
+                    const excludedContext = new RegExp(
+                        excludedContextPatternSource.replaceAll('\\\\', '\\'),
+                        'i',
+                    ).test(contextSignal);
+                    const forbidden = excludedContext || /(buy|add.?to.?cart|checkout|place.?order|account|sign.?in|log.?in|wishlist|share|review|compare|subscribe|submit)/i.test(signal);
+                    const mediaContainer = element.closest([
+                        '[class*=gallery i]', '[class*=thumbnail i]', '[class*=slider i]',
+                        '[class*=carousel i]', '[class*=swiper i]', '[class*=zoom i]',
+                        '[class*=product-image i]', '[class*=product-media i]', '[data-selenium*=media i]',
+                    ].join(','));
+                    const dialogWithImages = element.closest('[role=dialog],dialog')?.querySelector('img,picture');
+                    const mediaSignal = /\b(gallery|media|image|photo|thumbnail|carousel|slider|zoom|next|prev|previous|more|view.?all|continue.?shopping|cookie)\b/i.test(signal);
+                    const consentSignal = /(?:cookie|consent|continue.?shopping)/i.test(purpose || '')
+                        && /(?:accept|agree|allow|essential|continue|cookie|consent)/i.test(signal);
+
+                    return {
+                        safe: !forbidden && Boolean(
+                            consentSignal
+                            || mediaContainer
+                            || dialogWithImages
+                            || element.querySelector('img,picture')
+                            || mediaSignal
+                        ),
+                        forbidden,
+                        excluded_context: excludedContext,
+                        media_signal: mediaSignal,
+                        consent_signal: consentSignal,
+                    };
+                }, {
+                    purpose: action.purpose,
+                    excludedContextPatternSource: EXCLUDED_GALLERY_CONTEXT_PATTERN_SOURCE,
+                }).catch(() => ({ safe: false }));
+
+                if (controlSafety.safe !== true) {
+                    actionTrace.push({
+                        action: action.kind,
+                        phase: 'ai_action',
+                        selector: action.selector,
+                        index: targetIndex,
+                        action_index: actionIndex,
+                        repetition,
+                        purpose: action.purpose,
+                        clicked: false,
+                        changed: false,
+                        unsafe_control: true,
+                        control_safety: controlSafety,
+                        selector_match_count: currentCount,
+                    });
+                    break;
+                }
+
+                await target.scrollIntoViewIfNeeded({ timeout: 700 }).catch(() => {});
+                const clicked = await clickAndWaitForGalleryChange(target, {
+                    action: action.kind,
+                    phase: 'ai_action',
+                    selector: action.selector,
+                    index: targetIndex,
+                    action_index: actionIndex,
+                    repetition,
+                    purpose: action.purpose,
+                    wait_after_ms: action.wait_after_ms,
+                    selector_match_count: currentCount,
+                });
+                await collect();
+                const trace = actionTrace.at(-1) || {};
+                trace.expanded_gallery_visible_after = await expandedGalleryVisible();
+
+                if (!clicked || (action.kind === 'click_until_no_change' && trace.changed !== true)) {
+                    break;
+                }
+            }
+        }
+    } else {
+        await attemptExpandedGallery();
+        await collect();
         const thumbnails = thumbnailSelectors.length ? page.locator(thumbnailSelectors.join(',')) : null;
     const thumbnailCount = thumbnails
         ? Math.min(await thumbnails.count(), recipeNumber('max_thumbnail_clicks', 20, 20))
         : 0;
 
+    let thumbnailClicks = 0;
     for (let index = 0; index < thumbnailCount && !leftProductPage && !outOfTime(); index++) {
         const thumbnail = thumbnails.nth(index);
         await thumbnail.scrollIntoViewIfNeeded({ timeout: 500 }).catch(() => {});
-        await clickAndWaitForGalleryChange(thumbnail, {
+        const clicked = await clickAndWaitForGalleryChange(thumbnail, {
             phase: 'thumbnail',
             selector: thumbnailSelectors.join(','),
             index,
         });
         await collect();
-
-        if (enoughCollected()) {
-            break;
-        }
-    }
-
-    const openMediaButtons = openSelectors.length ? page.locator(openSelectors.join(',')) : null;
-    const openMediaCount = openMediaButtons ? Math.min(await openMediaButtons.count(), 5) : 0;
-
-    for (let index = 0; index < openMediaCount && !leftProductPage && !outOfTime(); index++) {
-        const button = openMediaButtons.nth(index);
-        const text = (await button.innerText({ timeout: 300 }).catch(() => '')).trim();
-        const marker = `${await button.getAttribute('class') || ''} ${await button.getAttribute('data-selenium') || ''}`;
-
-        if (!/^\+\s*\d+$/.test(text) && !/(open.?media|gallery|see.?more|view.?all)/i.test(`${text} ${marker}`)) {
-            continue;
-        }
-
-        await clickAndWaitForGalleryChange(button, {
-            phase: 'open',
-            selector: openSelectors.join(','),
-            index,
-        });
-        await collect();
-
-        if (enoughCollected()) {
-            break;
-        }
+        thumbnailClicks += clicked ? 1 : 0;
     }
 
     const nextButtons = nextSelectors.length ? page.locator(nextSelectors.join(',')) : null;
+    const seenNextSignatures = new Set([await collectionSignature()]);
 
     if (nextButtons && await nextButtons.count()) {
-        for (let index = 0; index < Math.min(limit, recipeNumber('max_next_clicks', 15, 15)) && !leftProductPage && !outOfTime(); index++) {
-            await clickAndWaitForGalleryChange(nextButtons.first(), {
+        for (let index = 0; index < recipeNumber('max_next_clicks', 15, 15) && !leftProductPage && !outOfTime(); index++) {
+            const clicked = await clickAndWaitForGalleryChange(nextButtons.first(), {
                 phase: 'next',
                 selector: nextSelectors.join(','),
                 index,
             });
             await collect();
+            const trace = actionTrace.at(-1) || {};
+            const signature = await collectionSignature();
+            const repeatedState = seenNextSignatures.has(signature);
+            seenNextSignatures.add(signature);
 
-            if (enoughCollected()) {
+            if (!clicked || trace.changed !== true || repeatedState) {
                 break;
             }
         }
     }
+    }
 
     if (!outOfTime()) {
-        galleryReadiness = await waitForStableGallery();
+        if (!enoughCollected()) {
+            galleryReadiness = await waitForStableGallery();
+            await collect();
+        }
         postInteractionScout = await captureInteractionScout().catch(() => ({}));
+        await collect();
         postInteractionScout.gallery_readiness = galleryReadiness;
         postInteractionScout.observed_gallery_count = galleryReadiness.observed_count || 0;
         postInteractionScout.expected_count_evidence = galleryReadiness.evidence || [];
@@ -1128,8 +1758,8 @@ const excludedNonPhotoUrls = await page.evaluate(() => {
         'video',
         '[data-type="video"]',
         '[data-media-type="video"]',
-        '[class*="video" i]',
-        '[class*="360" i]',
+        'li[class*="video" i],figure[class*="video" i],[role="option"][class*="video" i],button[class*="video" i]',
+        'li[class*="360" i],figure[class*="360" i],[role="option"][class*="360" i],button[class*="360" i]',
     ].join(','));
 
     for (const element of media) {
@@ -1153,27 +1783,38 @@ const priorityDomImages = [...new Set(priorityImages.map(normalize).filter(Boole
 const requestedImages = networkImages.map(normalize).filter(Boolean).filter(photoOnly);
 const embeddedImages = payloadImages.map(normalize).filter(Boolean).filter(photoOnly);
 const allCandidates = [...new Set([...domImages, ...embeddedImages, ...requestedImages])];
+const actionPlanStatus = recipeActionPlanStatus({ actions: recipeActions, actionTrace });
+const expectedGalleryCount = recipeNumber('expected_image_count', 0, 20);
+const distinctDomAssetCount = new Set(domImages.map(imageAssetKey)).size;
+const structurallyCompletedRecipe = strictRecipe
+    && recipe.gallery_present === true
+    && expectedGalleryCount >= 2
+    && distinctDomAssetCount >= expectedGalleryCount
+    && actionPlanStatus.required === true
+    && actionPlanStatus.complete === true;
 const effectiveMinimumSide = galleryProbeMinimumSide({
     minimumSide,
     confirmedMinimumSide: confirmedGalleryMinimumSide,
     galleryPresent: recipe.gallery_present === true,
-    expectedCount: recipeNumber('expected_image_count', 0, 20),
-    observedCount: galleryReadiness.observed_count || 0,
+    expectedCount: expectedGalleryCount,
+    observedCount: structurallyCompletedRecipe ? expectedGalleryCount : (galleryReadiness.observed_count || 0),
 });
 const galleryGoalReached = effectiveMinimumSide < minimumSide;
 const hasDirectBhImages = allCandidates.some((url) => new URL(url).hostname === 'static.bhphoto.com');
 const domKeys = new Set(domImages.map(imageAssetKey));
-const candidates = priorityDomImages.length >= 2
-    ? priorityDomImages
-    : (domImages.length >= 2
-        ? allCandidates.filter((candidate) => domKeys.has(imageAssetKey(candidate)))
-        : allCandidates);
+const candidates = strictRecipe
+    ? [...new Set(domImages)]
+    : (priorityDomImages.length >= 2
+        ? priorityDomImages
+        : (domImages.length >= 2
+            ? allCandidates.filter((candidate) => domKeys.has(imageAssetKey(candidate)))
+            : allCandidates));
 const probeImage = async (candidate) => {
     if (!await publicHttpUrl(candidate)) {
         return { ok: false, url: candidate, reason: 'non_public_url' };
     }
 
-    return page.evaluate(({ url, timeout, minSide }) => new Promise((resolve) => {
+    return page.evaluate(({ url, timeout, minSide, allowWideGalleryFrame }) => new Promise((resolve) => {
         const image = new Image();
         const timer = setTimeout(
             () => resolve({ ok: false, url, reason: 'probe_timeout' }),
@@ -1187,7 +1828,9 @@ const probeImage = async (candidate) => {
         image.onload = () => {
             const width = image.naturalWidth || 0;
             const height = image.naturalHeight || 0;
-            const ok = width >= minSide && height >= minSide;
+            const ok = allowWideGalleryFrame
+                ? Math.max(width, height) >= minSide && Math.min(width, height) >= Math.min(100, minSide)
+                : width >= minSide && height >= minSide;
 
             finish({
                 ok,
@@ -1203,9 +1846,11 @@ const probeImage = async (candidate) => {
         url: candidate,
         timeout: probeTimeoutMs,
         minSide: effectiveMinimumSide,
+        allowWideGalleryFrame: galleryGoalReached,
     }).catch(() => ({ ok: false, url: candidate, reason: 'probe_failed' }));
 };
-const candidatesToProbe = candidates.slice(0, Math.max(30, limit * 3));
+const candidatesToProbe = prioritizeCandidateRenditions(candidates)
+    .slice(0, Math.max(30, limit * 3));
 const probes = [];
 
 if (!scoutOnly) {
@@ -1256,7 +1901,13 @@ for (const probe of probes) {
     );
 
     if (!existing || score > existing.score) {
-        bestImages.set(key, { url: candidate, score });
+        bestImages.set(key, {
+            url: candidate,
+            score,
+            width: probe.width || 0,
+            height: probe.height || 0,
+            source: domKeys.has(key) ? 'recipe_dom' : 'network_or_payload',
+        });
     }
 }
 
@@ -1271,11 +1922,24 @@ process.stdout.write(JSON.stringify({
     learned_recipe: learnedRecipe,
     diagnostics: {
         dom_candidates: domImages.length,
+        raw_dom_candidates: gathered.length,
+        raw_dom_samples: [...new Set(gathered)].slice(0, 20),
+        strict_recipe: strictRecipe,
+        excluded_gallery_contexts: [...new Set(excludedGalleryContexts)].slice(0, 20),
         payload_candidates: embeddedImages.length,
         network_candidates: requestedImages.length,
         unique_candidates: allCandidates.length,
+        distinct_dom_assets: new Set(domImages.map(imageAssetKey)).size,
+        collection_errors: [...new Set(collectionErrors)].slice(0, 10),
+        distinct_candidate_assets: new Set(candidates.map(imageAssetKey)).size,
         probed_candidates: probes.length,
         validated_candidates: images.length,
+        validated_image_evidence: [...bestImages.values()].slice(0, limit).map(({ url, width, height, source }) => ({
+            url,
+            width,
+            height,
+            source,
+        })),
         rejected_candidates: validationFailures.slice(0, 20),
         observed_gallery_count: galleryReadiness.observed_count || 0,
         gallery_waited_ms: galleryReadiness.waited_ms || 0,
@@ -1284,5 +1948,6 @@ process.stdout.write(JSON.stringify({
         gallery_goal_reached: galleryGoalReached,
         effective_minimum_side: effectiveMinimumSide,
         stopped_early: outOfTime(),
+        action_plan: actionPlanStatus,
     },
 }));
