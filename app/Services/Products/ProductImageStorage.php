@@ -6,7 +6,6 @@ use App\Models\Category;
 use App\Models\Product;
 use App\Models\ProductDraft;
 use App\Models\ProductDraftMedia;
-use App\Models\ProductGalleryRecipe;
 use App\Models\ProductSourceAttempt;
 use App\Models\ProductVariant;
 use App\Services\Ai\AiSettings;
@@ -24,6 +23,7 @@ class ProductImageStorage
         private readonly ProductImageResolver $resolver,
         private readonly ProductImageCandidateDiscovery $candidateDiscovery,
         private readonly ProductImageVisionVerifier $visionVerifier,
+        private readonly ConfirmedProductGalleryVerifier $confirmedGalleryVerifier,
         private readonly ProductSourcePriority $sourcePriority,
         private readonly ProductSourceMetrics $sourceMetrics,
         private readonly ImagePerceptualHash $perceptualHash,
@@ -252,8 +252,14 @@ class ProductImageStorage
         if (config('product-images.source_preflight', true)) {
             $progress?->__invoke('Быстро проверяю доступность карточек, CAPTCHA/WAF, статические фото и готовые рецепты до запуска Playwright.');
             $cardSources = $cardSources
-                ->map(function (array $source, int $index) use ($telegramUpdateId): array {
-                    $preflight = $this->resolver->preflightSource($source, $telegramUpdateId);
+                ->map(function (array $source, int $index) use ($telegramUpdateId, $draft): array {
+                    $attemptCheckpoint = ProductSourceAttempt::query()->max('id') ?? 0;
+
+                    try {
+                        $preflight = $this->resolver->preflightSource($source, $telegramUpdateId);
+                    } finally {
+                        $this->associateAttemptsWithDraftSince($draft, $telegramUpdateId, $attemptCheckpoint);
+                    }
 
                     return [
                         ...$source,
@@ -291,9 +297,12 @@ class ProductImageStorage
                 ->values();
         }
 
-        if (! $this->settings->fallbackSourcesEnabled()) {
-            $cardSources = $cardSources->take(1)->values();
-        }
+        // Trying the next already-known candidate page (source #2, #3...)
+        // is not the optional "reserve" - it's core behaviour, bounded only
+        // by the per-source cost/time budget checks inside the loop below.
+        // fallbackSourcesEnabled() controls a genuinely separate, costlier
+        // mechanism further down: the broad AI web search for sources this
+        // draft's own research never found at all (discoverCandidates()).
 
         $selected = [];
         $chosenSource = null;
@@ -398,20 +407,26 @@ class ProductImageStorage
             }
 
             $sourceBlocked = false;
-            $resolvedUrls = $this->resolver->resolve(
-                [$source],
-                max(8, $target * 2),
-                function (string $level, string $message) use (&$sourceBlocked, $progress): void {
-                    if ($level === 'blocked') {
-                        $sourceBlocked = true;
-                    }
-                    if ($progress) {
-                        $progress($message);
-                    }
-                },
-                $telegramUpdateId,
-                activeRecipeOnly: $activeRecipeOnly || $sourceIndex > 0,
-            );
+            $attemptCheckpoint = ProductSourceAttempt::query()->max('id') ?? 0;
+
+            try {
+                $resolvedUrls = $this->resolver->resolve(
+                    [$source],
+                    max(8, $target * 2),
+                    function (string $level, string $message) use (&$sourceBlocked, $progress): void {
+                        if ($level === 'blocked') {
+                            $sourceBlocked = true;
+                        }
+                        if ($progress) {
+                            $progress($message);
+                        }
+                    },
+                    $telegramUpdateId,
+                    activeRecipeOnly: $activeRecipeOnly || $sourceIndex > 0,
+                );
+            } finally {
+                $this->associateAttemptsWithDraftSince($draft, $telegramUpdateId, $attemptCheckpoint);
+            }
 
             $resolvedPageContext = collect($resolvedUrls)
                 ->map(fn (string $imageUrl): ?array => $this->resolver->sourceContextForImage($imageUrl))
@@ -428,6 +443,17 @@ class ProductImageStorage
 
                 if ($this->identityMatcher->conflictsSource($draft, $runtimeSourceEvidence)
                     || ($this->identityMatcher->requiresExactIdentifier($draft) && ! $runtimeIdentityConfirmed)) {
+                    $this->attempts->record([
+                        'telegram_update_id' => $telegramUpdateId,
+                        'product_draft_id' => $draft->id,
+                        'product_url' => $source['url'],
+                        'actor' => 'identity_validator',
+                        'phase' => 'source_selection',
+                        'action' => 'validate_runtime_product_identity',
+                        'status' => 'failed',
+                        'decision' => 'reject_runtime_identifier_mismatch',
+                        'output' => ['final_url' => $resolvedFinalUrl],
+                    ]);
                     $progress?->__invoke('Источник пропущен: конечная страница после редиректа не подтверждает точную модель/SKU.');
 
                     continue;
@@ -438,6 +464,16 @@ class ProductImageStorage
             }
 
             if ($sourceBlocked) {
+                $this->attempts->record([
+                    'telegram_update_id' => $telegramUpdateId,
+                    'product_draft_id' => $draft->id,
+                    'product_url' => $source['url'],
+                    'actor' => 'playwright',
+                    'phase' => 'source_selection',
+                    'action' => 'validate_source_access',
+                    'status' => 'failed',
+                    'decision' => 'reject_blocked_source',
+                ]);
                 if ($progress) {
                     $progress('Источник пропущен: ссылка ведёт на защитную заглушку, а не на товар.');
                 }
@@ -487,13 +523,38 @@ class ProductImageStorage
                 ->values();
             $structurallyConfirmed = $sourceIdentityConfirmed
                 && $confirmedGallery->count() >= $minimumCompleteGallerySize;
+            $galleryVerification = $structurallyConfirmed
+                ? $this->confirmedGalleryVerifier->verify(
+                    $productPageUrl,
+                    $confirmedGallery,
+                    $draft,
+                    $minimumCompleteGallerySize,
+                    $telegramUpdateId,
+                )
+                : null;
+            $verifiedGallery = $galleryVerification !== null
+                ? $galleryVerification['candidates']
+                : $confirmedGallery;
             $trustPlaywrightGallery = $structurallyConfirmed
-                && $this->confirmedGalleryContentIsProduct($productPageUrl, $confirmedGallery, $draft, $telegramUpdateId);
+                && $verifiedGallery->count() >= $minimumCompleteGallerySize;
 
             if (! $trustPlaywrightGallery) {
+                if ($galleryVerification !== null) {
+                    $verifiedCandidates = $verifiedGallery->all();
+                    $this->destroyUnselected($allCandidates, $verifiedCandidates);
+                    $allCandidates = $verifiedCandidates;
+
+                    if ($allCandidates === []) {
+                        $progress?->__invoke('Vision отклонил содержимое слайдера как нетоварное; продолжаю со следующей карточкой.');
+
+                        continue;
+                    }
+                }
+
                 $deferredVisionSets[] = [
                     'candidates' => $allCandidates,
                     'source' => $source,
+                    'already_verified' => $galleryVerification !== null,
                 ];
                 usort($deferredVisionSets, fn (array $left, array $right): int =>
                     count($right['candidates']) <=> count($left['candidates'])
@@ -514,23 +575,34 @@ class ProductImageStorage
                     'phase' => 'image_verification',
                     'action' => 'verify_gallery',
                     'status' => 'deferred',
-                    'decision' => 'try_next_source_before_vision',
+                    'decision' => $galleryVerification !== null
+                        ? 'retain_vision_filtered_partial_and_try_next_source'
+                        : 'try_next_source_before_vision',
                     'input' => ['downloaded_images' => count($allCandidates)],
                 ]);
-                $progress?->__invoke('Подтверждённый слайдер не получен; сохраняю набор в резерв и сначала проверяю следующую страницу.');
+                $progress?->__invoke($galleryVerification !== null
+                    ? 'После пакетной Vision-проверки фото меньше минимума категории; сохраняю частичный набор и продолжаю поиск.'
+                    : 'Подтверждённый слайдер не получен; сохраняю набор в резерв и сначала проверяю следующую страницу.');
 
                 continue;
             }
 
-            $selected = $confirmedGallery
+            $verificationMode = $galleryVerification['mode'];
+            $selected = $verifiedGallery
                 ->take($target)
                 ->map(fn (array $candidate): array => [
                     ...$candidate,
-                    'verification_status' => 'source_verified',
-                    'verification_notes' => 'Exact product source and complete Playwright-confirmed slider.',
+                    'verification_status' => $verificationMode === ConfirmedProductGalleryVerifier::MODE_DEDICATED
+                        ? 'source_verified'
+                        : 'verified',
+                    'verification_notes' => $verificationMode === ConfirmedProductGalleryVerifier::MODE_DEDICATED
+                        ? 'Exact product source and dedicated Playwright gallery; one representative Vision check.'
+                        : ($candidate['vision_reason'] ?? 'Ambiguous Playwright carousel accepted by batch Vision review.'),
                 ])
                 ->all();
-            $progress?->__invoke('Playwright подтвердил единый слайдер точной карточки: принимаю '.count($selected).' разных фото без Vision.');
+            $progress?->__invoke($verificationMode === ConfirmedProductGalleryVerifier::MODE_DEDICATED
+                ? 'Playwright подтвердил выделенную товарную галерею: Vision проверил один кадр, принимаю остальные '.count($selected).' фото.'
+                : 'Playwright нашёл неоднозначный слайдер: Vision пакетно проверил все кадры и принял '.count($selected).' фото.');
             $this->attempts->record([
                 'telegram_update_id' => $telegramUpdateId,
                 'product_draft_id' => $draft->id,
@@ -539,7 +611,9 @@ class ProductImageStorage
                 'phase' => 'image_verification',
                 'action' => 'verify_gallery',
                 'status' => 'completed',
-                'decision' => 'accept_confirmed_slider_without_vision',
+                'decision' => $verificationMode === ConfirmedProductGalleryVerifier::MODE_DEDICATED
+                    ? 'accept_dedicated_gallery_after_representative_check'
+                    : 'accept_ambiguous_gallery_after_batch_vision',
                 'input' => ['downloaded_images' => count($allCandidates)],
                 'output' => [
                     'accepted_images' => count($selected),
@@ -551,7 +625,9 @@ class ProductImageStorage
             $this->destroy($partialSelected);
             $partialSelected = [];
             $chosenSource = [...$source, 'url' => $productPageUrl];
-            $chosenMethod = 'playwright';
+            $chosenMethod = $verificationMode === ConfirmedProductGalleryVerifier::MODE_DEDICATED
+                ? 'playwright'
+                : 'playwright_vision';
             break;
         }
 
@@ -562,15 +638,19 @@ class ProductImageStorage
                 $candidates = $set['candidates'];
                 $source = $set['source'];
                 $candidateCount = count($candidates);
+                $verificationInterrupted = false;
 
                 try {
-                    $verified = $this->selectFromCandidates($draft, $candidates, $target, $telegramUpdateId);
+                    $verified = ($set['already_verified'] ?? false)
+                        ? $candidates
+                        : $this->selectFromCandidates($draft, $candidates, $target, $telegramUpdateId);
                     $verified = $this->removeNearDuplicates($verified, $excludedHashes);
                     $this->destroyUnselected($candidates, $verified);
                 } catch (Throwable $exception) {
                     report($exception);
                     $this->destroy($candidates);
                     $verified = [];
+                    $verificationInterrupted = true;
                     $progress?->__invoke('Один набор Vision временно недоступен; пробую следующую страницу.');
                 }
 
@@ -581,10 +661,14 @@ class ProductImageStorage
                     'actor' => 'vision',
                     'phase' => 'image_verification',
                     'action' => 'verify_deferred_source',
-                    'status' => $verified !== [] ? 'completed' : 'failed',
-                    'decision' => count($verified) >= $minimumCompleteGallerySize
-                        ? 'accept_images'
-                        : 'try_next_independent_source',
+                    'status' => $verificationInterrupted
+                        ? 'interrupted'
+                        : ($verified !== [] ? 'completed' : 'failed'),
+                    'decision' => $verificationInterrupted
+                        ? 'retry_source_on_continuation'
+                        : (count($verified) >= $minimumCompleteGallerySize
+                            ? 'accept_images'
+                            : 'try_next_independent_source'),
                     'input' => ['downloaded_images' => $candidateCount],
                     'output' => [
                         'accepted_images' => count($verified),
@@ -749,24 +833,48 @@ class ProductImageStorage
                     $groupIdentityConfirmed = is_array($groupSource)
                         && ! $this->identityMatcher->conflictsSource($draft, $groupSource)
                         && $this->identityMatcher->supportsSource($draft, $groupSource);
+                    $groupGalleryVerification = null;
 
                     if (
                         $groupIdentityConfirmed
                         && $confirmedGroup->count() >= $minimumCompleteGallerySize
+                        && $groupPageUrl
                     ) {
+                        $groupGalleryVerification = $this->confirmedGalleryVerifier->verify(
+                            $groupPageUrl,
+                            $confirmedGroup,
+                            $draft,
+                            $minimumCompleteGallerySize,
+                            $telegramUpdateId,
+                        );
+                        $confirmedGroup = $groupGalleryVerification['candidates'];
+                    }
+
+                    if (
+                        $groupIdentityConfirmed
+                        && $confirmedGroup->count() >= $minimumCompleteGallerySize
+                        && $groupPageUrl
+                    ) {
+                        $verificationMode = $groupGalleryVerification['mode'];
                         $selected = $confirmedGroup
                             ->take($target)
                             ->map(fn (array $candidate): array => [
                                 ...$candidate,
                                 'source_identity_confirmed' => true,
-                                'verification_status' => 'source_verified',
-                                'verification_notes' => 'Exact product source and complete Playwright-confirmed slider discovered during fallback search.',
+                                'verification_status' => $verificationMode === ConfirmedProductGalleryVerifier::MODE_DEDICATED
+                                    ? 'source_verified'
+                                    : 'verified',
+                                'verification_notes' => $verificationMode === ConfirmedProductGalleryVerifier::MODE_DEDICATED
+                                    ? 'Exact product source and dedicated Playwright gallery discovered during fallback search.'
+                                    : ($candidate['vision_reason'] ?? 'Ambiguous fallback carousel accepted by batch Vision review.'),
                             ])
                             ->all();
                         $this->destroy($partialSelected);
                         $partialSelected = [];
                         $chosenSource = $groupSource;
-                        $chosenMethod = 'fallback_playwright';
+                        $chosenMethod = $verificationMode === ConfirmedProductGalleryVerifier::MODE_DEDICATED
+                            ? 'fallback_playwright'
+                            : 'fallback_playwright_vision';
                         $this->attempts->record([
                             'telegram_update_id' => $telegramUpdateId,
                             'product_draft_id' => $draft->id,
@@ -775,27 +883,60 @@ class ProductImageStorage
                             'phase' => 'image_verification',
                             'action' => 'verify_discovered_gallery',
                             'status' => 'completed',
-                            'decision' => 'accept_confirmed_slider_without_vision',
+                            'decision' => $verificationMode === ConfirmedProductGalleryVerifier::MODE_DEDICATED
+                                ? 'accept_dedicated_gallery_after_representative_check'
+                                : 'accept_ambiguous_gallery_after_batch_vision',
                             'input' => ['downloaded_images' => count($groupCandidates)],
                             'output' => [
                                 'accepted_images' => count($selected),
                                 'accepted_urls' => collect($selected)->pluck('source_url')->values()->all(),
                             ],
                         ]);
-                        $progress?->__invoke('Резервный поиск нашёл и подтвердил Playwright-галерею точной карточки: принимаю '.count($selected).' фото и прекращаю обход источников.');
+                        $progress?->__invoke($verificationMode === ConfirmedProductGalleryVerifier::MODE_DEDICATED
+                            ? 'Резервный поиск нашёл выделенную Playwright-галерею: один кадр проверен Vision, принимаю '.count($selected).' фото и прекращаю обход источников.'
+                            : 'Резервный поиск нашёл неоднозначный слайдер: Vision пакетно принял '.count($selected).' фото и прекращаю обход источников.');
 
                         break;
                     }
 
+                    $verificationInterrupted = false;
+
                     try {
-                        $verified = $this->selectFromCandidates($draft, $groupCandidates, $target, $telegramUpdateId);
+                        $verified = $groupGalleryVerification !== null
+                            ? $confirmedGroup->all()
+                            : $this->selectFromCandidates($draft, $groupCandidates, $target, $telegramUpdateId);
                     } catch (Throwable $exception) {
                         report($exception);
+                        $verified = [];
+                        $verificationInterrupted = true;
                         $progress?->__invoke('Vision резервного поиска временно недоступен; завершаю с лучшим уже полученным результатом.');
-
-                        continue;
                     }
                     $selected = $this->removeNearDuplicates($verified, $excludedHashes);
+                    $this->attempts->record([
+                        'telegram_update_id' => $telegramUpdateId,
+                        'product_draft_id' => $draft->id,
+                        'product_url' => $groupPageUrl,
+                        'actor' => 'vision',
+                        'phase' => 'image_verification',
+                        'action' => 'verify_discovered_candidates',
+                        'status' => $verificationInterrupted
+                            ? 'interrupted'
+                            : ($selected !== [] ? 'completed' : 'failed'),
+                        'decision' => $verificationInterrupted
+                            ? 'retry_source_on_continuation'
+                            : (count($selected) >= $minimumCompleteGallerySize
+                                ? 'accept_images'
+                                : ($selected !== [] ? 'retain_partial_source' : 'reject_candidates')),
+                        'input' => ['downloaded_images' => count($groupCandidates)],
+                        'output' => [
+                            'accepted_images' => count($selected),
+                            'accepted_urls' => collect($selected)->pluck('source_url')->values()->all(),
+                        ],
+                    ]);
+
+                    if ($verificationInterrupted) {
+                        continue;
+                    }
 
                     if ($selected !== []) {
                         if (count($selected) < $minimumCompleteGallerySize) {
@@ -966,7 +1107,14 @@ class ProductImageStorage
             ? match (true) {
                 $this->costBudget->exceeded($telegramUpdateId) => 'cost_budget',
                 ! $this->timeBudget->canStart($telegramUpdateId, 20) => 'time_budget',
-                default => null,
+                // Every known and AI-discovered source was tried within
+                // budget and time and none produced a usable gallery. This
+                // is not a dead end: only the money/time limit is allowed to
+                // stop a request for good, so this gets the same resumable
+                // stop reason as a budget/time cutoff - a later continuation
+                // cycle excludes already-tried URLs and explores genuinely
+                // new candidates instead of repeating the same failure.
+                default => 'exhausted',
             }
         : null;
 
@@ -1034,29 +1182,12 @@ class ProductImageStorage
     /** @param null|callable(string): void $progress */
     public function continueStage(ProductDraft $draft, ?callable $progress = null, ?int $telegramUpdateId = null): int
     {
-        // A page counts as exhausted only after real work happened on it
-        // (selection/resolution/training) or after a failed preflight proved
-        // it blocked/unavailable. A merely successful cheap preflight must
-        // not exclude a source that was never run through Playwright/Vision.
-        $attemptedUrls = ProductSourceAttempt::query()
-            ->where('product_draft_id', $draft->id)
-            ->where(function ($query): void {
-                $query->whereIn('phase', ['source_selection', 'source_resolution', 'gallery_training'])
-                    ->orWhere(function ($preflight): void {
-                        $preflight->where('phase', 'gallery_preflight')->where('status', 'failed');
-                    });
-            })
-            ->orderBy('id')
-            ->pluck('product_url')
-            ->filter(fn (mixed $url): bool => is_string($url) && filter_var($url, FILTER_VALIDATE_URL) !== false)
-            ->unique()
-            ->values()
-            ->all();
-
-        // The last page may be the one whose recipe finished exactly as the
-        // budget was crossed. Retry that checkpoint after the contract fix;
-        // every older page/domain is already exhausted for this draft.
-        array_pop($attemptedUrls);
+        // Only URLs with a terminal end-to-end outcome are excluded. A
+        // successful preflight, gallery-training round, source resolution,
+        // completed download without final verification, or interrupted
+        // Vision call is a checkpoint rather than proof that the source was
+        // exhausted, so continuation is allowed to retry it.
+        $attemptedUrls = $this->terminalSourceUrlsForContinuation($draft);
         $currentSource = $this->currentDraftSource($draft);
         $cycleSources = $currentSource
             ? [[...$currentSource, 'type' => 'retailer']]
@@ -1069,6 +1200,50 @@ class ProductImageStorage
             $cycleSources,
             $attemptedUrls,
         );
+    }
+
+    /** @return array<int, string> */
+    private function terminalSourceUrlsForContinuation(ProductDraft $draft): array
+    {
+        $terminalVerificationActions = [
+            'verify_gallery',
+            'verify_deferred_source',
+            'verify_discovered_gallery',
+            'verify_discovered_candidates',
+        ];
+
+        return ProductSourceAttempt::query()
+            ->where('product_draft_id', $draft->id)
+            ->where(function ($query) use ($terminalVerificationActions): void {
+                $query
+                    ->where(function ($preflight): void {
+                        $preflight->where('phase', 'gallery_preflight')
+                            ->where('status', 'failed');
+                    })
+                    ->orWhere(function ($selection): void {
+                        $selection->where('phase', 'source_selection')
+                            ->where('status', 'failed');
+                    })
+                    ->orWhere(function ($download): void {
+                        $download->where('phase', 'image_download')
+                            ->where('status', 'failed');
+                    })
+                    ->orWhere(function ($fallbackDownload): void {
+                        $fallbackDownload->where('phase', 'fallback_image_download')
+                            ->where('status', 'failed');
+                    })
+                    ->orWhere(function ($verification) use ($terminalVerificationActions): void {
+                        $verification->where('phase', 'image_verification')
+                            ->whereIn('action', $terminalVerificationActions)
+                            ->whereIn('status', ['completed', 'failed']);
+                    });
+            })
+            ->orderBy('id')
+            ->pluck('product_url')
+            ->filter(fn (mixed $url): bool => is_string($url) && filter_var($url, FILTER_VALIDATE_URL) !== false)
+            ->unique()
+            ->values()
+            ->all();
     }
 
     /**
@@ -1551,6 +1726,11 @@ class ProductImageStorage
         $limit = (int) config('product-images.download_candidates', 8);
         $sourcePagesByUrl = [];
         $sourceContextsByUrl = [];
+        // A guessed larger rendition (see normalizeCandidateUrl()'s WxH
+        // bump) is not guaranteed to exist for a given item - if it fails
+        // to download, fall back to the originally observed, real
+        // rendition instead of losing that photo entirely.
+        $renditionFallbackByUrl = [];
         $this->lastDownloadRejections = [];
 
         foreach ($urls as $originalUrl) {
@@ -1570,6 +1750,11 @@ class ProductImageStorage
             }
             if (is_array($context)) {
                 $sourceContextsByUrl[$key] = $context;
+            }
+
+            $observedKey = self::normalizeCandidateUrl($originalUrl, upgradeRendition: false);
+            if ($observedKey !== $key) {
+                $renditionFallbackByUrl[$key] = $observedKey;
             }
         }
 
@@ -1616,6 +1801,10 @@ class ProductImageStorage
 
             $failureReason = null;
             $download = $this->resolver->download($url, failureReason: $failureReason);
+
+            if (! $download && isset($renditionFallbackByUrl[$url])) {
+                $download = $this->resolver->download($renditionFallbackByUrl[$url], failureReason: $failureReason);
+            }
 
             if (! $download) {
                 $this->lastDownloadRejections[] = ['url' => $url, 'reason' => $failureReason ?? 'unknown'];
@@ -1697,24 +1886,47 @@ class ProductImageStorage
         array $additionalExcludedSourceUrls = [],
         int $searchAttempt = 0,
     ): array {
-        $discovered = ($skipKnownSources || $progress)
-            ? $this->candidateDiscovery->find(
-                $draft,
-                $existingUrls,
-                $skipKnownSources,
-                $progress,
-                $telegramUpdateId,
-                $additionalExcludedSourceUrls,
-                $searchAttempt,
-            )
-            : $this->candidateDiscovery->find(
-                $draft,
-                $existingUrls,
-                telegramUpdateId: $telegramUpdateId,
-                additionalExcludedSourceUrls: $additionalExcludedSourceUrls,
-                searchAttempt: $searchAttempt,
-            );
-        $newUrls = array_values(array_diff($this->cleanUrls($discovered), $existingUrls));
+        $attemptCheckpoint = ProductSourceAttempt::query()->max('id') ?? 0;
+
+        try {
+            $discovered = ($skipKnownSources || $progress)
+                ? $this->candidateDiscovery->find(
+                    $draft,
+                    $existingUrls,
+                    $skipKnownSources,
+                    $progress,
+                    $telegramUpdateId,
+                    $additionalExcludedSourceUrls,
+                    $searchAttempt,
+                )
+                : $this->candidateDiscovery->find(
+                    $draft,
+                    $existingUrls,
+                    telegramUpdateId: $telegramUpdateId,
+                    additionalExcludedSourceUrls: $additionalExcludedSourceUrls,
+                    searchAttempt: $searchAttempt,
+                );
+        } finally {
+            $this->associateAttemptsWithDraftSince($draft, $telegramUpdateId, $attemptCheckpoint);
+        }
+        // Keep the exact rendition observed by the browser until
+        // downloadCandidates() has built its upgraded -> observed fallback
+        // map. Cleaning here used to turn a verified 750x750 URL into a
+        // speculative 1600x1600 URL before the downloader could remember
+        // where that guess came from.
+        $existingAssetKeys = collect($this->cleanUrls($existingUrls))
+            ->map(fn (string $url): string => self::imageAssetKey($url))
+            ->all();
+        $newUrls = collect($discovered)
+            ->filter(fn (mixed $url): bool => is_string($url) && filter_var($url, FILTER_VALIDATE_URL) !== false)
+            ->reject(fn (string $url): bool => in_array(
+                self::imageAssetKey(self::normalizeCandidateUrl($url)),
+                $existingAssetKeys,
+                true,
+            ))
+            ->unique(fn (string $url): string => self::imageAssetKey($url))
+            ->values()
+            ->all();
         $candidates = $this->downloadCandidates($newUrls, $draft);
 
         if ($discovered !== []) {
@@ -1744,6 +1956,30 @@ class ProductImageStorage
         ]);
 
         return [$candidates, true];
+    }
+
+    /**
+     * Nested resolver/trainer services only know the Telegram update that
+     * started the current search cycle. During continuation that update is
+     * the callback, while the draft still points at its original message, so
+     * recorder inference cannot bind the attempts on its own. Attach every
+     * attempt created by this exact nested call before continuation logic
+     * decides whether the source is terminal or retryable.
+     */
+    private function associateAttemptsWithDraftSince(
+        ProductDraft $draft,
+        ?int $telegramUpdateId,
+        int $afterId,
+    ): void {
+        if (! $telegramUpdateId) {
+            return;
+        }
+
+        ProductSourceAttempt::query()
+            ->where('id', '>', $afterId)
+            ->where('telegram_update_id', $telegramUpdateId)
+            ->whereNull('product_draft_id')
+            ->update(['product_draft_id' => $draft->id]);
     }
 
     /**
@@ -1788,74 +2024,6 @@ class ProductImageStorage
         } catch (Throwable $exception) {
             throw $exception;
         }
-    }
-
-    /**
-     * A structurally complete, identity-confirmed Playwright slider still
-     * needs its actual content sanity-checked: a slider can be fully
-     * confirmed (right count, right SKU) while showing something other than
-     * the product itself - a manufacturing/materials story slider, a
-     * lifestyle scene, a feature screenshot - and nothing else in this fast
-     * path looks at pixels. Whether that is true is a property of the
-     * recipe/template (the same DOM position keeps showing the same kind of
-     * content for every product on that domain), not of any one search, so
-     * this checks Vision on exactly one representative frame only the first
-     * time a given recipe's confirmed-slider path is actually exercised, and
-     * persists the verdict onto the recipe row - content_verified_by_vision
-     * is written only here, never by the AI trainer, precisely because the
-     * trainer's own content_confirmed_product claim (free-text DOM
-     * reasoning, no pixels) is what this exists to double-check: every
-     * recipe gets exactly one real spot check regardless of what it claims,
-     * so an overconfident trainer can't skip the check just by saying true.
-     * Every later search against the same recipe reuses that verdict for
-     * free. A fresh AI training round replaces the whole recipe JSON, which
-     * naturally drops this key and re-arms the check for the new version.
-     *
-     * @param  \Illuminate\Support\Collection<int, array<string, mixed>>  $confirmedGallery
-     */
-    private function confirmedGalleryContentIsProduct(
-        string $productPageUrl,
-        \Illuminate\Support\Collection $confirmedGallery,
-        ProductDraft $draft,
-        ?int $telegramUpdateId,
-    ): bool {
-        if ($confirmedGallery->isEmpty()) {
-            return true;
-        }
-
-        $host = strtolower((string) parse_url($productPageUrl, PHP_URL_HOST));
-        $recipe = ProductGalleryRecipe::query()
-            ->where('domain', $host)
-            ->where('path_pattern', '*')
-            ->first();
-        $verified = $recipe?->recipe['content_verified_by_vision'] ?? null;
-
-        if (is_bool($verified)) {
-            return $verified;
-        }
-
-        $spotCheckCandidate = $confirmedGallery->first();
-        $approved = $this->visionVerifier->select($draft, [$spotCheckCandidate], 1, $telegramUpdateId);
-        $passed = $approved !== [];
-
-        $recipe?->update(['recipe' => [...$recipe->recipe, 'content_verified_by_vision' => $passed]]);
-
-        $this->attempts->record([
-            'telegram_update_id' => $telegramUpdateId,
-            'product_draft_id' => $draft->id,
-            'product_url' => $productPageUrl,
-            'actor' => 'vision',
-            'phase' => 'image_verification',
-            'action' => 'spot_check_confirmed_slider',
-            'status' => 'completed',
-            'decision' => $passed ? 'content_confirmed' : 'content_rejected',
-            'input' => [
-                'candidate_url' => $spotCheckCandidate['source_url'] ?? null,
-                'ai_claimed' => $recipe?->recipe['content_confirmed_product'] ?? null,
-            ],
-        ]);
-
-        return $passed;
     }
 
     private function looksLikeJunk(string $url): bool
@@ -2007,26 +2175,39 @@ class ProductImageStorage
      * at another size" judgment used for downloading candidates and the one
      * used for the AI preflight's static-gallery headcount never diverge.
      */
-    public static function normalizeCandidateUrl(string $url): string
+    public static function normalizeCandidateUrl(string $url, bool $upgradeRendition = true): string
     {
         $url = trim($url);
         $host = Str::lower((string) parse_url($url, PHP_URL_HOST));
 
-        if ($host === 'static.bhphoto.com' || str_ends_with($host, '.bhphoto.com')) {
+        // Many commerce CDNs (not one named site) expose the same immutable
+        // photo under several "WxH" size-bucket path segments without the
+        // largest bucket ever appearing directly in the page's own HTML -
+        // matches both a bare "/1280x1280/" segment and a word-prefixed one
+        // like B&H's "/images500x500/". Bumping the number(s) already
+        // present is domain-agnostic and safe to try; the guessed bucket is
+        // not guaranteed to exist for every item (real case: fleetnetwork.ca
+        // BigCommerce Stencil products only ever have up to 1280x1280 -
+        // guessing 1600 for those would 404), so a failed download of this
+        // URL must fall back to the $upgradeRendition: false form (the
+        // originally observed, real rendition) instead of losing the photo
+        // outright - see downloadCandidates()'s $renditionFallbackByUrl.
+        if ($upgradeRendition && preg_match('#/([a-z_]*)(\d{2,5})(x\d{2,5})/#i', $url, $sizeSegment) === 1 && (int) $sizeSegment[2] < 1600) {
             $url = preg_replace(
-                '#/multiple_images/(?:thumbnails|images\d+x\d+)/#i',
-                '/multiple_images/images2500x2500/',
+                '#/'.preg_quote($sizeSegment[1].$sizeSegment[2].$sizeSegment[3], '#').'/#i',
+                '/'.$sizeSegment[1].'1600x1600/',
                 $url,
-            ) ?: $url;
-
-            return preg_replace(
-                '#/images/(?:smallimages|images\d+x\d+)/#i',
-                '/images/images2500x2500/',
-                $url,
+                1,
             ) ?: $url;
         }
 
-        if (str_contains($host, 'dlcdnwebimgs.asus.com')) {
+        // ASUS's own "//wNN" syntax (double-slash, no "x", unlike the near-
+        // universal WxH bucket convention above) is idiosyncratic to this
+        // one CDN, so recognizing it at all is unavoidably domain-specific -
+        // but which larger rendition actually exists is still just a guess,
+        // same as the generic WxH case: not gated by $upgradeRendition would
+        // mean a failed guess has no way back to the real, observed size.
+        if ($upgradeRendition && str_contains($host, 'dlcdnwebimgs.asus.com')) {
             return preg_replace('#//w(?:48|64|96|184)(?:\?|$)#i', '//w800', $url) ?: $url;
         }
 

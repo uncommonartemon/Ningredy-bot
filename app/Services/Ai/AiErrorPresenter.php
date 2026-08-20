@@ -19,9 +19,10 @@ class AiErrorPresenter
 
         $providerDetail = $this->providerDetail($error);
         $suffix .= $providerDetail !== '' ? " Ответ провайдера: {$providerDetail}" : '';
+        $classificationText = trim($raw.' '.mb_strtolower($providerDetail));
 
         return match (true) {
-            str_contains($raw, 'insufficient_quota'), str_contains($raw, 'billing'), str_contains($raw, 'credit'), str_contains($raw, 'quota') => [
+            str_contains($classificationText, 'insufficient_quota'), str_contains($classificationText, 'billing'), str_contains($classificationText, 'credit'), str_contains($classificationText, 'quota') => [
                 'retryable' => false, 'message' => 'У AI-провайдера закончилась квота или средства. Пополните баланс/лимит и повторите запрос.'.$suffix,
             ],
             str_contains($raw, 'does not exist'), str_contains($raw, 'model_not_found'), str_contains($raw, 'invalid model'), str_contains($raw, 'no such model'), str_contains($raw, 'unknown model') => [
@@ -33,7 +34,7 @@ class AiErrorPresenter
             str_contains($raw, 'context length'), str_contains($raw, 'maximum context'), str_contains($raw, 'too many tokens') => [
                 'retryable' => false, 'message' => 'Запрос или история диалога слишком длинные для модели. Сформулируйте короче или начните новый диалог.'.$suffix,
             ],
-            str_contains($raw, '429'), str_contains($raw, 'rate limit') => [
+            str_contains($classificationText, '429'), str_contains($classificationText, 'rate limit') => [
                 'retryable' => true, 'message' => 'AI-провайдер временно ограничил частоту запросов. Повторю автоматически.'.$suffix,
             ],
             str_contains($raw, 'timeout'), str_contains($raw, 'timed out') => [

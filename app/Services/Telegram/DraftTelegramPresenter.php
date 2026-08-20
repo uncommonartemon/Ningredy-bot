@@ -126,14 +126,16 @@ class DraftTelegramPresenter
     private function controlMarkup(ProductDraft $draft): array
     {
         $mediaCount = $draft->media()->count();
-        $searchPaused = in_array($draft->gallery_search_stop_reason, ['cost_budget', 'time_budget'], true);
+        $searchPaused = in_array($draft->gallery_search_stop_reason, ['cost_budget', 'time_budget', 'exhausted'], true);
 
         if ($searchPaused && $mediaCount === 0) {
-            $limit = number_format(app(AiSettings::class)->maxSearchCostUsd(), 2);
+            $buttonLabel = $draft->gallery_search_stop_reason === 'exhausted'
+                ? '▶️ Продолжить поиск фото'
+                : '▶️ Продолжить поиск фото (+$'.number_format(app(AiSettings::class)->maxSearchCostUsd(), 2).')';
 
             return ['inline_keyboard' => [
                 [[
-                    'text' => '▶️ Продолжить поиск фото (+$'.$limit.')',
+                    'text' => $buttonLabel,
                     'callback_data' => "draft:continue-search:{$draft->id}",
                 ]],
                 [[
@@ -158,10 +160,12 @@ class DraftTelegramPresenter
             ],
         ];
 
-        if (in_array($draft->gallery_search_stop_reason, ['cost_budget', 'time_budget'], true)) {
-            $limit = number_format(app(AiSettings::class)->maxSearchCostUsd(), 2);
+        if (in_array($draft->gallery_search_stop_reason, ['cost_budget', 'time_budget', 'exhausted'], true)) {
+            $label = $draft->gallery_search_stop_reason === 'exhausted'
+                ? '▶️ Продолжить поиск'
+                : '▶️ Продолжить поиск (+$'.number_format(app(AiSettings::class)->maxSearchCostUsd(), 2).')';
             $rows[] = [[
-                'text' => "▶️ Продолжить поиск (+\${$limit})",
+                'text' => $label,
                 'callback_data' => "draft:continue-search:{$draft->id}",
             ]];
         } elseif ($draft->media()->count() <= 2) {
@@ -246,13 +250,16 @@ class DraftTelegramPresenter
             "🏷 {$draft->title}",
             implode(' · ', array_filter([$draft->brand, $draft->model, $draft->color])),
         ]));
-        $searchPaused = in_array($draft->gallery_search_stop_reason, ['cost_budget', 'time_budget'], true);
+        $searchPaused = in_array($draft->gallery_search_stop_reason, ['cost_budget', 'time_budget', 'exhausted'], true);
 
         if ($searchPaused && $galleryCount === 0) {
             $header = "⏸ Черновик #{$draft->id}: поиск фотографий приостановлен\n"
                 ."🏷 {$draft->title}\n"
                 .implode(' / ', array_filter([$draft->brand, $draft->model, $draft->color]));
-            $usageFootnote = "\nЛимит текущего запуска достигнут. Нажмите «Продолжить поиск фото», чтобы начать новый бюджетный цикл.".$usageFootnote;
+            $usageFootnote = "\n".($draft->gallery_search_stop_reason === 'exhausted'
+                ? 'Все известные и найденные AI-поиском источники проверены без результата.'
+                : 'Лимит текущего запуска достигнут.')
+                .' Нажмите «Продолжить поиск фото», чтобы начать новый цикл.'.$usageFootnote;
         }
 
         $fixed = $header."\n\n".$footer.$usageFootnote;

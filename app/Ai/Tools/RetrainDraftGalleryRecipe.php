@@ -56,6 +56,7 @@ class RetrainDraftGalleryRecipe implements Tool
                         $this->update->id,
                         (string) $this->update->chat_id,
                         $hint,
+                        $draft->telegram_update_id,
                     );
 
                     return ['ok' => true, 'queued' => true, 'draft_id' => $draft->id];

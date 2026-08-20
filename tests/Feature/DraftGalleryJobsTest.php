@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Jobs\ContinueDraftGallerySearch;
 use App\Jobs\RestageDraftGalleryPhotos;
 use App\Jobs\TopUpDraftGalleryPhotos;
+use App\Jobs\TrainDraftGalleryRecipe;
 use App\Models\AiRun;
 use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
@@ -19,6 +20,22 @@ use Tests\TestCase;
 class DraftGalleryJobsTest extends TestCase
 {
     use RefreshDatabase;
+
+    public function test_gallery_job_overlap_locks_expire_after_the_job_timeout(): void
+    {
+        $jobs = [
+            new ContinueDraftGallerySearch(11, '100', 21, 21),
+            new RestageDraftGalleryPhotos(12, '100', 22, 22),
+            new TopUpDraftGalleryPhotos(13, '100', 23, 23),
+            new TrainDraftGalleryRecipe(14, 24, '100', null, 24),
+        ];
+
+        foreach ($jobs as $job) {
+            $middleware = $job->middleware()[0];
+
+            $this->assertSame($job->timeout + 60, $middleware->expiresAfter);
+        }
+    }
 
     public function test_restage_job_blacklists_current_gallery_before_searching_again(): void
     {
@@ -36,7 +53,7 @@ class DraftGalleryJobsTest extends TestCase
         $presenter->shouldReceive('sendReview')->once();
         $telegram = $this->telegramMock();
 
-        (new RestageDraftGalleryPhotos($draft->id, '100', $draft->telegram_update_id))->handle($images, $presenter, $telegram);
+        (new RestageDraftGalleryPhotos($draft->id, '100', $draft->telegram_update_id, $draft->telegram_update_id))->handle($images, $presenter, $telegram);
 
         $this->assertFalse(Cache::has("draft-gallery-restage:{$draft->id}:queued"));
     }
@@ -54,7 +71,7 @@ class DraftGalleryJobsTest extends TestCase
         $presenter->shouldReceive('sendReview')->once();
         $telegram = $this->telegramMock();
 
-        (new TopUpDraftGalleryPhotos($draft->id, '100', $draft->telegram_update_id))->handle($images, $presenter, $telegram);
+        (new TopUpDraftGalleryPhotos($draft->id, '100', $draft->telegram_update_id, $draft->telegram_update_id))->handle($images, $presenter, $telegram);
 
         $this->assertFalse(Cache::has("draft-gallery-topup:{$draft->id}:queued"));
     }
@@ -88,10 +105,30 @@ class DraftGalleryJobsTest extends TestCase
             $mock->shouldNotReceive('sendMessage');
         });
 
-        (new ContinueDraftGallerySearch($draft->id, '100', $continueUpdate->id))
+        (new ContinueDraftGallerySearch($draft->id, '100', $continueUpdate->id, $draft->telegram_update_id))
             ->handle($images, $presenter, $telegram);
 
         $this->assertFalse(Cache::has("draft-gallery-continue:{$draft->id}:queued"));
+    }
+
+    public function test_queued_gallery_job_cannot_mutate_a_reused_draft_id(): void
+    {
+        $draft = $this->draft();
+        $images = $this->mock(ProductImageStorage::class);
+        $images->shouldNotReceive('continueStage');
+        $presenter = $this->mock(DraftTelegramPresenter::class);
+        $presenter->shouldNotReceive('sendReview');
+        $telegram = $this->mock(TelegramClient::class);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('different draft generation');
+
+        (new ContinueDraftGallerySearch(
+            $draft->id,
+            '100',
+            $draft->telegram_update_id,
+            $draft->telegram_update_id + 1000,
+        ))->handle($images, $presenter, $telegram);
     }
 
     private function draft(): ProductDraft

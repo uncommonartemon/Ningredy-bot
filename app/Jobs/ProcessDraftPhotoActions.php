@@ -33,6 +33,7 @@ class ProcessDraftPhotoActions implements ShouldQueue
         public int $telegramUpdateId,
         public string $chatId,
         public ?int $operationId = null,
+        public ?int $expectedDraftTelegramUpdateId = null,
     ) {
         $this->onQueue('media');
     }
@@ -50,6 +51,12 @@ class ProcessDraftPhotoActions implements ShouldQueue
 
         try {
             $draft = ProductDraft::query()->with('media')->findOrFail($this->draftId);
+            throw_unless(
+                $this->expectedDraftTelegramUpdateId !== null
+                    && (int) $draft->telegram_update_id === $this->expectedDraftTelegramUpdateId,
+                RuntimeException::class,
+                'Queued photo actions belong to a different draft generation.',
+            );
             throw_unless($draft->status === 'pending_review', RuntimeException::class, 'Черновик уже обработан.');
             $progress->info("Черновик #{$draft->id}: принято операций — ".count($this->actions).'.');
 

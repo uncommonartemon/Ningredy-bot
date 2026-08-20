@@ -90,8 +90,17 @@ class ProductImageResolver
             }
         } catch (Throwable $exception) {
             $status = $exception instanceof RequestException ? $exception->response->status() : null;
-            $result['browser_probe_required'] = in_array($status, [401, 403, 429], true);
             $result['unavailable'] = in_array($status, [404, 410], true);
+            // A connection timeout/DNS failure has no status at all (it
+            // isn't a RequestException - the server never answered this
+            // cheap client within its short fast-fail timeout), but that is
+            // at least as promising a candidate for a real browser retry as
+            // an explicit 403: slow-walking or black-holing a non-browser
+            // request instead of returning a clean block status is itself a
+            // common anti-bot tactic, and Playwright's own timeout/budget is
+            // not bound by this quick check's. Only a confirmed 404/410
+            // (the page itself does not exist) is not worth retrying.
+            $result['browser_probe_required'] = ! $result['unavailable'];
             $result['reason'] = $status ? 'http_'.$status : 'http_error';
         }
 

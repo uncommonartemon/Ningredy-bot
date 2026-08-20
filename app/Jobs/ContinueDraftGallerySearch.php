@@ -31,6 +31,7 @@ class ContinueDraftGallerySearch implements ShouldQueue
         public int $draftId,
         public string $chatId,
         public int $telegramUpdateId,
+        public ?int $expectedDraftTelegramUpdateId = null,
     ) {
         $this->onQueue('media');
     }
@@ -44,7 +45,9 @@ class ContinueDraftGallerySearch implements ShouldQueue
         // duplicate against the same draft. Shares its lock key with
         // RestageDraftGalleryPhotos/TopUpDraftGalleryPhotos so none of the
         // three gallery-mutating jobs can race each other either.
-        return [(new WithoutOverlapping("draft-gallery-search:{$this->draftId}"))->releaseAfter($this->timeout + 60)];
+        return [(new WithoutOverlapping("draft-gallery-search:{$this->draftId}"))
+            ->releaseAfter($this->timeout + 60)
+            ->expireAfter($this->timeout + 60)];
     }
 
     public function handle(
@@ -54,6 +57,12 @@ class ContinueDraftGallerySearch implements ShouldQueue
     ): void {
         try {
             $draft = ProductDraft::query()->with('telegramUpdate')->findOrFail($this->draftId);
+            throw_unless(
+                $this->expectedDraftTelegramUpdateId !== null
+                    && (int) $draft->telegram_update_id === $this->expectedDraftTelegramUpdateId,
+                RuntimeException::class,
+                'Queued gallery search belongs to a different draft generation.',
+            );
             throw_unless($draft->status === 'pending_review', RuntimeException::class, 'Черновик уже обработан.');
 
             $existingProgressMessageId = (int) data_get(
@@ -104,7 +113,10 @@ class ContinueDraftGallerySearch implements ShouldQueue
         try {
             $draft = ProductDraft::query()->find($this->draftId);
 
-            if ($draft && $draft->status === 'pending_review') {
+            if ($draft
+                && $this->expectedDraftTelegramUpdateId !== null
+                && (int) $draft->telegram_update_id === $this->expectedDraftTelegramUpdateId
+                && $draft->status === 'pending_review') {
                 app(DraftTelegramPresenter::class)->sendReview(
                     app(TelegramClient::class),
                     $this->chatId,

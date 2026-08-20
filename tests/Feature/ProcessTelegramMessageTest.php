@@ -797,6 +797,63 @@ class ProcessTelegramMessageTest extends TestCase
         $this->assertNull($draft->reviewed_at);
     }
 
+    public function test_research_keeps_a_zero_photo_draft_pending_when_every_source_is_exhausted_without_a_budget_cause(): void
+    {
+        // Only the money/time budget is allowed to end a search for good.
+        // Trying every known and AI-discovered source and finding nothing,
+        // with neither limit actually hit, must stay resumable exactly like
+        // a budget/time stop instead of the draft being marked "rejected"
+        // with no way for the user to try again.
+        ProductResearchAgent::fake([[
+            'status' => 'found',
+            'title' => 'Razer Blade 14 RTX 5070',
+            'brand' => 'Razer',
+            'model' => 'Blade 14',
+            'category' => 'laptops',
+            'product_type' => 'laptop',
+            'color' => 'Black',
+            'description' => 'Gaming laptop.',
+            'specifications' => [],
+            'sources' => [[
+                'title' => 'PBTech',
+                'url' => 'https://www.pbtech.com/product/NBKRAZ530633/model',
+                'type' => 'retailer',
+            ]],
+            'primary_source_url' => 'https://www.pbtech.com/product/NBKRAZ530633/model',
+            'official_source_url' => null,
+            'research_notes' => null,
+            'image_urls' => [],
+            'confidence' => 0.95,
+        ]]);
+        $update = $this->update();
+        $resolver = $this->mock(ProductImageResolver::class);
+        $resolver->shouldNotReceive('resolve');
+        $imageStorage = $this->mock(ProductImageStorage::class);
+        $imageStorage->shouldReceive('stage')->once()->andReturnUsing(function (ProductDraft $draft): int {
+            $draft->update([
+                'images_staged_at' => now(),
+                'gallery_status' => 'missing',
+                'gallery_search_stop_reason' => 'exhausted',
+            ]);
+
+            return 0;
+        });
+
+        $result = json_decode((new ResearchProduct($update, $resolver, imageStorage: $imageStorage))->handle(new Request([
+            'query' => 'Razer Blade 14 RTX 5070',
+        ])), true, flags: JSON_THROW_ON_ERROR);
+
+        $draft = ProductDraft::query()->firstOrFail();
+
+        $this->assertTrue($result['ok']);
+        $this->assertSame('gallery_search_paused', $result['status']);
+        $this->assertSame($draft->id, $result['draft_id']);
+        $this->assertSame(0, $result['image_count']);
+        $this->assertSame('pending_review', $draft->status);
+        $this->assertSame('exhausted', $draft->gallery_search_stop_reason);
+        $this->assertNull($draft->reviewed_at);
+    }
+
     public function test_research_tool_never_returns_a_clarification_question_after_web_search(): void
     {
         ProductResearchAgent::fake([[

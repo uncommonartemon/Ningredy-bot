@@ -30,12 +30,47 @@ class ProductImageVisionVerifier
         int $limit,
         ?int $telegramUpdateId = null,
     ): array {
+        return $this->selectWithPolicy($draft, $candidates, $limit, $telegramUpdateId, false);
+    }
+
+    /**
+     * Reviews every frame of an ambiguous Playwright carousel in one request.
+     * This policy deliberately accepts useful lifestyle/feature photography
+     * when the requested product is still meaningfully visible.
+     *
+     * @param  array<int, array<string, mixed>>  $candidates
+     * @return array<int, array<string, mixed>>
+     */
+    public function selectGalleryFrames(
+        ProductDraft $draft,
+        array $candidates,
+        int $limit,
+        ?int $telegramUpdateId = null,
+    ): array {
+        return $this->selectWithPolicy($draft, $candidates, $limit, $telegramUpdateId, true);
+    }
+
+    /**
+     * @param  array<int, array<string, mixed>>  $candidates
+     * @return array<int, array<string, mixed>>
+     */
+    private function selectWithPolicy(
+        ProductDraft $draft,
+        array $candidates,
+        int $limit,
+        ?int $telegramUpdateId,
+        bool $galleryFramePolicy,
+    ): array {
         if ($limit <= 0 || $candidates === []) {
             return [];
         }
 
-        $maxCandidates = (int) config('product-images.vision_candidates', 4);
-        $minimumScore = (int) config('product-images.vision_min_score', 60);
+        $maxCandidates = $galleryFramePolicy
+            ? AiSettings::GALLERY_MAX_IMAGE_COUNT
+            : (int) config('product-images.vision_candidates', 4);
+        $minimumScore = $galleryFramePolicy
+            ? min(40, (int) config('product-images.vision_min_score', 60))
+            : (int) config('product-images.vision_min_score', 60);
         $candidates = array_slice($candidates, 0, $maxCandidates);
         $candidates = array_map(function (array $candidate) use ($draft): array {
             $pageContext = is_array($candidate['page_source_context'] ?? null)
@@ -66,7 +101,7 @@ class ProductImageVisionVerifier
         );
         $provider = $settings->providerFor('product_image_vision');
         $model = $settings->modelFor('product_image_vision');
-        $prompt = $this->prompt($draft, $candidates);
+        $prompt = $this->prompt($draft, $candidates, $galleryFramePolicy);
         $run = AiRun::query()->create([
             'telegram_update_id' => $telegramUpdateId ?? $draft->telegram_update_id,
             'provider' => $provider,
@@ -145,9 +180,12 @@ class ProductImageVisionVerifier
                     ];
                 });
 
+            $allowedKinds = $galleryFramePolicy
+                ? ['product', 'packaging', 'detail', 'banner']
+                : ['product', 'packaging', 'detail'];
             $reviews = $this->rankReviews($reviewed->filter(fn (array $review): bool => $review['publishable']
                 && (! filled($draft->color) || $review['color_match'])
-                && in_array($review['kind'], ['product', 'packaging', 'detail'], true)
+                && in_array($review['kind'], $allowedKinds, true)
                 && $review['score'] >= $minimumScore
                 && ($review['exact_match'] || $review['source_supported'])));
 
@@ -195,7 +233,7 @@ class ProductImageVisionVerifier
     }
 
     /** @param array<int, array<string, mixed>> $candidates */
-    private function prompt(ProductDraft $draft, array $candidates): string
+    private function prompt(ProductDraft $draft, array $candidates, bool $galleryFramePolicy = false): string
     {
         $count = count($candidates);
         $specifications = collect($draft->specifications ?? [])->map(function (array $item): string {
@@ -216,6 +254,44 @@ class ProductImageVisionVerifier
                     : ''),
         )->implode("\n");
 
+        $qualityPolicy = $galleryFramePolicy
+            ? <<<'POLICY'
+            These attachments are frames from one structurally complete but semantically ambiguous carousel on the
+            exact product page. Be deliberately permissive: publishable=true when the requested product is meaningfully
+            visible and the frame is useful or attractive, including lifestyle scenes with people or rooms, feature
+            text/graphics over a product photo, collages, unusual angles, a closed/folded/side/top view, ports, keyboard,
+            internals, installed components, or a polished render. Promotional text alone is not a rejection reason.
+            Classify a marketing composition with a prominent product as kind=product, kind=detail, or kind=banner.
+
+            Reject only when the requested product is absent or too tiny to be useful; the frame is pure text/chart/logo,
+            UI screenshot, accessory-only, unrelated media, user-generated/used/damaged imagery; quality is genuinely
+            unusable; or pixels visibly contradict the product type, model, revision, or required color. Page identity
+            is valid positive evidence when pixels do not contradict it. Review every attachment independently.
+            POLICY
+            : <<<'POLICY'
+            Set publishable=false for a thumbnail, blurry or pixelated/upscaled image, watermark or promotional text,
+            badly cropped/truncated product, collage, screenshot, logo, accessory-only shot, or image where the product
+            is too small to be useful. Also reject user-generated used-item and auction photos, worn/damaged units,
+            hands, rooms, or improvised phone shots even when the model matches.
+            POLICY;
+        $confirmedFramePolicy = $galleryFramePolicy
+            ? <<<'POLICY'
+            A candidate marked confirmed_playwright_gallery_frame was technically extracted from this exact product
+            page. Apply the permissive carousel policy above: a prominent product with text, graphics, people, a room,
+            or unusual framing remains publishable. Gallery membership supports provenance but never overrides a visible
+            conflict, a frame without the product, or unusable quality.
+            POLICY
+            : <<<'POLICY'
+            A candidate marked confirmed_playwright_gallery_frame is part of a complete gallery extracted and validated
+            by Playwright from this exact product's page. Do not reject it solely because its clean source resolution
+            is 400-599px, or solely because it shows an unusual camera angle or framing (side, top, closed lid, hinge,
+            ports, keyboard deck, or another close-up of a distinctive part) instead of a clean front hero shot -
+            classify those as kind=product or kind=detail, not uncertain or unrelated, and score them on sharpness and
+            usefulness rather than penalizing the angle itself. Still reject a confirmed-gallery frame that is a logo,
+            banner, screenshot, accessory-only shot, or that visibly conflicts on model or color - gallery membership
+            is not identity or color evidence by itself, only a pass on resolution and camera angle.
+            POLICY;
+
         return <<<PROMPT
             Review {$count} attached candidate images for a public product catalog.
             Exact requested product: {$draft->title}
@@ -226,18 +302,8 @@ class ProductImageVisionVerifier
 
             Judge every source type by identical rules. A manufacturer, marketplace, or retailer URL is evidence only
             and must never override a visible mismatch. A visibly different product color requires color_match=false.
-            Set publishable=false for a thumbnail, blurry or pixelated/upscaled image, watermark or promotional text,
-            badly cropped/truncated product, collage, screenshot, logo, accessory-only shot, or image where the product
-            is too small to be useful. Also reject user-generated used-item and auction photos, worn/damaged units,
-            hands, rooms, or improvised phone shots even when the model matches.
-            A candidate marked confirmed_playwright_gallery_frame is part of a complete gallery extracted and validated
-            by Playwright from this exact product's page. Do not reject it solely because its clean source resolution
-            is 400-599px, or solely because it shows an unusual camera angle or framing (side, top, closed lid, hinge,
-            ports, keyboard deck, or another close-up of a distinctive part) instead of a clean front hero shot -
-            classify those as kind=product or kind=detail, not uncertain or unrelated, and score them on sharpness and
-            usefulness rather than penalizing the angle itself. Still reject a confirmed-gallery frame that is a logo,
-            banner, screenshot, accessory-only shot, or that visibly conflicts on model or color - gallery membership
-            is not identity or color evidence by itself, only a pass on resolution and camera angle.
+            {$qualityPolicy}
+            {$confirmedFramePolicy}
             A candidate marked exact_page_identity=yes came from a page whose URL/title deterministically contains
             the requested SKU/MPN/model. Do not require that identifier to be visibly printed on the photographed
             product. Use that page evidence for identity unless the pixels visibly contradict it. It never overrides

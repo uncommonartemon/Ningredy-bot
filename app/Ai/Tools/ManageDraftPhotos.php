@@ -67,6 +67,7 @@ class ManageDraftPhotos implements Tool
                     $actions,
                     $this->update->id,
                     (string) $this->update->chat_id,
+                    expectedDraftTelegramUpdateId: $draft->telegram_update_id,
                 );
 
                 return ['ok' => true, 'queued' => true, 'draft_id' => $draft->id, 'actions' => $actions];

@@ -142,9 +142,9 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput
               aluminum..." and "The chassis is CNC-milled..." - the captions describe how the product is
               made, not the product itself.
             - Configuration/SKU picker: a repeated row of cards, each with its own price, its own SKU/model
-              code, and its own "Compare"/"Buy"/"Notify me" control - e.g. one card priced $2,599.99 for
-              SKU GU605CR-XS97 next to another priced $3,599.99 for SKU GU605CW-XS98. Different prices or
-              different SKU codes on sibling cards mean the images belong to different configurations being
+              code, and its own "Compare"/"Buy"/"Notify me" control - e.g. one card priced $X for SKU-A next
+              to another priced $Y for SKU-B, same model name on both. Different prices or different SKU
+              codes on sibling cards mean the images belong to different configurations being
               compared, not different views of one product, even when the model name text is identical.
             When no such evidence exists either way, or it is ambiguous, set it to false rather than
             assuming. This is independent of confidence, which is about whether the recipe will technically

@@ -114,4 +114,67 @@ class LowResolutionDraftApprovalTest extends TestCase
         Http::assertSent(fn (ClientRequest $request): bool => str_ends_with($request->url(), '/sendMessage')
             && str_contains((string) $request['text'], 'Автоматически ищу замену'));
     }
+
+    public function test_approval_automatically_queues_restage_when_the_draft_has_no_photos(): void
+    {
+        $sourceUpdate = TelegramUpdate::query()->create([
+            'update_id' => 3190,
+            'telegram_user_id' => '12345',
+            'chat_id' => '98765',
+            'message_id' => 190,
+            'text' => 'Find exact laptop without photos',
+            'payload' => ['update_id' => 3190],
+            'status' => 'completed',
+        ]);
+        $run = AiRun::query()->create([
+            'telegram_update_id' => $sourceUpdate->id,
+            'provider' => 'openai',
+            'model' => 'gpt-5.4',
+            'status' => 'completed',
+            'prompt' => 'Find exact laptop without photos',
+            'started_at' => now(),
+            'completed_at' => now(),
+        ]);
+        $draft = ProductDraft::query()->create([
+            'telegram_update_id' => $sourceUpdate->id,
+            'ai_run_id' => $run->id,
+            'requested_by_telegram_user_id' => '12345',
+            'title' => 'Exact Laptop Without Photos',
+            'brand' => 'Example',
+            'model' => 'EX-2',
+            'description' => 'Exact laptop description.',
+            'specifications' => [],
+            'sources' => [['title' => 'Store', 'url' => 'https://example.com/product-2', 'type' => 'retailer']],
+            'image_urls' => [],
+            'confidence' => 0.95,
+            'gallery_status' => 'missing',
+        ]);
+
+        $this->postJson('/api/telegram/webhook', [
+            'update_id' => 3191,
+            'callback_query' => [
+                'id' => 'callback-missing-photos',
+                'from' => ['id' => 12345, 'username' => 'admin'],
+                'data' => "draft:add:{$draft->id}",
+                'message' => [
+                    'message_id' => 191,
+                    'chat' => ['id' => 98765],
+                ],
+            ],
+        ], ['X-Telegram-Bot-Api-Secret-Token' => 'test-secret'])->assertOk();
+
+        $this->assertSame('pending_review', $draft->fresh()->status);
+        $this->assertDatabaseMissing('products', ['title' => 'Exact Laptop Without Photos']);
+        $this->assertDatabaseHas('telegram_updates', [
+            'update_id' => 3191,
+            'status' => 'completed',
+            'error' => null,
+        ]);
+        Queue::assertPushed(RestageDraftGalleryPhotos::class, fn (RestageDraftGalleryPhotos $job): bool =>
+            $job->draftId === $draft->id && $job->telegramUpdateId > 0
+        );
+        Queue::assertNotPushed(StoreProductImages::class);
+        Http::assertSent(fn (ClientRequest $request): bool => str_ends_with($request->url(), '/sendMessage')
+            && str_contains((string) $request['text'], 'нет фотографий'));
+    }
 }

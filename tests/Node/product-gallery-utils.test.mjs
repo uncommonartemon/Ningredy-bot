@@ -46,6 +46,13 @@ test('allows a same-product internal gallery route but rejects unrelated navigat
         true,
     );
     assert.equal(
+        isAllowedProductNavigation(
+            'https://www.gigabyte.com/us/Laptop/AORUS-MASTER-16-AM6H/sp',
+            '/us/Laptop/AORUS-MASTER-16-AM6H/gallery',
+        ),
+        true,
+    );
+    assert.equal(
         isAllowedProductNavigation(specification, '/Laptop/Another-Model/Gallery'),
         false,
     );
@@ -73,29 +80,94 @@ test('accepts extensionless dynamic image URLs', () => {
     );
 });
 
-test('upgrades every B&H thumbnail rendition to the verified 2500px endpoint', () => {
+test('upgrades a numeric WxH rendition segment on any domain, not just one named CDN', () => {
+    // Generic by construction: no hostname check, no CDN-specific magic
+    // number - reuses UPSCALED_SIZE_PARAM_VALUE (the same ceiling already
+    // used for query-param upscaling) and only bumps the number(s) already
+    // present, whatever word (if any) prefixes them.
     const page = 'https://www.bhphotovideo.com/c/product/1932364-REG/example.html/accessories';
 
-    assert.equal(
-        normalizeImageCandidate(
-            'https://static.bhphoto.com/images/multiple_images/thumbnails/1767181436_IMG_2646502.jpg',
-            page,
-        ),
-        'https://static.bhphoto.com/images/multiple_images/images2500x2500/1767181436_IMG_2646502.jpg',
-    );
     assert.equal(
         normalizeImageCandidate(
             'https://static.bhphoto.com/images/multiple_images/images500x500/1767181436_IMG_2646502.jpg',
             page,
         ),
-        'https://static.bhphoto.com/images/multiple_images/images2500x2500/1767181436_IMG_2646502.jpg',
+        'https://static.bhphoto.com/images/multiple_images/images1600x1600/1767181436_IMG_2646502.jpg',
     );
     assert.equal(
         normalizeImageCandidate(
             'https://static.bhphoto.com/images/images750x750/1767181363_1932364.jpg',
             page,
         ),
-        'https://static.bhphoto.com/images/images2500x2500/1767181363_1932364.jpg',
+        'https://static.bhphoto.com/images/images1600x1600/1767181363_1932364.jpg',
+    );
+    assert.equal(
+        normalizeImageCandidate(
+            'https://example-other-cdn.test/media/240x240/product.jpg',
+            'https://example-other-cdn.test/product-page',
+        ),
+        'https://example-other-cdn.test/media/1600x1600/product.jpg',
+    );
+    // A word-only size marker ("thumbnails") has no universal larger-size
+    // spelling across CDNs to guess (one site's "large" is another's
+    // "xlarge"/"full"/"original") - guessing a word would be exactly the
+    // kind of site-specific hardcoding this was rewritten to avoid, so it
+    // is left as observed rather than invented.
+    assert.equal(
+        normalizeImageCandidate(
+            'https://static.bhphoto.com/images/multiple_images/thumbnails/1767181436_IMG_2646502.jpg',
+            page,
+        ),
+        'https://static.bhphoto.com/images/multiple_images/thumbnails/1767181436_IMG_2646502.jpg',
+    );
+});
+
+test('upgradeRendition:false keeps the originally observed B&H rendition unrewritten', () => {
+    // The 2500px endpoint is a guess, not a guarantee - some SKUs only ever
+    // rendered up to 1000x1000 or 1500x1500, and the guess 404s for them.
+    // Callers need the real, observed URL back as a fallback candidate.
+    const page = 'https://www.bhphotovideo.com/c/product/1899207-REG/example.html';
+
+    assert.equal(
+        normalizeImageCandidate(
+            'https://static.bhphoto.com/images/multiple_images/thumbnails/1757069749_IMG_2568520.jpg',
+            page,
+            { upgradeRendition: false },
+        ),
+        'https://static.bhphoto.com/images/multiple_images/thumbnails/1757069749_IMG_2568520.jpg',
+    );
+    assert.equal(
+        normalizeImageCandidate(
+            'https://static.bhphoto.com/images/images500x500/1757069749_1899207.jpg',
+            page,
+            { upgradeRendition: false },
+        ),
+        'https://static.bhphoto.com/images/images500x500/1757069749_1899207.jpg',
+    );
+});
+
+test('upgrades the ASUS //wNN rendition too, with the same observed fallback', () => {
+    // ASUS's own "//wNN" syntax doesn't fit the generic WxH/Nw pattern
+    // (digit comes after "w", not before), so it needs its own small rule -
+    // but it gets the exact same guess-then-fallback treatment as every
+    // other rendition upgrade, mirroring ProductImageStorage::
+    // normalizeCandidateUrl()'s ASUS rule (PHP).
+    const page = 'https://www.asus.com/laptops/for-home/vivobook/asus-vivobook-15-x1504/';
+
+    assert.equal(
+        normalizeImageCandidate(
+            'https://dlcdnwebimgs.asus.com/gain/a57df082-80c1-4b35-9493-ff9727e4e7a4//w48',
+            page,
+        ),
+        'https://dlcdnwebimgs.asus.com/gain/a57df082-80c1-4b35-9493-ff9727e4e7a4//w800',
+    );
+    assert.equal(
+        normalizeImageCandidate(
+            'https://dlcdnwebimgs.asus.com/gain/a57df082-80c1-4b35-9493-ff9727e4e7a4//w48',
+            page,
+            { upgradeRendition: false },
+        ),
+        'https://dlcdnwebimgs.asus.com/gain/a57df082-80c1-4b35-9493-ff9727e4e7a4//w48',
     );
 });
 
@@ -235,6 +307,19 @@ test('uses browser-valid quoted attribute selectors for non-photo media', () => 
     assert.doesNotMatch(extractor, /\[class\*=(?:video|360) i\]/);
     assert.match(extractor, /\[class\*="video" i\]/);
     assert.match(extractor, /\[class\*="360" i\]/);
+});
+
+test('scopes the post-interaction scout to the confirmed media container, not the initial one', () => {
+    // A later round already knows an interaction happened - re-scanning the
+    // whole page again (not just the opened gallery/viewer) is why a real
+    // round 2 payload grew instead of shrinking (~55KB -> ~79KB). The
+    // initial, pre-interaction scout call must stay unscoped (nothing has
+    // opened yet); only the post-interaction one should pass scopeToMedia.
+    const extractor = readFileSync(new URL('../../scripts/extract-product-gallery.mjs', import.meta.url), 'utf8');
+
+    assert.match(extractor, /scout = await captureInteractionScout\(\);/);
+    assert.match(extractor, /postInteractionScout = await captureInteractionScout\(true\)/);
+    assert.match(extractor, /const scopeFilter = \(list, isWithinMedia\) => \{/);
 });
 
 test('counts Swiper data-image frames and declared product gallery size', () => {

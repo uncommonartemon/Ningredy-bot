@@ -410,12 +410,22 @@ class ResearchProduct implements Tool
                 $imageCount = $draft?->media()->count() ?? 0;
             }
 
+            $gallerySearchStopReason = $draft?->fresh()->gallery_search_stop_reason;
+            // A stop is only ever a dead end when the request itself decided
+            // there is nothing left worth trying (identity conflict, no
+            // candidates at all). Running out of money/time, or trying every
+            // known and AI-discovered source without a match, are all
+            // resumable - a fresh continuation cycle gets its own budget and
+            // explores genuinely new candidates, so none of them should
+            // leave the user with a dead draft and no way to keep going.
             $galleryPaused = $draft
                 && $imageCount === 0
-                && in_array($draft->fresh()->gallery_search_stop_reason, ['cost_budget', 'time_budget'], true);
+                && in_array($gallerySearchStopReason, ['cost_budget', 'time_budget', 'exhausted'], true);
 
             if ($galleryPaused) {
-                $progress->warning('Лимит текущего запуска достигнут. Черновик сохранён, поиск можно продолжить отдельным бюджетным циклом.');
+                $progress->warning($gallerySearchStopReason === 'exhausted'
+                    ? 'Все известные и найденные AI-поиском источники проверены без результата. Черновик сохранён, поиск можно продолжить новым циклом.'
+                    : 'Лимит текущего запуска достигнут. Черновик сохранён, поиск можно продолжить отдельным бюджетным циклом.');
 
                 return $this->json([
                     ...$result,
@@ -423,7 +433,7 @@ class ResearchProduct implements Tool
                     'status' => 'gallery_search_paused',
                     'draft_id' => $draft->id,
                     'image_count' => 0,
-                    'message' => 'Информация сохранена; поиск фотографий приостановлен лимитом и доступен для продолжения.',
+                    'message' => 'Информация сохранена; поиск фотографий приостановлен и доступен для продолжения.',
                 ]);
             }
 

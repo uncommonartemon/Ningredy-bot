@@ -1,4 +1,4 @@
-export const normalizeImageCandidate = (rawUrl, sourceUrl) => {
+export const normalizeImageCandidate = (rawUrl, sourceUrl, { upgradeRendition = true } = {}) => {
     let url;
 
     try {
@@ -13,13 +13,39 @@ export const normalizeImageCandidate = (rawUrl, sourceUrl) => {
 
     let normalized = url.toString();
 
-    if (url.hostname.endsWith('bhphoto.com')) {
-        // B&H exposes the same immutable frame under predictable rendition
-        // directories. Normalize every known rendition to its public 2500px
-        // endpoint before probing so small modal URLs never reach the catalog.
-        normalized = normalized
-            .replace(/\/multiple_images\/(?:thumbnails|images\d+x\d+)\//i, '/multiple_images/images2500x2500/')
-            .replace(/\/images\/(?:smallimages|images\d+x\d+)\//i, '/images/images2500x2500/');
+    if (upgradeRendition) {
+        // Many commerce CDNs (not just one named site) expose the same
+        // immutable photo under several "WxH"/"Nw" size-bucket path
+        // segments - the same convention SIZE_SEGMENT above already
+        // recognizes for dedup - without the largest bucket ever appearing
+        // directly in the page's own DOM/network traffic. Guessing a
+        // bigger bucket by bumping the number is domain-agnostic and safe
+        // to try; what is NOT safe is assuming the guessed bucket exists
+        // for every item - it doesn't, and callers that need a real
+        // fallback if it 404s/fails to decode should also probe the
+        // { upgradeRendition: false } form of the same URL.
+        // Matches both a bare "/1280x1280/" segment and a word-prefixed one
+        // like B&H's "/images500x500/" - the leading word (if any) is kept,
+        // only the number(s) are bumped, so this stays agnostic to whatever
+        // word each CDN happens to prefix its size buckets with.
+        const sizeSegment = normalized.match(/\/([a-z_]*)(\d{2,5})(x\d{2,5}|w)\//i);
+        const currentWidth = sizeSegment ? Number.parseInt(sizeSegment[2], 10) : 0;
+
+        if (sizeSegment && currentWidth > 0 && currentWidth < UPSCALED_SIZE_PARAM_VALUE) {
+            const prefix = sizeSegment[1] || '';
+            const suffix = sizeSegment[3].toLowerCase() === 'w' ? 'w' : `x${UPSCALED_SIZE_PARAM_VALUE}`;
+            normalized = normalized.replace(sizeSegment[0], `/${prefix}${UPSCALED_SIZE_PARAM_VALUE}${suffix}/`);
+        }
+
+        // ASUS's own "//wNN" syntax (double-slash, digit right after "w",
+        // unlike the generic WxH/Nw bucket convention above) is
+        // idiosyncratic to this one CDN, so recognizing it at all is
+        // unavoidably domain-specific - mirrors ProductImageStorage::
+        // normalizeCandidateUrl()'s ASUS rule (PHP), including the same
+        // guess-then-fall-back-if-it-404s caveat.
+        if (url.hostname.endsWith('dlcdnwebimgs.asus.com')) {
+            normalized = normalized.replace(/\/\/w(?:48|64|96|184)(?=\?|$)/i, '//w800');
+        }
     }
 
     const pathSize = Number.parseInt(normalized.match(/images(\d+)x\d+/i)?.[1] || '0', 10);
@@ -48,7 +74,7 @@ export const galleryContextLooksExcluded = (signal) => new RegExp(
     'i',
 ).test(String(signal || '').replace(/([a-z])([A-Z])/g, '$1 $2'));
 
-const PRODUCT_SECTION_SEGMENT = /^(?:specification|specifications|specs|overview|details|features|gallery|media|images?|photos?|product-images?|product-media)$/i;
+const PRODUCT_SECTION_SEGMENT = /^(?:sp|specification|specifications|specs|overview|details|features|gallery|media|images?|photos?|product-images?|product-media)$/i;
 const GALLERY_SECTION_SEGMENT = /^(?:gallery|media|images?|photos?|product-images?|product-media)$/i;
 
 const comparableHost = (hostname) => String(hostname || '').toLowerCase().replace(/^www\./, '');

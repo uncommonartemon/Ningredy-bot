@@ -1206,7 +1206,7 @@ const attemptExpandedGallery = async (skipExplicitSelectors = false) => {
     return clicked && (trace.changed === true || await expandedGalleryVisible());
 };
 
-const captureInteractionScout = async () => page.evaluate((excludedContextPatternSource) => {
+const captureInteractionScout = async (scopeToMedia = false) => page.evaluate(({ excludedContextPatternSource, scopeToMedia }) => {
     const excludedContextPattern = new RegExp(excludedContextPatternSource.replaceAll('\\\\', '\\'), 'i');
     const semanticContext = (element) => {
         const parts = [];
@@ -1329,14 +1329,38 @@ const captureInteractionScout = async () => page.evaluate((excludedContextPatter
         '[class*=carousel i]', '[class*=swiper i]', '[class*=zoom i]',
         '[class*=product-image i]', '[class*=product-media i]', '[data-selenium*=media i]',
     ].join(',');
-    const candidates = [...document.querySelectorAll([
-        '[data-old-hires]', '[data-zoom-image]', '[data-large_image]', '[data-full]', '[itemprop=image]',
-        '[class*=gallery i]', '[class*=thumbnail i]', '[class*=slider i]',
-        '[class*=carousel i]', '[class*=swiper i]', '[class*=zoom i]',
-        '[class*=product-image i]', '[class*=product-media i]', '[data-selenium*=media i]',
-        'button[aria-label*=next i]', 'button[aria-label*=image i]',
-    ].join(','))].filter((element) => !excludedContext(element)).slice(0, 70);
-    const interactiveControls = [...document.querySelectorAll('button,a,[role=button]')]
+    // A later round already knows an interaction happened - scoping to the
+    // confirmed media container instead of re-scanning the whole page again
+    // (nav, footer, unrelated recommendation carousels that merely match
+    // one of the same loose keywords) keeps the growing per-round payload
+    // from ballooning (a real case: round 2's page snapshot grew from
+    // ~55KB to ~79KB instead of shrinking, because the newly opened
+    // viewer's controls were added on top of everything the first round
+    // already matched, not scoped down to it). Only applied when at least
+    // one match exists - an empty scoped set almost certainly means the
+    // heuristic container selector missed the real one on this page, not
+    // that nothing is there, so falling back to the unscoped list is safer
+    // than silently hiding the gallery from the next round's reasoning.
+    const scopeFilter = (list, isWithinMedia) => {
+        if (!scopeToMedia) {
+            return list;
+        }
+
+        const scoped = list.filter(isWithinMedia);
+
+        return scoped.length > 0 ? scoped : list;
+    };
+    const candidates = scopeFilter(
+        [...document.querySelectorAll([
+            '[data-old-hires]', '[data-zoom-image]', '[data-large_image]', '[data-full]', '[itemprop=image]',
+            '[class*=gallery i]', '[class*=thumbnail i]', '[class*=slider i]',
+            '[class*=carousel i]', '[class*=swiper i]', '[class*=zoom i]',
+            '[class*=product-image i]', '[class*=product-media i]', '[data-selenium*=media i]',
+            'button[aria-label*=next i]', 'button[aria-label*=image i]',
+        ].join(','))].filter((element) => !excludedContext(element)),
+        (element) => Boolean(element.closest(mediaContainerSelector)),
+    ).slice(0, 70);
+    const interactiveControlElements = [...document.querySelectorAll('button,a,[role=button]')]
         .filter((element) => /\b(gallery|media|image|photo|thumbnail|carousel|slider|zoom|next|more)\b/i.test([
             element.getAttribute('aria-label'),
              element.getAttribute('title'),
@@ -1345,11 +1369,14 @@ const captureInteractionScout = async () => page.evaluate((excludedContextPatter
              element.getAttribute('href'),
              element.textContent,
         ].filter(Boolean).join(' ')))
-        .filter((element) => !excludedContext(element))
-        .slice(0, 50)
+        .filter((element) => !excludedContext(element));
+    const interactiveControls = scopeFilter(
+        interactiveControlElements,
+        (element) => Boolean(element.closest(mediaContainerSelector)),
+    ).slice(0, 50)
         .map(sanitize)
         .filter(Boolean);
-    const actionCandidates = [...document.querySelectorAll('button,a,[role=button],summary')]
+    const actionCandidateObjects = [...document.querySelectorAll('button,a,[role=button],summary')]
         .filter(visible)
         .filter((element) => !excludedContext(element))
         .map((element, documentIndex) => {
@@ -1396,11 +1423,12 @@ const captureInteractionScout = async () => page.evaluate((excludedContextPatter
                     + (inViewport(element) ? 1 : 0)
                     + (/\b(gallery|media|image|photo|thumbnail|carousel|slider|zoom|next|more)\b/i.test(signal) ? 5 : 0),
             };
-        })
+        });
+    const actionCandidates = scopeFilter(actionCandidateObjects, (candidate) => candidate.within_media)
         .sort((left, right) => right.relevance - left.relevance || left.document_index - right.document_index)
         .slice(0, 80)
         .map(({ relevance, ...candidate }) => candidate);
-    const imageCandidates = [...document.images].filter((element) => !excludedContext(element))
+    const imageCandidateObjects = [...document.images].filter((element) => !excludedContext(element))
         .map((element, documentIndex) => {
             const dataAttributes = Object.fromEntries(
                 [...element.attributes]
@@ -1426,7 +1454,8 @@ const captureInteractionScout = async () => page.evaluate((excludedContextPatter
                 parent_control_selector: parentControl ? selectorFor(parentControl) : null,
                 data_attributes: dataAttributes,
             };
-        })
+        });
+    const imageCandidates = scopeFilter(imageCandidateObjects, (candidate) => candidate.within_media)
         .sort((left, right) =>
             Number(right.within_media) - Number(left.within_media)
             || (right.natural_width * right.natural_height) - (left.natural_width * left.natural_height))
@@ -1447,7 +1476,7 @@ const captureInteractionScout = async () => page.evaluate((excludedContextPatter
             visible_dialogs: [...document.querySelectorAll('[role=dialog],dialog[open]')].filter(visible).length,
         },
     };
-}, EXCLUDED_GALLERY_CONTEXT_PATTERN_SOURCE);
+}, { excludedContextPatternSource: EXCLUDED_GALLERY_CONTEXT_PATTERN_SOURCE, scopeToMedia });
 
 try {
     const navigation = await page.goto(sourceUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 });
@@ -1728,7 +1757,7 @@ try {
             galleryReadiness = await waitForStableGallery();
             await collect();
         }
-        postInteractionScout = await captureInteractionScout().catch(() => ({}));
+        postInteractionScout = await captureInteractionScout(true).catch(() => ({}));
         await collect();
         postInteractionScout.gallery_readiness = galleryReadiness;
         postInteractionScout.observed_gallery_count = galleryReadiness.observed_count || 0;
@@ -1776,12 +1805,28 @@ const excludedNonPhotoUrls = await page.evaluate(() => {
     return urls;
 }).catch(() => []);
 const normalize = (rawUrl) => normalizeImageCandidate(rawUrl, sourceUrl);
+const normalizeObserved = (rawUrl) => normalizeImageCandidate(rawUrl, sourceUrl, { upgradeRendition: false });
 const excludedNonPhotoKeys = new Set(excludedNonPhotoUrls.map(normalize).filter(Boolean).map(imageAssetKey));
 const photoOnly = (url) => !excludedNonPhotoKeys.has(imageAssetKey(url));
 const domImages = gathered.map(normalize).filter(Boolean).filter(photoOnly);
 const priorityDomImages = [...new Set(priorityImages.map(normalize).filter(Boolean).filter(photoOnly))];
 const requestedImages = networkImages.map(normalize).filter(Boolean).filter(photoOnly);
 const embeddedImages = payloadImages.map(normalize).filter(Boolean).filter(photoOnly);
+// A rendition guess (any WxH path-segment bump, e.g. B&H's /images500x500/
+// -> /images1600x1600/) is speculative - the exact size directory it points
+// at isn't guaranteed to exist for every SKU. Keep the originally observed,
+// real rendition as a fallback so a guess that 404s doesn't sink the whole
+// candidate instead of just settling
+// for the smaller size we actually saw on the page.
+const renditionFallback = new Map();
+for (const rawUrl of [...gathered, ...priorityImages, ...networkImages, ...payloadImages]) {
+    const upgraded = normalize(rawUrl);
+    const observed = normalizeObserved(rawUrl);
+
+    if (upgraded && observed && upgraded !== observed) {
+        renditionFallback.set(upgraded, observed);
+    }
+}
 const allCandidates = [...new Set([...domImages, ...embeddedImages, ...requestedImages])];
 const actionPlanStatus = recipeActionPlanStatus({ actions: recipeActions, actionTrace });
 const expectedGalleryCount = recipeNumber('expected_image_count', 0, 20);
@@ -1871,6 +1916,21 @@ if (!scoutOnly) {
     for (let index = 0; index < upscaleAttempts.length && !outOfTime(); index += 4) {
         probes.push(...await Promise.all(upscaleAttempts.slice(index, index + 4).map(probeImage)));
     }
+
+    // A candidate we speculatively upgraded to a guessed larger rendition
+    // (see renditionFallback) may not actually exist at that size for this
+    // particular SKU - the guess 404s/decode-fails while the smaller size
+    // we genuinely observed on the page is real. Fall back to it rather
+    // than losing the photo entirely.
+    const renditionFallbackAttempts = probes
+        .filter((probe) => !probe.ok && probe.reason !== 'dimensions_below_minimum' && renditionFallback.has(probe.url))
+        .map((probe) => renditionFallback.get(probe.url))
+        .filter((url, index, all) => all.indexOf(url) === index)
+        .slice(0, 20);
+
+    for (let index = 0; index < renditionFallbackAttempts.length && !outOfTime(); index += 4) {
+        probes.push(...await Promise.all(renditionFallbackAttempts.slice(index, index + 4).map(probeImage)));
+    }
 }
 
 const bestImages = new Map();
@@ -1882,7 +1942,12 @@ for (const probe of probes) {
         continue;
     }
 
-    const candidate = normalize(probe.url);
+    // Re-normalize without re-applying the speculative rendition upgrade:
+    // probe.url is already the exact URL that was fetched and decoded
+    // (possibly a renditionFallback candidate deliberately smaller than the
+    // guessed rendition), so upgrading it again here would rewrite a known-
+    // good fallback back into the same broken guess it was chosen to avoid.
+    const candidate = normalizeObserved(probe.url);
 
     if (!candidate) {
         validationFailures.push({ url: probe.url, reason: 'normalization_failed' });
@@ -1942,6 +2007,13 @@ process.stdout.write(JSON.stringify({
         })),
         rejected_candidates: validationFailures.slice(0, 20),
         observed_gallery_count: galleryReadiness.observed_count || 0,
+        gallery_readiness: {
+            thumbnail_count: galleryReadiness.thumbnail_count || 0,
+            data_image_count: galleryReadiness.data_image_count || 0,
+            declared_image_count: galleryReadiness.declared_image_count || 0,
+            explicit_image_count: galleryReadiness.explicit_image_count || 0,
+            evidence: galleryReadiness.evidence || [],
+        },
         gallery_waited_ms: galleryReadiness.waited_ms || 0,
         gallery_stable_samples: galleryReadiness.stable_samples || 0,
         gallery_wait_timed_out: galleryReadiness.timed_out || false,

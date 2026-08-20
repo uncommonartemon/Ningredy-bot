@@ -328,19 +328,27 @@ class AiSettings
         $this->saveIntegerSetting('ai.browser_scout_timeout_seconds', $seconds, 15, 300);
     }
 
+    /**
+     * Only a safety cap now, not the everyday operating limit - training
+     * keeps going, bounded by the money/time budget, whenever cost can be
+     * measured for this search (see ProductGalleryRecipeTrainer::train()).
+     * This value is used only when it genuinely can't be (tests, no
+     * telegram_update_id, no configured price for the model, or the budget
+     * itself disabled).
+     */
     public function galleryTrainingMaxRounds(): int
     {
         return $this->integerSetting(
             'ai.gallery_training_max_rounds',
             (int) config('product-images.browser_fallback.training_max_rounds', self::DEFAULT_GALLERY_TRAINING_MAX_ROUNDS),
             1,
-            4,
+            12,
         );
     }
 
     public function saveGalleryTrainingMaxRounds(?int $rounds): void
     {
-        $this->saveIntegerSetting('ai.gallery_training_max_rounds', $rounds, 1, 4);
+        $this->saveIntegerSetting('ai.gallery_training_max_rounds', $rounds, 1, 12);
     }
 
     public function galleryMinSuccessCount(): int

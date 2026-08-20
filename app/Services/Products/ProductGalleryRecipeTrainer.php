@@ -9,6 +9,7 @@ use App\Models\ProductGalleryRecipe;
 use App\Models\ProductGalleryRecipeVersion;
 use App\Services\Ai\AiSettings;
 use App\Services\Ai\OpenAiHeavyOperationGate;
+use App\Services\Ai\ProductSearchCostBudget;
 use App\Services\Ai\ProductSearchTimeBudget;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
@@ -22,6 +23,7 @@ class ProductGalleryRecipeTrainer
         private readonly BrowserProductGalleryExtractor $browser,
         private readonly AiSettings $settings,
         private readonly ProductSearchTimeBudget $timeBudget,
+        private readonly ProductSearchCostBudget $costBudget,
         private readonly ProductGalleryRecipeResultValidator $resultValidator,
         private readonly ProductSourceAttemptRecorder $attempts,
     ) {}
@@ -233,18 +235,37 @@ class ProductGalleryRecipeTrainer
             $bestPartialImages = $oldImages;
             $bestPartialResult = [];
             $promote = false;
-            $maxRounds = $this->settings->galleryTrainingMaxRounds();
+            // Only the money/time budget is allowed to end a request for
+            // good - a fixed round count is not a real reason to stop while
+            // both are still available. galleryTrainingMaxRounds() becomes a
+            // safety cap instead of the everyday limit, used only when cost
+            // genuinely cannot be measured (tests, no telegram_update_id, no
+            // configured price for this model, or the budget itself
+            // disabled) - the same pattern already used for the fallback
+            // discovery rounds in ProductImageStorage::stage().
+            $safetyRounds = max(1, $this->settings->galleryTrainingMaxRounds());
+            $safetyLimited = app()->environment('testing')
+                || ! $telegramUpdateId
+                || $this->costBudget->limit() <= 0
+                || $this->costBudget->unmeasurable($telegramUpdateId);
             $roundScout = $pageScout;
             $previousCandidateImages = null;
 
-            for ($attempt = 1; $attempt <= $maxRounds; $attempt++) {
-                if (! $this->timeBudget->canStart($telegramUpdateId, 30)) {
-                    $debug?->__invoke('warning', 'Резерв времени достигнут: дополнительную попытку обучения не запускаю.');
+            for ($attempt = 1; $safetyLimited ? $attempt <= $safetyRounds : true; $attempt++) {
+                $costExceeded = ! $safetyLimited && $this->costBudget->exceeded($telegramUpdateId);
+
+                if (! $this->timeBudget->canStart($telegramUpdateId, 30) || $costExceeded) {
+                    $reason = $costExceeded
+                        ? 'Бюджет поиска исчерпан: дополнительную попытку обучения не запускаю.'
+                        : 'Резерв времени достигнут: дополнительную попытку обучения не запускаю.';
+                    $debug?->__invoke('warning', $reason);
 
                     if ($attempt === 1) {
                         $version->update([
                             'status' => 'deferred',
-                            'error' => 'Обучение отложено: достигнут резерв времени текущего поиска.',
+                            'error' => $costExceeded
+                                ? 'Обучение отложено: денежный бюджет текущего поиска исчерпан.'
+                                : 'Обучение отложено: достигнут резерв времени текущего поиска.',
                         ]);
 
                         return $oldImages;
@@ -266,9 +287,10 @@ class ProductGalleryRecipeTrainer
                 // the ~1800-token system instructions for this reason - nothing
                 // from this payload, despite most of it being unchanged
                 // between its 3 rounds.
+                $roundLabel = $safetyLimited ? "{$attempt}/{$safetyRounds}" : (string) $attempt;
                 $prompt = json_encode([
                     'url' => $url,
-                    'max_attempts' => $maxRounds,
+                    'max_attempts' => $safetyLimited ? $safetyRounds : null,
                     'current_recipe' => $recipe->recipe,
                     'diagnostics' => $scout['diagnostics'] ?? [],
                     'preflight' => $preflight,
@@ -324,7 +346,7 @@ class ProductGalleryRecipeTrainer
                         'completed_at' => now(),
                     ]);
                     $failureKind = $this->failureKindForException($exception);
-                    $debug?->__invoke('warning', "AI-тренер: раунд {$attempt}/{$maxRounds} не удался ({$exception->getMessage()}), пробую следующий раунд.");
+                    $debug?->__invoke('warning', "AI-тренер: раунд {$roundLabel} не удался ({$exception->getMessage()}), пробую следующий раунд.");
                     $attempts[] = ['attempt' => $attempt, 'error' => 'ai_call_failed: '.$exception->getMessage()];
                     $feedback = ['error' => 'The previous attempt failed to produce a response: '.mb_substr($exception->getMessage(), 0, 300)];
 
@@ -341,14 +363,14 @@ class ProductGalleryRecipeTrainer
                     $aiFacingMessage = $exception instanceof \App\Exceptions\InvalidGalleryRecipeException
                         ? $exception->englishMessage
                         : $exception->getMessage();
-                    $debug?->__invoke('warning', "AI-тренер: раунд {$attempt}/{$maxRounds} вернул невалидный рецепт ({$exception->getMessage()}), пробую следующий раунд.");
+                    $debug?->__invoke('warning', "AI-тренер: раунд {$roundLabel} вернул невалидный рецепт ({$exception->getMessage()}), пробую следующий раунд.");
                     $attempts[] = ['attempt' => $attempt, 'error' => 'invalid_recipe: '.$aiFacingMessage];
                     $feedback = ['error' => 'The previous attempt returned an invalid recipe: '.mb_substr($aiFacingMessage, 0, 300)];
 
                     continue;
                 }
 
-                $debug?->__invoke('step', "AI-тренер: проверяю рецепт, раунд {$attempt}/{$maxRounds} · {$url}");
+                $debug?->__invoke('step', "AI-тренер: проверяю рецепт, раунд {$roundLabel} · {$url}");
                 $candidateResult = $this->browser->executeRecipe($url, $candidate, 20, $debug, $telegramUpdateId);
                 $this->recordExecutionTrace(
                     $url,
@@ -398,7 +420,7 @@ class ProductGalleryRecipeTrainer
                 if ($previousCandidateImages !== null && $this->sameImageSet($candidateImages, $previousCandidateImages)) {
                     $debug?->__invoke(
                         'warning',
-                        "AI-тренер: раунд {$attempt}/{$maxRounds} не изменил результат по сравнению с предыдущим (".count($candidateImages)." фото); дальнейшие раунды не запускаю.",
+                        "AI-тренер: раунд {$roundLabel} не изменил результат по сравнению с предыдущим (".count($candidateImages)." фото); дальнейшие раунды не запускаю.",
                     );
 
                     break;

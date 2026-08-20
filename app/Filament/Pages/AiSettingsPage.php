@@ -121,11 +121,11 @@ class AiSettingsPage extends Page implements HasForms
                             ->searchable(),
                     ]),
                 Section::make('Источники и Playwright')
-                    ->description('Фотографии одной карточки никогда не смешиваются. Резервные источники означают только переход к следующей целой странице после полного провала текущей.')
+                    ->description('Фотографии одной карточки никогда не смешиваются. Известные карточки-кандидаты (найденные первичным Web Search) перебираются по очереди всегда, пока есть бюджет/время — это не настраивается отдельно.')
                     ->schema([
                         Toggle::make('fallback_sources_enabled')
-                            ->label('Пробовать резервные источники')
-                            ->helperText('Выключено — проверяется только первая выбранная карточка. Включено — при провале берётся следующая карточка, но галерея остаётся из одного источника.')
+                            ->label('Резервный AI веб-поиск по новым магазинам')
+                            ->helperText('Включается только когда ВСЕ уже известные карточки-источники перебраны и ни одна не дала галерею. Запускает новые платные раунды AI веб-поиска по интернету (не привязан к конкретной странице) с Vision-проверкой найденного — дороже и менее точен, чем перебор уже известных карточек, поэтому вынесен в отдельный тумблер для контроля стоимости.')
                             ->default(true)
                             ->inline(false),
                         Toggle::make('gallery_prefer_playwright_first')
@@ -154,11 +154,11 @@ class AiSettingsPage extends Page implements HasForms
                             ->helperText('Рецепт — безопасный JSON с CSS-селекторами и ограниченными действиями Playwright.')
                             ->searchable(),
                         TextInput::make('gallery_training_max_rounds')
-                            ->label('Максимум раундов AI ↔ Playwright')
-                            ->numeric()->minValue(1)->maxValue(4)
+                            ->label('Раундов AI ↔ Playwright (запасной потолок)')
+                            ->numeric()->minValue(1)->maxValue(12)
                             ->default(AiSettings::DEFAULT_GALLERY_TRAINING_MAX_ROUNDS)
                             ->required()
-                            ->helperText('Каждый новый раунд получает DOM после предыдущих кликов. 3 обычно хватает для двухслойной галереи.'),
+                            ->helperText('Не обычный лимит — раунды продолжаются, пока хватает денежного/временного бюджета поиска. Это число используется только когда бюджет посчитать нельзя (тесты, модель без цены, бюджет выключен).'),
                         TextInput::make('gallery_min_success_count')
                             ->label('Минимум фото для успеха рецепта')
                             ->numeric()->minValue(1)->maxValue(AiSettings::GALLERY_MAX_IMAGE_COUNT)

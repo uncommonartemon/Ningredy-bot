@@ -30,6 +30,29 @@ class ProductImagePreflightTest extends TestCase
         $this->assertSame('http_403', $result['reason']);
     }
 
+    public function test_preflight_escalates_a_connection_timeout_to_a_browser_probe_too(): void
+    {
+        // Real case: cURL error 28 (connect/read timeout, 0 bytes received)
+        // against hp.com's own product page. A timeout has no HTTP status
+        // at all - it must not fall through the 401/403/429 status check
+        // and quietly get browser_probe_required=false, or a slow-walking/
+        // black-holing anti-bot response (as promising a Playwright
+        // candidate as an explicit 403) is indistinguishable from a
+        // genuinely irrelevant source.
+        Http::fake([
+            'https://93.184.216.34/product' => Http::failedConnection('cURL error 28: Operation timed out'),
+        ]);
+
+        $result = app(ProductImageResolver::class)->preflightSource([
+            'url' => 'https://93.184.216.34/product',
+        ]);
+
+        $this->assertFalse($result['blocked']);
+        $this->assertFalse($result['unavailable']);
+        $this->assertTrue($result['browser_probe_required']);
+        $this->assertSame('http_error', $result['reason']);
+    }
+
     public function test_preflight_reports_static_images_and_an_active_domain_recipe(): void
     {
         ProductGalleryRecipe::query()->create([

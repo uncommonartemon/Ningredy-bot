@@ -87,6 +87,23 @@ class AiErrorPresenterTest extends TestCase
         $this->assertStringContainsString('tokens per min (TPM)', $result['message']);
     }
 
+    public function test_exhausted_credits_in_nested_provider_body_are_not_treated_as_retryable_rate_limit(): void
+    {
+        $psrResponse = new Psr7Response(429, [], json_encode([
+            'error' => [
+                'message' => 'You have no credits remaining. Add credits to continue using the API.',
+            ],
+        ]));
+        $requestException = new RequestException(new Response($psrResponse));
+        $wrapped = new RuntimeException('Application rate limited by AI provider [openai].', 429, $requestException);
+
+        $result = app(AiErrorPresenter::class)->present($wrapped);
+
+        $this->assertFalse($result['retryable']);
+        $this->assertStringContainsString('закончилась квота или средства', $result['message']);
+        $this->assertStringContainsString('You have no credits remaining', $result['message']);
+    }
+
     public function test_retry_after_seconds_is_parsed_from_the_provider_body(): void
     {
         // OpenAI's 429 body tells exactly when the TPM window resets

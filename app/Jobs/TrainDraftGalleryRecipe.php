@@ -30,6 +30,7 @@ class TrainDraftGalleryRecipe implements ShouldQueue
         public int $telegramUpdateId,
         public string $chatId,
         public ?string $hint = null,
+        public ?int $expectedDraftTelegramUpdateId = null,
     ) {
         $this->onQueue('media');
     }
@@ -37,7 +38,9 @@ class TrainDraftGalleryRecipe implements ShouldQueue
     /** @return array<int, object> */
     public function middleware(): array
     {
-        return [(new WithoutOverlapping("draft-gallery-retrain:{$this->draftId}"))->releaseAfter($this->timeout + 60)];
+        return [(new WithoutOverlapping("draft-gallery-retrain:{$this->draftId}"))
+            ->releaseAfter($this->timeout + 60)
+            ->expireAfter($this->timeout + 60)];
     }
 
     public function handle(
@@ -45,6 +48,12 @@ class TrainDraftGalleryRecipe implements ShouldQueue
         TelegramClient $telegram,
     ): void {
         $draft = ProductDraft::query()->with('media')->findOrFail($this->draftId);
+        throw_unless(
+            $this->expectedDraftTelegramUpdateId !== null
+                && (int) $draft->telegram_update_id === $this->expectedDraftTelegramUpdateId,
+            RuntimeException::class,
+            'Queued gallery recipe training belongs to a different draft generation.',
+        );
         throw_unless($draft->status === 'pending_review', RuntimeException::class, 'Черновик уже обработан.');
         $url = trim((string) $draft->primary_source_url);
         throw_if($url === '', RuntimeException::class, 'У черновика нет ссылки на товарную карточку.');
@@ -95,6 +104,7 @@ class TrainDraftGalleryRecipe implements ShouldQueue
             $actions,
             $this->telegramUpdateId,
             $this->chatId,
+            expectedDraftTelegramUpdateId: $this->expectedDraftTelegramUpdateId,
         );
         Cache::forget("draft-gallery-retrain:{$this->draftId}:queued");
     }

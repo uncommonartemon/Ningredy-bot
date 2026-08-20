@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Exceptions\LowResolutionDraftMediaException;
+use App\Exceptions\MissingDraftMediaException;
 use App\Jobs\ContinueDraftGallerySearch;
 use App\Jobs\ProcessDraftPhotoActions;
 use App\Jobs\ProcessTelegramMessage;
@@ -252,6 +253,10 @@ class TelegramWebhookController extends Controller
         $chatId = (string) data_get($callback, 'message.chat.id');
         $messageId = data_get($callback, 'message.message_id');
 
+        if ($this->rejectStaleDraftCallback($data, $callbackId, $chatId, $messageId, $update)) {
+            return;
+        }
+
         if (preg_match('/^draft:(enhance|replace|delete)-photo:(\d+):(\d+)$/', $data, $photoMatches) === 1) {
             $this->handleDraftEnhancePhoto(
                 draftId: (int) $photoMatches[2],
@@ -432,13 +437,15 @@ class TelegramWebhookController extends Controller
             $product = $approved
                 ? $this->draftWorkflow->approve($draft, telegramReviewerId: $update->telegram_user_id)
                 : null;
-        } catch (LowResolutionDraftMediaException $exception) {
+        } catch (LowResolutionDraftMediaException|MissingDraftMediaException $exception) {
             $queuedKey = "draft-gallery-restage:{$draft->id}:queued";
 
             if (Cache::add($queuedKey, true, now()->addMinutes(35))) {
                 $this->draftPresenter->clearControls($this->telegram, $draft, $chatId);
-                RestageDraftGalleryPhotos::dispatch($draft->id, $chatId, $update->id);
-                $message = 'Фото черновика не проходят текущий порог качества. Автоматически ищу замену через резервные источники и Vision; после поиска пришлю обновлённый черновик для проверки.';
+                RestageDraftGalleryPhotos::dispatch($draft->id, $chatId, $update->id, $draft->telegram_update_id);
+                $message = $exception instanceof MissingDraftMediaException
+                    ? 'В черновике нет фотографий. Автоматически продолжаю поиск через источники категории, Playwright и Vision; после поиска пришлю обновлённый черновик для проверки.'
+                    : 'Фото черновика не проходят текущий порог качества. Автоматически ищу замену через резервные источники и Vision; после поиска пришлю обновлённый черновик для проверки.';
             } else {
                 $message = 'Замена неподходящих фотографий этого черновика уже выполняется.';
             }
@@ -498,6 +505,54 @@ class TelegramWebhookController extends Controller
                 $this->telegram->sendMessage($chatId, $result, $this->mainKeyboard());
             }
         }
+    }
+
+    private function rejectStaleDraftCallback(
+        string $data,
+        string $callbackId,
+        string $chatId,
+        mixed $messageId,
+        TelegramUpdate $update,
+    ): bool {
+        if (preg_match('/^draft:[a-z-]+:(\d+)(?::\d+)?$/', $data, $matches) !== 1) {
+            return false;
+        }
+
+        $draft = ProductDraft::query()->find((int) $matches[1]);
+
+        if (! $draft) {
+            return false;
+        }
+
+        $trackedMessageIds = collect($draft->telegram_control_message_ids ?? [])
+            ->map(fn (mixed $trackedId): int => (int) $trackedId)
+            ->filter(fn (int $trackedId): bool => $trackedId > 0)
+            ->values();
+
+        // Legacy drafts created before control-message tracking cannot be
+        // authenticated this way, so their existing buttons remain usable.
+        // Every newly presented draft has at least one tracked control ID.
+        if ($trackedMessageIds->isEmpty()) {
+            return false;
+        }
+
+        $storedChatId = trim((string) $draft->telegram_review_chat_id);
+        $currentMessageId = (int) $messageId;
+        $matchesCurrentControl = $currentMessageId > 0
+            && $trackedMessageIds->contains($currentMessageId)
+            && ($storedChatId === '' || $storedChatId === $chatId);
+
+        if ($matchesCurrentControl) {
+            return false;
+        }
+
+        $this->telegram->answerCallbackQuery(
+            $callbackId,
+            'Эта кнопка устарела и относится к другой версии черновика.',
+        );
+        $update->update(['status' => 'completed', 'processed_at' => now()]);
+
+        return true;
     }
 
     private function handleDraftEnhanceMenu(
@@ -608,6 +663,7 @@ class TelegramWebhookController extends Controller
                 $update->id,
                 $chatId,
                 $operation->id,
+                $draft->telegram_update_id,
             );
             $update->update(['status' => 'completed', 'processed_at' => now()]);
         } catch (Throwable $exception) {
@@ -684,7 +740,7 @@ class TelegramWebhookController extends Controller
             return;
         }
 
-        TrainDraftGalleryRecipe::dispatch($draft->id, $update->id, $chatId, $hint);
+        TrainDraftGalleryRecipe::dispatch($draft->id, $update->id, $chatId, $hint, $draft->telegram_update_id);
         $update->update(['status' => 'completed', 'processed_at' => now()]);
         $this->telegram->answerCallbackQuery($callbackId, 'AI изучает DOM источника и проверит новый рецепт.');
         $this->draftPresenter->clearControls($this->telegram, $draft, $chatId);
@@ -831,7 +887,7 @@ class TelegramWebhookController extends Controller
             return;
         }
 
-        RestageDraftGalleryPhotos::dispatch($draft->id, $chatId, $update->id);
+        RestageDraftGalleryPhotos::dispatch($draft->id, $chatId, $update->id, $draft->telegram_update_id);
         $update->update(['status' => 'completed', 'processed_at' => now()]);
         $this->telegram->answerCallbackQuery($callbackId, 'Ищу другие фото без прежних источников.');
         $this->telegram->sendMessage(
@@ -854,7 +910,7 @@ class TelegramWebhookController extends Controller
             return;
         }
 
-        if (! in_array($draft->gallery_search_stop_reason, ['cost_budget', 'time_budget'], true)) {
+        if (! in_array($draft->gallery_search_stop_reason, ['cost_budget', 'time_budget', 'exhausted'], true)) {
             $this->telegram->answerCallbackQuery($callbackId, 'Поиск не был остановлен лимитом; продолжать нечего.');
 
             return;
@@ -869,11 +925,11 @@ class TelegramWebhookController extends Controller
         }
 
         $this->draftPresenter->clearForSearchContinuation($this->telegram, $draft);
-        ContinueDraftGallerySearch::dispatch($draft->id, $chatId, $update->id);
+        ContinueDraftGallerySearch::dispatch($draft->id, $chatId, $update->id, $draft->telegram_update_id);
         $update->update(['status' => 'completed', 'processed_at' => now()]);
         $this->telegram->answerCallbackQuery(
             $callbackId,
-            'Продолжаю с последнего источника; прежние фото сохранены до успешной замены.',
+            'Продолжаю с новых и ещё не обработанных источников; прежние фото сохранены до успешной замены.',
         );
     }
 
@@ -899,7 +955,7 @@ class TelegramWebhookController extends Controller
             return;
         }
 
-        TopUpDraftGalleryPhotos::dispatch($draft->id, $chatId, $update->id);
+        TopUpDraftGalleryPhotos::dispatch($draft->id, $chatId, $update->id, $draft->telegram_update_id);
         $update->update(['status' => 'completed', 'processed_at' => now()]);
         $this->telegram->answerCallbackQuery($callbackId, 'Ищу дополнительные фото.');
         $this->telegram->sendMessage(
@@ -1136,7 +1192,7 @@ class TelegramWebhookController extends Controller
         }
 
         $hint = mb_substr($text, 0, 1000);
-        TrainDraftGalleryRecipe::dispatch($draft->id, $update->id, $chatId, $hint);
+        TrainDraftGalleryRecipe::dispatch($draft->id, $update->id, $chatId, $hint, $draft->telegram_update_id);
         $update->update(['status' => 'completed', 'processed_at' => now()]);
         $this->telegram->sendMessage(
             $chatId,

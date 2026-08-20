@@ -705,6 +705,93 @@ class TelegramInteractivePanelTest extends TestCase
             && $request['callback_query_id'] === 'callback-continue-search');
     }
 
+    public function test_stale_draft_button_cannot_target_a_new_draft_that_reused_the_same_id(): void
+    {
+        Queue::fake();
+        $draft = $this->pendingDraftWithMedia();
+        $draft->forceFill([
+            'gallery_search_stop_reason' => 'cost_budget',
+            'telegram_review_chat_id' => '98765',
+            'telegram_control_message_ids' => [184],
+        ])->save();
+
+        $this->postJson('/api/telegram/webhook', [
+            'update_id' => 3403,
+            'callback_query' => [
+                'id' => 'callback-stale-draft',
+                'from' => ['id' => 12345, 'username' => 'admin'],
+                'data' => 'draft:continue-search:'.$draft->id,
+                // Same numeric draft id, but a button from an older Telegram
+                // control message. This is exactly what happened after a
+                // test cleanup reset SQLite's product_drafts sequence.
+                'message' => [
+                    'message_id' => 84,
+                    'chat' => ['id' => 98765],
+                ],
+            ],
+        ], $this->headers())->assertOk();
+
+        Queue::assertNotPushed(ContinueDraftGallerySearch::class);
+        $this->assertSame([184], $draft->fresh()->telegram_control_message_ids);
+        Http::assertSent(fn (ClientRequest $request): bool => str_ends_with($request->url(), '/answerCallbackQuery')
+            && $request['callback_query_id'] === 'callback-stale-draft'
+            && str_contains((string) ($request['text'] ?? ''), 'устарела'));
+    }
+
+    public function test_exhausted_draft_shows_continue_search_without_a_cost_label(): void
+    {
+        // "exhausted" means every known/discovered source was tried and none
+        // hit the money or time limit - unlike cost_budget/time_budget there
+        // is no fresh spend being authorized by the button, so it must not
+        // claim one.
+        $draft = $this->pendingDraftWithMedia();
+        $draft->media()->delete();
+        $draft->update(['gallery_search_stop_reason' => 'exhausted']);
+
+        app(\App\Services\Telegram\DraftTelegramPresenter::class)
+            ->sendControls(app(TelegramClient::class), '98765', $draft->fresh());
+
+        Http::assertSent(function (ClientRequest $request) use ($draft): bool {
+            if (! str_ends_with($request->url(), '/sendMessage')) {
+                return false;
+            }
+
+            $buttons = collect(data_get($request['reply_markup'] ?? [], 'inline_keyboard', []))->flatten(1);
+            $continue = $buttons->firstWhere('callback_data', "draft:continue-search:{$draft->id}");
+
+            return $continue !== null && ! str_contains((string) $continue['text'], '$');
+        });
+    }
+
+    public function test_exhausted_draft_continue_search_callback_is_accepted(): void
+    {
+        Queue::fake();
+        $draft = $this->pendingDraftWithMedia();
+        $draft->forceFill([
+            'gallery_search_stop_reason' => 'exhausted',
+            'telegram_review_chat_id' => '98765',
+            'telegram_review_message_ids' => [81, 82, 83],
+            'telegram_control_message_ids' => [84],
+        ])->save();
+
+        $this->postJson('/api/telegram/webhook', [
+            'update_id' => 3402,
+            'callback_query' => [
+                'id' => 'callback-continue-search-exhausted',
+                'from' => ['id' => 12345, 'username' => 'admin'],
+                'data' => "draft:continue-search:{$draft->id}",
+                'message' => [
+                    'message_id' => 84,
+                    'chat' => ['id' => 98765],
+                ],
+            ],
+        ], $this->headers())->assertOk();
+
+        Queue::assertPushed(ContinueDraftGallerySearch::class, fn (ContinueDraftGallerySearch $job): bool =>
+            $job->draftId === $draft->id && $job->chatId === '98765'
+        );
+    }
+
     private function pendingDraftWithMedia(): ProductDraft
     {
         $sourceUpdate = TelegramUpdate::query()->create([

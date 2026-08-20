@@ -26,6 +26,7 @@ class TopUpDraftGalleryPhotos implements ShouldQueue
         public int $draftId,
         public string $chatId,
         public int $telegramUpdateId,
+        public ?int $expectedDraftTelegramUpdateId = null,
     ) {
         $this->onQueue('media');
     }
@@ -36,7 +37,9 @@ class TopUpDraftGalleryPhotos implements ShouldQueue
         // Shares its lock key with RestageDraftGalleryPhotos/
         // ContinueDraftGallerySearch so none of the three jobs that mutate
         // this draft's media can run concurrently with each other.
-        return [(new WithoutOverlapping("draft-gallery-search:{$this->draftId}"))->releaseAfter($this->timeout + 60)];
+        return [(new WithoutOverlapping("draft-gallery-search:{$this->draftId}"))
+            ->releaseAfter($this->timeout + 60)
+            ->expireAfter($this->timeout + 60)];
     }
 
     public function handle(
@@ -46,6 +49,12 @@ class TopUpDraftGalleryPhotos implements ShouldQueue
     ): void {
         try {
             $draft = ProductDraft::query()->with('media')->findOrFail($this->draftId);
+            throw_unless(
+                $this->expectedDraftTelegramUpdateId !== null
+                    && (int) $draft->telegram_update_id === $this->expectedDraftTelegramUpdateId,
+                RuntimeException::class,
+                'Queued gallery search belongs to a different draft generation.',
+            );
             throw_unless($draft->status === 'pending_review', RuntimeException::class, 'Черновик уже обработан.');
 
             $progress = new TelegramProgressReporter($telegram, $this->chatId);
