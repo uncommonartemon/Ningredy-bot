@@ -29,6 +29,8 @@ class ProductImageCandidateDiscovery
         private readonly WikimediaImageSearch $wikimedia,
         private readonly ProductSourcePriority $sourcePriority,
         private readonly AiErrorPresenter $errors,
+        private readonly ProductIdentityMatcher $identityMatcher,
+        private readonly ProductSourceAttemptRecorder $attempts,
     ) {}
 
     public function sourcePageForImage(string $imageUrl): ?string
@@ -440,24 +442,7 @@ class ProductImageCandidateDiscovery
             $sources,
         );
 
-        // A newly trained complete gallery must survive the global result cap
-        // even when an older high-scoring domain produced many loose URLs.
-        return collect($sorted)
-            ->values()
-            ->map(fn (string $url, int $index): array => [
-                'url' => $url,
-                'index' => $index,
-                'gallery_rank' => $this->resolver->isConfirmedGalleryImage($url)
-                    ? 2
-                    : ($this->resolver->isPartialGalleryImage($url) ? 1 : 0),
-            ])
-            ->sort(fn (array $left, array $right): int =>
-                ($right['gallery_rank'] <=> $left['gallery_rank'])
-                ?: ($left['index'] <=> $right['index'])
-            )
-            ->take((int) config('product-images.ai_result_limit', 20))
-            ->pluck('url')
-            ->all();
+        return $this->limitCandidateUrlsBySource($sorted);
     }
 
     /**
@@ -499,9 +484,44 @@ class ProductImageCandidateDiscovery
                     [$source], $resolveLimit, telegramUpdateId: $telegramUpdateId, activeRecipeOnly: $activeRecipeOnly
                 );
 
+            $runtimeContext = collect($pageImages)
+                ->map(fn (string $imageUrl): ?array => $this->resolver->sourceContextForImage($imageUrl))
+                ->first(fn (mixed $context): bool => is_array($context));
+            // Some stores use opaque/numeric product URLs and the browser
+            // extractor may have no richer runtime metadata. Preserve the
+            // Web Search title/SKU evidence instead of degrading that exact
+            // card to a bare URL and rejecting it later as unconfirmed.
+            $runtimeContext ??= [...$source, 'url' => $pageUrl];
+
+            $finalPageUrl = is_string($runtimeContext['url'] ?? null)
+                ? $runtimeContext['url']
+                : $pageUrl;
+            $runtimeContext = [...$runtimeContext, 'url' => $finalPageUrl];
+            $identityRejected = $this->identityMatcher->conflictsSource($draft, $runtimeContext)
+                || ($this->identityMatcher->requiresExactIdentifier($draft)
+                    && ! $this->identityMatcher->supportsSource($draft, $runtimeContext));
+
+            if ($identityRejected) {
+                $this->attempts->record([
+                    'telegram_update_id' => $telegramUpdateId,
+                    'product_draft_id' => $draft->id,
+                    'product_url' => $finalPageUrl,
+                    'actor' => 'identity_validator',
+                    'phase' => 'source_selection',
+                    'action' => 'validate_discovery_runtime_identity',
+                    'status' => 'failed',
+                    'decision' => 'reject_runtime_identifier_mismatch',
+                    'input' => ['requested_url' => $pageUrl],
+                    'output' => ['final_source_context' => $runtimeContext],
+                ]);
+                $progress?->__invoke('Страница резервного поиска пропущена после открытия: конечная карточка не подтверждает точную модель/SKU · '.$finalPageUrl);
+
+                continue;
+            }
+
             foreach ($pageImages as $imageUrl) {
                 $key = ProductImageStorage::normalizeCandidateUrl($imageUrl);
-                $context = $this->resolver->sourceContextForImage($imageUrl) ?? ['url' => $pageUrl];
+                $context = $this->resolver->sourceContextForImage($imageUrl) ?? $runtimeContext;
                 $finalPageUrl = is_string($context['url'] ?? null) ? $context['url'] : $pageUrl;
                 $this->sourcePagesByImageUrl[$key] = $finalPageUrl;
                 $this->sourceContextsByImageUrl[$key] = $context;
@@ -511,5 +531,63 @@ class ProductImageCandidateDiscovery
         }
 
         return array_values(array_unique($resolved));
+    }
+
+    /**
+     * Apply result limits per logical product page, then globally. This keeps
+     * a confirmed gallery atomic and prevents one page with many renditions
+     * from evicting every frame of the next independent exact card.
+     *
+     * @param  array<int, string>  $urls
+     * @return array<int, string>
+     */
+    private function limitCandidateUrlsBySource(array $urls): array
+    {
+        $globalLimit = max(1, (int) config('product-images.ai_result_limit', 20));
+        $perSourceLimit = max(1, min(
+            $globalLimit,
+            (int) config('product-images.max_images', 10),
+        ));
+
+        return collect($urls)
+            ->values()
+            ->map(function (string $url, int $index): array {
+                $key = ProductImageStorage::normalizeCandidateUrl($url);
+                $pageUrl = $this->sourceContextsByImageUrl[$key]['url']
+                    ?? $this->sourcePagesByImageUrl[$key]
+                    ?? null;
+
+                return [
+                    'url' => $url,
+                    'index' => $index,
+                    'group' => is_string($pageUrl) && filter_var($pageUrl, FILTER_VALIDATE_URL)
+                        ? 'page:'.rtrim($pageUrl, '/')
+                        : 'image:'.sha1($url),
+                    'gallery_rank' => $this->resolver->isConfirmedGalleryImage($url)
+                        ? 2
+                        : ($this->resolver->isPartialGalleryImage($url) ? 1 : 0),
+                ];
+            })
+            ->groupBy('group')
+            ->map(fn ($group): array => [
+                'first_index' => $group->min('index'),
+                'gallery_rank' => $group->max('gallery_rank'),
+                'items' => $group
+                    ->sort(fn (array $left, array $right): int =>
+                        ($right['gallery_rank'] <=> $left['gallery_rank'])
+                        ?: ($left['index'] <=> $right['index'])
+                    )
+                    ->take($perSourceLimit)
+                    ->values(),
+            ])
+            ->sort(fn (array $left, array $right): int =>
+                ($right['gallery_rank'] <=> $left['gallery_rank'])
+                ?: ($left['first_index'] <=> $right['first_index'])
+            )
+            ->flatMap(fn (array $group) => $group['items'])
+            ->take($globalLimit)
+            ->pluck('url')
+            ->values()
+            ->all();
     }
 }

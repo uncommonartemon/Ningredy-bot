@@ -2095,6 +2095,30 @@ class ProductImageStorageTest extends TestCase
         $this->assertSame('complete', $draft->fresh()->gallery_status);
     }
 
+    public function test_paid_fallback_rechecks_cost_measurability_after_the_first_empty_round(): void
+    {
+        // A fresh continuation has no usage before its first AI call, so its
+        // cost is briefly unmeasurable. That temporary state must not freeze
+        // the deterministic test/budgetless round cap for the whole run.
+        $costBudget = $this->mock(ProductSearchCostBudget::class);
+        $costBudget->shouldReceive('limit')->andReturn(1.0)->byDefault();
+        $costBudget->shouldReceive('unmeasurable')->once()->andReturn(true);
+
+        $method = new \ReflectionMethod(ProductImageStorage::class, 'fallbackSearchSafetyCapReached');
+        $method->setAccessible(true);
+        $storage = app(ProductImageStorage::class);
+
+        // Before the first call, unmeasurable is true, but zero completed
+        // rounds never reaches a one-round safety cap.
+        $this->assertFalse($method->invoke($storage, 0, 1, 99001, false));
+
+        // The next loop iteration must ask the budget again. Once the first AI
+        // operation supplied priced usage, the same one-round count is no
+        // longer a reason to stop a paid production search.
+        $costBudget->shouldReceive('unmeasurable')->once()->andReturn(false);
+        $this->assertFalse($method->invoke($storage, 1, 1, 99001, false));
+    }
+
     public function test_fallback_stops_on_a_confirmed_exact_gallery_even_when_loose_urls_came_first(): void
     {
         Storage::fake('public');
@@ -2976,6 +3000,125 @@ class ProductImageStorageTest extends TestCase
         $this->assertStringContainsString('blocked-official.html', $sourceOrder->first());
     }
 
+    public function test_playwright_first_can_train_a_new_recipe_on_any_known_source_not_only_the_first(): void
+    {
+        Storage::fake('public');
+        config()->set('product-images.source_preflight', false);
+        config()->set('product-images.fallback_discovery', false);
+        AppSetting::put('ai.fallback_sources_enabled', '0');
+        ProductImageVisionAgent::fake()->preventStrayPrompts();
+
+        $resolver = $this->mock(ProductImageResolver::class);
+        $resolver->shouldReceive('resolve')
+            ->twice()
+            ->withArgs(function (
+                array $sources,
+                int $limit,
+                ?callable $debug,
+                ?int $telegramUpdateId,
+                bool $forceInteractive,
+                bool $staticOnly,
+                bool $activeRecipeOnly,
+            ): bool {
+                $this->assertFalse($activeRecipeOnly);
+
+                return true;
+            })
+            ->andReturn([]);
+        $resolver->shouldNotReceive('download');
+
+        [, , $draft] = $this->records();
+        $draft->update([
+            'product_type' => 'laptop',
+            'image_urls' => [],
+            'sources' => [
+                [
+                    'title' => 'First exact card without a gallery',
+                    'url' => 'https://first.example/products/lenovo-test',
+                    'type' => 'retailer',
+                    'image_urls' => [],
+                ],
+                [
+                    'title' => 'Second exact card that needs training',
+                    'url' => 'https://second.example/products/lenovo-test',
+                    'type' => 'retailer',
+                    'image_urls' => [],
+                ],
+            ],
+        ]);
+
+        $this->assertSame(0, app(ProductImageStorage::class)->stage($draft->fresh()));
+    }
+
+    public function test_preflight_static_url_volume_cannot_displace_the_selected_primary_card(): void
+    {
+        Storage::fake('public');
+        config()->set('product-images.source_preflight', true);
+        config()->set('product-images.fallback_discovery', false);
+        AppSetting::put('ai.fallback_sources_enabled', '0');
+        ProductImageVisionAgent::fake()->preventStrayPrompts();
+
+        $primaryUrl = 'https://primary.example/products/lenovo-test';
+        $secondaryUrl = 'https://secondary.example/products/lenovo-test';
+        $opened = [];
+        $resolver = $this->mock(ProductImageResolver::class);
+        $resolver->shouldReceive('preflightSource')->twice()->andReturnUsing(
+            function (array $source) use ($primaryUrl): array {
+                $staticUrls = $source['url'] === $primaryUrl
+                    ? []
+                    : collect(range(1, 17))
+                        ->map(fn (int $index): string => 'https://secondary.example/images/'.$index.'.jpg')
+                        ->all();
+
+                return [
+                    'static_image_urls' => $staticUrls,
+                    'blocked' => false,
+                    'unavailable' => false,
+                    'active_recipe' => false,
+                    'browser_probe_required' => false,
+                    'final_url' => $source['url'],
+                    'identity_evidence' => 'Lenovo Test',
+                ];
+            },
+        );
+        $resolver->shouldReceive('resolve')->twice()->andReturnUsing(
+            function (array $sources) use (&$opened): array {
+                $opened[] = $sources[0]['url'];
+
+                return [];
+            },
+        );
+        $resolver->shouldReceive('sourceContextForImage')->andReturn(null)->byDefault();
+        $resolver->shouldReceive('isConfirmedGalleryImage')->andReturn(false)->byDefault();
+        $resolver->shouldReceive('isPartialGalleryImage')->andReturn(false)->byDefault();
+        $resolver->shouldReceive('download')->andReturn(null)->byDefault();
+
+        [, , $draft] = $this->records();
+        $draft->update([
+            'product_type' => 'laptop',
+            'primary_source_url' => $primaryUrl,
+            'image_urls' => [],
+            'sources' => [
+                [
+                    'title' => 'Selected primary card',
+                    'url' => $primaryUrl,
+                    'type' => 'retailer',
+                    'image_urls' => [],
+                ],
+                [
+                    'title' => 'Secondary page with many unverified static URLs',
+                    'url' => $secondaryUrl,
+                    'type' => 'manufacturer',
+                    'image_urls' => [],
+                ],
+            ],
+        ]);
+
+        app(ProductImageStorage::class)->stage($draft->fresh());
+
+        $this->assertSame($primaryUrl, $opened[0] ?? null);
+    }
+
     public function test_staging_never_opens_a_blacklisted_source_and_uses_a_new_one(): void
     {
         Storage::fake('public');
@@ -3284,6 +3427,181 @@ class ProductImageStorageTest extends TestCase
         Http::assertSent(fn (Request $request): bool => $request->url() === $guessed);
         Http::assertSent(fn (Request $request): bool => $request->url() === $observed);
         imagedestroy($candidates[0]['image']);
+    }
+
+    public function test_fallback_rejects_a_redirected_foreign_model_before_returning_its_images(): void
+    {
+        $requestedPage = 'https://shop.example/products/hp-omen-max-16-ah0097nr';
+        $redirectedPage = 'https://shop.example/products/hp-omen-17-db1095cl';
+        $wrongImages = collect(range(1, 5))
+            ->map(fn (int $index): string => 'https://cdn.example/db1095cl/'.$index.'.jpg')
+            ->all();
+        $resolver = $this->mock(ProductImageResolver::class);
+        $resolver->shouldReceive('resolve')->once()->andReturn($wrongImages);
+        $resolver->shouldReceive('sourceContextForImage')->andReturn([
+            'url' => $redirectedPage,
+            'title' => 'HP OMEN 17-db1095cl Gaming Laptop',
+        ])->byDefault();
+
+        [, , $draft] = $this->records();
+        $draft->telegramUpdate()->update(['text' => 'HP OMEN MAX 16-ah0097nr ищи']);
+        $draft->update([
+            'title' => 'HP OMEN MAX 16-ah0097nr',
+            'brand' => 'HP',
+            'model' => 'OMEN MAX 16-ah0097nr',
+            'specifications' => [[
+                'key' => 'sku',
+                'name' => 'SKU',
+                'value' => '16-ah0097nr',
+            ]],
+        ]);
+
+        $method = new \ReflectionMethod(ProductImageCandidateDiscovery::class, 'resolveSourcesIndividually');
+        $method->setAccessible(true);
+        $resolved = $method->invoke(
+            app(ProductImageCandidateDiscovery::class),
+            [['url' => $requestedPage]],
+            $draft->fresh(),
+        );
+
+        $this->assertSame([], $resolved);
+        $this->assertDatabaseHas('product_source_attempts', [
+            'product_draft_id' => $draft->id,
+            'product_url' => $redirectedPage,
+            'action' => 'validate_discovery_runtime_identity',
+            'decision' => 'reject_runtime_identifier_mismatch',
+        ]);
+    }
+
+    public function test_fallback_preserves_exact_search_title_for_an_opaque_product_url(): void
+    {
+        $opaquePage = 'https://shop.example/product/1881718';
+        $images = [
+            'https://cdn.example/ah0097nr/front.jpg',
+            'https://cdn.example/ah0097nr/side.jpg',
+            'https://cdn.example/ah0097nr/back.jpg',
+        ];
+        $resolver = $this->mock(ProductImageResolver::class);
+        $resolver->shouldReceive('resolve')->once()->andReturn($images);
+        $resolver->shouldReceive('sourceContextForImage')->andReturn(null)->byDefault();
+
+        [, , $draft] = $this->records();
+        $draft->telegramUpdate()->update(['text' => 'HP OMEN MAX 16-ah0097nr ищи']);
+        $draft->update([
+            'title' => 'HP OMEN MAX 16-ah0097nr',
+            'brand' => 'HP',
+            'model' => 'OMEN MAX 16-ah0097nr',
+            'specifications' => [[
+                'key' => 'sku',
+                'name' => 'SKU',
+                'value' => '16-ah0097nr',
+            ]],
+        ]);
+        $sourceEvidence = [
+            'url' => $opaquePage,
+            'title' => 'HP OMEN MAX 16-ah0097nr Gaming Laptop',
+        ];
+        $matcher = app(\App\Services\Products\ProductIdentityMatcher::class);
+        $this->assertTrue($matcher->supportsSource($draft->fresh(), $sourceEvidence));
+        $this->assertFalse($matcher->conflictsSource($draft->fresh(), $sourceEvidence));
+
+        $discovery = app(ProductImageCandidateDiscovery::class);
+        $method = new \ReflectionMethod(ProductImageCandidateDiscovery::class, 'resolveSourcesIndividually');
+        $method->setAccessible(true);
+        $resolved = $method->invoke(
+            $discovery,
+            [[
+                'url' => $opaquePage,
+                'title' => 'HP OMEN MAX 16-ah0097nr Gaming Laptop',
+            ]],
+            $draft->fresh(),
+        );
+
+        $this->assertSame($images, $resolved);
+        $this->assertSame(
+            'HP OMEN MAX 16-ah0097nr Gaming Laptop',
+            $discovery->sourceContextForImage($images[0])['title'] ?? null,
+        );
+    }
+
+    public function test_wrong_discovery_page_cannot_consume_download_slots_before_a_later_exact_gallery(): void
+    {
+        config()->set('product-images.download_candidates', 10);
+        $wrongPage = 'https://wrong.example/products/hp-omen-17-db1095cl';
+        $exactPage = 'https://exact.example/products/hp-omen-max-16-ah0097nr';
+        $wrongUrls = collect(range(1, 15))
+            ->map(fn (int $index): string => 'https://wrong-cdn.example/db1095cl/'.$index.'.jpg')
+            ->all();
+        $exactUrls = collect(range(1, 5))
+            ->map(fn (int $index): string => 'https://exact-cdn.example/ah0097nr/'.$index.'.jpg')
+            ->all();
+
+        $contextFor = fn (string $url): array => str_contains($url, 'exact-cdn')
+            ? ['url' => $exactPage, 'title' => 'HP OMEN MAX 16-ah0097nr']
+            : ['url' => $wrongPage, 'title' => 'HP OMEN 17-db1095cl'];
+        $discovery = $this->mock(ProductImageCandidateDiscovery::class);
+        $discovery->shouldReceive('find')->once()->andReturn([...$wrongUrls, ...$exactUrls]);
+        $discovery->shouldReceive('sourceContextForImage')->andReturnUsing($contextFor)->byDefault();
+        $discovery->shouldReceive('sourcePageForImage')->andReturnUsing(
+            fn (string $url): string => $contextFor($url)['url'],
+        )->byDefault();
+
+        $downloaded = [];
+        $resolver = $this->mock(ProductImageResolver::class);
+        $resolver->shouldReceive('sourceContextForImage')->andReturn(null)->byDefault();
+        $resolver->shouldReceive('isConfirmedGalleryImage')->andReturnUsing(
+            fn (string $url): bool => str_contains($url, 'exact-cdn'),
+        );
+        $resolver->shouldReceive('isPartialGalleryImage')->andReturn(false)->byDefault();
+        $resolver->shouldReceive('download')->andReturnUsing(function (string $url) use (&$downloaded): array {
+            $this->assertStringContainsString('exact-cdn.example/ah0097nr/', $url);
+            $downloaded[] = $url;
+            preg_match('~/(\d+)\.jpg$~', $url, $match);
+
+            return [
+                'bytes' => $this->jpeg(50 + (int) ($match[1] ?? 1)),
+                'source_url' => $url,
+                'mime_type' => 'image/jpeg',
+                'width' => 720,
+                'height' => 600,
+                'confirmed_gallery' => true,
+                'partial_gallery' => false,
+            ];
+        });
+
+        [, , $draft] = $this->records();
+        $draft->telegramUpdate()->update(['text' => 'HP OMEN MAX 16-ah0097nr ищи']);
+        $draft->update([
+            'title' => 'HP OMEN MAX 16-ah0097nr',
+            'brand' => 'HP',
+            'model' => 'OMEN MAX 16-ah0097nr',
+            'specifications' => [[
+                'key' => 'sku',
+                'name' => 'SKU',
+                'value' => '16-ah0097nr',
+            ]],
+            'image_urls' => [],
+            'sources' => [],
+        ]);
+
+        $method = new \ReflectionMethod(ProductImageStorage::class, 'discoverCandidates');
+        $method->setAccessible(true);
+        [$candidates] = $method->invoke(app(ProductImageStorage::class), $draft->fresh(), [], true);
+
+        $this->assertCount(5, $candidates);
+        $this->assertCount(5, $downloaded);
+        $this->assertTrue(collect($downloaded)->every(
+            fn (string $url): bool => str_contains($url, 'exact-cdn.example/ah0097nr/'),
+        ));
+        $this->assertDatabaseHas('product_source_attempts', [
+            'product_draft_id' => $draft->id,
+            'product_url' => $wrongPage,
+            'decision' => 'reject_runtime_identifier_mismatch',
+        ]);
+
+        foreach ($candidates as $candidate) {
+            imagedestroy($candidate['image']);
+        }
     }
 
     public function test_continuation_binds_nested_discovery_attempts_to_the_original_draft(): void

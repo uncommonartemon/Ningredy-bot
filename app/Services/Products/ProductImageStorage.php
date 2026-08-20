@@ -283,15 +283,18 @@ class ProductImageStorage
                         '_preflight_browser_probe_required' => (bool) ($preflight['browser_probe_required'] ?? false),
                         '_preflight_final_url' => (string) ($preflight['final_url'] ?? $source['url']),
                         '_preflight_identity_evidence' => (string) ($preflight['identity_evidence'] ?? ''),
+                        '_preflight_is_primary' => rtrim((string) ($source['url'] ?? ''), '/')
+                            === rtrim((string) ($draft->primary_source_url ?? ''), '/'),
                         '_preflight_index' => $index,
                     ];
                 })
                 ->filter(fn (array $source): bool => ! $source['_preflight_blocked'] && ! $source['_preflight_unavailable'])
                 ->sortByDesc(fn (array $source): array => [
                     $this->identityMatcher->supportsSource($draft, $source) ? 1 : 0,
+                    $source['_preflight_is_primary'] ? 1 : 0,
                     $source['_preflight_active_recipe'] ? 1 : 0,
-                    count($source['image_urls'] ?? []),
                     $source['_preflight_browser_probe_required'] ? 1 : 0,
+                    count($source['image_urls'] ?? []) >= $minimumCompleteGallerySize ? 1 : 0,
                     -$source['_preflight_index'],
                 ])
                 ->values();
@@ -422,7 +425,7 @@ class ProductImageStorage
                         }
                     },
                     $telegramUpdateId,
-                    activeRecipeOnly: $activeRecipeOnly || $sourceIndex > 0,
+                    activeRecipeOnly: $activeRecipeOnly,
                 );
             } finally {
                 $this->associateAttemptsWithDraftSince($draft, $telegramUpdateId, $attemptCheckpoint);
@@ -726,13 +729,22 @@ class ProductImageStorage
             // can never see it as over budget) all need a deterministic
             // round-count safety cap instead of relying purely on the time
             // limit for hours of paid discovery calls.
-            $safetyLimited = app()->environment('testing')
-                || ! $telegramUpdateId
-                || $this->costBudget->limit() <= 0
-                || $this->costBudget->unmeasurable($telegramUpdateId);
             $safetyRounds = max(1, (int) config('product-images.fallback_search_rounds', 3));
 
-            while (! $safetyLimited || $fallbackRound < $safetyRounds) {
+            while (true) {
+                // Re-evaluate measurability after every discovery call. A
+                // fresh continuation has no usage before its first AI request,
+                // so spent() is temporarily null. Freezing that initial state
+                // incorrectly imposed the three-round safety cap on a normal
+                // paid production search even after cost became measurable.
+                if ($this->fallbackSearchSafetyCapReached(
+                    $fallbackRound,
+                    $safetyRounds,
+                    $telegramUpdateId,
+                )) {
+                    break;
+                }
+
                 if (! $this->timeBudget->canStart($telegramUpdateId, 30) || $this->costBudget->exceeded($telegramUpdateId)) {
                     break;
                 }
@@ -1927,7 +1939,46 @@ class ProductImageStorage
             ->unique(fn (string $url): string => self::imageAssetKey($url))
             ->values()
             ->all();
-        $candidates = $this->downloadCandidates($newUrls, $draft);
+        // Download every logical product page independently. One wrong page
+        // must not consume the global first-N download slots and starve a
+        // later exact Playwright gallery that has already been found.
+        $candidates = [];
+        $downloadRejections = [];
+
+        foreach ($this->groupDiscoveryUrlsBySource($newUrls) as $group) {
+            $groupUrls = $group['urls'];
+            $groupContext = $group['context'];
+            $groupPageUrl = $group['page_url'];
+
+            if (
+                is_array($groupContext)
+                && $groupPageUrl
+                && ($this->identityMatcher->conflictsSource($draft, $groupContext)
+                    || ($this->identityMatcher->requiresExactIdentifier($draft)
+                        && ! $this->identityMatcher->supportsSource($draft, $groupContext)))
+            ) {
+                $this->attempts->record([
+                    'telegram_update_id' => $telegramUpdateId,
+                    'product_draft_id' => $draft->id,
+                    'product_url' => $groupPageUrl,
+                    'actor' => 'identity_validator',
+                    'phase' => 'source_selection',
+                    'action' => 'validate_discovered_product_identity',
+                    'status' => 'failed',
+                    'decision' => 'reject_runtime_identifier_mismatch',
+                    'output' => ['source_context' => $groupContext],
+                ]);
+                $progress?->__invoke('Найденная страница пропущена: после открытия она не подтверждает точную модель/SKU товара · '.$groupPageUrl);
+
+                continue;
+            }
+
+            $groupCandidates = $this->downloadCandidates($groupUrls, $draft);
+            $downloadRejections = [...$downloadRejections, ...$this->lastDownloadRejections];
+            $candidates = [...$candidates, ...$groupCandidates];
+        }
+
+        $this->lastDownloadRejections = $downloadRejections;
 
         if ($discovered !== []) {
             $draft->update(['image_urls' => array_values(array_unique([
@@ -1956,6 +2007,68 @@ class ProductImageStorage
         ]);
 
         return [$candidates, true];
+    }
+
+    /**
+     * Keep independent product pages atomic before download and Vision.
+     * Bare image-search URLs without a page relationship intentionally form
+     * one-item groups; sharing a CDN host is not proof of one product card.
+     *
+     * @param  array<int, string>  $urls
+     * @return array<int, array{page_url: ?string, context: ?array, urls: array<int, string>}>
+     */
+    private function groupDiscoveryUrlsBySource(array $urls): array
+    {
+        return collect($urls)
+            ->groupBy(function (string $url): string {
+                $context = $this->candidateDiscovery->sourceContextForImage($url);
+                $pageUrl = is_array($context) && is_string($context['url'] ?? null)
+                    ? $context['url']
+                    : $this->candidateDiscovery->sourcePageForImage($url);
+
+                return is_string($pageUrl) && filter_var($pageUrl, FILTER_VALIDATE_URL)
+                    ? 'page:'.rtrim($pageUrl, '/')
+                    : 'image:'.sha1($url);
+            })
+            ->map(function ($group, string $key): array {
+                $groupUrls = $group->values()->all();
+                $context = collect($groupUrls)
+                    ->map(fn (string $url): ?array => $this->candidateDiscovery->sourceContextForImage($url))
+                    ->first(fn (mixed $value): bool => is_array($value));
+                $pageUrl = str_starts_with($key, 'page:') ? substr($key, 5) : null;
+
+                if (! is_array($context) && $pageUrl) {
+                    $context = ['url' => $pageUrl];
+                }
+
+                return [
+                    'page_url' => $pageUrl,
+                    'context' => $context,
+                    'urls' => $groupUrls,
+                ];
+            })
+            ->values()
+            ->all();
+    }
+
+    /**
+     * The result is deliberately recomputed at the top of every round. Cost
+     * can be temporarily unmeasurable before the first AI call and measurable
+     * immediately afterwards; callers must never cache this decision for the
+     * lifetime of the search cycle.
+     */
+    private function fallbackSearchSafetyCapReached(
+        int $completedRounds,
+        int $safetyRounds,
+        ?int $telegramUpdateId,
+        ?bool $testingEnvironment = null,
+    ): bool {
+        $safetyLimited = ($testingEnvironment ?? app()->environment('testing'))
+            || ! $telegramUpdateId
+            || $this->costBudget->limit() <= 0
+            || $this->costBudget->unmeasurable($telegramUpdateId);
+
+        return $safetyLimited && $completedRounds >= $safetyRounds;
     }
 
     /**

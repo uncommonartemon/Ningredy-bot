@@ -142,4 +142,25 @@ class ProductIdentityMatcherTest extends TestCase
         $this->assertTrue($matcher->supportsSource($draft, $source));
         $this->assertFalse($matcher->conflicts($draft, $source['_preflight_identity_evidence']));
     }
+
+    public function test_exact_hyphenated_sku_is_not_conflicted_by_its_derived_token_pair(): void
+    {
+        $draft = new ProductDraft([
+            'telegram_update_id' => 123,
+            'title' => 'HP OMEN MAX 16-ah0097nr',
+            'brand' => 'HP',
+            'model' => 'OMEN MAX 16-ah0097nr',
+            'specifications' => [
+                ['key' => 'sku', 'name' => 'SKU', 'value' => '16-ah0097nr'],
+            ],
+        ]);
+        $draft->setRelation('telegramUpdate', new TelegramUpdate([
+            'text' => 'HP OMEN MAX 16-ah0097nr ищи',
+        ]));
+        $evidence = 'https://shop.example/product/1881718 HP OMEN MAX 16-ah0097nr Gaming Laptop';
+        $matcher = new ProductIdentityMatcher;
+
+        $this->assertTrue($matcher->supportsEvidence($draft, $evidence));
+        $this->assertFalse($matcher->conflicts($draft, $evidence));
+    }
 }

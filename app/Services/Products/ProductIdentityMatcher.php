@@ -124,6 +124,20 @@ class ProductIdentityMatcher
                     continue;
                 }
 
+                // identifierCandidates() also builds adjacent token pairs.
+                // When the exact SKU is already present, that can produce a
+                // synthetic value such as 16ah0097nr16 from the exact
+                // 16-ah0097nr plus its first atom. It is derivable from the
+                // exact match, not evidence of another variant. A genuinely
+                // nearby SKU (for example 16ah0098nr) contains neither value
+                // and is still inspected below.
+                if ($exactIdentifiers->contains(
+                    fn (string $exact): bool => str_contains($candidate, $exact)
+                        || str_contains($exact, $candidate),
+                )) {
+                    continue;
+                }
+
                 $prefixLength = min(4, max(2, (int) floor(strlen($identifier) * 0.35)));
                 $distanceLimit = max(1, min(3, (int) ceil(strlen($identifier) * 0.12)));
 
