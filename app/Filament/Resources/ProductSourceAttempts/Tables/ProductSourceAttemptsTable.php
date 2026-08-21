@@ -2,10 +2,17 @@
 
 namespace App\Filament\Resources\ProductSourceAttempts\Tables;
 
+use App\Filament\Resources\ProductDrafts\ProductDraftResource;
+use App\Models\AiRun;
+use Filament\Actions\ActionGroup;
 use Filament\Actions\ViewAction;
+use Filament\Forms\Components\TextInput;
 use Filament\Tables\Columns\TextColumn;
+use Filament\Tables\Filters\Filter;
 use Filament\Tables\Filters\SelectFilter;
+use Filament\Tables\Grouping\Group as TableGroup;
 use Filament\Tables\Table;
+use Illuminate\Database\Eloquent\Builder;
 
 class ProductSourceAttemptsTable
 {
@@ -13,10 +20,17 @@ class ProductSourceAttemptsTable
     {
         return $table
             ->defaultSort('id', 'desc')
+            ->poll(fn (): ?string => AiRun::query()->where('status', 'running')->exists() ? '15s' : null)
             ->columns([
                 TextColumn::make('id')->label('#')->sortable(),
                 TextColumn::make('created_at')->label('Время')->dateTime('d.m.Y H:i:s')->sortable(),
                 TextColumn::make('domain')->label('Домен')->searchable()->sortable(),
+                TextColumn::make('productDraft.id')
+                    ->label('Черновик')
+                    ->url(fn ($record): ?string => $record->product_draft_id
+                        ? ProductDraftResource::getUrl('view', ['record' => $record->product_draft_id])
+                        : null)
+                    ->placeholder('—'),
                 TextColumn::make('product_url')->label('Страница')->limit(55)->url(fn ($record): string => $record->product_url)->openUrlInNewTab()->copyable(),
                 TextColumn::make('actor')->label('Исполнитель')->badge(),
                 TextColumn::make('phase')->label('Этап')->badge(),
@@ -51,7 +65,28 @@ class ProductSourceAttemptsTable
                     'failed' => 'Ошибка',
                     'blocked' => 'Заблокировано',
                 ]),
+                Filter::make('domain')
+                    ->schema([TextInput::make('value')->label('Домен')])
+                    ->query(fn (Builder $query, array $data): Builder => $query->when(
+                        filled($data['value'] ?? null),
+                        fn (Builder $q) => $q->where('domain', $data['value']),
+                    )),
+                Filter::make('product_draft_id')
+                    ->schema([TextInput::make('value')->label('ID черновика')])
+                    ->query(fn (Builder $query, array $data): Builder => $query->when(
+                        filled($data['value'] ?? null),
+                        fn (Builder $q) => $q->where('product_draft_id', $data['value']),
+                    )),
             ])
-            ->recordActions([ViewAction::make()]);
+            ->groups([
+                TableGroup::make('product_draft_id')->label('Черновик'),
+                TableGroup::make('domain')->label('Домен'),
+                TableGroup::make('phase')->label('Этап'),
+            ])
+            ->recordActions([
+                ActionGroup::make([
+                    ViewAction::make(),
+                ]),
+            ]);
     }
 }

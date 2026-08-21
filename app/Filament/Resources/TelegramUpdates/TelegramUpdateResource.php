@@ -4,7 +4,6 @@ namespace App\Filament\Resources\TelegramUpdates;
 
 use App\Filament\Resources\TelegramUpdates\Pages\ListTelegramUpdates;
 use App\Filament\Resources\TelegramUpdates\Pages\ViewTelegramUpdate;
-use App\Filament\Resources\TelegramUpdates\Schemas\TelegramUpdateForm;
 use App\Filament\Resources\TelegramUpdates\Schemas\TelegramUpdateInfolist;
 use App\Filament\Resources\TelegramUpdates\Tables\TelegramUpdatesTable;
 use App\Models\TelegramUpdate;
@@ -13,6 +12,7 @@ use Filament\Resources\Resource;
 use Filament\Schemas\Schema;
 use Filament\Support\Icons\Heroicon;
 use Filament\Tables\Table;
+use UnitEnum;
 
 class TelegramUpdateResource extends Resource
 {
@@ -20,18 +20,15 @@ class TelegramUpdateResource extends Resource
 
     protected static string|BackedEnum|null $navigationIcon = Heroicon::OutlinedDocumentText;
 
-    protected static ?string $navigationLabel = 'Telegram журнал';
+    protected static ?string $navigationLabel = 'Telegram-журнал';
 
-    protected static ?string $modelLabel = 'Telegram update';
+    protected static ?string $modelLabel = 'обновление Telegram';
 
-    protected static ?string $pluralModelLabel = 'Telegram журнал';
+    protected static ?string $pluralModelLabel = 'Telegram-журнал';
 
-    protected static ?int $navigationSort = 4;
+    protected static string|UnitEnum|null $navigationGroup = 'Система';
 
-    public static function form(Schema $schema): Schema
-    {
-        return TelegramUpdateForm::configure($schema);
-    }
+    protected static ?int $navigationSort = 1;
 
     public static function infolist(Schema $schema): Schema
     {

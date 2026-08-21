@@ -5,6 +5,7 @@ namespace App\Filament\Resources\ProductDrafts;
 use App\Filament\Resources\ProductDrafts\Pages\EditProductDraft;
 use App\Filament\Resources\ProductDrafts\Pages\ListProductDrafts;
 use App\Filament\Resources\ProductDrafts\Pages\ViewProductDraft;
+use App\Filament\Resources\ProductDrafts\RelationManagers\MediaRelationManager;
 use App\Filament\Resources\ProductDrafts\Schemas\ProductDraftForm;
 use App\Filament\Resources\ProductDrafts\Schemas\ProductDraftInfolist;
 use App\Filament\Resources\ProductDrafts\Tables\ProductDraftsTable;
@@ -14,6 +15,7 @@ use Filament\Resources\Resource;
 use Filament\Schemas\Schema;
 use Filament\Support\Icons\Heroicon;
 use Filament\Tables\Table;
+use UnitEnum;
 
 class ProductDraftResource extends Resource
 {
@@ -27,9 +29,23 @@ class ProductDraftResource extends Resource
 
     protected static ?string $pluralModelLabel = 'черновики AI';
 
+    protected static string|UnitEnum|null $navigationGroup = 'Каталог';
+
     protected static ?int $navigationSort = 2;
 
     protected static ?string $recordTitleAttribute = 'title';
+
+    public static function getNavigationBadge(): ?string
+    {
+        $count = ProductDraft::query()->where('status', 'pending_review')->count();
+
+        return $count > 0 ? (string) $count : null;
+    }
+
+    public static function getNavigationBadgeColor(): ?string
+    {
+        return 'warning';
+    }
 
     public static function form(Schema $schema): Schema
     {
@@ -49,7 +65,7 @@ class ProductDraftResource extends Resource
     public static function getRelations(): array
     {
         return [
-            //
+            MediaRelationManager::class,
         ];
     }
 

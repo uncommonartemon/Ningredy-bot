@@ -4,9 +4,11 @@ namespace App\Services\Products;
 
 use App\Ai\Agents\ProductGalleryPreflightAgent;
 use App\Ai\Agents\ProductGalleryRecipeTrainerAgent;
+use App\Exceptions\InvalidGalleryRecipeException;
 use App\Models\AiRun;
 use App\Models\ProductGalleryRecipe;
 use App\Models\ProductGalleryRecipeVersion;
+use App\Models\ProductSourceDomain;
 use App\Services\Ai\AiSettings;
 use App\Services\Ai\OpenAiHeavyOperationGate;
 use App\Services\Ai\ProductSearchCostBudget;
@@ -14,6 +16,7 @@ use App\Services\Ai\ProductSearchTimeBudget;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Validator;
+use Illuminate\Validation\ValidationException;
 use RuntimeException;
 use Throwable;
 
@@ -67,6 +70,12 @@ class ProductGalleryRecipeTrainer
                 ['domain' => $host, 'path_pattern' => '*'],
                 ['status' => 'learning'],
             );
+            $domainSettings = ProductSourceDomain::query()->firstOrCreate([
+                'domain' => ProductSourcePriority::host($url),
+            ]);
+            $domainHint = is_string($domainSettings->agent_hint) && trim($domainSettings->agent_hint) !== ''
+                ? mb_substr(trim($domainSettings->agent_hint), 0, 4000)
+                : null;
 
             if ($recipe->status === 'disabled' && ! $force) {
                 $debug?->__invoke('warning', "Playwright для {$host} отключён после подтверждённой CAPTCHA/WAF.");
@@ -98,6 +107,9 @@ class ProductGalleryRecipeTrainer
 
             if ($userHint !== null && trim($userHint) !== '') {
                 $debug?->__invoke('step', 'Подсказка оператора учтена: '.mb_substr(trim($userHint), 0, 300));
+            }
+            if ($domainHint !== null) {
+                $debug?->__invoke('step', "Постоянная подсказка домена {$host} передана AI-тренеру.");
             }
 
             $debug?->__invoke('step', "AI-тренер: Playwright собирает DOM, интерактивные элементы и сетевые изображения {$host}.");
@@ -146,7 +158,7 @@ class ProductGalleryRecipeTrainer
             $preflightDecision = 'train_playwright';
 
             if (! $forceInteractive) {
-                $preflight = $this->preflight($url, $pageScout, $scout['diagnostics'] ?? [], $context, $provider, $model, $version, $telegramUpdateId, $debug);
+                $preflight = $this->preflight($url, $pageScout, $scout['diagnostics'] ?? [], $context, $domainHint, $provider, $model, $version, $telegramUpdateId, $debug);
                 $preflightDecision = (string) ($preflight['decision'] ?? 'no_gallery');
 
                 // static_sufficient is an estimate from raw DOM markup (thumbnails
@@ -248,8 +260,8 @@ class ProductGalleryRecipeTrainer
                 || ! $telegramUpdateId
                 || $this->costBudget->limit() <= 0
                 || $this->costBudget->unmeasurable($telegramUpdateId);
-            $roundScout = $pageScout;
-            $previousCandidateImages = null;
+            $previousCandidate = null;
+            $previousCandidateResult = null;
 
             for ($attempt = 1; $safetyLimited ? $attempt <= $safetyRounds : true; $attempt++) {
                 $costExceeded = ! $safetyLimited && $this->costBudget->exceeded($telegramUpdateId);
@@ -294,10 +306,20 @@ class ProductGalleryRecipeTrainer
                     'current_recipe' => $recipe->recipe,
                     'diagnostics' => $scout['diagnostics'] ?? [],
                     'preflight' => $preflight,
+                    'domain_hint' => $domainHint,
                     'operator_hint' => $userHint,
+                    // This is always the original, freshly loaded page. Every
+                    // recipe execution starts from this state in a new browser
+                    // process; post-interaction DOM is diagnostic feedback only.
+                    'page' => $pageScout,
+                    'execution_contract' => [
+                        'browser_state' => 'fresh_page_load_for_every_recipe_execution',
+                        'recipe_must_be_self_contained' => true,
+                        'post_interaction_dom_is_diagnostic_only' => true,
+                        'required_behavior' => 'Replay every successful prerequisite action before using controls revealed by it.',
+                    ],
                     // --- everything below changes every round ---
                     'attempt' => $attempt,
-                    'page' => $roundScout,
                     'attempt_history' => $attempts,
                     'previous_attempt_feedback' => $feedback,
                 ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
@@ -355,12 +377,17 @@ class ProductGalleryRecipeTrainer
 
                 try {
                     $candidate = $this->validateRecipe($response->toArray());
+                    $candidate = $this->makeRecipeReplayable(
+                        $candidate,
+                        $previousCandidate,
+                        $previousCandidateResult,
+                    );
                 } catch (Throwable $exception) {
                     // The operator-facing progress line stays in the app
                     // locale (Russian); the AI trainer prompt is entirely
                     // English, so its feedback/history use englishMessage
                     // when available instead of leaking a Russian sentence.
-                    $aiFacingMessage = $exception instanceof \App\Exceptions\InvalidGalleryRecipeException
+                    $aiFacingMessage = $exception instanceof InvalidGalleryRecipeException
                         ? $exception->englishMessage
                         : $exception->getMessage();
                     $debug?->__invoke('warning', "AI-тренер: раунд {$roundLabel} вернул невалидный рецепт ({$exception->getMessage()}), пробую следующий раунд.");
@@ -407,26 +434,6 @@ class ProductGalleryRecipeTrainer
                     break;
                 }
 
-                // Every correction round resends this page's whole DOM
-                // scout plus the growing attempt_history, so a round that
-                // changes nothing is not merely wasted, it is the single
-                // most expensive round yet (a real search paid full price
-                // for a 3rd round that produced byte-for-byte the same 2
-                // images as the 2nd - the correction attempt made no
-                // difference, but the growing context did). Stop as soon as
-                // a round's images exactly match the previous round's,
-                // rather than paying for a 3rd retry of something that has
-                // already visibly stopped responding to feedback.
-                if ($previousCandidateImages !== null && $this->sameImageSet($candidateImages, $previousCandidateImages)) {
-                    $debug?->__invoke(
-                        'warning',
-                        "AI-тренер: раунд {$roundLabel} не изменил результат по сравнению с предыдущим (".count($candidateImages)." фото); дальнейшие раунды не запускаю.",
-                    );
-
-                    break;
-                }
-                $previousCandidateImages = $candidateImages;
-
                 $postInteractionScout = $candidateResult['post_interaction_scout'] ?? [];
                 $postInteractionScoutUsable = is_array($postInteractionScout)
                     && (
@@ -434,10 +441,6 @@ class ProductGalleryRecipeTrainer
                         || ($postInteractionScout['interactive_controls'] ?? []) !== []
                         || ($postInteractionScout['action_candidates'] ?? []) !== []
                     );
-                if ($postInteractionScoutUsable) {
-                    $roundScout = $postInteractionScout;
-                }
-
                 $feedback = [
                     'rejected_recipe' => $candidate,
                     'candidate_count' => count($candidateImages),
@@ -446,16 +449,17 @@ class ProductGalleryRecipeTrainer
                     'failure_kind' => $candidateResult['failure_kind'] ?? null,
                     'error' => $candidateResult['error'] ?? $validation['reason'],
                     'action_trace' => $candidateResult['action_trace'] ?? [],
-                    // Sent as the next round's top-level "page" instead of
-                    // duplicated here too when it was usable - a real search
-                    // sent the exact same ~120KB DOM snapshot twice in one
-                    // prompt (here and as page), roughly doubling every
-                    // correction round's cost for zero extra information.
-                    'post_interaction_scout' => $postInteractionScoutUsable ? null : $postInteractionScout,
+                    // The initial page remains the replay starting point;
+                    // this sanitized post-action snapshot is observation only.
+                    'previous_attempt_observation' => is_array($postInteractionScout) && $postInteractionScout !== []
+                        ? $postInteractionScout
+                        : null,
                     'instruction' => $postInteractionScoutUsable
-                        ? 'The page field already reflects the DOM after these actions. Use it plus action_trace below. Decide whether another safe click opens a deeper gallery layer; do not repeat failed actions.'
-                        : 'Use the post-interaction DOM and action trace. Decide whether another safe click opens a deeper gallery layer; do not repeat failed actions.',
+                        ? 'The page field is the fresh initial page. previous_attempt_observation is the DOM revealed by the last execution and is diagnostic only. Return a complete recipe that replays all prerequisites from the fresh page before using newly revealed controls.'
+                        : 'The page field is the fresh initial page. Use the action trace and diagnostics to return a materially corrected, complete recipe; every execution starts from that fresh page.',
                 ];
+                $previousCandidate = $candidate;
+                $previousCandidateResult = $candidateResult;
             }
 
             $hasPartial = ! $promote && count($bestPartialImages) > 0;
@@ -624,6 +628,7 @@ class ProductGalleryRecipeTrainer
         array $pageScout,
         array $diagnostics,
         array $context,
+        ?string $domainHint,
         string $provider,
         string $model,
         ProductGalleryRecipeVersion $version,
@@ -634,6 +639,7 @@ class ProductGalleryRecipeTrainer
             'url' => $url,
             'page' => $pageScout,
             'diagnostics' => $diagnostics,
+            'domain_hint' => $domainHint,
             // Two raw URLs can still be the exact same photo at another size
             // (e.g. Adobe Scene7's wid/hei or $preset$ query forms) - counting
             // them as distinct before the preflight AI ever sees them would
@@ -908,8 +914,8 @@ class ProductGalleryRecipeTrainer
                 $this->recipeValidationRules(),
                 $this->recipeValidationMessages(app()->getLocale()),
             )->validate();
-        } catch (\Illuminate\Validation\ValidationException $exception) {
-            throw new \App\Exceptions\InvalidGalleryRecipeException(
+        } catch (ValidationException $exception) {
+            throw new InvalidGalleryRecipeException(
                 $exception->getMessage(),
                 $this->englishValidationMessage($data),
             );
@@ -1018,7 +1024,7 @@ class ProductGalleryRecipeTrainer
             Validator::make($data, $this->recipeValidationRules(), $this->recipeValidationMessages('en'))->validate();
 
             return 'The recipe failed schema validation.';
-        } catch (\Illuminate\Validation\ValidationException $exception) {
+        } catch (ValidationException $exception) {
             return $exception->getMessage();
         } finally {
             app()->setLocale($locale);
@@ -1046,12 +1052,91 @@ class ProductGalleryRecipeTrainer
         ];
     }
 
-    /** @param array<int, string> $left @param array<int, string> $right */
-    private function sameImageSet(array $left, array $right): bool
-    {
-        return count($left) === count($right)
-            && array_diff($left, $right) === []
-            && array_diff($right, $left) === [];
+    /**
+     * A correction is proposed from post-interaction evidence but executed in
+     * a fresh browser. Preserve the successful click prefix that produced the
+     * observed state unless the correction already contains that exact step.
+     * This is generic replay protection, not a domain-specific selector rule.
+     *
+     * @param  array<string, mixed>  $candidate
+     * @param  array<string, mixed>|null  $previousCandidate
+     * @param  array<string, mixed>|null  $previousResult
+     * @return array<string, mixed>
+     */
+    private function makeRecipeReplayable(
+        array $candidate,
+        ?array $previousCandidate,
+        ?array $previousResult,
+    ): array {
+        if (! $previousCandidate || ! $previousResult) {
+            return $candidate;
+        }
+
+        $previousActions = is_array($previousCandidate['actions'] ?? null)
+            ? $previousCandidate['actions']
+            : [];
+        $trace = collect(is_array($previousResult['action_trace'] ?? null)
+            ? $previousResult['action_trace']
+            : []);
+        $candidateActions = collect(is_array($candidate['actions'] ?? null)
+            ? $candidate['actions']
+            : []);
+
+        $successfulPrefix = [];
+        foreach ($previousActions as $actionIndex => $action) {
+            if (! is_array($action) || ($action['kind'] ?? null) !== 'click') {
+                break;
+            }
+
+            $selector = (string) ($action['selector'] ?? '');
+            $purpose = (string) ($action['purpose'] ?? '');
+            $opensGallery = in_array($selector, $previousCandidate['open_selectors'] ?? [], true)
+                || preg_match('/(?:open|expand|full.?screen|lightbox|zoom|viewer|view.?all)/i', $purpose) === 1;
+            $worked = $trace->contains(fn (mixed $item): bool => is_array($item)
+                && (int) ($item['action_index'] ?? -1) === $actionIndex
+                && ($item['action'] ?? null) === 'click'
+                && ($item['clicked'] ?? false) === true
+                && ($item['unsafe_control'] ?? false) !== true
+                && ($item['navigation_blocked'] ?? false) !== true
+                && ($item['navigated_away'] ?? false) !== true
+                && (! $opensGallery
+                    || ($item['changed'] ?? false) === true
+                    || ($item['expanded_gallery_visible_after'] ?? false) === true));
+            if (! $worked) {
+                break;
+            }
+
+            $successfulPrefix[] = $action;
+        }
+
+        if ($successfulPrefix === []) {
+            return $candidate;
+        }
+
+        $prefixKeys = collect($successfulPrefix)
+            ->map(fn (array $action): string => 'click|'.($action['selector'] ?? '').'|'.($action['index'] ?? 0))
+            ->all();
+        $remainingActions = $candidateActions
+            ->reject(function (array $action) use ($prefixKeys): bool {
+                $key = ($action['kind'] ?? '').'|'.($action['selector'] ?? '').'|'.($action['index'] ?? 0);
+
+                return in_array($key, $prefixKeys, true);
+            })
+            ->values()->all();
+        $candidate['actions'] = array_slice([
+            ...$successfulPrefix,
+            ...$remainingActions,
+        ], 0, 12);
+        $candidate['open_selectors'] = collect($candidate['open_selectors'] ?? [])
+            ->merge($previousCandidate['open_selectors'] ?? [])
+            ->filter(fn (mixed $selector): bool => is_string($selector))
+            ->unique()->take(5)->values()->all();
+        $candidate['pre_click_selectors'] = collect($candidate['pre_click_selectors'] ?? [])
+            ->merge($previousCandidate['pre_click_selectors'] ?? [])
+            ->filter(fn (mixed $selector): bool => is_string($selector))
+            ->unique()->take(5)->values()->all();
+
+        return $candidate;
     }
 
     private function clampInt(mixed $value, int $min, int $max, int $default): int

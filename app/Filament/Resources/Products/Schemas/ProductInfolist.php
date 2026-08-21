@@ -44,11 +44,18 @@ class ProductInfolist
                 RepeatableEntry::make('variants')->label('Варианты')->schema([
                     TextEntry::make('name')->label('Название')->placeholder('Основной вариант'),
                     TextEntry::make('sku')->label('SKU')->placeholder('—')->copyable(),
+                    TextEntry::make('mpn')->label('MPN')->placeholder('—')->copyable(),
+                    TextEntry::make('gtin')->label('GTIN')->placeholder('—')->copyable(),
                     TextEntry::make('color')->label('Цвет')->placeholder('—'),
                     TextEntry::make('price')->label('Цена')->money(fn ($record) => $record->currency ?: 'CZK')->placeholder('—'),
                     TextEntry::make('stock_status')->label('Наличие')->badge(),
                     IconEntry::make('is_default')->label('Основной')->boolean(),
-                ])->columns(3)->columnSpanFull(),
+                    RepeatableEntry::make('attributes')->label('Характеристики')->schema([
+                        TextEntry::make('definition.label')->label('Название')->placeholder('—'),
+                        TextEntry::make('value')->label('Значение')->placeholder('—'),
+                        TextEntry::make('unit')->label('Единица')->placeholder('—'),
+                    ])->columns(3)->columnSpanFull(),
+                ])->columns(4)->columnSpanFull(),
             ])->columnSpanFull(),
 
             Section::make('Служебные данные')->schema([

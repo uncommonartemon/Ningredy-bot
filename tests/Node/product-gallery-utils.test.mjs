@@ -4,7 +4,6 @@ import test from 'node:test';
 import {
     galleryCollectionTarget,
     galleryContextLooksExcluded,
-    galleryProbeMinimumSide,
     imageAssetKey,
     imageDimensionsMeetMinimum,
     isAllowedProductNavigation,
@@ -13,6 +12,7 @@ import {
     prioritizeCandidateRenditions,
     recipeActionOpensGallery,
     recipeActionPlanStatus,
+    recipeActionShouldStop,
     recipeActionTraversesGallery,
     urlQualityScore,
     withUpscaledSizeParam,
@@ -256,42 +256,49 @@ test('requires arrow traversal to reach no-change or its declared limit', () => 
     }).complete, true);
 });
 
-test('lowers the probe threshold only for a structurally complete Playwright gallery', () => {
-    assert.equal(galleryProbeMinimumSide({
-        minimumSide: 600,
-        confirmedMinimumSide: 400,
-        galleryPresent: true,
-        expectedCount: 6,
-        observedCount: 6,
-    }), 400);
-    assert.equal(galleryProbeMinimumSide({
-        minimumSide: 600,
-        confirmedMinimumSide: 400,
-        galleryPresent: true,
-        expectedCount: 6,
-        observedCount: 1,
-    }), 600);
+test('one failed thumbnail click does not abort the remaining click_each traversal', () => {
+    assert.equal(recipeActionShouldStop({
+        kind: 'click_each',
+        clicked: false,
+        changed: false,
+    }), false);
+    assert.equal(recipeActionShouldStop({
+        kind: 'click',
+        clicked: false,
+        changed: false,
+    }), true);
+    assert.equal(recipeActionShouldStop({
+        kind: 'click_until_no_change',
+        clicked: true,
+        changed: false,
+    }), true);
 });
 
-test('keeps narrow side views only inside a confirmed complete gallery', () => {
+test('checks configured image width and height independently for every source', () => {
     assert.equal(imageDimensionsMeetMinimum({
-        width: 720,
-        height: 120,
-        minimumSide: 400,
-        confirmedGallery: true,
+        width: 1000,
+        height: 550,
+        minimumWidth: 1000,
+        minimumHeight: 550,
     }), true);
     assert.equal(imageDimensionsMeetMinimum({
-        width: 720,
-        height: 120,
-        minimumSide: 400,
-        confirmedGallery: false,
+        width: 999,
+        height: 700,
+        minimumWidth: 1000,
+        minimumHeight: 550,
     }), false);
     assert.equal(imageDimensionsMeetMinimum({
-        width: 720,
-        height: 90,
-        minimumSide: 400,
-        confirmedGallery: true,
+        width: 1200,
+        height: 549,
+        minimumWidth: 1000,
+        minimumHeight: 550,
     }), false);
+    assert.equal(imageDimensionsMeetMinimum({
+        width: 1000,
+        height: 1,
+        minimumWidth: 1000,
+        minimumHeight: 0,
+    }), true);
 });
 
 test('rejects known non-image resources before the browser probe', () => {

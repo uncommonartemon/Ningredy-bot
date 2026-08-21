@@ -2,8 +2,11 @@
 
 namespace App\Filament\Resources\ProductGalleryRecipes\Tables;
 
+use App\Filament\Resources\ProductGalleryRecipes\ProductGalleryRecipeResource;
+use Filament\Actions\ActionGroup;
 use Filament\Actions\DeleteAction;
 use Filament\Actions\EditAction;
+use Filament\Actions\ViewAction;
 use Filament\Tables\Columns\IconColumn;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Filters\SelectFilter;
@@ -14,6 +17,7 @@ class ProductGalleryRecipesTable
     public static function configure(Table $table): Table
     {
         return $table
+            ->recordUrl(fn ($record): string => ProductGalleryRecipeResource::getUrl('view', ['record' => $record]))
             ->defaultSort('last_success_at', 'desc')
             ->columns([
                 TextColumn::make('domain')
@@ -77,10 +81,13 @@ class ProductGalleryRecipesTable
                     ]),
             ])
             ->recordActions([
-                EditAction::make(),
-                DeleteAction::make()
-                    ->label('Удалить и обучить заново')
-                    ->modalDescription('При следующем обращении к домену Playwright автоматически создаст новый рецепт.'),
+                ViewAction::make(),
+                ActionGroup::make([
+                    EditAction::make()->label('Быстрое редактирование'),
+                    DeleteAction::make()
+                        ->label('Удалить и обучить заново')
+                        ->modalDescription('При следующем обращении к домену Playwright автоматически создаст новый рецепт.'),
+                ]),
             ]);
     }
 }

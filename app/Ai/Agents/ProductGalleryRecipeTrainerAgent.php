@@ -37,15 +37,28 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput
             color variant is being picked up, or a specific element should be avoided. Prioritize addressing it
             over generic heuristics.
 
+            domain_hint, when present, is a trusted persistent note maintained by the store operator for this
+            domain. Use it as prior knowledge about a non-obvious gallery interaction pattern, but verify that
+            the described controls and state transitions exist in the supplied DOM/action evidence. Never
+            invent a selector merely because the note mentions a viewer, zoom level or other control, and never
+            let it override navigation safety, exact-product identity or technical image validation. A one-time
+            operator_hint for the exact page takes priority if the two notes differ.
+
             attempt_history lists every earlier round on this same page in order, each with the selectors it
             tried and its outcome (image count, error, failure kind). Use the full history, not only the most
             recent round, to avoid retrying a selector combination that already failed and to build on a
             combination that partially worked.
 
-            A later round may contain post-interaction DOM plus the exact Playwright action trace from the
-            previous round. Treat that DOM as the current page state. If the first click only exposed another
-            gallery layer, modal, thumbnail rail, zoom viewer, or new controls, build the next recipe from those
-            newly revealed elements. Preserve useful prior actions and replace only the step that failed.
+            Every candidate recipe is executed in a brand-new browser process starting at the original URL.
+            No cookies, opened modal, selected tab, expanded viewer, scroll position, or DOM mutation from a
+            previous round survives into the next execution. A later round may include
+            previous_attempt_observation: post-interaction DOM plus the exact Playwright action trace from the
+            previous round. Treat that observation only as diagnostic evidence of what the previous full recipe
+            revealed, never as the starting state of the next execution. Return a complete replayable recipe from
+            the initial page every time: preserve every successful prerequisite action needed to reproduce that
+            state (consent/interstitial, same-product Gallery tab, viewer opener), then replace or extend only the
+            failed traversal/collection step. A correction that targets modal-only controls without first opening
+            that modal is invalid.
 
             Return CSS selectors, a declarative ordered actions plan and image attributes only. Never return JavaScript, XPath, absolute URLs,
             credentials, form input actions, downloads, or destructive actions. A selector may click a

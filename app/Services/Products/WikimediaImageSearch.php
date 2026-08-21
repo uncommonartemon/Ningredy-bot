@@ -138,7 +138,10 @@ class WikimediaImageSearch
         $width = (int) ($info['thumbwidth'] ?? $info['width'] ?? 0);
         $height = (int) ($info['thumbheight'] ?? $info['height'] ?? 0);
 
-        if (min($width, $height) < $this->settings->imageMinimumSide()) {
+        if (
+            $width < $this->settings->imageMinimumWidth()
+            || $height < $this->settings->imageMinimumHeight()
+        ) {
             return false;
         }
 

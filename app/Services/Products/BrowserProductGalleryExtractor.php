@@ -293,8 +293,8 @@ class BrowserProductGalleryExtractor
                 'PRODUCT_GALLERY_SCOUT_ONLY' => $scoutOnly ? '1' : '0',
                 'PRODUCT_GALLERY_DOM_WAIT_MS' => (string) config('product-images.browser_fallback.dom_wait_ms', 12000),
                 'PRODUCT_GALLERY_PROBE_TIMEOUT_MS' => (string) config('product-images.browser_fallback.image_probe_timeout_ms', 5000),
-                'PRODUCT_GALLERY_MINIMUM_SIDE' => (string) $this->settings->imageMinimumSide(),
-                'PRODUCT_GALLERY_CONFIRMED_MINIMUM_SIDE' => (string) $this->settings->confirmedGalleryMinimumSide(),
+                'PRODUCT_GALLERY_MINIMUM_WIDTH' => (string) $this->settings->imageMinimumWidth(),
+                'PRODUCT_GALLERY_MINIMUM_HEIGHT' => (string) $this->settings->imageMinimumHeight(),
                 // The script must finish - with whatever it already gathered -
                 // before this process is killed at the timeout; on Windows that
                 // kill is a hard TerminateProcess, so this reserve is the

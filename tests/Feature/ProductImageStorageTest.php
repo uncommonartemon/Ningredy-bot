@@ -19,6 +19,7 @@ use App\Models\TelegramUpdate;
 use App\Services\Ai\ProductSearchCostBudget;
 use App\Services\Products\BrowserProductGalleryExtractor;
 use App\Services\Products\ConfirmedProductGalleryVerifier;
+use App\Services\Products\ProductIdentityMatcher;
 use App\Services\Products\ProductImageCandidateDiscovery;
 use App\Services\Products\ProductImageResolver;
 use App\Services\Products\ProductImageStorage;
@@ -36,6 +37,17 @@ use Tests\TestCase;
 class ProductImageStorageTest extends TestCase
 {
     use RefreshDatabase;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        // Most image fixtures in this suite intentionally exercise the
+        // historical 500px boundary. Production defaults stay at width 700,
+        // height 0 (automatic/no minimum).
+        AppSetting::put('ai.image_minimum_width', '500');
+        AppSetting::put('ai.image_minimum_height', '500');
+    }
 
     public function test_it_stores_up_to_five_local_images_for_a_laptop_and_only_deletes_them_with_the_product(): void
     {
@@ -3501,7 +3513,7 @@ class ProductImageStorageTest extends TestCase
             'url' => $opaquePage,
             'title' => 'HP OMEN MAX 16-ah0097nr Gaming Laptop',
         ];
-        $matcher = app(\App\Services\Products\ProductIdentityMatcher::class);
+        $matcher = app(ProductIdentityMatcher::class);
         $this->assertTrue($matcher->supportsSource($draft->fresh(), $sourceEvidence));
         $this->assertFalse($matcher->conflictsSource($draft->fresh(), $sourceEvidence));
 
@@ -3718,7 +3730,7 @@ class ProductImageStorageTest extends TestCase
         return [$product, $variant, $draft];
     }
 
-    /** Below the production minimum_side (500) - deliberately, to exercise the too_small rejection path. */
+    /** Below this suite's explicit 500×500 threshold to exercise the too_small rejection path. */
     private function tinyJpeg(): string
     {
         $image = imagecreatetruecolor(50, 50);

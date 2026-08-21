@@ -10,6 +10,7 @@ use App\Models\ProductSourceAttempt;
 use BackedEnum;
 use Filament\Resources\Resource;
 use Filament\Schemas\Schema;
+use Filament\Support\Icons\Heroicon;
 use Filament\Tables\Table;
 use UnitEnum;
 
@@ -17,17 +18,17 @@ class ProductSourceAttemptResource extends Resource
 {
     protected static ?string $model = ProductSourceAttempt::class;
 
-    protected static string|BackedEnum|null $navigationIcon = 'heroicon-o-command-line';
+    protected static string|BackedEnum|null $navigationIcon = Heroicon::OutlinedCommandLine;
 
-    protected static ?string $navigationLabel = 'Шаги поиска фото';
+    protected static ?string $navigationLabel = 'Попытки источников';
 
-    protected static ?string $modelLabel = 'шаг поиска';
+    protected static ?string $modelLabel = 'попытка источника';
 
-    protected static ?string $pluralModelLabel = 'шаги поиска фото';
+    protected static ?string $pluralModelLabel = 'попытки источников';
 
-    protected static string|UnitEnum|null $navigationGroup = 'AI и автоматизация';
+    protected static string|UnitEnum|null $navigationGroup = 'Поиск и AI';
 
-    protected static ?int $navigationSort = 6;
+    protected static ?int $navigationSort = 4;
 
     public static function infolist(Schema $schema): Schema
     {

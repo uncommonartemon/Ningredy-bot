@@ -559,8 +559,7 @@ class ProductImageStorage
                     'source' => $source,
                     'already_verified' => $galleryVerification !== null,
                 ];
-                usort($deferredVisionSets, fn (array $left, array $right): int =>
-                    count($right['candidates']) <=> count($left['candidates'])
+                usort($deferredVisionSets, fn (array $left, array $right): int => count($right['candidates']) <=> count($left['candidates'])
                 );
                 $discardedSets = array_splice(
                     $deferredVisionSets,
@@ -770,11 +769,11 @@ class ProductImageStorage
                 $roundSourceUrls = collect([
                     ...$attemptedRoundSourceUrls,
                     ...collect($discoveredCandidates)
-                    ->flatMap(fn (array $candidate): array => array_values(array_filter([
-                        $candidate['page_source_url'] ?? null,
-                        $candidate['source_url'] ?? null,
-                    ], fn (mixed $url): bool => is_string($url) && filter_var($url, FILTER_VALIDATE_URL) !== false)))
-                    ->all(),
+                        ->flatMap(fn (array $candidate): array => array_values(array_filter([
+                            $candidate['page_source_url'] ?? null,
+                            $candidate['source_url'] ?? null,
+                        ], fn (mixed $url): bool => is_string($url) && filter_var($url, FILTER_VALIDATE_URL) !== false)))
+                        ->all(),
                 ])
                     ->unique()
                     ->values()
@@ -1789,8 +1788,7 @@ class ProductImageStorage
                     ? 2
                     : ($this->resolver->isPartialGalleryImage($url) ? 1 : 0),
             ])
-            ->sort(fn (array $left, array $right): int =>
-                ($right['gallery_rank'] <=> $left['gallery_rank'])
+            ->sort(fn (array $left, array $right): int => ($right['gallery_rank'] <=> $left['gallery_rank'])
                 ?: ($left['index'] <=> $right['index'])
             )
             ->pluck('url')
@@ -1824,18 +1822,18 @@ class ProductImageStorage
                 continue;
             }
 
-            $confirmedGallery = (bool) ($download['confirmed_gallery'] ?? false);
-            $minimumSide = $confirmedGallery
-                ? $this->settings->confirmedGalleryMinimumSide()
-                : null;
-
             if (! $this->hasUsefulDimensions(
                 $download['width'],
                 $download['height'],
-                $minimumSide,
-                $confirmedGallery,
             )) {
-                $this->lastDownloadRejections[] = ['url' => $url, 'reason' => "too_small ({$download['width']}x{$download['height']})"];
+                $requiredWidth = $this->settings->imageMinimumWidth();
+                $requiredHeight = $this->settings->imageMinimumHeight();
+                $this->lastDownloadRejections[] = [
+                    'url' => $url,
+                    'reason' => $requiredHeight > 0
+                        ? "too_small ({$download['width']}x{$download['height']}; required {$requiredWidth}x{$requiredHeight})"
+                        : "too_small ({$download['width']}x{$download['height']}; required width>={$requiredWidth}, height=any)",
+                ];
 
                 continue;
             }
@@ -2488,20 +2486,11 @@ class ProductImageStorage
     private function hasUsefulDimensions(
         int $width,
         int $height,
-        ?int $minimumSide = null,
-        bool $confirmedGallery = false,
-    ): bool
-    {
-        $minimum = $minimumSide ?? $this->settings->imageMinimumSide();
-
-        if ($confirmedGallery) {
-            return max($width, $height) >= $minimum
-                && min($width, $height) >= 100;
-        }
-
+    ): bool {
         $ratio = $width / max($height, 1);
 
-        return min($width, $height) >= $minimum
+        return $width >= $this->settings->imageMinimumWidth()
+            && $height >= $this->settings->imageMinimumHeight()
             && $ratio >= (float) config('product-images.minimum_ratio', 0.28)
             && $ratio <= (float) config('product-images.maximum_ratio', 3.5);
     }

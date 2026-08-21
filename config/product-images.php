@@ -13,8 +13,10 @@ return [
     ],
     'download_limit' => 20,
     'download_candidates' => 10,
-    // Reject genuinely tiny thumbnails while allowing clean medium-size shop photos.
-    'minimum_side' => 500,
+    // Width and height are checked independently so useful wide product shots
+    // are not reduced to one ambiguous "minimum side" setting.
+    'minimum_width' => (int) env('PRODUCT_IMAGE_MINIMUM_WIDTH', 700),
+    'minimum_height' => (int) env('PRODUCT_IMAGE_MINIMUM_HEIGHT', 0),
     'minimum_ratio' => 0.28,
     'maximum_ratio' => 3.5,
     'public_source_target' => 6,
@@ -104,9 +106,6 @@ return [
         'gallery_limit' => 10,
         'dom_wait_ms' => (int) env('PRODUCT_IMAGE_BROWSER_DOM_WAIT_MS', 12000),
         'image_probe_timeout_ms' => (int) env('PRODUCT_IMAGE_BROWSER_PROBE_TIMEOUT_MS', 5000),
-        // A complete Playwright gallery may only expose medium-size originals.
-        // This lower limit is used only after the recipe confirms every frame.
-        'confirmed_gallery_minimum_side' => (int) env('PRODUCT_IMAGE_CONFIRMED_GALLERY_MINIMUM_SIDE', 400),
         'training_max_rounds' => (int) env('PRODUCT_IMAGE_GALLERY_TRAINING_MAX_ROUNDS', 3),
         'timeout' => 45,
         'scout_timeout' => 60,

@@ -83,58 +83,70 @@ class ProductDraftTypeTest extends TestCase
         $this->assertSame('0197529234567', $variant->gtin);
     }
 
-    public function test_complete_source_verified_gallery_uses_its_confirmed_minimum_side(): void
+    public function test_complete_source_verified_gallery_does_not_bypass_dimension_requirements(): void
     {
         Queue::fake([StoreProductImages::class]);
-        config()->set('product-images.minimum_side', 450);
-        config()->set('product-images.browser_fallback.confirmed_gallery_minimum_side', 400);
+        app(AiSettings::class)->saveImageMinimumWidth(450);
+        app(AiSettings::class)->saveImageMinimumHeight(450);
         $draft = $this->draft('Lenovo LOQ 15APH8', '82XT003GUS', 'laptop');
         $draft->update(['gallery_status' => 'complete']);
         $this->addMedia($draft, 420, 420, 'source_verified');
 
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('450×450px');
+
+        app(ProductDraftWorkflow::class)->approve($draft->fresh());
+    }
+
+    public function test_minimum_height_is_checked_independently_for_wide_images(): void
+    {
+        Queue::fake([StoreProductImages::class]);
+        app(AiSettings::class)->saveImageMinimumWidth(900);
+        app(AiSettings::class)->saveImageMinimumHeight(550);
+        $draft = $this->draft('Lenovo LOQ 15APH8', '82XT003GUS', 'laptop');
+        $this->addMedia($draft, 1000, 549, 'verified');
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('900×550px');
+
+        app(ProductDraftWorkflow::class)->approve($draft->fresh());
+    }
+
+    public function test_minimum_width_is_checked_independently_for_tall_images(): void
+    {
+        Queue::fake([StoreProductImages::class]);
+        app(AiSettings::class)->saveImageMinimumWidth(900);
+        app(AiSettings::class)->saveImageMinimumHeight(550);
+        $draft = $this->draft('Lenovo LOQ 15APH8', '82XT003GUS', 'laptop');
+        $this->addMedia($draft, 899, 1000, 'source_verified');
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('900×550px');
+
+        app(ProductDraftWorkflow::class)->approve($draft->fresh());
+    }
+
+    public function test_filament_image_dimensions_change_the_approval_threshold(): void
+    {
+        Queue::fake([StoreProductImages::class]);
+        app(AiSettings::class)->saveImageMinimumWidth(430);
+        app(AiSettings::class)->saveImageMinimumHeight(400);
+        $draft = $this->draft('Lenovo LOQ 15APH8', '82XT003GUS', 'laptop');
+        $this->addMedia($draft, 440, 410, 'verified');
+
         $product = app(ProductDraftWorkflow::class)->approve($draft->fresh());
 
         $this->assertSame('published', $product->status);
-        $this->assertSame('approved', $draft->fresh()->status);
         Queue::assertPushed(StoreProductImages::class);
     }
 
-    public function test_unconfirmed_gallery_still_rejects_an_image_below_the_general_minimum_side(): void
+    public function test_zero_minimum_height_disables_only_the_height_requirement(): void
     {
         Queue::fake([StoreProductImages::class]);
-        config()->set('product-images.minimum_side', 450);
-        config()->set('product-images.browser_fallback.confirmed_gallery_minimum_side', 400);
+        app(AiSettings::class)->saveImageMinimumWidth(700);
+        app(AiSettings::class)->saveImageMinimumHeight(0);
         $draft = $this->draft('Lenovo LOQ 15APH8', '82XT003GUS', 'laptop');
-        $draft->update(['gallery_status' => 'complete']);
-        $this->addMedia($draft, 420, 420, 'verified');
-
-        $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('меньше 450px');
-
-        app(ProductDraftWorkflow::class)->approve($draft->fresh());
-    }
-
-    public function test_source_verified_gallery_still_rejects_an_image_below_its_lower_minimum_side(): void
-    {
-        Queue::fake([StoreProductImages::class]);
-        config()->set('product-images.minimum_side', 450);
-        config()->set('product-images.browser_fallback.confirmed_gallery_minimum_side', 400);
-        $draft = $this->draft('Lenovo LOQ 15APH8', '82XT003GUS', 'laptop');
-        $draft->update(['gallery_status' => 'complete']);
-        $this->addMedia($draft, 99, 600, 'source_verified');
-
-        $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('меньше 400px');
-
-        app(ProductDraftWorkflow::class)->approve($draft->fresh());
-    }
-
-    public function test_filament_image_minimum_setting_changes_the_approval_threshold(): void
-    {
-        Queue::fake([StoreProductImages::class]);
-        app(AiSettings::class)->saveImageMinimumSide(430);
-        $draft = $this->draft('Lenovo LOQ 15APH8', '82XT003GUS', 'laptop');
-        $this->addMedia($draft, 440, 440, 'verified');
+        $this->addMedia($draft, 700, 100, 'verified');
 
         $product = app(ProductDraftWorkflow::class)->approve($draft->fresh());
 
@@ -183,7 +195,7 @@ class ProductDraftTypeTest extends TestCase
             'image_urls' => [],
             'confidence' => 0.9,
         ]);
-        $this->addMedia($draft, 600, 600, 'verified');
+        $this->addMedia($draft, 800, 800, 'verified');
 
         return $draft;
     }

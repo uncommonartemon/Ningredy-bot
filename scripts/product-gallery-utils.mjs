@@ -361,44 +361,18 @@ export const withUpscaledSizeParam = (rawUrl) => {
     return changed ? url.toString() : null;
 };
 
-export const galleryProbeMinimumSide = ({
-    minimumSide,
-    confirmedMinimumSide,
-    galleryPresent,
-    expectedCount,
-    observedCount,
-}) => {
-    const configured = Math.max(100, Number.parseInt(minimumSide || '600', 10));
-    const fallback = Math.max(100, Number.parseInt(confirmedMinimumSide || '400', 10));
-    const expected = Math.max(0, Number.parseInt(expectedCount || '0', 10));
-    const observed = Math.max(0, Number.parseInt(observedCount || '0', 10));
-    const reachedGallery = galleryPresent === true && expected >= 2 && observed >= expected;
-
-    return reachedGallery ? Math.min(configured, fallback) : configured;
-};
-
 export const imageDimensionsMeetMinimum = ({
     width,
     height,
-    minimumSide,
-    confirmedGallery = false,
-    confirmedShortSide = 100,
+    minimumWidth,
+    minimumHeight,
 }) => {
     const imageWidth = Math.max(0, Number.parseInt(width || '0', 10));
     const imageHeight = Math.max(0, Number.parseInt(height || '0', 10));
-    const minimum = Math.max(100, Number.parseInt(minimumSide || '600', 10));
+    const requiredWidth = Math.max(100, Number.parseInt(minimumWidth || '700', 10));
+    const requiredHeight = Math.max(0, Number.parseInt(minimumHeight ?? '0', 10));
 
-    if (!confirmedGallery) {
-        return imageWidth >= minimum && imageHeight >= minimum;
-    }
-
-    const shortMinimum = Math.max(100, Math.min(
-        minimum,
-        Number.parseInt(confirmedShortSide || '100', 10),
-    ));
-
-    return Math.max(imageWidth, imageHeight) >= minimum
-        && Math.min(imageWidth, imageHeight) >= shortMinimum;
+    return imageWidth >= requiredWidth && imageHeight >= requiredHeight;
 };
 
 const SAFE_RECIPE_ACTION_KINDS = new Set([
@@ -489,4 +463,15 @@ export const recipeActionPlanStatus = ({ actions, actionTrace }) => {
         completed_actions: steps.filter((step) => step.complete).length,
         steps,
     };
+};
+
+// A detached or covered thumbnail must not abort traversal of every remaining
+// thumbnail. Its failed click stays in the trace, so validation still rejects
+// an incomplete plan and the next AI round receives exact feedback.
+export const recipeActionShouldStop = ({ kind, clicked, changed }) => {
+    if (!clicked) {
+        return kind !== 'click_each';
+    }
+
+    return kind === 'click_until_no_change' && changed !== true;
 };

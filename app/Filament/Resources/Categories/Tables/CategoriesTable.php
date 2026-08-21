@@ -16,6 +16,7 @@ class CategoriesTable
             ->modifyQueryUsing(fn ($query) => $query->with('translations')->withCount('products'))
             ->defaultSort('sort_order')
             ->columns([
+                TextColumn::make('id')->label('#')->sortable()->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('name')->label('English name')->searchable()->sortable(),
                 TextColumn::make('slug')->label('Slug')->searchable()->sortable(),
                 TextColumn::make('translations_summary')->label('Переводы')
@@ -43,12 +44,14 @@ class CategoriesTable
                     ->sortable(),
                 TextColumn::make('product_search_hint')
                     ->label('Подсказка поиска')
-                    ->limit(70)
+                    ->limit(60)
                     ->placeholder('—')
-                    ->wrap(),
+                    ->tooltip(fn (?string $state): ?string => filled($state) ? $state : null),
                 TextColumn::make('products_count')->label('Товары')->badge()->sortable(),
                 TextColumn::make('sort_order')->label('Порядок')->sortable(),
                 ToggleColumn::make('is_active')->label('Активна')->sortable(),
+                TextColumn::make('created_at')->label('Создана')->dateTime('d.m.Y H:i')->sortable()->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('updated_at')->label('Изменена')->dateTime('d.m.Y H:i')->sortable()->toggleable(isToggledHiddenByDefault: true),
             ])
             ->recordActions([EditAction::make()]);
     }

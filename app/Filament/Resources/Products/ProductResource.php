@@ -16,6 +16,8 @@ use Filament\Resources\Resource;
 use Filament\Schemas\Schema;
 use Filament\Support\Icons\Heroicon;
 use Filament\Tables\Table;
+use Illuminate\Database\Eloquent\Builder;
+use UnitEnum;
 
 class ProductResource extends Resource
 {
@@ -29,9 +31,21 @@ class ProductResource extends Resource
 
     protected static ?string $pluralModelLabel = 'товары';
 
+    protected static string|UnitEnum|null $navigationGroup = 'Каталог';
+
     protected static ?int $navigationSort = 1;
 
     protected static ?string $recordTitleAttribute = 'title';
+
+    public static function getGloballySearchableAttributes(): array
+    {
+        return ['title', 'model', 'brand.name', 'variants.sku', 'variants.mpn', 'variants.gtin'];
+    }
+
+    public static function getGlobalSearchEloquentQuery(): Builder
+    {
+        return parent::getGlobalSearchEloquentQuery()->with(['brand', 'variants']);
+    }
 
     public static function form(Schema $schema): Schema
     {

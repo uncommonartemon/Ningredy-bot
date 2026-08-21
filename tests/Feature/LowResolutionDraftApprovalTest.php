@@ -30,8 +30,8 @@ class LowResolutionDraftApprovalTest extends TestCase
             'services.telegram.bot_token' => 'test-token',
             'services.telegram.webhook_secret' => 'test-secret',
             'services.telegram.allowed_user_ids' => ['12345'],
-            'product-images.minimum_side' => 500,
-            'product-images.browser_fallback.confirmed_gallery_minimum_side' => 400,
+            'product-images.minimum_width' => 500,
+            'product-images.minimum_height' => 500,
         ]);
         Http::fake([
             'https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => true]),
@@ -107,8 +107,7 @@ class LowResolutionDraftApprovalTest extends TestCase
             'status' => 'completed',
             'error' => null,
         ]);
-        Queue::assertPushed(RestageDraftGalleryPhotos::class, fn (RestageDraftGalleryPhotos $job): bool =>
-            $job->draftId === $draft->id && $job->telegramUpdateId > 0
+        Queue::assertPushed(RestageDraftGalleryPhotos::class, fn (RestageDraftGalleryPhotos $job): bool => $job->draftId === $draft->id && $job->telegramUpdateId > 0
         );
         Queue::assertNotPushed(StoreProductImages::class);
         Http::assertSent(fn (ClientRequest $request): bool => str_ends_with($request->url(), '/sendMessage')
@@ -170,8 +169,7 @@ class LowResolutionDraftApprovalTest extends TestCase
             'status' => 'completed',
             'error' => null,
         ]);
-        Queue::assertPushed(RestageDraftGalleryPhotos::class, fn (RestageDraftGalleryPhotos $job): bool =>
-            $job->draftId === $draft->id && $job->telegramUpdateId > 0
+        Queue::assertPushed(RestageDraftGalleryPhotos::class, fn (RestageDraftGalleryPhotos $job): bool => $job->draftId === $draft->id && $job->telegramUpdateId > 0
         );
         Queue::assertNotPushed(StoreProductImages::class);
         Http::assertSent(fn (ClientRequest $request): bool => str_ends_with($request->url(), '/sendMessage')

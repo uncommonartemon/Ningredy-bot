@@ -4,10 +4,13 @@ namespace App\Filament\Resources\ProductGalleryRecipeVersions\Tables;
 
 use App\Models\ProductGalleryRecipeVersion;
 use Filament\Actions\Action;
+use Filament\Forms\Components\TextInput;
 use Filament\Notifications\Notification;
 use Filament\Tables\Columns\TextColumn;
+use Filament\Tables\Filters\Filter;
 use Filament\Tables\Filters\SelectFilter;
 use Filament\Tables\Table;
+use Illuminate\Database\Eloquent\Builder;
 
 class ProductGalleryRecipeVersionsTable
 {
@@ -44,6 +47,17 @@ class ProductGalleryRecipeVersionsTable
                     'training' => 'Обучение',
                     'testing' => 'Проверка',
                 ]),
+                Filter::make('domain')
+                    ->schema([
+                        TextInput::make('value')->label('Домен'),
+                    ])
+                    ->query(fn (Builder $query, array $data): Builder => $query->when(
+                        filled($data['value'] ?? null),
+                        fn (Builder $q) => $q->where('domain', $data['value']),
+                    ))
+                    ->indicateUsing(fn (array $data): ?string => filled($data['value'] ?? null)
+                        ? 'Домен: '.$data['value']
+                        : null),
             ])
             ->recordActions([
                 Action::make('rollback')

@@ -13,6 +13,7 @@ use Filament\Forms\Contracts\HasForms;
 use Filament\Notifications\Notification;
 use Filament\Pages\Page;
 use Filament\Schemas\Schema;
+use Filament\Support\Icons\Heroicon;
 use Throwable;
 use UnitEnum;
 
@@ -20,7 +21,7 @@ class TelegramSettings extends Page implements HasForms
 {
     use InteractsWithForms;
 
-    protected static string|BackedEnum|null $navigationIcon = 'heroicon-o-paper-airplane';
+    protected static string|BackedEnum|null $navigationIcon = Heroicon::OutlinedPaperAirplane;
 
     protected static string|UnitEnum|null $navigationGroup = 'Настройки';
 
@@ -28,7 +29,7 @@ class TelegramSettings extends Page implements HasForms
 
     protected static ?string $title = 'Telegram webhook';
 
-    protected static ?int $navigationSort = 100;
+    protected static ?int $navigationSort = 2;
 
     protected string $view = 'filament.pages.telegram-settings';
 

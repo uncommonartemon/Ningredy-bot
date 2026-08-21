@@ -130,28 +130,26 @@ class AiSettingsTest extends TestCase
         $this->assertSame(180, $settings->productResearchIdleTimeoutSeconds());
     }
 
-    public function test_image_minimum_sides_are_saved_clamped_and_keep_confirmed_below_general(): void
+    public function test_image_minimum_width_and_height_are_saved_and_clamped_independently(): void
     {
         $settings = app(AiSettings::class);
 
-        $this->assertSame(500, $settings->imageMinimumSide());
-        $this->assertSame(400, $settings->confirmedGalleryMinimumSide());
+        $this->assertSame(700, $settings->imageMinimumWidth());
+        $this->assertSame(0, $settings->imageMinimumHeight());
 
-        $settings->saveImageMinimumSide(600);
-        $settings->saveConfirmedGalleryMinimumSide(550);
-        $this->assertSame(600, $settings->imageMinimumSide());
-        $this->assertSame(550, $settings->confirmedGalleryMinimumSide());
+        $settings->saveImageMinimumWidth(1000);
+        $settings->saveImageMinimumHeight(550);
+        $this->assertSame(1000, $settings->imageMinimumWidth());
+        $this->assertSame(550, $settings->imageMinimumHeight());
 
-        $settings->saveConfirmedGalleryMinimumSide(700);
-        $this->assertSame(600, $settings->confirmedGalleryMinimumSide());
+        $settings->saveImageMinimumWidth(50);
+        $settings->saveImageMinimumHeight(-50);
+        $this->assertSame(AiSettings::MIN_IMAGE_WIDTH, $settings->imageMinimumWidth());
+        $this->assertSame(AiSettings::MIN_IMAGE_HEIGHT, $settings->imageMinimumHeight());
 
-        $settings->saveImageMinimumSide(50);
-        $this->assertSame(AiSettings::MIN_IMAGE_SIDE, $settings->imageMinimumSide());
-        $this->assertSame(AiSettings::MIN_IMAGE_SIDE, $settings->confirmedGalleryMinimumSide());
-
-        $settings->saveImageMinimumSide(9999);
-        $settings->saveConfirmedGalleryMinimumSide(9999);
-        $this->assertSame(AiSettings::MAX_IMAGE_SIDE, $settings->imageMinimumSide());
-        $this->assertSame(AiSettings::MAX_IMAGE_SIDE, $settings->confirmedGalleryMinimumSide());
+        $settings->saveImageMinimumWidth(9999);
+        $settings->saveImageMinimumHeight(9999);
+        $this->assertSame(AiSettings::MAX_IMAGE_DIMENSION, $settings->imageMinimumWidth());
+        $this->assertSame(AiSettings::MAX_IMAGE_DIMENSION, $settings->imageMinimumHeight());
     }
 }

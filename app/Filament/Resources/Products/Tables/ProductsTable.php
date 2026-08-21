@@ -41,7 +41,7 @@ class ProductsTable
                 TextColumn::make('image_verification')->label('Проверка фото')
                     ->state(fn ($record): ?string => ($record->primaryMedia ?: $record->media->firstWhere('type', 'image'))?->verification_status)
                     ->badge()->formatStateUsing(fn (?string $state): string => match ($state) {
-                        'verified' => 'Vision', 'source_verified' => '��������', 'manual' => 'Вручную', 'rejected' => 'Отклонено', default => 'Не проверено',
+                        'verified' => 'Vision', 'source_verified' => 'Подтверждено источником', 'manual' => 'Вручную', 'rejected' => 'Отклонено', default => 'Не проверено',
                     })->color(fn (?string $state): string => match ($state) {
                         'verified' => 'success', 'source_verified' => 'success', 'manual' => 'info', 'rejected' => 'danger', default => 'warning',
                     })->toggleable(),
@@ -50,6 +50,9 @@ class ProductsTable
                 TextColumn::make('brand.name')->label('Бренд')->searchable()->sortable(),
                 TextColumn::make('model')->label('Модель')->searchable()->toggleable(),
                 TextColumn::make('category.name')->label('Категория')->sortable(),
+                TextColumn::make('product_type')->label('Тип')->badge()->formatStateUsing(fn (string $state): string => match ($state) {
+                    'laptop' => 'Ноутбук', 'desktop' => 'Готовый ПК', 'component' => 'Комплектующая', default => 'Другая техника',
+                })->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('variants_count')->label('Варианты')->counts('variants')->badge(),
                 TextColumn::make('defaultVariant.price')->label('Цена')->numeric(decimalPlaces: 2)->placeholder('—'),
                 TextColumn::make('defaultVariant.currency')->label('Валюта')->toggleable(),
@@ -60,7 +63,12 @@ class ProductsTable
                 }),
                 ToggleColumn::make('is_active')->label('На сайте')->sortable(),
                 ToggleColumn::make('is_featured')->label('Рекомендуемый')->sortable()->toggleable(),
+                TextColumn::make('slug')->label('Slug')->copyable()->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('canonical_key')->label('Ключ дедупликации')->copyable()->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('confidence')->label('Увер. AI')->numeric(decimalPlaces: 2)->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('sort_order')->label('Порядок')->sortable()->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('published_at')->label('Публикация')->dateTime('d.m.Y H:i')->sortable(),
+                TextColumn::make('created_at')->label('Создан')->dateTime('d.m.Y H:i')->sortable()->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('updated_at')->label('Изменён')->since()->sortable()->toggleable(isToggledHiddenByDefault: true),
             ])->filters([
                 SelectFilter::make('status')->label('Статус')->options([

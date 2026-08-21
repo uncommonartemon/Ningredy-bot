@@ -4,7 +4,6 @@ import { chromium } from 'playwright-core';
 import {
     EXCLUDED_GALLERY_CONTEXT_PATTERN_SOURCE,
     galleryCollectionTarget,
-    galleryProbeMinimumSide,
     imageAssetKey,
     isAllowedProductNavigation,
     normalizeImageCandidate,
@@ -12,6 +11,7 @@ import {
     prioritizeCandidateRenditions,
     recipeActionOpensGallery,
     recipeActionPlanStatus,
+    recipeActionShouldStop,
     recipeActionTraversesGallery,
     urlQualityScore,
     withUpscaledSizeParam,
@@ -28,12 +28,12 @@ const probeTimeoutMs = Math.max(1000, Math.min(10000, Number.parseInt(
     process.env.PRODUCT_GALLERY_PROBE_TIMEOUT_MS || '5000',
     10,
 )));
-const minimumSide = Math.max(100, Math.min(2000, Number.parseInt(
-    process.env.PRODUCT_GALLERY_MINIMUM_SIDE || '600',
+const minimumWidth = Math.max(100, Math.min(4000, Number.parseInt(
+    process.env.PRODUCT_GALLERY_MINIMUM_WIDTH || '700',
     10,
 )));
-const confirmedGalleryMinimumSide = Math.max(100, Math.min(2000, Number.parseInt(
-    process.env.PRODUCT_GALLERY_CONFIRMED_MINIMUM_SIDE || '400',
+const minimumHeight = Math.max(0, Math.min(4000, Number.parseInt(
+    process.env.PRODUCT_GALLERY_MINIMUM_HEIGHT ?? '0',
     10,
 )));
 // PHP kills this process at its own timeout, and on Windows that kill is a
@@ -1703,7 +1703,11 @@ try {
                 const trace = actionTrace.at(-1) || {};
                 trace.expanded_gallery_visible_after = await expandedGalleryVisible();
 
-                if (!clicked || (action.kind === 'click_until_no_change' && trace.changed !== true)) {
+                if (recipeActionShouldStop({
+                    kind: action.kind,
+                    clicked,
+                    changed: trace.changed,
+                })) {
                     break;
                 }
             }
@@ -1837,14 +1841,7 @@ const structurallyCompletedRecipe = strictRecipe
     && distinctDomAssetCount >= expectedGalleryCount
     && actionPlanStatus.required === true
     && actionPlanStatus.complete === true;
-const effectiveMinimumSide = galleryProbeMinimumSide({
-    minimumSide,
-    confirmedMinimumSide: confirmedGalleryMinimumSide,
-    galleryPresent: recipe.gallery_present === true,
-    expectedCount: expectedGalleryCount,
-    observedCount: structurallyCompletedRecipe ? expectedGalleryCount : (galleryReadiness.observed_count || 0),
-});
-const galleryGoalReached = effectiveMinimumSide < minimumSide;
+const galleryGoalReached = structurallyCompletedRecipe;
 const hasDirectBhImages = allCandidates.some((url) => new URL(url).hostname === 'static.bhphoto.com');
 const domKeys = new Set(domImages.map(imageAssetKey));
 const candidates = strictRecipe
@@ -1859,7 +1856,7 @@ const probeImage = async (candidate) => {
         return { ok: false, url: candidate, reason: 'non_public_url' };
     }
 
-    return page.evaluate(({ url, timeout, minSide, allowWideGalleryFrame }) => new Promise((resolve) => {
+    return page.evaluate(({ url, timeout, minWidth, minHeight }) => new Promise((resolve) => {
         const image = new Image();
         const timer = setTimeout(
             () => resolve({ ok: false, url, reason: 'probe_timeout' }),
@@ -1873,9 +1870,7 @@ const probeImage = async (candidate) => {
         image.onload = () => {
             const width = image.naturalWidth || 0;
             const height = image.naturalHeight || 0;
-            const ok = allowWideGalleryFrame
-                ? Math.max(width, height) >= minSide && Math.min(width, height) >= Math.min(100, minSide)
-                : width >= minSide && height >= minSide;
+            const ok = width >= minWidth && height >= minHeight;
 
             finish({
                 ok,
@@ -1890,8 +1885,8 @@ const probeImage = async (candidate) => {
     }), {
         url: candidate,
         timeout: probeTimeoutMs,
-        minSide: effectiveMinimumSide,
-        allowWideGalleryFrame: galleryGoalReached,
+        minWidth: minimumWidth,
+        minHeight: minimumHeight,
     }).catch(() => ({ ok: false, url: candidate, reason: 'probe_failed' }));
 };
 const candidatesToProbe = prioritizeCandidateRenditions(candidates)
@@ -2018,7 +2013,8 @@ process.stdout.write(JSON.stringify({
         gallery_stable_samples: galleryReadiness.stable_samples || 0,
         gallery_wait_timed_out: galleryReadiness.timed_out || false,
         gallery_goal_reached: galleryGoalReached,
-        effective_minimum_side: effectiveMinimumSide,
+        effective_minimum_width: minimumWidth,
+        effective_minimum_height: minimumHeight,
         stopped_early: outOfTime(),
         action_plan: actionPlanStatus,
     },

@@ -33,8 +33,8 @@ class ProductDraftWorkflow
         ?User $reviewer = null,
         ?string $telegramReviewerId = null,
     ): Product {
-        $minimumSide = $this->settings->imageMinimumSide();
-        $confirmedGalleryMinimumSide = $this->settings->confirmedGalleryMinimumSide();
+        $minimumWidth = $this->settings->imageMinimumWidth();
+        $minimumHeight = $this->settings->imageMinimumHeight();
         $media = $draft->media()->get(['width', 'height', 'verification_status']);
         throw_if(
             $media->isEmpty(),
@@ -42,24 +42,16 @@ class ProductDraftWorkflow
             'Черновик не содержит проверенных фотографий и не может быть опубликован.',
         );
         $lowResolutionMedia = $media
-            ->first(function ($media) use ($draft, $minimumSide, $confirmedGalleryMinimumSide): bool {
-                $confirmedGallery = $draft->gallery_status === 'complete'
-                    && $media->verification_status === 'source_verified';
-
-                if ($confirmedGallery) {
-                    return max((int) $media->width, (int) $media->height) < $confirmedGalleryMinimumSide
-                        || min((int) $media->width, (int) $media->height) < 100;
-                }
-
-                return min((int) $media->width, (int) $media->height) < $minimumSide;
+            ->first(function ($media) use ($minimumWidth, $minimumHeight): bool {
+                return (int) $media->width < $minimumWidth
+                    || (int) $media->height < $minimumHeight;
             });
-        if ($draft->gallery_status === 'complete' && $lowResolutionMedia?->verification_status === 'source_verified') {
-            $minimumSide = $confirmedGalleryMinimumSide;
-        }
         throw_if(
             $lowResolutionMedia !== null,
             LowResolutionDraftMediaException::class,
-            "Черновик содержит фото меньше {$minimumSide}px и не может быть опубликован. Сначала замените фотографии.",
+            $minimumHeight > 0
+                ? "Черновик содержит фото меньше {$minimumWidth}×{$minimumHeight}px и не может быть опубликован. Сначала замените фотографии."
+                : "Черновик содержит фото шириной меньше {$minimumWidth}px и не может быть опубликован. Высота не ограничена. Сначала замените фотографии.",
         );
 
         try {
