@@ -8,6 +8,7 @@ use App\Models\ProductDraft;
 use App\Models\ProductGalleryRecipe;
 use App\Models\ProductSourceAttempt;
 use App\Models\ProductSourceDomain;
+use App\Models\ProductSourcePageRule;
 use App\Models\TelegramUpdate;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
@@ -45,6 +46,17 @@ class ResetCatalogTestDataCommandTest extends TestCase
             ['domain' => 'example.com'],
             ['agent_hint' => 'Persistent domain setting.'],
         );
+        ProductSourcePageRule::query()->create([
+            'domain' => 'example.com',
+            'path_hash' => hash('sha256', '/landing'),
+            'path' => '/landing',
+            'sample_url' => 'https://example.com/landing',
+            'page_kind' => 'product_family_landing',
+            'reason' => 'No isolated product gallery.',
+            'evidence' => ['multiple configurations', 'editorial sections'],
+            'confidence' => 0.95,
+            'active' => true,
+        ]);
         ProductSourceAttempt::query()->create([
             'telegram_update_id' => $update->id,
             'product_draft_id' => $draft->id,
@@ -61,6 +73,7 @@ class ResetCatalogTestDataCommandTest extends TestCase
 
         $this->assertDatabaseCount('product_drafts', 0);
         $this->assertDatabaseCount('product_gallery_recipes', 0);
+        $this->assertDatabaseCount('product_source_page_rules', 0);
         $this->assertDatabaseHas('product_source_domains', [
             'domain' => 'example.com',
             'agent_hint' => 'Persistent domain setting.',

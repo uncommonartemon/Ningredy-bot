@@ -10,6 +10,7 @@ use App\Models\ProductGalleryRecipeVersion;
 use App\Models\ProductSourceDomain;
 use App\Services\Products\BrowserProductGalleryExtractor;
 use App\Services\Products\ProductGalleryRecipeTrainer;
+use App\Services\Products\ProductImageResolver;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Mockery\MockInterface;
 use Tests\TestCase;
@@ -1196,5 +1197,160 @@ class ProductGalleryRecipeTrainerTest extends TestCase
             ['https://images.samsung.com/is/image/samsung/product'],
             $seenStaticUrls,
         );
+    }
+
+    public function test_preflight_remembers_a_high_confidence_family_landing_and_skips_it_next_time(): void
+    {
+        ProductGalleryPreflightAgent::fake(fn (): array => [
+            'decision' => 'unsuitable_page',
+            'page_kind' => 'product_family_landing',
+            'gallery_likely' => false,
+            'hidden_images_likely' => false,
+            'interaction_required' => false,
+            'expected_image_count' => 0,
+            'evidence' => [
+                'Several configurations have separate prices and buy controls.',
+                'The page contains independent feature-story carousels but no isolated product media container.',
+            ],
+            'confidence' => 0.97,
+            'reason' => 'This is a product-family marketing landing page.',
+        ])->preventStrayPrompts();
+        ProductGalleryRecipeTrainerAgent::fake()->preventStrayPrompts();
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('scout')->once()->andReturn([
+                'scout' => [
+                    'title' => 'Laptop family',
+                    'fragments' => ['<main><section data-feature-story></section></main>'],
+                    'interactive_controls' => [],
+                    'network_image_samples' => [],
+                    'access_gate' => false,
+                    'rate_limited' => false,
+                ],
+                'diagnostics' => [],
+            ]);
+            $mock->shouldNotReceive('executeRecipe');
+        });
+
+        $url = 'https://brand.example/laptops/model-family?region=us';
+        $this->assertSame([], app(ProductGalleryRecipeTrainer::class)->train($url, force: true));
+        $this->assertDatabaseHas('product_source_page_rules', [
+            'domain' => 'brand.example',
+            'path' => '/laptops/model-family',
+            'page_kind' => 'product_family_landing',
+            'active' => true,
+        ]);
+
+        $preflight = app(ProductImageResolver::class)->preflightSource(['url' => $url]);
+
+        $this->assertTrue($preflight['blocked']);
+        $this->assertSame('known_unsuitable_page', $preflight['reason']);
+        ProductGalleryRecipeTrainerAgent::assertNeverPrompted();
+    }
+
+    public function test_training_round_can_abandon_a_page_after_inspecting_the_dom(): void
+    {
+        ProductGalleryRecipeTrainerAgent::fake(fn (): array => [
+            'training_decision' => 'abandon_page',
+            'page_kind' => 'editorial_marketing',
+            'page_assessment_evidence' => [
+                'Slide captions describe manufacturing steps rather than product views.',
+                'No price, SKU, gallery counter, media thumbnails, or product-card controls surround the carousel.',
+            ],
+            'gallery_present' => false,
+            'content_confirmed_product' => false,
+            'expected_image_count' => 0,
+            'expected_count_evidence' => 'No isolated product gallery.',
+            'actions' => [],
+            'pre_click_selectors' => [],
+            'collect_selectors' => [],
+            'thumbnail_selectors' => [],
+            'open_selectors' => [],
+            'next_selectors' => [],
+            'attributes' => [],
+            'max_thumbnail_clicks' => 0,
+            'max_next_clicks' => 0,
+            'wait_after_click_ms' => 150,
+            'confidence' => 0.96,
+            'reason' => 'The carousel is editorial content, not a product gallery.',
+        ])->preventStrayPrompts();
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('scout')->once()->andReturn([
+                'scout' => [
+                    'title' => 'How the laptop is made',
+                    'fragments' => ['<section><h2>Machined from aluminum</h2></section>'],
+                    'interactive_controls' => [],
+                    'network_image_samples' => [],
+                    'access_gate' => false,
+                    'rate_limited' => false,
+                ],
+                'diagnostics' => [],
+            ]);
+            $mock->shouldNotReceive('executeRecipe');
+        });
+
+        $this->assertSame([], app(ProductGalleryRecipeTrainer::class)->train(
+            'https://brand.example/stories/model',
+            force: true,
+        ));
+        $this->assertDatabaseHas('product_source_page_rules', [
+            'domain' => 'brand.example',
+            'path' => '/stories/model',
+            'page_kind' => 'editorial_marketing',
+        ]);
+        $version = ProductGalleryRecipeVersion::query()->latest('id')->firstOrFail();
+        $this->assertSame('rejected', $version->status);
+        $this->assertSame('abandon_page', $version->result['page_assessment']['training_decision']);
+    }
+
+    public function test_three_identical_browser_outcomes_stop_only_the_current_page(): void
+    {
+        AppSetting::put('ai.gallery_training_max_rounds', '10');
+        ProductGalleryRecipeTrainerAgent::fake(fn (): array => [
+            'gallery_present' => true,
+            'content_confirmed_product' => true,
+            'expected_image_count' => 4,
+            'expected_count_evidence' => 'Four items were estimated.',
+            'actions' => [],
+            'pre_click_selectors' => [],
+            'collect_selectors' => ['.gallery img'],
+            'thumbnail_selectors' => [],
+            'open_selectors' => [],
+            'next_selectors' => [],
+            'attributes' => ['src'],
+            'max_thumbnail_clicks' => 0,
+            'max_next_clicks' => 0,
+            'wait_after_click_ms' => 150,
+            'confidence' => 0.7,
+            'reason' => 'Try the candidate gallery.',
+        ])->preventStrayPrompts();
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('scout')->once()->andReturn([
+                'scout' => [
+                    'title' => 'Unclear product page',
+                    'fragments' => ['<div class=gallery></div>'],
+                    'interactive_controls' => [],
+                    'network_image_samples' => [],
+                    'access_gate' => false,
+                    'rate_limited' => false,
+                ],
+                'diagnostics' => [],
+            ]);
+            $mock->shouldReceive('executeRecipe')->times(3)->andReturn([
+                'images' => [],
+                'diagnostics' => [],
+                'action_trace' => [],
+                'post_interaction_scout' => [],
+            ]);
+        });
+
+        $this->assertSame([], app(ProductGalleryRecipeTrainer::class)->train(
+            'https://unclear.example/product',
+            force: true,
+        ));
+        $recipe = ProductGalleryRecipe::query()->where('domain', 'unclear.example')->firstOrFail();
+        $this->assertSame(1, $recipe->failure_count);
+        $this->assertDatabaseMissing('product_source_page_rules', ['domain' => 'unclear.example']);
+        $version = $recipe->versions()->latest('id')->firstOrFail();
+        $this->assertSame('page_stalled', $version->result['failure_kind']);
     }
 }

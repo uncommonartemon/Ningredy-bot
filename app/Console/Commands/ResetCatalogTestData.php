@@ -43,6 +43,7 @@ class ResetCatalogTestData extends Command
         Product::query()->eachById(fn (Product $product) => $product->delete());
 
         DB::transaction(function (): void {
+            $this->deleteIfPresent('product_source_page_rules');
             $this->deleteIfPresent('product_gallery_recipe_versions');
             $this->deleteIfPresent('product_gallery_recipes');
             $this->deleteIfPresent('product_source_stats');

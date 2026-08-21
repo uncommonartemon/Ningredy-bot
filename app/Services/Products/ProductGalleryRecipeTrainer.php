@@ -29,6 +29,7 @@ class ProductGalleryRecipeTrainer
         private readonly ProductSearchCostBudget $costBudget,
         private readonly ProductGalleryRecipeResultValidator $resultValidator,
         private readonly ProductSourceAttemptRecorder $attempts,
+        private readonly ProductSourcePageRules $pageRules,
     ) {}
 
     public function train(
@@ -183,6 +184,41 @@ class ProductGalleryRecipeTrainer
                 $debug?->__invoke('step', 'AI-предфильтр пропущен: предыдущая статичная галерея дала слишком мало разных фото, принудительно кликаю по слайдеру.');
             }
 
+            if ($preflightDecision === 'unsuitable_page') {
+                $pageRule = $this->pageRules->rememberUnsuitable(
+                    $url,
+                    (string) ($preflight['page_kind'] ?? 'unknown'),
+                    (string) ($preflight['reason'] ?? ''),
+                    is_array($preflight['evidence'] ?? null) ? $preflight['evidence'] : [],
+                    (float) ($preflight['confidence'] ?? 0),
+                    $layoutFingerprint,
+                );
+
+                if ($pageRule) {
+                    $this->attempts->record([
+                        'telegram_update_id' => $telegramUpdateId,
+                        'product_gallery_recipe_version_id' => $version->id,
+                        'product_url' => $url,
+                        'actor' => 'ai',
+                        'phase' => 'gallery_preflight',
+                        'action' => 'assess_page_suitability',
+                        'status' => 'failed',
+                        'decision' => 'unsuitable_page',
+                        'output' => $preflight,
+                    ]);
+                    $debug?->__invoke(
+                        'warning',
+                        'Страница не является изолированной товарной карточкой с перспективной галереей; запоминаю URL и перехожу к следующему источнику: '.($preflight['reason'] ?? $url),
+                    );
+                } else {
+                    $preflightDecision = 'train_playwright';
+                    $debug?->__invoke(
+                        'warning',
+                        'AI предложил пропустить страницу без достаточных доказательств; решение не сохраняю и разрешаю Playwright проверить её.',
+                    );
+                }
+            }
+
             if ($preflightDecision === 'blocked') {
                 $failureKind = 'access_gate';
                 $this->recordFailure(
@@ -262,6 +298,9 @@ class ProductGalleryRecipeTrainer
                 || $this->costBudget->unmeasurable($telegramUpdateId);
             $previousCandidate = null;
             $previousCandidateResult = null;
+            $previousProgressSignature = null;
+            $stagnantRounds = 0;
+            $stalled = false;
 
             for ($attempt = 1; $safetyLimited ? $attempt <= $safetyRounds : true; $attempt++) {
                 $costExceeded = ! $safetyLimited && $this->costBudget->exceeded($telegramUpdateId);
@@ -377,6 +416,56 @@ class ProductGalleryRecipeTrainer
 
                 try {
                     $candidate = $this->validateRecipe($response->toArray());
+
+                    if (($candidate['training_decision'] ?? 'propose_recipe') === 'abandon_page') {
+                        $pageRule = $this->pageRules->rememberUnsuitable(
+                            $url,
+                            (string) ($candidate['page_kind'] ?? 'unknown'),
+                            (string) ($candidate['reason'] ?? ''),
+                            is_array($candidate['page_assessment_evidence'] ?? null)
+                                ? $candidate['page_assessment_evidence']
+                                : [],
+                            (float) ($candidate['confidence'] ?? 0),
+                            $layoutFingerprint,
+                        );
+
+                        if (! $pageRule) {
+                            throw new RuntimeException(
+                                'abandon_page requires a terminal page kind, confidence >= 0.85 and at least two concrete evidence items.',
+                            );
+                        }
+
+                        $this->attempts->record([
+                            'telegram_update_id' => $telegramUpdateId,
+                            'product_gallery_recipe_version_id' => $version->id,
+                            'product_url' => $url,
+                            'actor' => 'ai',
+                            'phase' => 'gallery_training',
+                            'action' => 'assess_page_suitability',
+                            'status' => 'failed',
+                            'decision' => 'unsuitable_page',
+                            'round' => $attempt,
+                            'output' => [
+                                'page_kind' => $candidate['page_kind'],
+                                'reason' => $candidate['reason'],
+                                'evidence' => $candidate['page_assessment_evidence'],
+                                'confidence' => $candidate['confidence'],
+                            ],
+                        ]);
+                        $version->update([
+                            'status' => 'rejected',
+                            'recipe' => $candidate,
+                            'result' => ['page_assessment' => $candidate],
+                            'error' => $candidate['reason'],
+                        ]);
+                        $debug?->__invoke(
+                            'warning',
+                            'После проверки DOM страница признана бесперспективной для товарной галереи; запоминаю URL и перехожу к следующему источнику: '.$candidate['reason'],
+                        );
+
+                        return [];
+                    }
+
                     $candidate = $this->makeRecipeReplayable(
                         $candidate,
                         $previousCandidate,
@@ -426,11 +515,29 @@ class ProductGalleryRecipeTrainer
                     'candidate_count' => count($candidateImages),
                     'validation' => $validation,
                     'diagnostics' => $candidateResult['diagnostics'] ?? [],
-                    'failure_kind' => $candidateResult['failure_kind'] ?? null,
+                    'failure_kind' => $stalled ? 'page_stalled' : ($candidateResult['failure_kind'] ?? null),
                     'error' => $candidateResult['error'] ?? null,
                 ];
 
                 if ($promote) {
+                    break;
+                }
+
+                $progressSignature = $this->trainingProgressSignature($candidateResult);
+                if ($previousProgressSignature !== null && hash_equals($previousProgressSignature, $progressSignature)) {
+                    $stagnantRounds++;
+                } else {
+                    $stagnantRounds = 0;
+                }
+                $previousProgressSignature = $progressSignature;
+
+                if ($stagnantRounds >= 2) {
+                    $stalled = true;
+                    $debug?->__invoke(
+                        'warning',
+                        'AI-тренер три раунда подряд не получил новых фото, нового DOM-состояния или успешного перехода; прекращаю этот URL и перехожу к следующему источнику.',
+                    );
+
                     break;
                 }
 
@@ -446,7 +553,7 @@ class ProductGalleryRecipeTrainer
                     'candidate_count' => count($candidateImages),
                     'previous_working_count' => count($oldImages),
                     'diagnostics' => $candidateResult['diagnostics'] ?? [],
-                    'failure_kind' => $candidateResult['failure_kind'] ?? null,
+                    'failure_kind' => $stalled ? 'page_stalled' : ($candidateResult['failure_kind'] ?? null),
                     'error' => $candidateResult['error'] ?? $validation['reason'],
                     'action_trace' => $candidateResult['action_trace'] ?? [],
                     // The initial page remains the replay starting point;
@@ -476,12 +583,16 @@ class ProductGalleryRecipeTrainer
                     'attempts' => $attempts,
                     'diagnostics' => $candidateResult['diagnostics'] ?? [],
                     'action_trace' => $candidateResult['action_trace'] ?? [],
-                    'failure_kind' => $candidateResult['failure_kind'] ?? null,
+                    'failure_kind' => $stalled ? 'page_stalled' : ($candidateResult['failure_kind'] ?? null),
                     'error' => $candidateResult['error'] ?? null,
                 ],
                 'score' => $score,
                 'promoted_at' => $promote ? now() : null,
-                'error' => $promote ? null : 'Все разрешённые раунды завершены без полной подтверждённой галереи.',
+                'error' => $promote
+                    ? null
+                    : ($stalled
+                        ? 'Обучение остановлено: три последовательных раунда не дали материального прогресса.'
+                        : 'Все разрешённые раунды завершены без полной подтверждённой галереи.'),
             ]);
 
             if (! $promote) {
@@ -679,6 +790,9 @@ class ProductGalleryRecipeTrainer
                 ),
             );
             $preflightResponse = $response->toArray();
+            $preflightResponse['page_kind'] = is_string($preflightResponse['page_kind'] ?? null)
+                ? $preflightResponse['page_kind']
+                : 'unknown';
             // The provider's own schema already caps these string lengths, but
             // that constraint isn't always honored - truncate defensively so an
             // overlong sentence doesn't throw away an otherwise-valid decision.
@@ -692,7 +806,8 @@ class ProductGalleryRecipeTrainer
             }
 
             $data = Validator::make($preflightResponse, [
-                'decision' => ['required', 'in:static_sufficient,train_playwright,no_gallery,blocked'],
+                'decision' => ['required', 'in:static_sufficient,train_playwright,no_gallery,unsuitable_page,blocked'],
+                'page_kind' => ['required', 'in:product_card,product_family_landing,editorial_marketing,listing_or_comparison,non_product_page,unknown'],
                 'gallery_likely' => ['required', 'boolean'],
                 'hidden_images_likely' => ['required', 'boolean'],
                 'interaction_required' => ['required', 'boolean'],
@@ -718,6 +833,7 @@ class ProductGalleryRecipeTrainer
             ]);
             $data = [
                 'decision' => count($payload['static_image_urls']) >= 2 ? 'static_sufficient' : 'no_gallery',
+                'page_kind' => 'unknown',
                 'gallery_likely' => false,
                 'hidden_images_likely' => false,
                 'interaction_required' => false,
@@ -857,6 +973,22 @@ class ProductGalleryRecipeTrainer
     /** @return array<string, mixed> */
     private function validateRecipe(array $data): array
     {
+        $data['training_decision'] = is_string($data['training_decision'] ?? null)
+            ? $data['training_decision']
+            : 'propose_recipe';
+        $data['page_kind'] = is_string($data['page_kind'] ?? null)
+            ? $data['page_kind']
+            : 'unknown';
+        $data['page_assessment_evidence'] = collect(
+            is_array($data['page_assessment_evidence'] ?? null)
+                ? $data['page_assessment_evidence']
+                : [],
+        )
+            ->filter(fn (mixed $item): bool => is_string($item) && trim($item) !== '')
+            ->map(fn (string $item): string => mb_substr(trim($item), 0, 500))
+            ->unique()
+            ->values()
+            ->all();
         // Stored recipes and test fixtures created before ordered actions
         // remain valid; new strict AI responses always include this field.
         $data['actions'] = is_array($data['actions'] ?? null) ? $data['actions'] : [];
@@ -967,7 +1099,7 @@ class ProductGalleryRecipeTrainer
             ->map(fn (string $attribute): string => strtolower(trim($attribute)))
             ->unique()->values()->all();
 
-        if ($data['collect_selectors'] === []) {
+        if (($data['training_decision'] ?? 'propose_recipe') === 'propose_recipe' && $data['collect_selectors'] === []) {
             throw new RuntimeException('AI не вернул безопасный селектор сбора изображений.');
         }
 
@@ -978,6 +1110,10 @@ class ProductGalleryRecipeTrainer
     private function recipeValidationRules(): array
     {
         return [
+            'training_decision' => ['required', 'in:propose_recipe,abandon_page'],
+            'page_kind' => ['required', 'in:product_card,product_family_landing,editorial_marketing,listing_or_comparison,non_product_page,unknown'],
+            'page_assessment_evidence' => ['present', 'array', 'max:8'],
+            'page_assessment_evidence.*' => ['string', 'max:500'],
             'gallery_present' => ['required', 'boolean'],
             'expected_image_count' => ['required', 'integer', 'between:0,20'],
             'expected_count_evidence' => ['required', 'string', 'max:500'],
@@ -1137,6 +1273,46 @@ class ProductGalleryRecipeTrainer
             ->unique()->take(5)->values()->all();
 
         return $candidate;
+    }
+
+    /**
+     * Fingerprint only observable progress, not the selector text proposed by
+     * the model. Trying three different selectors against the same unchanged
+     * page is still a stalled training session.
+     */
+    private function trainingProgressSignature(array $result): string
+    {
+        $images = collect(is_array($result['images'] ?? null) ? $result['images'] : [])
+            ->filter(fn (mixed $url): bool => is_string($url) && $url !== '')
+            ->map(fn (string $url): string => ProductImageStorage::imageAssetKey($url))
+            ->unique()
+            ->sort()
+            ->values()
+            ->all();
+        $postInteractionScout = is_array($result['post_interaction_scout'] ?? null)
+            ? $result['post_interaction_scout']
+            : [];
+        $layoutFingerprint = $postInteractionScout === []
+            ? null
+            : app(ProductPageLayoutFingerprint::class)->make($postInteractionScout);
+        $transitions = collect(is_array($result['action_trace'] ?? null) ? $result['action_trace'] : [])
+            ->filter(fn (mixed $action): bool => is_array($action) && ($action['clicked'] ?? false) === true)
+            ->map(fn (array $action): array => [
+                'changed' => (bool) ($action['changed'] ?? false),
+                'expanded_gallery' => (bool) ($action['expanded_gallery_visible_after'] ?? false),
+                'navigated' => (bool) ($action['navigated'] ?? false),
+                'gallery_count_after' => (int) ($action['gallery_count_after'] ?? 0),
+            ])
+            ->values()
+            ->all();
+
+        return hash('sha256', json_encode([
+            'images' => $images,
+            'layout_fingerprint' => $layoutFingerprint,
+            'transitions' => $transitions,
+            'observed_gallery_count' => (int) data_get($result, 'diagnostics.observed_gallery_count', 0),
+            'validated_candidates' => (int) data_get($result, 'diagnostics.validated_candidates', 0),
+        ], JSON_UNESCAPED_SLASHES) ?: '{}');
     }
 
     private function clampInt(mixed $value, int $min, int $max, int $default): int

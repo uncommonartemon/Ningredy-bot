@@ -49,6 +49,15 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput
             recent round, to avoid retrying a selector combination that already failed and to build on a
             combination that partially worked.
 
+            Reassess the page and the remaining prospect on every round, including after inspecting
+            previous_attempt_observation. Set training_decision to abandon_page when the evidence now shows
+            that this URL is a product-family landing page, editorial/marketing story, listing/comparison,
+            support/non-product page, or another page without an isolated same-product gallery that can be
+            trained. This is a terminal decision for this URL, not the whole domain. Cite at least two
+            concrete DOM/action/context facts in page_assessment_evidence and use high confidence. Never
+            abandon a real product card merely because one recipe failed, a viewer is layered, or a selector
+            needs correction. Otherwise set training_decision to propose_recipe and continue normally.
+
             Every candidate recipe is executed in a brand-new browser process starting at the original URL.
             No cookies, opened modal, selected tab, expanded viewer, scroll position, or DOM mutation from a
             previous round survives into the next execution. A later round may include
@@ -181,6 +190,19 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput
         ])->withoutAdditionalProperties())->required();
 
         return [
+            'training_decision' => $schema->string()->enum([
+                'propose_recipe', 'abandon_page',
+            ])->required(),
+            'page_kind' => $schema->string()->enum([
+                'product_card',
+                'product_family_landing',
+                'editorial_marketing',
+                'listing_or_comparison',
+                'non_product_page',
+                'unknown',
+            ])->required(),
+            'page_assessment_evidence' => $schema->array()->max(8)
+                ->items($schema->string()->max(500))->required(),
             'gallery_present' => $schema->boolean()->required(),
             'expected_image_count' => $schema->integer()->min(0)->max(20)->required(),
             'expected_count_evidence' => $schema->string()->max(500)->required(),

@@ -38,7 +38,17 @@ class ProductGalleryPreflightAgent implements Agent, HasStructuredOutput
             - train_playwright: there is concrete evidence of a hidden/incomplete gallery, slider, zoom,
               modal, thumbnails, next controls, x-of-N media, lazy-loaded images, or layered interaction;
             - no_gallery: no credible multi-image product gallery evidence exists;
+            - unsuitable_page: the URL is a product-family landing page, editorial/marketing story,
+              listing/comparison page, support page, or another page that is not an isolated product
+              card and has no isolated same-product gallery worth training;
             - blocked: the supplied page is an access gate, CAPTCHA, WAF, login wall, or unusable shell.
+
+            Classify page_kind independently of the decision. A page mentioning the requested product is
+            not automatically a product_card: repeated configurations with separate prices/SKUs, long
+            feature-story sections, collection navigation, or several independent promotional carousels
+            are evidence of a family/marketing page. Use unsuitable_page only with concrete surrounding
+            evidence and high confidence. Do not use it merely because a valid product card has an unusual
+            gallery or because one interaction is required.
 
             Ignore videos and 360-degree media completely. Count only photographs; also ignore color
             swatches, recommendations, logos, icons, and unrelated page images. Do not call a generic class name proof by itself:
@@ -59,6 +69,14 @@ class ProductGalleryPreflightAgent implements Agent, HasStructuredOutput
     {
         return [
             'decision' => $schema->string()->max(40)->required(),
+            'page_kind' => $schema->string()->enum([
+                'product_card',
+                'product_family_landing',
+                'editorial_marketing',
+                'listing_or_comparison',
+                'non_product_page',
+                'unknown',
+            ])->required(),
             'gallery_likely' => $schema->boolean()->required(),
             'hidden_images_likely' => $schema->boolean()->required(),
             'interaction_required' => $schema->boolean()->required(),

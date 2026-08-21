@@ -5,6 +5,7 @@ namespace Tests\Unit;
 use App\Services\Ai\AiSettings;
 use App\Services\Products\BrowserProductGalleryExtractor;
 use App\Services\Products\ProductImageResolver;
+use App\Services\Products\ProductSourcePageRules;
 use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
 
@@ -18,6 +19,10 @@ class ProductImageResolverTest extends TestCase
             ->shouldReceive('galleryBrowserMode')
             ->byDefault()
             ->andReturn(AiSettings::GALLERY_BROWSER_AUTO);
+        $this->mock(ProductSourcePageRules::class)
+            ->shouldReceive('activeRuleFor')
+            ->byDefault()
+            ->andReturnNull();
     }
 
     public function test_it_extracts_absolute_and_relative_product_metadata_images(): void

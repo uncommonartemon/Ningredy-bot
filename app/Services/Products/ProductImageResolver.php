@@ -24,6 +24,7 @@ class ProductImageResolver
         private readonly ProductSearchTimeBudget $timeBudget,
         private readonly ProductSearchCostBudget $costBudget,
         private readonly ProductSourceAttemptRecorder $attempts,
+        private readonly ProductSourcePageRules $pageRules,
     ) {}
 
     /** @var array<int, true> */
@@ -53,6 +54,28 @@ class ProductImageResolver
             'final_url' => $url,
             'identity_evidence' => '',
         ];
+
+        if ($url !== '' && ($pageRule = $this->pageRules->activeRuleFor($url))) {
+            $this->pageRules->recordHit($pageRule);
+            $result['blocked'] = true;
+            $result['reason'] = 'known_unsuitable_page';
+            $this->attempts->record([
+                'telegram_update_id' => $telegramUpdateId,
+                'product_url' => $url,
+                'actor' => 'http_preflight',
+                'phase' => 'gallery_preflight',
+                'action' => 'apply_page_rule',
+                'status' => 'failed',
+                'decision' => 'known_unsuitable_page',
+                'output' => [
+                    'page_kind' => $pageRule->page_kind,
+                    'reason' => $pageRule->reason,
+                    'confidence' => $pageRule->confidence,
+                ],
+            ]);
+
+            return $result;
+        }
 
         if ($url === '' || ! $this->isPublicUrl($url) || $this->looksLikeNonHtmlDocumentUrl($url)) {
             return [...$result, 'unavailable' => true, 'reason' => 'invalid_or_non_html_url'];
@@ -116,6 +139,7 @@ class ProductImageResolver
                 'active_recipe' => $result['active_recipe'],
                 'static_count' => count($result['static_image_urls']),
                 'identity_evidence_present' => $result['identity_evidence'] !== '',
+                'page_rule' => $result['reason'] === 'known_unsuitable_page',
             ],
         ]);
 
@@ -165,6 +189,30 @@ class ProductImageResolver
             if ($this->looksLikeNonHtmlDocumentUrl($sourceUrl)) {
                 $debug?->__invoke('warning', 'Источник пропущен: ссылка ведёт на документ, а не на HTML-карточку товара.');
                 $this->metrics->recordExtraction($sourceUrl, 0, 'non_html');
+
+                continue;
+            }
+
+            if ($pageRule = $this->pageRules->activeRuleFor($sourceUrl)) {
+                $this->pageRules->recordHit($pageRule);
+                $debug?->__invoke(
+                    'warning',
+                    'Страница ранее подтверждена как непригодная товарная карточка; пропускаю URL и перехожу к следующему источнику: '.$sourceUrl,
+                );
+                $this->attempts->record([
+                    'telegram_update_id' => $telegramUpdateId,
+                    'product_url' => $sourceUrl,
+                    'actor' => 'orchestrator',
+                    'phase' => 'gallery_preflight',
+                    'action' => 'apply_page_rule',
+                    'status' => 'failed',
+                    'decision' => 'known_unsuitable_page',
+                    'output' => [
+                        'page_kind' => $pageRule->page_kind,
+                        'reason' => $pageRule->reason,
+                        'confidence' => $pageRule->confidence,
+                    ],
+                ]);
 
                 continue;
             }
