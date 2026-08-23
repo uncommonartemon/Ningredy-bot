@@ -279,6 +279,7 @@ class ProductImageResolver
                 $browserContext = [
                     'static_image_urls' => $browserSeedImages,
                     'minimum_verified_images' => max(1, (int) ($source['_minimum_verified_images'] ?? 3)),
+                    'category_slug' => $source['_category_slug'] ?? null,
                 ];
                 $browserResult = $activeRecipeOnly
                     ? $this->browser->extract(

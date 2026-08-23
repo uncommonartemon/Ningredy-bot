@@ -3,6 +3,7 @@
 namespace App\Ai\Agents;
 
 use App\Ai\Tools\GetCandidateRejectionDetail;
+use App\Ai\Tools\GetProductSearchIntent;
 use App\Ai\Tools\GetRecipeHealth;
 use App\Ai\Tools\GetSourceAttemptHistory;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
@@ -23,7 +24,7 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
     public const int MAX_OUTPUT_TOKENS = 8_000;
 
     /**
-     * Both parameters are optional/nullable and default to null so that
+     * All parameters are optional/nullable and default to null so that
      * direct, unscoped construction (e.g. instructions() introspection in
      * tests) keeps working; tools() below is only populated once real
      * scoping context is supplied by the training loop.
@@ -31,6 +32,8 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
     public function __construct(
         private readonly ?string $url = null,
         private readonly ?string $domain = null,
+        private readonly ?int $telegramUpdateId = null,
+        private readonly ?string $categorySlug = null,
     ) {}
 
     public function tools(): iterable
@@ -43,6 +46,7 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
             new GetSourceAttemptHistory($this->url, $this->domain),
             new GetCandidateRejectionDetail($this->url, $this->domain),
             new GetRecipeHealth($this->domain),
+            new GetProductSearchIntent($this->telegramUpdateId, $this->categorySlug),
         ];
     }
 
@@ -83,9 +87,11 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
             GetSourceAttemptHistory (this search's own recorded decisions for this URL or domain),
             GetCandidateRejectionDetail (the real, already-computed reason a specific candidate image URL was
             rejected at download time - resolution, duplicate, unreachable - rather than a selector problem),
-            and GetRecipeHealth (this domain's own failure/retrain history, including whether it is already
-            close to being disabled). Call one only when you are genuinely unsure why a previous round failed;
-            do not call them speculatively every round.
+            GetRecipeHealth (this domain's own failure/retrain history, including whether it is already close
+            to being disabled), and GetProductSearchIntent (the operator's original Telegram request text and
+            this category's own search hint, when the DOM evidence alone is ambiguous about which variant,
+            color or configuration is wanted). Call one only when you are genuinely unsure why a previous
+            round failed or what is actually wanted; do not call them speculatively every round.
 
             Reassess the page and the remaining prospect on every round, including after inspecting
             previous_attempt_observation. Set training_decision to abandon_page when the evidence now shows

@@ -6,8 +6,8 @@ use App\Ai\Agents\ProductImageDiscoveryAgent;
 use App\Models\AiRun;
 use App\Models\Category;
 use App\Models\ProductDraft;
-use App\Services\Ai\AiSettings;
 use App\Services\Ai\AiErrorPresenter;
+use App\Services\Ai\AiSettings;
 use App\Services\Ai\OpenAiHeavyOperationGate;
 use App\Services\Ai\ProductSearchTimeBudget;
 use Illuminate\Support\Facades\Log;
@@ -471,6 +471,7 @@ class ProductImageCandidateDiscovery
                 continue;
             }
             $source['_minimum_verified_images'] = $minimumVerifiedImages;
+            $source['_category_slug'] = trim((string) $draft->category) !== '' ? trim((string) $draft->category) : null;
 
             $pageImages = $progress
                 ? $this->resolver->resolve(
@@ -573,15 +574,13 @@ class ProductImageCandidateDiscovery
                 'first_index' => $group->min('index'),
                 'gallery_rank' => $group->max('gallery_rank'),
                 'items' => $group
-                    ->sort(fn (array $left, array $right): int =>
-                        ($right['gallery_rank'] <=> $left['gallery_rank'])
+                    ->sort(fn (array $left, array $right): int => ($right['gallery_rank'] <=> $left['gallery_rank'])
                         ?: ($left['index'] <=> $right['index'])
                     )
                     ->take($perSourceLimit)
                     ->values(),
             ])
-            ->sort(fn (array $left, array $right): int =>
-                ($right['gallery_rank'] <=> $left['gallery_rank'])
+            ->sort(fn (array $left, array $right): int => ($right['gallery_rank'] <=> $left['gallery_rank'])
                 ?: ($left['first_index'] <=> $right['first_index'])
             )
             ->flatMap(fn (array $group) => $group['items'])

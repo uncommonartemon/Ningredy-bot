@@ -44,6 +44,8 @@ class ProductGalleryRecipeTrainer
         ?string $userHint = null,
     ): array {
         $host = strtolower((string) parse_url($url, PHP_URL_HOST));
+        $categorySlug = trim((string) ($context['category_slug'] ?? ''));
+        $categorySlug = $categorySlug !== '' ? $categorySlug : null;
 
         if ($host === '') {
             return [];
@@ -396,7 +398,7 @@ class ProductGalleryRecipeTrainer
                     $response = app(OpenAiHeavyOperationGate::class)->run(
                         $provider,
                         $recipeTimeout,
-                        fn () => ProductGalleryRecipeTrainerAgent::make($url, $host)->prompt(
+                        fn () => ProductGalleryRecipeTrainerAgent::make($url, $host, $telegramUpdateId, $categorySlug)->prompt(
                             $prompt ?: '{}',
                             provider: $provider,
                             model: $model,

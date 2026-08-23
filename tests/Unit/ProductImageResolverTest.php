@@ -133,6 +133,7 @@ class ProductImageResolverTest extends TestCase
             ->with('https://93.184.216.34/javascript-product', 5, null, null, [
                 'static_image_urls' => ['https://93.184.216.34/static-fallback.jpg'],
                 'minimum_verified_images' => 3,
+                'category_slug' => null,
             ], false)
             ->andReturn([
                 'https://93.184.216.34/browser-product-front.jpg',
@@ -167,7 +168,11 @@ class ProductImageResolverTest extends TestCase
                 5,
                 null,
                 null,
-                ['static_image_urls' => ['https://93.184.216.34/static.jpg'], 'minimum_verified_images' => 3],
+                [
+                    'static_image_urls' => ['https://93.184.216.34/static.jpg'],
+                    'minimum_verified_images' => 3,
+                    'category_slug' => null,
+                ],
                 false,
                 true,
             )
@@ -249,6 +254,7 @@ class ProductImageResolverTest extends TestCase
             ->with('https://93.184.216.34/headerless-product', 5, null, null, [
                 'static_image_urls' => ['https://93.184.216.34/hero.jpg'],
                 'minimum_verified_images' => 3,
+                'category_slug' => null,
             ], false)
             ->andReturn([]);
 
