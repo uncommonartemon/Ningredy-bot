@@ -94,6 +94,21 @@ class ContinueDraftGallerySearch implements ShouldQueue
             );
             $fresh = $draft->fresh('media');
 
+            // 'exhausted' means this cycle's sources came up short of the
+            // category's minimum but the request's own time/cost budget
+            // (shared across cycles via the same telegram_update_id) isn't
+            // actually spent - keep chaining automatically instead of
+            // leaving the user to press "продолжить" again for every round.
+            // cost_budget/time_budget means that allowance really is gone,
+            // so this is where the chain has to stop and report back.
+            if ($fresh->gallery_status !== 'complete' && $fresh->gallery_search_stop_reason === 'exhausted') {
+                $progress->info('Все источники этого цикла проверены без результата; автоматически продолжаю новым циклом.');
+                self::dispatch($this->draftId, $this->chatId, $this->telegramUpdateId, $this->expectedDraftTelegramUpdateId)
+                    ->afterCommit();
+
+                return;
+            }
+
             if ($stored > 0) {
                 $progress->done("Продолжение завершено: галерея обновлена, фото: {$fresh->media->count()}");
             } else {

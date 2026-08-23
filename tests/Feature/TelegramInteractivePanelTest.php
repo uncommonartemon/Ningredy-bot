@@ -12,6 +12,7 @@ use App\Models\Product;
 use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
 use App\Services\Telegram\DraftTelegramMessageLifecycle;
+use App\Services\Telegram\DraftTelegramPresenter;
 use App\Services\Telegram\TelegramClient;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request as ClientRequest;
@@ -623,7 +624,7 @@ class TelegramInteractivePanelTest extends TestCase
         $draft = $this->pendingDraftWithMedia();
         $draft->update(['gallery_search_stop_reason' => 'cost_budget']);
 
-        app(\App\Services\Telegram\DraftTelegramPresenter::class)
+        app(DraftTelegramPresenter::class)
             ->sendControls(app(TelegramClient::class), '98765', $draft);
 
         Http::assertSent(function (ClientRequest $request) use ($draft): bool {
@@ -646,7 +647,7 @@ class TelegramInteractivePanelTest extends TestCase
         $draft->media()->delete();
         $draft->update(['gallery_search_stop_reason' => 'time_budget']);
 
-        app(\App\Services\Telegram\DraftTelegramPresenter::class)
+        app(DraftTelegramPresenter::class)
             ->sendControls(app(TelegramClient::class), '98765', $draft->fresh());
 
         Http::assertSent(function (ClientRequest $request) use ($draft): bool {
@@ -693,8 +694,7 @@ class TelegramInteractivePanelTest extends TestCase
             ],
         ], $this->headers())->assertOk();
 
-        Queue::assertPushed(ContinueDraftGallerySearch::class, fn (ContinueDraftGallerySearch $job): bool =>
-            $job->draftId === $draft->id && $job->chatId === '98765'
+        Queue::assertPushed(ContinueDraftGallerySearch::class, fn (ContinueDraftGallerySearch $job): bool => $job->draftId === $draft->id && $job->chatId === '98765'
         );
         $fresh = $draft->fresh();
         $this->assertSame([], $fresh->telegram_review_message_ids);
@@ -748,7 +748,7 @@ class TelegramInteractivePanelTest extends TestCase
         $draft->media()->delete();
         $draft->update(['gallery_search_stop_reason' => 'exhausted']);
 
-        app(\App\Services\Telegram\DraftTelegramPresenter::class)
+        app(DraftTelegramPresenter::class)
             ->sendControls(app(TelegramClient::class), '98765', $draft->fresh());
 
         Http::assertSent(function (ClientRequest $request) use ($draft): bool {
@@ -787,8 +787,67 @@ class TelegramInteractivePanelTest extends TestCase
             ],
         ], $this->headers())->assertOk();
 
-        Queue::assertPushed(ContinueDraftGallerySearch::class, fn (ContinueDraftGallerySearch $job): bool =>
-            $job->draftId === $draft->id && $job->chatId === '98765'
+        Queue::assertPushed(ContinueDraftGallerySearch::class, fn (ContinueDraftGallerySearch $job): bool => $job->draftId === $draft->id && $job->chatId === '98765'
+        );
+    }
+
+    public function test_interrupted_draft_shows_paused_message_instead_of_ready(): void
+    {
+        // images_staged_at stays null only when the gallery search never
+        // finished a single pass at all (e.g. the owning job was killed by
+        // its own timeout mid-search) - as opposed to a normal run that
+        // finished and decided there was nothing left to try. This must
+        // never be shown to the user as "готов к добавлению" with 0 photos.
+        $draft = $this->pendingDraftWithMedia();
+        $draft->media()->delete();
+        $draft->forceFill(['images_staged_at' => null])->save();
+
+        app(DraftTelegramPresenter::class)
+            ->sendReview(app(TelegramClient::class), '98765', $draft->fresh());
+
+        Http::assertSent(function (ClientRequest $request) use ($draft): bool {
+            if (! str_ends_with($request->url(), '/sendMessage')) {
+                return false;
+            }
+
+            $text = (string) ($request['text'] ?? '');
+
+            return str_contains($text, "Черновик #{$draft->id}: поиск фотографий приостановлен")
+                && str_contains($text, 'прервался технической ошибкой')
+                && ! str_contains($text, 'готов к добавлению');
+        });
+    }
+
+    public function test_interrupted_draft_continue_search_callback_is_accepted(): void
+    {
+        // The button must stay usable even without a recognized stop reason
+        // set, so a stuck draft is never left with no manual way forward
+        // while automatic recovery is still pending.
+        Queue::fake();
+        $draft = $this->pendingDraftWithMedia();
+        $draft->media()->delete();
+        $draft->forceFill([
+            'images_staged_at' => null,
+            'gallery_search_stop_reason' => null,
+            'telegram_review_chat_id' => '98765',
+            'telegram_review_message_ids' => [81, 82, 83],
+            'telegram_control_message_ids' => [84],
+        ])->save();
+
+        $this->postJson('/api/telegram/webhook', [
+            'update_id' => 3403,
+            'callback_query' => [
+                'id' => 'callback-continue-search-interrupted',
+                'from' => ['id' => 12345, 'username' => 'admin'],
+                'data' => "draft:continue-search:{$draft->id}",
+                'message' => [
+                    'message_id' => 84,
+                    'chat' => ['id' => 98765],
+                ],
+            ],
+        ], $this->headers())->assertOk();
+
+        Queue::assertPushed(ContinueDraftGallerySearch::class, fn (ContinueDraftGallerySearch $job): bool => $job->draftId === $draft->id && $job->chatId === '98765'
         );
     }
 

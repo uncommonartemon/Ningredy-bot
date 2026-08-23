@@ -14,6 +14,7 @@ use App\Services\Telegram\DraftTelegramPresenter;
 use App\Services\Telegram\TelegramClient;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Queue;
 use Mockery\MockInterface;
 use Tests\TestCase;
 
@@ -91,8 +92,7 @@ class DraftGalleryJobsTest extends TestCase
         $images = $this->mock(ProductImageStorage::class);
         $images->shouldReceive('continueStage')
             ->once()
-            ->withArgs(fn (ProductDraft $argument, mixed $progress, int $updateId): bool =>
-                $argument->is($draft) && is_callable($progress) && $updateId === $continueUpdate->id
+            ->withArgs(fn (ProductDraft $argument, mixed $progress, int $updateId): bool => $argument->is($draft) && is_callable($progress) && $updateId === $continueUpdate->id
             )
             ->andReturn(0);
         $presenter = $this->mock(DraftTelegramPresenter::class);
@@ -109,6 +109,47 @@ class DraftGalleryJobsTest extends TestCase
             ->handle($images, $presenter, $telegram);
 
         $this->assertFalse(Cache::has("draft-gallery-continue:{$draft->id}:queued"));
+    }
+
+    public function test_continue_job_automatically_chains_another_cycle_when_still_exhausted(): void
+    {
+        // 'exhausted' means this cycle's sources came up short but the
+        // request's own budget isn't spent - the job must queue its own
+        // next cycle instead of reporting back and waiting for a button.
+        Queue::fake();
+        $draft = $this->draft();
+        $continueUpdate = TelegramUpdate::query()->create([
+            'update_id' => random_int(100_000, 999_999),
+            'telegram_user_id' => '1',
+            'chat_id' => '100',
+            'payload' => [],
+            'status' => 'completed',
+        ]);
+        $images = $this->mock(ProductImageStorage::class);
+        $images->shouldReceive('continueStage')
+            ->once()
+            ->andReturnUsing(function (ProductDraft $argument): int {
+                $argument->update([
+                    'gallery_status' => 'missing',
+                    'gallery_search_stop_reason' => 'exhausted',
+                ]);
+
+                return 0;
+            });
+        $presenter = $this->mock(DraftTelegramPresenter::class);
+        $presenter->shouldNotReceive('sendReview');
+        $telegram = $this->telegramMock();
+
+        (new ContinueDraftGallerySearch($draft->id, '100', $continueUpdate->id, $draft->telegram_update_id))
+            ->handle($images, $presenter, $telegram);
+
+        Queue::assertPushed(
+            ContinueDraftGallerySearch::class,
+            fn (ContinueDraftGallerySearch $job): bool => $job->draftId === $draft->id
+                && $job->chatId === '100'
+                && $job->telegramUpdateId === $continueUpdate->id
+                && $job->expectedDraftTelegramUpdateId === $draft->telegram_update_id,
+        );
     }
 
     public function test_queued_gallery_job_cannot_mutate_a_reused_draft_id(): void

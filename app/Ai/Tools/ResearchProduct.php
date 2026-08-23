@@ -4,6 +4,7 @@ namespace App\Ai\Tools;
 
 use App\Ai\Agents\ProductResearchAgent;
 use App\Ai\Tools\Concerns\RecordsOperations;
+use App\Jobs\ContinueDraftGallerySearch;
 use App\Models\AiRun;
 use App\Models\Category;
 use App\Models\Product;
@@ -423,9 +424,26 @@ class ResearchProduct implements Tool
                 && in_array($gallerySearchStopReason, ['cost_budget', 'time_budget', 'exhausted'], true);
 
             if ($galleryPaused) {
-                $progress->warning($gallerySearchStopReason === 'exhausted'
-                    ? 'Все известные и найденные AI-поиском источники проверены без результата. Черновик сохранён, поиск можно продолжить новым циклом.'
-                    : 'Лимит текущего запуска достигнут. Черновик сохранён, поиск можно продолжить отдельным бюджетным циклом.');
+                // 'exhausted' means every source tried so far came up empty,
+                // but the request's own time/cost budget (tracked per
+                // telegram_update_id) is not actually used up yet - a
+                // continuation cycle reusing the same update id still shares
+                // that same remaining allowance, so it can be queued right
+                // away instead of waiting for the user to press the button.
+                // cost_budget/time_budget means the allowance itself is
+                // gone, so only an explicit user action (fresh budget) can
+                // resume it.
+                if ($gallerySearchStopReason === 'exhausted') {
+                    $progress->warning('Все известные и найденные AI-поиском источники проверены без результата. Автоматически продолжаю поиск новым циклом.');
+                    ContinueDraftGallerySearch::dispatch(
+                        $draft->id,
+                        (string) $this->update->chat_id,
+                        $this->update->id,
+                        $this->update->id,
+                    )->afterCommit();
+                } else {
+                    $progress->warning('Лимит текущего запуска достигнут. Черновик сохранён, поиск можно продолжить отдельным бюджетным циклом.');
+                }
 
                 return $this->json([
                     ...$result,

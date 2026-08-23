@@ -910,7 +910,10 @@ class TelegramWebhookController extends Controller
             return;
         }
 
-        if (! in_array($draft->gallery_search_stop_reason, ['cost_budget', 'time_budget', 'exhausted'], true)) {
+        $resumable = in_array($draft->gallery_search_stop_reason, ['cost_budget', 'time_budget', 'exhausted'], true)
+            || $draft->images_staged_at === null;
+
+        if (! $resumable) {
             $this->telegram->answerCallbackQuery($callbackId, 'Поиск не был остановлен лимитом; продолжать нечего.');
 
             return;

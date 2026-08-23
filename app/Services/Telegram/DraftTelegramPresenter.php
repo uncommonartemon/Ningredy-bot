@@ -251,15 +251,22 @@ class DraftTelegramPresenter
             implode(' · ', array_filter([$draft->brand, $draft->model, $draft->color])),
         ]));
         $searchPaused = in_array($draft->gallery_search_stop_reason, ['cost_budget', 'time_budget', 'exhausted'], true);
+        // images_staged_at stays null only when staging never ran to its own
+        // completion at all - e.g. the job was killed by its hard timeout
+        // mid-search - as opposed to a normal run that finished and decided
+        // there was nothing left to try. Both must block "готов", not just
+        // the latter.
+        $searchInterrupted = $draft->images_staged_at === null;
 
-        if ($searchPaused && $galleryCount === 0) {
+        if (($searchPaused || $searchInterrupted) && $galleryCount === 0) {
             $header = "⏸ Черновик #{$draft->id}: поиск фотографий приостановлен\n"
                 ."🏷 {$draft->title}\n"
                 .implode(' / ', array_filter([$draft->brand, $draft->model, $draft->color]));
-            $usageFootnote = "\n".($draft->gallery_search_stop_reason === 'exhausted'
-                ? 'Все известные и найденные AI-поиском источники проверены без результата.'
-                : 'Лимит текущего запуска достигнут.')
-                .' Нажмите «Продолжить поиск фото», чтобы начать новый цикл.'.$usageFootnote;
+            $usageFootnote = "\n".match (true) {
+                $searchInterrupted => 'Поиск фотографий прервался технической ошибкой и не успел завершиться штатно. Будет повторён автоматически.',
+                $draft->gallery_search_stop_reason === 'exhausted' => 'Все известные и найденные AI-поиском источники проверены без результата. Продолжаю автоматически.',
+                default => 'Лимит текущего запуска достигнут. Нажмите «Продолжить поиск фото», чтобы начать новый цикл.',
+            }.$usageFootnote;
         }
 
         $fixed = $header."\n\n".$footer.$usageFootnote;

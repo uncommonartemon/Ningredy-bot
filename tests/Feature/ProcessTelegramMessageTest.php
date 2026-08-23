@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Ai\Agents\ProductResearchAgent;
 use App\Ai\Agents\ServerAssistantAgent;
 use App\Ai\Tools\ResearchProduct;
+use App\Jobs\ContinueDraftGallerySearch;
 use App\Jobs\ProcessTelegramMessage;
 use App\Models\AiRun;
 use App\Models\AttributeDefinition;
@@ -26,6 +27,7 @@ use Illuminate\Http\Client\Request as HttpRequest;
 use Illuminate\Http\Client\RequestException;
 use Illuminate\Http\Client\Response as HttpClientResponse;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Storage;
 use Laravel\Ai\Tools\Request;
 use Tests\TestCase;
@@ -747,6 +749,7 @@ class ProcessTelegramMessageTest extends TestCase
 
     public function test_research_keeps_a_zero_photo_draft_pending_when_gallery_budget_stops(): void
     {
+        Queue::fake();
         ProductResearchAgent::fake([[
             'status' => 'found',
             'title' => 'Razer Blade 14 RTX 5070',
@@ -795,15 +798,22 @@ class ProcessTelegramMessageTest extends TestCase
         $this->assertSame('pending_review', $draft->status);
         $this->assertSame('cost_budget', $draft->gallery_search_stop_reason);
         $this->assertNull($draft->reviewed_at);
+        // The money/time allowance for this request is genuinely gone -
+        // only an explicit user action (fresh budget) can resume it, so no
+        // automatic continuation should be queued.
+        Queue::assertNotPushed(ContinueDraftGallerySearch::class);
     }
 
-    public function test_research_keeps_a_zero_photo_draft_pending_when_every_source_is_exhausted_without_a_budget_cause(): void
+    public function test_research_automatically_continues_a_zero_photo_draft_when_every_source_is_exhausted_without_a_budget_cause(): void
     {
         // Only the money/time budget is allowed to end a search for good.
         // Trying every known and AI-discovered source and finding nothing,
         // with neither limit actually hit, must stay resumable exactly like
         // a budget/time stop instead of the draft being marked "rejected"
-        // with no way for the user to try again.
+        // with no way for the user to try again - and since the request's
+        // own budget isn't spent yet, continuation is queued automatically
+        // instead of waiting for the user to press a button.
+        Queue::fake();
         ProductResearchAgent::fake([[
             'status' => 'found',
             'title' => 'Razer Blade 14 RTX 5070',
@@ -852,6 +862,13 @@ class ProcessTelegramMessageTest extends TestCase
         $this->assertSame('pending_review', $draft->status);
         $this->assertSame('exhausted', $draft->gallery_search_stop_reason);
         $this->assertNull($draft->reviewed_at);
+        Queue::assertPushed(
+            ContinueDraftGallerySearch::class,
+            fn (ContinueDraftGallerySearch $job): bool => $job->draftId === $draft->id
+                && $job->chatId === (string) $update->chat_id
+                && $job->telegramUpdateId === $update->id
+                && $job->expectedDraftTelegramUpdateId === $update->id,
+        );
     }
 
     public function test_research_tool_never_returns_a_clarification_question_after_web_search(): void
