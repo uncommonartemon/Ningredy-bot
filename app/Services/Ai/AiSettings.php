@@ -190,6 +190,27 @@ class AiSettings
             : filter_var($value, FILTER_VALIDATE_BOOLEAN);
     }
 
+    /**
+     * Off by default: this gates the trainer agent's write tools
+     * (AbandonGalleryTrainingAttempt, FlagDomainRecipeNote) - a tool the
+     * model never sees can never be called, so this is the cheapest point
+     * to roll the capability out gradually and to disable it instantly,
+     * without a deploy, if it starts making bad calls.
+     */
+    public function galleryAgentWriteToolsEnabled(): bool
+    {
+        $value = AppSetting::valueFor('ai.gallery_agent_write_tools_enabled');
+
+        return $value === null
+            ? false
+            : filter_var($value, FILTER_VALIDATE_BOOLEAN);
+    }
+
+    public function saveGalleryAgentWriteToolsEnabled(bool $enabled): void
+    {
+        AppSetting::put('ai.gallery_agent_write_tools_enabled', $enabled ? '1' : '0');
+    }
+
     public function saveGalleryPreferPlaywrightFirst(bool $enabled): void
     {
         AppSetting::put('ai.gallery_prefer_playwright_first', $enabled ? '1' : '0');

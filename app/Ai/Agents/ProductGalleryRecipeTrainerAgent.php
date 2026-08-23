@@ -2,10 +2,18 @@
 
 namespace App\Ai\Agents;
 
+use App\Ai\Tools\AbandonGalleryTrainingAttempt;
+use App\Ai\Tools\FlagDomainRecipeNote;
 use App\Ai\Tools\GetCandidateRejectionDetail;
 use App\Ai\Tools\GetProductSearchIntent;
 use App\Ai\Tools\GetRecipeHealth;
 use App\Ai\Tools\GetSourceAttemptHistory;
+use App\Models\ProductGalleryRecipe;
+use App\Models\ProductGalleryRecipeVersion;
+use App\Models\ProductSourceDomain;
+use App\Models\TelegramUpdate;
+use App\Services\Ai\AiSettings;
+use App\Services\Products\GalleryTrainingAbandonSignal;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
 use Laravel\Ai\Attributes\MaxSteps;
 use Laravel\Ai\Attributes\MaxTokens;
@@ -27,13 +35,21 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
      * All parameters are optional/nullable and default to null so that
      * direct, unscoped construction (e.g. instructions() introspection in
      * tests) keeps working; tools() below is only populated once real
-     * scoping context is supplied by the training loop.
+     * scoping context is supplied by the training loop. The write-tool-only
+     * parameters (version/recipe/domainSettings/update/abandonSignal) are
+     * separate from url/domain/telegramUpdateId/categorySlug because only
+     * the former group is needed for the always-on read tools.
      */
     public function __construct(
         private readonly ?string $url = null,
         private readonly ?string $domain = null,
         private readonly ?int $telegramUpdateId = null,
         private readonly ?string $categorySlug = null,
+        private readonly ?ProductGalleryRecipeVersion $version = null,
+        private readonly ?ProductGalleryRecipe $recipe = null,
+        private readonly ?ProductSourceDomain $domainSettings = null,
+        private readonly ?TelegramUpdate $update = null,
+        private readonly ?GalleryTrainingAbandonSignal $abandonSignal = null,
     ) {}
 
     public function tools(): iterable
@@ -42,12 +58,30 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
             return [];
         }
 
-        return [
+        $tools = [
             new GetSourceAttemptHistory($this->url, $this->domain),
             new GetCandidateRejectionDetail($this->url, $this->domain),
             new GetRecipeHealth($this->domain),
             new GetProductSearchIntent($this->telegramUpdateId, $this->categorySlug),
         ];
+
+        if (app(AiSettings::class)->galleryAgentWriteToolsEnabled()) {
+            if ($this->version !== null && $this->recipe !== null && $this->abandonSignal !== null) {
+                $tools[] = new AbandonGalleryTrainingAttempt(
+                    $this->version,
+                    $this->recipe,
+                    $this->url,
+                    $this->update,
+                    $this->abandonSignal,
+                );
+            }
+
+            if ($this->domainSettings !== null) {
+                $tools[] = new FlagDomainRecipeNote($this->domainSettings, $this->update);
+            }
+        }
+
+        return $tools;
     }
 
     public function instructions(): Stringable|string
@@ -92,6 +126,15 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
             this category's own search hint, when the DOM evidence alone is ambiguous about which variant,
             color or configuration is wanted). Call one only when you are genuinely unsure why a previous
             round failed or what is actually wanted; do not call them speculatively every round.
+
+            You may also have two tools that take a real, audited action instead of only reading:
+            AbandonGalleryTrainingAttempt ends this whole training session for the current URL - use it only
+            with concrete evidence (from the read tools above or from repeated identical failures already
+            visible in attempt_history) that further rounds will not succeed, never merely because one round
+            failed and never as a first resort. FlagDomainRecipeNote appends a short, permanent note to this
+            domain's own persistent hint for future training sessions - use it to record a genuinely reusable,
+            non-obvious fact about this domain's gallery interaction (an unreliable selector, a control that
+            navigates away, a wrong-variant trap), not routine commentary on this one page.
 
             Reassess the page and the remaining prospect on every round, including after inspecting
             previous_attempt_observation. Set training_decision to abandon_page when the evidence now shows

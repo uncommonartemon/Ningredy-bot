@@ -54,6 +54,7 @@ class AiSettingsPage extends Page implements HasForms
             'gallery_browser_mode' => $settings->galleryBrowserMode(),
             'fallback_sources_enabled' => $settings->fallbackSourcesEnabled(),
             'gallery_prefer_playwright_first' => $settings->galleryPreferPlaywrightFirst(),
+            'gallery_agent_write_tools_enabled' => $settings->galleryAgentWriteToolsEnabled(),
             'max_search_cost_usd' => $settings->maxSearchCostUsd(),
             'search_max_seconds' => $settings->searchMaxSeconds(),
             'search_reserve_seconds' => $settings->searchReserveSeconds(),
@@ -147,6 +148,11 @@ class AiSettingsPage extends Page implements HasForms
                                             ->label('Обучать Playwright даже когда статики "достаточно"')
                                             ->helperText('Оценка предфильтра по количеству фото (например "8") может быть завышена миниатюрами/повторами. Включено (по умолчанию) — при найденной галерее рецепт всё равно обучается и результат проверяется Vision, а не только оценкой. Медленнее и дороже за поиск, зато рецепт сохраняется для повторного использования.')
                                             ->default(true)
+                                            ->inline(false),
+                                        Toggle::make('gallery_agent_write_tools_enabled')
+                                            ->label('Разрешить AI-тренеру самому решать, когда сдаваться, и оставлять заметки о домене')
+                                            ->helperText('Выключено по умолчанию. Агент получает два инструмента: прекратить обучение на URL с указанием причины (учитывается в статистике отказов рецепта так же, как обычный сбой) и добавить короткую заметку в постоянную подсказку домена. Каждый вызов фиксируется в журнале AI-операций. Выключите мгновенно, если агент начнёт принимать плохие решения.')
+                                            ->default(false)
                                             ->inline(false),
                                         Grid::make(2)
                                             ->schema([
@@ -354,6 +360,7 @@ class AiSettingsPage extends Page implements HasForms
         $settings->saveGalleryBrowserMode($data['gallery_browser_mode'] ?? null);
         $settings->saveFallbackSourcesEnabled((bool) ($data['fallback_sources_enabled'] ?? false));
         $settings->saveGalleryPreferPlaywrightFirst((bool) ($data['gallery_prefer_playwright_first'] ?? false));
+        $settings->saveGalleryAgentWriteToolsEnabled((bool) ($data['gallery_agent_write_tools_enabled'] ?? false));
         $settings->saveMaxSearchCostUsd(
             isset($data['max_search_cost_usd']) && $data['max_search_cost_usd'] !== ''
                 ? (float) $data['max_search_cost_usd']

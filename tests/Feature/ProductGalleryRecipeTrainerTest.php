@@ -4,11 +4,14 @@ namespace Tests\Feature;
 
 use App\Ai\Agents\ProductGalleryPreflightAgent;
 use App\Ai\Agents\ProductGalleryRecipeTrainerAgent;
+use App\Ai\Tools\AbandonGalleryTrainingAttempt;
+use App\Ai\Tools\FlagDomainRecipeNote;
 use App\Models\AppSetting;
 use App\Models\ProductGalleryRecipe;
 use App\Models\ProductGalleryRecipeVersion;
 use App\Models\ProductSourceDomain;
 use App\Services\Products\BrowserProductGalleryExtractor;
+use App\Services\Products\GalleryTrainingAbandonSignal;
 use App\Services\Products\ProductGalleryRecipeTrainer;
 use App\Services\Products\ProductImageResolver;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -1645,6 +1648,132 @@ class ProductGalleryRecipeTrainerTest extends TestCase
         $this->assertSame(
             'active',
             ProductGalleryRecipe::query()->where('domain', 'tool-aware.example')->firstOrFail()->status,
+        );
+    }
+
+    public function test_write_tools_are_only_offered_once_the_setting_is_enabled(): void
+    {
+        $recipe = ProductGalleryRecipe::query()->create([
+            'domain' => 'write-tools.example',
+            'path_pattern' => '*',
+            'status' => 'learning',
+        ]);
+        $version = ProductGalleryRecipeVersion::query()->create([
+            'product_gallery_recipe_id' => $recipe->id,
+            'domain' => 'write-tools.example',
+            'product_url' => 'https://write-tools.example/product',
+            'trigger' => 'automatic',
+            'status' => 'scouting',
+            'provider' => 'openai',
+            'model' => 'gpt-test',
+        ]);
+        $domainSettings = ProductSourceDomain::query()->create(['domain' => 'write-tools.example']);
+        $makeAgent = fn (): ProductGalleryRecipeTrainerAgent => new ProductGalleryRecipeTrainerAgent(
+            url: 'https://write-tools.example/product',
+            domain: 'write-tools.example',
+            version: $version,
+            recipe: $recipe,
+            domainSettings: $domainSettings,
+            abandonSignal: new GalleryTrainingAbandonSignal,
+        );
+
+        $toolClasses = collect($makeAgent()->tools())->map(fn (object $tool): string => $tool::class)->all();
+        $this->assertNotContains(AbandonGalleryTrainingAttempt::class, $toolClasses);
+        $this->assertNotContains(FlagDomainRecipeNote::class, $toolClasses);
+
+        AppSetting::put('ai.gallery_agent_write_tools_enabled', '1');
+
+        $toolClasses = collect($makeAgent()->tools())->map(fn (object $tool): string => $tool::class)->all();
+        $this->assertContains(AbandonGalleryTrainingAttempt::class, $toolClasses);
+        $this->assertContains(FlagDomainRecipeNote::class, $toolClasses);
+    }
+
+    public function test_the_agent_can_abandon_a_url_it_judges_unrecoverable(): void
+    {
+        AppSetting::put('ai.gallery_agent_write_tools_enabled', '1');
+        ProductGalleryRecipeTrainerAgent::fake([
+            new ToolCall(id: 'call_1', name: 'AbandonGalleryTrainingAttempt', arguments: [
+                'reason' => 'GetRecipeHealth shows 2 prior download-layer failures; this is the same pattern.',
+                'failure_kind' => 'agent_abandoned',
+            ]),
+            $this->validRecipeResponse(['actions' => [], 'open_selectors' => []]),
+        ])->preventStrayPrompts();
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('scout')->once()->andReturn([
+                'scout' => [
+                    'title' => 'Product page',
+                    'fragments' => ['<div class=gallery></div>'],
+                    'interactive_controls' => [],
+                    'network_image_samples' => [],
+                    'access_gate' => false,
+                    'rate_limited' => false,
+                ],
+                'diagnostics' => [],
+            ]);
+            $mock->shouldNotReceive('executeRecipe');
+        });
+
+        $images = app(ProductGalleryRecipeTrainer::class)->train(
+            'https://agent-abandons.example/product',
+            force: true,
+        );
+
+        $this->assertSame([], $images);
+        $recipe = ProductGalleryRecipe::query()->where('domain', 'agent-abandons.example')->firstOrFail();
+        $this->assertSame(1, $recipe->failure_count);
+        $this->assertSame('agent_abandoned', $recipe->last_failure_kind);
+        $version = $recipe->versions()->latest('id')->firstOrFail();
+        $this->assertSame('agent_abandoned', $version->result['failure_kind']);
+        $this->assertStringContainsString('GetRecipeHealth shows', $version->error);
+        $this->assertDatabaseHas('ai_operations', [
+            'tool' => 'AbandonGalleryTrainingAttempt',
+            'action' => 'abandon_training_attempt',
+            'status' => 'completed',
+        ]);
+    }
+
+    public function test_the_agent_can_leave_a_domain_note_without_ending_the_session(): void
+    {
+        AppSetting::put('ai.gallery_agent_write_tools_enabled', '1');
+        ProductGalleryRecipeTrainerAgent::fake([
+            new ToolCall(id: 'call_1', name: 'FlagDomainRecipeNote', arguments: [
+                'note' => 'The gallery tab navigates to a new page instead of expanding in place.',
+                'category' => 'navigation_hazard',
+            ]),
+            $this->validRecipeResponse(['actions' => [], 'open_selectors' => []]),
+        ])->preventStrayPrompts();
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('scout')->once()->andReturn([
+                'scout' => [
+                    'title' => 'Product page',
+                    'fragments' => ['<div class=gallery></div>'],
+                    'interactive_controls' => [],
+                    'network_image_samples' => [],
+                    'access_gate' => false,
+                    'rate_limited' => false,
+                ],
+                'diagnostics' => [],
+            ]);
+            $mock->shouldReceive('executeRecipe')->once()->andReturn([
+                'images' => [
+                    'https://cdn.example/one.jpg',
+                    'https://cdn.example/two.jpg',
+                    'https://cdn.example/three.jpg',
+                ],
+                'action_trace' => [],
+            ]);
+        });
+
+        $images = app(ProductGalleryRecipeTrainer::class)->train(
+            'https://notes.example/product',
+            force: true,
+        );
+
+        $this->assertCount(3, $images);
+        $domainSettings = ProductSourceDomain::query()->where('domain', 'notes.example')->firstOrFail();
+        $this->assertStringContainsString(
+            'The gallery tab navigates to a new page instead of expanding in place.',
+            $domainSettings->agent_hint,
         );
     }
 }

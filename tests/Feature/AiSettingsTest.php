@@ -99,6 +99,19 @@ class AiSettingsTest extends TestCase
         $this->assertSame(AiSettings::GALLERY_BROWSER_AUTO, $settings->galleryBrowserMode());
     }
 
+    public function test_gallery_agent_write_tools_default_to_disabled_and_can_be_toggled(): void
+    {
+        $settings = app(AiSettings::class);
+
+        $this->assertFalse($settings->galleryAgentWriteToolsEnabled());
+
+        $settings->saveGalleryAgentWriteToolsEnabled(true);
+        $this->assertTrue($settings->galleryAgentWriteToolsEnabled());
+
+        $settings->saveGalleryAgentWriteToolsEnabled(false);
+        $this->assertFalse($settings->galleryAgentWriteToolsEnabled());
+    }
+
     public function test_search_limits_have_safe_defaults_and_are_clamped(): void
     {
         $settings = app(AiSettings::class);

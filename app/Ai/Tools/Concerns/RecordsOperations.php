@@ -11,7 +11,7 @@ use Throwable;
 trait RecordsOperations
 {
     protected function recordOperation(
-        TelegramUpdate $update,
+        ?TelegramUpdate $update,
         string $tool,
         string $action,
         array $payload,
@@ -20,7 +20,7 @@ trait RecordsOperations
         ?int $targetId = null,
     ): array {
         $key = hash('sha256', $this->json([
-            'update_id' => $update->id,
+            'update_id' => $update?->id,
             'tool' => $tool,
             'action' => $action,
             'target_type' => $targetType,
@@ -41,8 +41,8 @@ trait RecordsOperations
                 $update, $tool, $action, $payload, $callback, $targetType, $targetId, $key, $existing,
             ): array {
                 $operation = $existing ?: AiOperation::query()->create([
-                    'telegram_update_id' => $update->id,
-                    'telegram_user_id' => $update->telegram_user_id,
+                    'telegram_update_id' => $update?->id,
+                    'telegram_user_id' => $update?->telegram_user_id,
                     'tool' => $tool,
                     'action' => $action,
                     'target_type' => $targetType,

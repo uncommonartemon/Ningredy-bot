@@ -64,6 +64,16 @@ class AdminPanelAccessTest extends TestCase
             ->assertSee('Telegram webhook');
     }
 
+    public function test_admin_can_open_ai_settings_page(): void
+    {
+        $admin = User::factory()->create(['name' => 'ningredy', 'is_admin' => true]);
+
+        $this->actingAs($admin)
+            ->get('/admin/ai-settings-page')
+            ->assertOk()
+            ->assertSee('Разрешить AI-тренеру самому решать');
+    }
+
     public function test_admin_can_view_and_edit_a_product_with_media(): void
     {
         Storage::fake('public');

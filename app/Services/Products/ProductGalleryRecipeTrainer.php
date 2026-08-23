@@ -9,6 +9,7 @@ use App\Models\AiRun;
 use App\Models\ProductGalleryRecipe;
 use App\Models\ProductGalleryRecipeVersion;
 use App\Models\ProductSourceDomain;
+use App\Models\TelegramUpdate;
 use App\Services\Ai\AiSettings;
 use App\Services\Ai\OpenAiHeavyOperationGate;
 use App\Services\Ai\ProductSearchCostBudget;
@@ -46,6 +47,11 @@ class ProductGalleryRecipeTrainer
         $host = strtolower((string) parse_url($url, PHP_URL_HOST));
         $categorySlug = trim((string) ($context['category_slug'] ?? ''));
         $categorySlug = $categorySlug !== '' ? $categorySlug : null;
+        // Only used to attribute the trainer agent's own write-tool calls
+        // (see AbandonGalleryTrainingAttempt/FlagDomainRecipeNote) in the
+        // ai_operations audit trail; null whenever this run has no Telegram
+        // update at all (e.g. an admin-triggered TrainProductGalleryRecipe).
+        $update = $telegramUpdateId ? TelegramUpdate::query()->find($telegramUpdateId) : null;
 
         if ($host === '') {
             return [];
@@ -313,6 +319,8 @@ class ProductGalleryRecipeTrainer
             $stagnantRounds = 0;
             $stalled = false;
             $stuckOnValidation = false;
+            $agentAbandoned = false;
+            $agentAbandonReason = null;
 
             for ($attempt = 1; $safetyLimited ? $attempt <= $safetyRounds : true; $attempt++) {
                 $costExceeded = ! $safetyLimited && $this->costBudget->exceeded($telegramUpdateId);
@@ -389,6 +397,7 @@ class ProductGalleryRecipeTrainer
                     'prompt' => $prompt ?: '{}',
                     'started_at' => now(),
                 ]) : null;
+                $abandonSignal = new GalleryTrainingAbandonSignal;
 
                 try {
                     $recipeTimeout = $this->timeBudget->timeoutFor(
@@ -398,7 +407,17 @@ class ProductGalleryRecipeTrainer
                     $response = app(OpenAiHeavyOperationGate::class)->run(
                         $provider,
                         $recipeTimeout,
-                        fn () => ProductGalleryRecipeTrainerAgent::make($url, $host, $telegramUpdateId, $categorySlug)->prompt(
+                        fn () => ProductGalleryRecipeTrainerAgent::make(
+                            url: $url,
+                            domain: $host,
+                            telegramUpdateId: $telegramUpdateId,
+                            categorySlug: $categorySlug,
+                            version: $version,
+                            recipe: $recipe,
+                            domainSettings: $domainSettings,
+                            update: $update,
+                            abandonSignal: $abandonSignal,
+                        )->prompt(
                             $prompt ?: '{}',
                             provider: $provider,
                             model: $model,
@@ -424,6 +443,19 @@ class ProductGalleryRecipeTrainer
                     $feedback = ['error' => 'The previous attempt failed to produce a response: '.mb_substr($exception->getMessage(), 0, 300)];
 
                     continue;
+                }
+
+                if ($abandonSignal->abandoned) {
+                    $agentAbandoned = true;
+                    $agentAbandonReason = $abandonSignal->reason;
+                    $failureKind = $abandonSignal->failureKind ?? 'agent_abandoned';
+                    $debug?->__invoke(
+                        'warning',
+                        "AI-тренер: агент сам решил прекратить обучение на этом URL ({$agentAbandonReason}); перехожу к следующему источнику.",
+                    );
+                    $attempts[] = ['attempt' => $attempt, 'error' => 'agent_abandoned: '.$agentAbandonReason];
+
+                    break;
                 }
 
                 try {
@@ -627,22 +659,27 @@ class ProductGalleryRecipeTrainer
                     'attempts' => $attempts,
                     'diagnostics' => $candidateResult['diagnostics'] ?? [],
                     'action_trace' => $candidateResult['action_trace'] ?? [],
-                    'failure_kind' => $stalled ? 'page_stalled' : ($stuckOnValidation ? 'recipe_mismatch' : ($candidateResult['failure_kind'] ?? null)),
+                    'failure_kind' => match (true) {
+                        $stalled => 'page_stalled',
+                        $agentAbandoned => $failureKind,
+                        $stuckOnValidation => 'recipe_mismatch',
+                        default => $candidateResult['failure_kind'] ?? null,
+                    },
                     'error' => $candidateResult['error'] ?? null,
                 ],
                 'score' => $score,
                 'promoted_at' => $promote ? now() : null,
-                'error' => $promote
-                    ? null
-                    : ($stalled
-                        ? 'Обучение остановлено: три последовательных раунда не дали материального прогресса.'
-                        : ($stuckOnValidation
-                            ? 'Обучение остановлено: '.self::MAX_IDENTICAL_VALIDATION_FAILURES.' раунда подряд одна и та же ошибка валидации ('.implode(', ', $lastValidationSignature ?? []).').'
-                            : 'Все разрешённые раунды завершены без полной подтверждённой галереи.')),
+                'error' => match (true) {
+                    $promote => null,
+                    $stalled => 'Обучение остановлено: три последовательных раунда не дали материального прогресса.',
+                    $agentAbandoned => 'Обучение остановлено по решению AI-агента: '.($agentAbandonReason ?? ''),
+                    $stuckOnValidation => 'Обучение остановлено: '.self::MAX_IDENTICAL_VALIDATION_FAILURES.' раунда подряд одна и та же ошибка валидации ('.implode(', ', $lastValidationSignature ?? []).').',
+                    default => 'Все разрешённые раунды завершены без полной подтверждённой галереи.',
+                },
             ]);
 
             if (! $promote) {
-                $failureKind = 'recipe_mismatch';
+                $failureKind = $agentAbandoned ? $failureKind : 'recipe_mismatch';
                 $this->recordFailure(
                     $recipe,
                     new RuntimeException((string) $version->error),
@@ -1064,7 +1101,7 @@ class ProductGalleryRecipeTrainer
 
         $disableAfter = match ($kind) {
             'access_gate' => 1,
-            'recipe_mismatch', 'dom_unusable' => 2,
+            'recipe_mismatch', 'dom_unusable', 'agent_abandoned' => 2,
             'browser_timeout', 'browser_protocol' => 3,
             default => PHP_INT_MAX,
         };
@@ -1075,7 +1112,7 @@ class ProductGalleryRecipeTrainer
             'browser_timeout', 'browser_protocol' => now()->addMinutes(min(60, 2 ** min(5, $failureCount))),
             'browser_unavailable', 'browser_process' => now()->addMinutes(15),
             'ai_timeout', 'ai_rate_limited' => now()->addMinutes(15),
-            'recipe_mismatch', 'dom_unusable' => now()->addMinutes(10),
+            'recipe_mismatch', 'dom_unusable', 'agent_abandoned' => now()->addMinutes(10),
             default => now()->addMinutes(15),
         };
         $pausePlaywright = in_array($kind, [
@@ -1092,6 +1129,7 @@ class ProductGalleryRecipeTrainer
         $disableReason = match ($kind) {
             'access_gate' => 'CAPTCHA/WAF: повторный вход тем же Playwright с высокой вероятностью снова будет заблокирован.',
             'recipe_mismatch', 'dom_unusable' => 'две полные тренировки рецепта не смогли получить галерею.',
+            'agent_abandoned' => 'AI-тренер дважды сам решил, что дальнейшее обучение на этом URL бесперспективно.',
             'browser_timeout', 'browser_protocol' => 'три последовательные браузерные попытки завершились одинаковой ошибкой.',
             default => 'исчерпан безопасный бюджет повторных попыток.',
         };
