@@ -86,6 +86,10 @@ return [
         'max_bytes' => (int) env('TELEGRAM_VOICE_MAX_BYTES', 20971520),
     ],
 
+    'telegram_photo' => [
+        'max_bytes' => (int) env('TELEGRAM_PHOTO_MAX_BYTES', 10485760),
+    ],
+
     'ai_usage' => [
         'prices' => [
             'openai' => [

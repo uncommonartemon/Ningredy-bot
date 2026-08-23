@@ -10,6 +10,7 @@ use App\Jobs\ProcessTelegramMessage;
 use App\Jobs\RestageDraftGalleryPhotos;
 use App\Jobs\TopUpDraftGalleryPhotos;
 use App\Jobs\TrainDraftGalleryRecipe;
+use App\Jobs\TranscribeTelegramPhoto;
 use App\Jobs\TranscribeTelegramVoice;
 use App\Models\AiOperation;
 use App\Models\AppSetting;
@@ -58,6 +59,7 @@ class TelegramWebhookController extends Controller
             ?? data_get($payload, 'message.reply_to_message.caption')
         );
         $hasVoice = is_array(data_get($payload, 'message.voice'));
+        $hasPhoto = is_array(data_get($payload, 'message.photo'));
         $isAllowed = $this->isAllowed($telegramUserId);
 
         if (! $isCallback && is_string($text)) {
@@ -98,6 +100,12 @@ class TelegramWebhookController extends Controller
             TranscribeTelegramVoice::dispatch($update->id)->afterCommit();
 
             return response()->json(['ok' => true, 'voice' => true]);
+        }
+
+        if ($hasPhoto && $chatId !== null) {
+            TranscribeTelegramPhoto::dispatch($update->id)->afterCommit();
+
+            return response()->json(['ok' => true, 'photo' => true]);
         }
 
         if (! is_string($text) || trim($text) === '' || $chatId === null) {

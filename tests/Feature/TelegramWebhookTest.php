@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Jobs\ProcessTelegramMessage;
+use App\Jobs\TranscribeTelegramPhoto;
 use App\Jobs\TranscribeTelegramVoice;
 use App\Models\TelegramChatState;
 use App\Models\TelegramUpdate;
@@ -89,6 +90,24 @@ class TelegramWebhookTest extends TestCase
         ])->assertOk()->assertJson(['voice' => true]);
 
         Queue::assertPushed(TranscribeTelegramVoice::class, 1);
+        Queue::assertNotPushed(ProcessTelegramMessage::class);
+    }
+
+    public function test_it_queues_allowed_photo_messages_for_transcription(): void
+    {
+        Queue::fake();
+        $payload = $this->messagePayload(updateId: 1004);
+        unset($payload['message']['text']);
+        $payload['message']['photo'] = [
+            ['file_id' => 'photo-small', 'width' => 90, 'height' => 68, 'file_size' => 900],
+            ['file_id' => 'photo-large', 'width' => 800, 'height' => 600, 'file_size' => 90000],
+        ];
+
+        $this->postJson('/api/telegram/webhook', $payload, [
+            'X-Telegram-Bot-Api-Secret-Token' => 'test-secret',
+        ])->assertOk()->assertJson(['photo' => true]);
+
+        Queue::assertPushed(TranscribeTelegramPhoto::class, 1);
         Queue::assertNotPushed(ProcessTelegramMessage::class);
     }
 
