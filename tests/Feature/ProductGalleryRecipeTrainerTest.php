@@ -12,6 +12,8 @@ use App\Services\Products\BrowserProductGalleryExtractor;
 use App\Services\Products\ProductGalleryRecipeTrainer;
 use App\Services\Products\ProductImageResolver;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Carbon;
+use Laravel\Ai\Responses\Data\ToolCall;
 use Mockery\MockInterface;
 use Tests\TestCase;
 
@@ -539,6 +541,105 @@ class ProductGalleryRecipeTrainerTest extends TestCase
         $this->assertSame('learning', $recipe->status);
         $this->assertSame('rate_limited', $recipe->last_failure_kind);
         $this->assertTrue($recipe->retry_after->isFuture());
+    }
+
+    public function test_confirmed_download_failure_needs_the_full_threshold_before_degrading(): void
+    {
+        // A single blip must not force a retrain - only a repeated pattern
+        // (the recipe's own in-browser probe passes, but a later plain HTTP
+        // download of the exact same URL keeps failing) is treated as a
+        // real signal.
+        $recipe = ProductGalleryRecipe::query()->create([
+            'domain' => 'gated.example',
+            'path_pattern' => '*',
+            'status' => 'active',
+            'recipe' => ['content_confirmed_product' => true],
+        ]);
+        $trainer = app(ProductGalleryRecipeTrainer::class);
+
+        $this->assertFalse($trainer->recordConfirmedDownloadFailure('gated.example'));
+        $this->assertSame('active', $recipe->fresh()->status);
+        $this->assertSame(1, $recipe->fresh()->failure_count);
+
+        $this->assertFalse($trainer->recordConfirmedDownloadFailure('gated.example'));
+        $this->assertSame('active', $recipe->fresh()->status);
+        $this->assertSame(2, $recipe->fresh()->failure_count);
+
+        $this->assertTrue($trainer->recordConfirmedDownloadFailure('gated.example'));
+        $recipe->refresh();
+        $this->assertSame('learning', $recipe->status);
+        $this->assertSame('download_unreachable', $recipe->last_failure_kind);
+        $this->assertSame(3, $recipe->failure_count);
+    }
+
+    public function test_confirmed_download_success_resets_the_failure_counter(): void
+    {
+        $recipe = ProductGalleryRecipe::query()->create([
+            'domain' => 'flaky.example',
+            'path_pattern' => '*',
+            'status' => 'active',
+            'recipe' => ['content_confirmed_product' => true],
+            'failure_count' => 2,
+            'last_failure_kind' => 'download_unreachable',
+            'last_failure_at' => now(),
+        ]);
+
+        app(ProductGalleryRecipeTrainer::class)->recordConfirmedDownloadSuccess('flaky.example');
+
+        $this->assertSame(0, $recipe->fresh()->failure_count);
+    }
+
+    public function test_confirmed_download_failures_stop_degrading_after_the_cycle_cap(): void
+    {
+        // If retraining keeps "verifying" the recipe but real downloads
+        // still fail every time afterwards, the click sequence is not the
+        // problem (almost certainly a session/cookie-gated CDN) - no amount
+        // of retraining fixes that, so this must stop spending AI budget on
+        // it instead of retraining forever.
+        $recipe = ProductGalleryRecipe::query()->create([
+            'domain' => 'permanently-gated.example',
+            'path_pattern' => '*',
+            'status' => 'active',
+            'recipe' => ['content_confirmed_product' => true],
+        ]);
+        $trainer = app(ProductGalleryRecipeTrainer::class);
+
+        // Sequence detection compares last_failure_at/last_success_at, and
+        // this test's own writes to both happen within milliseconds of each
+        // other - freeze and step fake "now" by whole seconds so the order
+        // is deterministic instead of depending on real wall-clock timing
+        // surviving second-precision timestamp columns.
+        Carbon::setTestNow(now());
+
+        foreach (range(1, 3) as $cycle) {
+            $this->assertFalse($trainer->recordConfirmedDownloadFailure('permanently-gated.example'));
+            Carbon::setTestNow(now()->addSecond());
+            $this->assertFalse($trainer->recordConfirmedDownloadFailure('permanently-gated.example'));
+            Carbon::setTestNow(now()->addSecond());
+            $this->assertTrue($trainer->recordConfirmedDownloadFailure('permanently-gated.example'));
+            $recipe->refresh();
+            $this->assertSame('learning', $recipe->status, "cycle {$cycle} should degrade");
+
+            // Simulate a successful retrain: the recipe verifies again and
+            // goes back to active with a fresh last_success_at, starting a
+            // new failure sequence for the next cycle.
+            Carbon::setTestNow(now()->addSecond());
+            $recipe->update(['status' => 'active', 'last_success_at' => now()]);
+            Carbon::setTestNow(now()->addSecond());
+        }
+
+        // The cap (3 cycles) was already hit - a 4th cycle must not degrade
+        // again, however many times it fails.
+        $this->assertFalse($trainer->recordConfirmedDownloadFailure('permanently-gated.example'));
+        Carbon::setTestNow(now()->addSecond());
+        $this->assertFalse($trainer->recordConfirmedDownloadFailure('permanently-gated.example'));
+        Carbon::setTestNow(now()->addSecond());
+        $this->assertFalse($trainer->recordConfirmedDownloadFailure('permanently-gated.example'));
+        $recipe->refresh();
+        $this->assertSame('active', $recipe->status);
+        $this->assertStringContainsString('ручная проверка', (string) $recipe->last_error);
+
+        Carbon::setTestNow();
     }
 
     public function test_ai_gets_one_corrective_attempt_after_a_recipe_returns_no_gallery(): void
@@ -1352,5 +1453,198 @@ class ProductGalleryRecipeTrainerTest extends TestCase
         $this->assertDatabaseMissing('product_source_page_rules', ['domain' => 'unclear.example']);
         $version = $recipe->versions()->latest('id')->firstOrFail();
         $this->assertSame('page_stalled', $version->result['failure_kind']);
+    }
+
+    /** @return array<string, mixed> */
+    private function validRecipeResponse(array $overrides = []): array
+    {
+        return array_replace([
+            'gallery_present' => true,
+            'content_confirmed_product' => true,
+            'expected_image_count' => 3,
+            'expected_count_evidence' => 'Three gallery thumbnails are visible.',
+            'actions' => [[
+                'kind' => 'click',
+                'selector' => 'button[data-gallery]',
+                'index' => 0,
+                'limit' => 1,
+                'wait_after_ms' => 200,
+                'purpose' => 'Open the product media viewer.',
+            ]],
+            'pre_click_selectors' => [],
+            'collect_selectors' => ['[data-gallery-image]'],
+            'thumbnail_selectors' => [],
+            'open_selectors' => ['button[data-gallery]'],
+            'next_selectors' => [],
+            'attributes' => ['src'],
+            'max_thumbnail_clicks' => 3,
+            'max_next_clicks' => 0,
+            'wait_after_click_ms' => 150,
+            'confidence' => 0.9,
+            'reason' => 'Stable gallery controls found in page order.',
+        ], $overrides);
+    }
+
+    public function test_repeated_identical_validation_failures_stop_training_before_the_round_cap(): void
+    {
+        AppSetting::put('ai.gallery_training_max_rounds', '10');
+        $callCount = 0;
+        ProductGalleryRecipeTrainerAgent::fake(function () use (&$callCount): array {
+            $callCount++;
+
+            // A different out-of-range value every round (never literally
+            // repeated), but always the same hard constraint - proving the
+            // breaker tracks the failing RULE, not the specific bad value.
+            return $this->validRecipeResponse([
+                'actions' => [[
+                    'kind' => 'click',
+                    'selector' => 'button[data-gallery]',
+                    'index' => 40 + $callCount,
+                    'limit' => 1,
+                    'wait_after_ms' => 200,
+                    'purpose' => 'Open the product media viewer.',
+                ]],
+            ]);
+        })->preventStrayPrompts();
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('scout')->once()->andReturn([
+                'scout' => [
+                    'title' => 'Product page',
+                    'fragments' => ['<div class=gallery></div>'],
+                    'interactive_controls' => [],
+                    'network_image_samples' => [],
+                    'access_gate' => false,
+                    'rate_limited' => false,
+                ],
+                'diagnostics' => [],
+            ]);
+            $mock->shouldNotReceive('executeRecipe');
+        });
+
+        $images = app(ProductGalleryRecipeTrainer::class)->train(
+            'https://stuck.example/product',
+            force: true,
+        );
+
+        $this->assertSame([], $images);
+        $this->assertSame(3, $callCount, 'Training must abandon the URL after 3 identical validation failures instead of burning all 10 allowed rounds.');
+        $recipe = ProductGalleryRecipe::query()->where('domain', 'stuck.example')->firstOrFail();
+        $this->assertSame(1, $recipe->failure_count);
+        $this->assertSame('recipe_mismatch', $recipe->last_failure_kind);
+        $version = $recipe->versions()->latest('id')->firstOrFail();
+        $this->assertSame('rejected', $version->status);
+        $this->assertSame('recipe_mismatch', $version->result['failure_kind']);
+        $this->assertStringContainsString('actions.*.index', $version->error);
+    }
+
+    public function test_a_different_validation_failure_in_between_resets_the_identical_failure_counter(): void
+    {
+        AppSetting::put('ai.gallery_training_max_rounds', '10');
+        $callCount = 0;
+        // Rounds 1-2: bad action index (same rule). Round 3: a materially
+        // different rule (bad expected_image_count) interrupts the streak.
+        // Rounds 4-6: bad action index again, three IN A ROW this time -
+        // only then should the breaker fire, at round 6, not round 3.
+        ProductGalleryRecipeTrainerAgent::fake(function () use (&$callCount): array {
+            $callCount++;
+
+            if ($callCount === 3) {
+                return $this->validRecipeResponse(['expected_image_count' => 999]);
+            }
+
+            return $this->validRecipeResponse([
+                'actions' => [[
+                    'kind' => 'click',
+                    'selector' => 'button[data-gallery]',
+                    'index' => 40 + $callCount,
+                    'limit' => 1,
+                    'wait_after_ms' => 200,
+                    'purpose' => 'Open the product media viewer.',
+                ]],
+            ]);
+        })->preventStrayPrompts();
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('scout')->once()->andReturn([
+                'scout' => [
+                    'title' => 'Product page',
+                    'fragments' => ['<div class=gallery></div>'],
+                    'interactive_controls' => [],
+                    'network_image_samples' => [],
+                    'access_gate' => false,
+                    'rate_limited' => false,
+                ],
+                'diagnostics' => [],
+            ]);
+            $mock->shouldNotReceive('executeRecipe');
+        });
+
+        $images = app(ProductGalleryRecipeTrainer::class)->train(
+            'https://intermittent.example/product',
+            force: true,
+        );
+
+        $this->assertSame([], $images);
+        $this->assertSame(
+            6,
+            $callCount,
+            'A differently-shaped failure at round 3 must reset the streak, so the breaker only fires after 3 fresh identical failures (rounds 4-6).',
+        );
+        $version = ProductGalleryRecipe::query()->where('domain', 'intermittent.example')
+            ->firstOrFail()->versions()->latest('id')->firstOrFail();
+        $this->assertSame('recipe_mismatch', $version->result['failure_kind']);
+    }
+
+    public function test_the_trainer_agent_can_call_a_read_only_tool_before_returning_its_recipe(): void
+    {
+        // Proves the HasTools wiring end-to-end: the framework's real
+        // TextGenerationLoop (not faked) must see the ToolCall, resolve
+        // GetRecipeHealth by name among the tools ProductGalleryRecipeTrainerAgent
+        // actually supplies, execute its real handle() against this test's
+        // real database, then feed the *second* fake response back as the
+        // final structured recipe - a single train() round, transparent to
+        // the outer PHP loop, which only ever sees the eventual prompt() result.
+        ProductGalleryRecipe::query()->create([
+            'domain' => 'tool-aware.example',
+            'path_pattern' => '*',
+            'status' => 'learning',
+            'failure_count' => 1,
+            'last_failure_kind' => 'recipe_mismatch',
+        ]);
+        ProductGalleryRecipeTrainerAgent::fake([
+            new ToolCall(id: 'call_1', name: 'GetRecipeHealth', arguments: []),
+            $this->validRecipeResponse(['actions' => [], 'open_selectors' => []]),
+        ])->preventStrayPrompts();
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('scout')->once()->andReturn([
+                'scout' => [
+                    'title' => 'Product page',
+                    'fragments' => ['<div class=gallery></div>'],
+                    'interactive_controls' => [],
+                    'network_image_samples' => [],
+                    'access_gate' => false,
+                    'rate_limited' => false,
+                ],
+                'diagnostics' => [],
+            ]);
+            $mock->shouldReceive('executeRecipe')->once()->andReturn([
+                'images' => [
+                    'https://cdn.example/one.jpg',
+                    'https://cdn.example/two.jpg',
+                    'https://cdn.example/three.jpg',
+                ],
+                'action_trace' => [],
+            ]);
+        });
+
+        $images = app(ProductGalleryRecipeTrainer::class)->train(
+            'https://tool-aware.example/product',
+            force: true,
+        );
+
+        $this->assertCount(3, $images);
+        $this->assertSame(
+            'active',
+            ProductGalleryRecipe::query()->where('domain', 'tool-aware.example')->firstOrFail()->status,
+        );
     }
 }

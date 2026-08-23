@@ -283,6 +283,15 @@ class ProductGalleryRecipeTrainer
             $bestPartialImages = $oldImages;
             $bestPartialResult = [];
             $promote = false;
+            // A single blip in which value the AI guessed is normal
+            // correction; the same validation RULE failing repeatedly (a
+            // different out-of-range number is still the same mistake) means
+            // it is guessing around a hard constraint instead of fixing the
+            // actual approach (e.g. narrowing an overly broad selector).
+            // Stop burning rounds on it well before this session's cost/time
+            // budget would - see MAX_IDENTICAL_VALIDATION_FAILURES below.
+            $identicalValidationFailures = 0;
+            $lastValidationSignature = null;
             // Only the money/time budget is allowed to end a request for
             // good - a fixed round count is not a real reason to stop while
             // both are still available. galleryTrainingMaxRounds() becomes a
@@ -301,6 +310,7 @@ class ProductGalleryRecipeTrainer
             $previousProgressSignature = null;
             $stagnantRounds = 0;
             $stalled = false;
+            $stuckOnValidation = false;
 
             for ($attempt = 1; $safetyLimited ? $attempt <= $safetyRounds : true; $attempt++) {
                 $costExceeded = ! $safetyLimited && $this->costBudget->exceeded($telegramUpdateId);
@@ -386,7 +396,7 @@ class ProductGalleryRecipeTrainer
                     $response = app(OpenAiHeavyOperationGate::class)->run(
                         $provider,
                         $recipeTimeout,
-                        fn () => ProductGalleryRecipeTrainerAgent::make()->prompt(
+                        fn () => ProductGalleryRecipeTrainerAgent::make($url, $host)->prompt(
                             $prompt ?: '{}',
                             provider: $provider,
                             model: $model,
@@ -479,9 +489,41 @@ class ProductGalleryRecipeTrainer
                     $aiFacingMessage = $exception instanceof InvalidGalleryRecipeException
                         ? $exception->englishMessage
                         : $exception->getMessage();
+                    $signature = $exception instanceof InvalidGalleryRecipeException
+                        ? $exception->ruleSignature
+                        : [];
+
+                    if ($signature !== [] && $signature === $lastValidationSignature) {
+                        $identicalValidationFailures++;
+                    } else {
+                        $identicalValidationFailures = $signature !== [] ? 1 : 0;
+                    }
+                    $lastValidationSignature = $signature;
+
                     $debug?->__invoke('warning', "AI-тренер: раунд {$roundLabel} вернул невалидный рецепт ({$exception->getMessage()}), пробую следующий раунд.");
                     $attempts[] = ['attempt' => $attempt, 'error' => 'invalid_recipe: '.$aiFacingMessage];
-                    $feedback = ['error' => 'The previous attempt returned an invalid recipe: '.mb_substr($aiFacingMessage, 0, 300)];
+
+                    if ($identicalValidationFailures >= self::MAX_IDENTICAL_VALIDATION_FAILURES) {
+                        $debug?->__invoke(
+                            'warning',
+                            "AI-тренер: {$identicalValidationFailures} раунда подряд одна и та же ошибка валидации (".implode(', ', $signature).'); прекращаю этот URL и перехожу к следующему источнику.',
+                        );
+                        $failureKind = 'recipe_mismatch';
+                        $stuckOnValidation = true;
+
+                        break;
+                    }
+
+                    $feedback = [
+                        'error' => 'The previous attempt returned an invalid recipe: '.mb_substr($aiFacingMessage, 0, 300),
+                        ...($identicalValidationFailures >= self::MAX_IDENTICAL_VALIDATION_FAILURES - 1 ? [
+                            'stuck_warning' => 'This exact validation rule ('.implode(', ', $signature).') has now failed '
+                                .$identicalValidationFailures.' rounds in a row with a different value each time. Resubmitting '
+                                .'another value for the same field will not work - the constraint is hard. Change the underlying '
+                                .'approach instead (e.g. a more specific selector so the target element falls within range), or '
+                                .'this training session will be abandoned for this URL.',
+                        ] : []),
+                    ];
 
                     continue;
                 }
@@ -583,7 +625,7 @@ class ProductGalleryRecipeTrainer
                     'attempts' => $attempts,
                     'diagnostics' => $candidateResult['diagnostics'] ?? [],
                     'action_trace' => $candidateResult['action_trace'] ?? [],
-                    'failure_kind' => $stalled ? 'page_stalled' : ($candidateResult['failure_kind'] ?? null),
+                    'failure_kind' => $stalled ? 'page_stalled' : ($stuckOnValidation ? 'recipe_mismatch' : ($candidateResult['failure_kind'] ?? null)),
                     'error' => $candidateResult['error'] ?? null,
                 ],
                 'score' => $score,
@@ -592,7 +634,9 @@ class ProductGalleryRecipeTrainer
                     ? null
                     : ($stalled
                         ? 'Обучение остановлено: три последовательных раунда не дали материального прогресса.'
-                        : 'Все разрешённые раунды завершены без полной подтверждённой галереи.'),
+                        : ($stuckOnValidation
+                            ? 'Обучение остановлено: '.self::MAX_IDENTICAL_VALIDATION_FAILURES.' раунда подряд одна и та же ошибка валидации ('.implode(', ', $lastValidationSignature ?? []).').'
+                            : 'Все разрешённые раунды завершены без полной подтверждённой галереи.')),
             ]);
 
             if (! $promote) {
@@ -866,6 +910,126 @@ class ProductGalleryRecipeTrainer
         return $data;
     }
 
+    // A validation failure (schema-invalid recipe) that repeats on the exact
+    // same rule round after round means the AI is guessing around a hard
+    // constraint (e.g. a selector_index beyond the safety cap) rather than
+    // fixing the underlying approach - production seen: 11-15 rounds burnt
+    // on one unchanging rule before this existed. Nothing else bounds this
+    // loop by round count (gallery_training_max_rounds is a cost-budget-only
+    // safety net, not a real per-training-session cap), so without this a
+    // stuck loop can consume the whole search's time/cost budget alone.
+    private const MAX_IDENTICAL_VALIDATION_FAILURES = 3;
+
+    private const DOWNLOAD_FAILURE_KIND = 'download_unreachable';
+
+    // A single blip (transient network hiccup) must not force a retrain -
+    // only a repeated pattern across separate drafts/searches is treated as
+    // a real signal that the recipe's URLs are structurally unreachable
+    // outside a live browser session (e.g. referer/cookie-gated CDN).
+    private const DOWNLOAD_FAILURE_THRESHOLD = 3;
+
+    // If retraining keeps "verifying" the recipe (its own in-browser probe
+    // passes) and downloads still fail every time afterwards, the problem is
+    // almost certainly not the click sequence itself - no amount of
+    // retraining fixes a CDN that only serves images inside a live session.
+    // Stop spending AI budget on it after this many degrade cycles and leave
+    // it for manual review instead of retraining forever.
+    private const DOWNLOAD_DEGRADE_CYCLE_CAP = 3;
+
+    /**
+     * The recipe's own in-browser probe (see train()'s verification round)
+     * can load a candidate image successfully while a later plain HTTP
+     * download of the exact same URL fails - e.g. a CDN that only serves
+     * images inside a live browser session/referer. Nothing else reports
+     * that mismatch back here, so without this an "active" recipe would
+     * stay trusted and fail the same way on every future draft for this
+     * domain. Only a confirmed (Playwright-verified) candidate should ever
+     * reach this - a plain quality rejection (too small, etc.) says nothing
+     * about whether the recipe's URLs are actually reachable.
+     *
+     * @return bool True if this call just moved the recipe to "learning".
+     */
+    public function recordConfirmedDownloadFailure(string $domain, ?callable $debug = null): bool
+    {
+        $recipe = ProductGalleryRecipe::query()->where('domain', $domain)->where('status', 'active')->first();
+
+        if (! $recipe) {
+            return false;
+        }
+
+        $failedAfterLastSuccess = ! $recipe->last_success_at
+            || ! $recipe->last_failure_at
+            || $recipe->last_failure_at->greaterThan($recipe->last_success_at);
+        $sameFailureSequence = $failedAfterLastSuccess && $recipe->last_failure_kind === self::DOWNLOAD_FAILURE_KIND;
+        $failureCount = $sameFailureSequence ? max(0, (int) $recipe->failure_count) + 1 : 1;
+        $update = [
+            'failure_count' => $failureCount,
+            'last_failure_at' => now(),
+            'last_failure_kind' => self::DOWNLOAD_FAILURE_KIND,
+        ];
+
+        if ($failureCount < self::DOWNLOAD_FAILURE_THRESHOLD) {
+            $update['last_error'] = "Подтверждённое в браузере фото не скачалось обычным HTTP-запросом ({$failureCount}/"
+                .self::DOWNLOAD_FAILURE_THRESHOLD.').';
+            $recipe->update($update);
+
+            return false;
+        }
+
+        $cycleKey = "gallery-recipe-download-degrade-cycles:{$domain}";
+        $cycles = (int) Cache::get($cycleKey, 0);
+
+        if ($cycles >= self::DOWNLOAD_DEGRADE_CYCLE_CAP) {
+            $update['last_error'] = 'Повторные провалы скачивания после '.self::DOWNLOAD_DEGRADE_CYCLE_CAP.' циклов '
+                .'переобучения - дело, вероятно, не в самом рецепте (сессионная/cookie-защита CDN?). '
+                .'Автопереобучение по этой причине остановлено, нужна ручная проверка.';
+            $recipe->update($update);
+            $debug?->__invoke(
+                'warning',
+                "Домен {$domain}: авто-переобучение по скачиванию остановлено после ".self::DOWNLOAD_DEGRADE_CYCLE_CAP.' циклов - нужна ручная проверка.',
+            );
+
+            return false;
+        }
+
+        Cache::put($cycleKey, $cycles + 1, now()->addDays(7));
+        $update['status'] = 'learning';
+        $update['last_error'] = "Подтверждённые в браузере фото не скачались {$failureCount} раз(а) подряд обычным HTTP-запросом.";
+        $recipe->update($update);
+        $debug?->__invoke(
+            'warning',
+            "Домен {$domain}: подтверждённые фото не скачались {$failureCount} раз подряд - рецепт помечен на переобучение.",
+        );
+
+        return true;
+    }
+
+    /**
+     * A confirmed candidate that DID download successfully means this
+     * domain's images are currently reachable, so a prior run of blips
+     * shouldn't count toward the failure threshold above.
+     */
+    public function recordConfirmedDownloadSuccess(string $domain): void
+    {
+        ProductGalleryRecipe::query()
+            ->where('domain', $domain)
+            ->where('status', 'active')
+            ->where('last_failure_kind', self::DOWNLOAD_FAILURE_KIND)
+            ->where('failure_count', '>', 0)
+            ->update(['failure_count' => 0]);
+    }
+
+    /**
+     * Exposes recordConfirmedDownloadFailure()'s otherwise-private Cache
+     * counter for read-only inspection (e.g. by GetRecipeHealth), so a
+     * caller can tell "this recipe is on retrain cycle 2 of 3 because of a
+     * download-layer problem" without duplicating the Cache key elsewhere.
+     */
+    public function downloadDegradeCycles(string $domain): int
+    {
+        return (int) Cache::get("gallery-recipe-download-degrade-cycles:{$domain}", 0);
+    }
+
     private function recordFailure(
         ProductGalleryRecipe $recipe,
         Throwable $exception,
@@ -1050,6 +1214,7 @@ class ProductGalleryRecipeTrainer
             throw new InvalidGalleryRecipeException(
                 $exception->getMessage(),
                 $this->englishValidationMessage($data),
+                self::validationRuleSignature($exception),
             );
         }
 
@@ -1165,6 +1330,25 @@ class ProductGalleryRecipeTrainer
         } finally {
             app()->setLocale($locale);
         }
+    }
+
+    /**
+     * Identifies which rule(s) failed independent of which array index or
+     * value triggered them ("actions.1.index" and "actions.0.index" are the
+     * same recurring mistake, not two different ones) - this is what lets
+     * the training loop notice "stuck repeating this" instead of only ever
+     * seeing the message text change because the bad value itself changed.
+     *
+     * @return array<int, string>
+     */
+    private static function validationRuleSignature(ValidationException $exception): array
+    {
+        return collect($exception->validator->errors()->keys())
+            ->map(fn (string $key): string => preg_replace('/\.\d+(?=\.|$)/', '.*', $key) ?? $key)
+            ->unique()
+            ->sort()
+            ->values()
+            ->all();
     }
 
     /**

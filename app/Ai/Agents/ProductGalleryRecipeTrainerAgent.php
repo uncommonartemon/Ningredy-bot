@@ -2,19 +2,49 @@
 
 namespace App\Ai\Agents;
 
+use App\Ai\Tools\GetCandidateRejectionDetail;
+use App\Ai\Tools\GetRecipeHealth;
+use App\Ai\Tools\GetSourceAttemptHistory;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
+use Laravel\Ai\Attributes\MaxSteps;
 use Laravel\Ai\Attributes\MaxTokens;
 use Laravel\Ai\Contracts\Agent;
 use Laravel\Ai\Contracts\HasStructuredOutput;
+use Laravel\Ai\Contracts\HasTools;
 use Laravel\Ai\Promptable;
 use Stringable;
 
 #[MaxTokens(self::MAX_OUTPUT_TOKENS)]
-class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput
+#[MaxSteps(6)]
+class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, HasTools
 {
     use Promptable;
 
     public const int MAX_OUTPUT_TOKENS = 8_000;
+
+    /**
+     * Both parameters are optional/nullable and default to null so that
+     * direct, unscoped construction (e.g. instructions() introspection in
+     * tests) keeps working; tools() below is only populated once real
+     * scoping context is supplied by the training loop.
+     */
+    public function __construct(
+        private readonly ?string $url = null,
+        private readonly ?string $domain = null,
+    ) {}
+
+    public function tools(): iterable
+    {
+        if ($this->url === null || $this->domain === null) {
+            return [];
+        }
+
+        return [
+            new GetSourceAttemptHistory($this->url, $this->domain),
+            new GetCandidateRejectionDetail($this->url, $this->domain),
+            new GetRecipeHealth($this->domain),
+        ];
+    }
 
     public function instructions(): Stringable|string
     {
@@ -48,6 +78,14 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput
             tried and its outcome (image count, error, failure kind). Use the full history, not only the most
             recent round, to avoid retrying a selector combination that already failed and to build on a
             combination that partially worked.
+
+            You have read-only tools for cases where the supplied context is not enough to explain a failure:
+            GetSourceAttemptHistory (this search's own recorded decisions for this URL or domain),
+            GetCandidateRejectionDetail (the real, already-computed reason a specific candidate image URL was
+            rejected at download time - resolution, duplicate, unreachable - rather than a selector problem),
+            and GetRecipeHealth (this domain's own failure/retrain history, including whether it is already
+            close to being disabled). Call one only when you are genuinely unsure why a previous round failed;
+            do not call them speculatively every round.
 
             Reassess the page and the remaining prospect on every round, including after inspecting
             previous_attempt_observation. Set training_decision to abandon_page when the evidence now shows
