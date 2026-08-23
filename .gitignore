@@ -34,3 +34,6 @@ Thumbs.db
 .kimi-*
 *-scratch.*
 *-debug.*
+
+# Unrelated to this Laravel project (a Blender MCP server) - not part of Ningredy.
+/tools/blender-mcp
