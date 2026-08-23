@@ -414,7 +414,7 @@ class ProductImageResolver
     /**
      * @return array{bytes: string, source_url: string, mime_type: string, width: int, height: int, confirmed_gallery: bool, partial_gallery: bool}|null
      */
-    public function download(string $url, int $maxBytes = 8_388_608, ?string &$failureReason = null): ?array
+    public function download(string $url, int $maxBytes = 8_388_608, ?string &$failureReason = null, ?string $refererUrl = null): ?array
     {
         if (! $this->isPublicUrl($url)) {
             $failureReason = 'not_public_url';
@@ -423,7 +423,7 @@ class ProductImageResolver
         }
 
         try {
-            [$response, $finalUrl] = $this->fetch($url);
+            [$response, $finalUrl] = $this->fetch($url, $refererUrl);
             $bytes = $response->body();
 
             if ($bytes === '') {
@@ -479,18 +479,24 @@ class ProductImageResolver
     }
 
     /** @return array{Response, string} */
-    private function fetch(string $url): array
+    private function fetch(string $url, ?string $refererUrl = null): array
     {
         for ($redirects = 0; $redirects <= 3; $redirects++) {
             if (! $this->isPublicUrl($url)) {
                 throw new \RuntimeException('Blocked non-public product source URL.');
             }
 
+            // Many CDNs gate images by Referer against the *page* the photo
+            // was seen on (e.g. bhphotovideo.com), not the asset host itself
+            // (static.bhphoto.com) - a browser loading the product page sends
+            // the page's own URL as Referer, never the image origin. Falling
+            // back to the image's own origin when no page URL is known keeps
+            // prior behavior for callers that never had one to pass.
             $response = Http::withHeaders([
                 'User-Agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
                 'Accept' => 'text/html,application/xhtml+xml,image/avif,image/webp,image/*;q=0.8',
                 'Accept-Language' => 'en-US,en;q=0.9',
-                'Referer' => $this->origin($url).'/',
+                'Referer' => $refererUrl !== null && $refererUrl !== '' ? $refererUrl : $this->origin($url).'/',
                 'Cache-Control' => 'no-cache',
             ])->withoutRedirecting()
                 ->connectTimeout((int) config('product-images.http.connect_timeout', 3))

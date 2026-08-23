@@ -10,15 +10,117 @@ use App\Services\Ai\AiSettings;
 use App\Services\Ai\OpenAiHeavyOperationGate;
 use App\Services\Ai\ProductSearchTimeBudget;
 use GdImage;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Validator;
 use Laravel\Ai\Files\Image;
 use Throwable;
 
 class ProductImageVisionVerifier
 {
+    /**
+     * Best packaging candidate blocked solely by a category "no box photos"
+     * instruction, keyed by draft id. Held in memory only (never cached/
+     * serialized - it carries a live GdImage) so it never survives past the
+     * PHP process handling this draft's search cycle. Populated by
+     * selectWithPolicy() as candidates are reviewed and consumed exactly
+     * once via takeHintBlockedCandidate() as a last-resort fallback when a
+     * whole search cycle otherwise finds nothing.
+     *
+     * @var array<int, array<string, mixed>>
+     */
+    private array $hintBlockedCandidates = [];
+
     public function __construct(
         private readonly ProductIdentityMatcher $identityMatcher,
     ) {}
+
+    /**
+     * Returns and clears the best packaging photo seen for this draft that
+     * would otherwise have been accepted (matched identity/color/score) but
+     * was deterministically rejected only because the category instruction
+     * forbids packaging shots. Callers must use this strictly as a
+     * last-resort: only once every normal source/round has produced nothing
+     * usable, never to short-circuit the search early.
+     *
+     * @return array<string, mixed>|null
+     */
+    public function takeHintBlockedCandidate(ProductDraft $draft): ?array
+    {
+        $candidate = $this->hintBlockedCandidates[$draft->id] ?? null;
+        unset($this->hintBlockedCandidates[$draft->id]);
+
+        return $candidate;
+    }
+
+    private static function categoryHintForbidsPackaging(string $hint): bool
+    {
+        if ($hint === '') {
+            return false;
+        }
+
+        $normalized = mb_strtolower($hint);
+        $hasNegation = (bool) preg_match('/\b(без|не\s|нет|no|without)\b/u', $normalized);
+        $mentionsPackaging = (bool) preg_match('/(коробк|упаковк|\bbox\b|packaging)/u', $normalized);
+
+        return $hasNegation && $mentionsPackaging;
+    }
+
+    private function cloneGdImage(GdImage $image): GdImage
+    {
+        $width = imagesx($image);
+        $height = imagesy($image);
+        $clone = imagecreatetruecolor($width, $height);
+        imagealphablending($clone, false);
+        imagesavealpha($clone, true);
+        imagecopy($clone, $image, 0, 0, 0, 0, $width, $height);
+
+        return $clone;
+    }
+
+    /**
+     * @param  Collection<int, array<string, mixed>>  $qualifyingPackagingReviews
+     * @param  array<int, array<string, mixed>>  $candidates
+     */
+    private function rememberHintBlockedCandidate(
+        ProductDraft $draft,
+        $qualifyingPackagingReviews,
+        array $candidates,
+        string $categoryHint,
+        string $model,
+    ): void {
+        $best = $qualifyingPackagingReviews->sortByDesc('score')->first();
+
+        if ($best === null) {
+            return;
+        }
+
+        $existing = $this->hintBlockedCandidates[$draft->id] ?? null;
+
+        if ($existing !== null && ($existing['vision_score'] ?? 0) >= $best['score']) {
+            return;
+        }
+
+        $candidate = $candidates[$best['index'] - 1] ?? null;
+
+        if (! isset($candidate['image']) || ! $candidate['image'] instanceof GdImage) {
+            return;
+        }
+
+        if ($existing !== null && ($existing['image'] ?? null) instanceof GdImage) {
+            imagedestroy($existing['image']);
+        }
+
+        $this->hintBlockedCandidates[$draft->id] = [
+            ...$candidate,
+            'image' => $this->cloneGdImage($candidate['image']),
+            'verification_status' => 'hint_override',
+            'vision_kind' => $best['kind'],
+            'vision_score' => $best['score'],
+            'vision_reason' => 'Принято как крайний вариант: подсказка категории ("'.$categoryHint.'") запрещает такие фото, '
+                .'но по остальным источникам не нашлось ни одного подходящего без нарушения подсказки. '.$best['reason'],
+            'vision_model' => $model,
+        ];
+    }
 
     /**
      * @param  array<int, array<string, mixed>>  $candidates
@@ -101,7 +203,10 @@ class ProductImageVisionVerifier
         );
         $provider = $settings->providerFor('product_image_vision');
         $model = $settings->modelFor('product_image_vision');
-        $prompt = $this->prompt($draft, $candidates, $galleryFramePolicy);
+        $categoryHint = trim((string) Category::query()
+            ->where('slug', trim((string) $draft->category))
+            ->value('product_search_hint'));
+        $prompt = $this->prompt($draft, $candidates, $categoryHint, $galleryFramePolicy);
         $run = AiRun::query()->create([
             'telegram_update_id' => $telegramUpdateId ?? $draft->telegram_update_id,
             'provider' => $provider,
@@ -183,11 +288,25 @@ class ProductImageVisionVerifier
             $allowedKinds = $galleryFramePolicy
                 ? ['product', 'packaging', 'detail', 'banner']
                 : ['product', 'packaging', 'detail'];
-            $reviews = $this->rankReviews($reviewed->filter(fn (array $review): bool => $review['publishable']
+            $forbidsPackaging = self::categoryHintForbidsPackaging($categoryHint);
+            $qualifies = fn (array $review): bool => $review['publishable']
                 && (! filled($draft->color) || $review['color_match'])
                 && in_array($review['kind'], $allowedKinds, true)
                 && $review['score'] >= $minimumScore
-                && ($review['exact_match'] || $review['source_supported'])));
+                && ($review['exact_match'] || $review['source_supported']);
+
+            if ($forbidsPackaging) {
+                $this->rememberHintBlockedCandidate(
+                    $draft,
+                    $reviewed->filter(fn (array $review): bool => $review['kind'] === 'packaging' && $qualifies($review)),
+                    $candidates,
+                    $categoryHint,
+                    $model,
+                );
+            }
+
+            $reviews = $this->rankReviews($reviewed->filter(fn (array $review): bool => $qualifies($review)
+                && ! ($forbidsPackaging && $review['kind'] === 'packaging')));
 
             return $reviews->take($limit)->map(function (array $review) use ($candidates, $model): array {
                 return [
@@ -233,16 +352,12 @@ class ProductImageVisionVerifier
     }
 
     /** @param array<int, array<string, mixed>> $candidates */
-    private function prompt(ProductDraft $draft, array $candidates, bool $galleryFramePolicy = false): string
+    private function prompt(ProductDraft $draft, array $candidates, string $categoryHint, bool $galleryFramePolicy = false): string
     {
         $count = count($candidates);
         $specifications = collect($draft->specifications ?? [])->map(function (array $item): string {
             return trim(($item['name'] ?? '').': '.($item['value'] ?? ''), ': ');
         })->filter()->take(12)->implode('; ');
-        $categoryHint = Category::query()
-            ->where('slug', trim((string) $draft->category))
-            ->value('product_search_hint');
-        $categoryHint = trim((string) $categoryHint);
         $candidateSources = collect($candidates)->map(
             fn (array $candidate, int $index): string => '#'.($index + 1)
                 .' source: '.($candidate['source_url'] ?? 'unknown')

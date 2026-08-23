@@ -17,7 +17,7 @@ class Category extends Model
 
     protected $fillable = [
         'parent_id', 'name', 'slug', 'icon', 'sort_order', 'is_active', 'gallery_search_strategy',
-        'minimum_verified_images', 'product_search_hint',
+        'minimum_verified_images', 'product_search_hint', 'minimum_image_width', 'minimum_image_height',
     ];
 
     protected function casts(): array
@@ -25,6 +25,8 @@ class Category extends Model
         return [
             'is_active' => 'boolean',
             'minimum_verified_images' => 'integer',
+            'minimum_image_width' => 'integer',
+            'minimum_image_height' => 'integer',
         ];
     }
 
@@ -48,6 +50,22 @@ class Category extends Model
     public function minimumVerifiedImages(): int
     {
         return max(1, min(10, (int) ($this->minimum_verified_images ?: 3)));
+    }
+
+    /** Null means "use the global AI settings default" - not every category needs its own override. */
+    public function minimumImageWidth(): ?int
+    {
+        return $this->minimum_image_width !== null
+            ? max(100, min(4000, (int) $this->minimum_image_width))
+            : null;
+    }
+
+    /** Null means "use the global AI settings default" - not every category needs its own override. */
+    public function minimumImageHeight(): ?int
+    {
+        return $this->minimum_image_height !== null
+            ? max(0, min(4000, (int) $this->minimum_image_height))
+            : null;
     }
 
     public function productSearchPromptLine(): string

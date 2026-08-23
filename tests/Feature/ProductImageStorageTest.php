@@ -181,6 +181,82 @@ class ProductImageStorageTest extends TestCase
         $this->assertSame(5, $product->media()->count());
     }
 
+    public function test_packaging_photos_are_deterministically_rejected_when_the_category_forbids_them(): void
+    {
+        Category::query()->where('slug', 'components')->update(['product_search_hint' => 'Без фото коробки']);
+        ProductImageVisionAgent::fake(fn (): array => [
+            'images' => [[
+                'index' => 1,
+                'exact_match' => true,
+                'publishable' => true,
+                'color_match' => true,
+                'kind' => 'packaging',
+                'view' => 'packaging',
+                'gallery_rank' => 1,
+                'score' => 95,
+                'reason' => 'Clean retail packaging matching the exact model.',
+            ]],
+        ])->preventStrayPrompts();
+        [, , $draft] = $this->records();
+        $draft->update(['category' => 'components']);
+
+        $accepted = app(ProductImageVisionVerifier::class)->select($draft->fresh(), [[
+            'image' => imagecreatefromstring($this->jpeg(1)),
+            'source_url' => 'https://93.184.216.34/image-1.jpg',
+            'width' => 800,
+            'height' => 800,
+        ]], 1);
+
+        // The model said publishable=true, but the category deterministically
+        // forbids packaging photos regardless of what the model claims.
+        $this->assertSame([], $accepted);
+    }
+
+    public function test_a_packaging_photo_is_accepted_as_a_labelled_last_resort_once_the_search_finds_nothing_else(): void
+    {
+        Storage::fake('public');
+        Category::query()->where('slug', 'other-tech')->update(['product_search_hint' => 'Без фото коробки']);
+        ProductImageVisionAgent::fake(fn (string $prompt, $attachments): array => [
+            'images' => $attachments->keys()->map(fn (int $index): array => [
+                'index' => $index + 1,
+                'exact_match' => true,
+                'publishable' => true,
+                'color_match' => true,
+                'kind' => 'packaging',
+                'view' => 'packaging',
+                'gallery_rank' => $index + 1,
+                'score' => 95 - $index,
+                'reason' => 'Clean retail packaging matching the exact model.',
+            ])->all(),
+        ])->preventStrayPrompts();
+        Http::fake(fn (Request $request) => Http::response($this->jpeg(1), 200, [
+            'Content-Type' => 'image/jpeg',
+        ]));
+        [, , $draft] = $this->records();
+        $draft->update([
+            'category' => 'other-tech',
+            'image_urls' => [],
+            'sources' => [[
+                'title' => 'Only known card, box photo only',
+                'url' => 'https://93.184.216.34/only-card',
+                'type' => 'retailer',
+                'image_urls' => ['https://93.184.216.34/image-1.jpg'],
+            ]],
+        ]);
+
+        $stored = app(ProductImageStorage::class)->stage($draft->fresh());
+
+        $this->assertSame(1, $stored);
+        $media = $draft->media()->get();
+        $this->assertCount(1, $media);
+        $this->assertSame('hint_override', $media->first()->verification_status);
+        $this->assertStringContainsString('крайний вариант', (string) $media->first()->verification_notes);
+        $this->assertStringContainsString('Без фото коробки', (string) $media->first()->verification_notes);
+
+        $draftNotes = (string) $draft->fresh()->gallery_notes;
+        $this->assertStringContainsString('нарушающее подсказку', $draftNotes);
+    }
+
     public function test_it_requires_vision_even_for_an_exact_retailer_source(): void
     {
         Storage::fake('public');
@@ -1617,7 +1693,13 @@ class ProductImageStorageTest extends TestCase
             ]],
         ]);
 
-        $stored = app(ProductImageStorage::class)->stage($draft->fresh());
+        $messages = [];
+        $stored = app(ProductImageStorage::class)->stage(
+            $draft->fresh(),
+            function (string $message) use (&$messages): void {
+                $messages[] = $message;
+            },
+        );
 
         $this->assertSame(3, $stored);
         $this->assertSame(1, $visionCalls);
@@ -1631,6 +1713,11 @@ class ProductImageStorageTest extends TestCase
             ProductGalleryRecipe::query()->where('domain', '93.184.216.37')->firstOrFail()
                 ->recipe['gallery_verification_mode'],
         );
+        // Real production report: an ambiguous slider confirmed by batch
+        // Vision was mislabeled as a plain static HTML gallery in the final
+        // summary, because chosenMethod's 'playwright_vision' value had no
+        // case in the label match - it must credit Playwright, not static.
+        $this->assertStringContainsString('AI-переобучение Playwright-рецепта', end($messages));
     }
 
     public function test_a_rejected_dedicated_spot_check_falls_back_to_batch_instead_of_poisoning_the_recipe(): void
@@ -2390,7 +2477,7 @@ class ProductImageStorageTest extends TestCase
 
         $this->assertSame(2, $stored);
         $outcome = end($messages);
-        $this->assertStringContainsString('Итог: 2 фото', $outcome);
+        $this->assertStringContainsString('Итог: ✅ 2 фото', $outcome);
         $this->assertStringContainsString('93.184.216.34', $outcome);
         $this->assertStringContainsString('статичной HTML-галереи', $outcome);
     }
@@ -2421,7 +2508,7 @@ class ProductImageStorageTest extends TestCase
         );
 
         $this->assertSame(0, $stored);
-        $this->assertStringContainsString('Итог: подходящая галерея не найдена', end($messages));
+        $this->assertStringContainsString('Итог: ❌ подходящая галерея не найдена', end($messages));
         // Every known source was tried and none produced a gallery, but
         // neither the money nor the time budget was actually hit - only
         // those two limits are allowed to end a request for good, so this
@@ -3397,6 +3484,174 @@ class ProductImageStorageTest extends TestCase
 
         $this->assertCount(1, $candidates);
         $this->assertSame($observed, $candidates[0]['source_url']);
+        imagedestroy($candidates[0]['image']);
+    }
+
+    public function test_downloading_every_confirmed_candidate_technically_fails_degrades_the_recipe(): void
+    {
+        // The recipe's own in-browser probe (during training) can load an
+        // image successfully while a later plain HTTP download of that same
+        // URL fails - e.g. a CDN that only serves it within a live browser
+        // session/referer. Nothing else ever reports that mismatch back to
+        // the recipe, so without this it would stay "active" and fail the
+        // exact same way on every future draft for this domain.
+        $page = 'https://www.bhphotovideo.com/c/product/1899207-REG/example.html/specs';
+        $confirmedUrl = 'https://static.bhphoto.com/images/images1600x1600/1757069749_1899207.jpg';
+        Http::fake([$confirmedUrl => Http::response('Not Found', 404)]);
+
+        $browser = $this->mock(BrowserProductGalleryExtractor::class);
+        $browser->shouldReceive('isConfirmedGalleryImage')->andReturnUsing(fn (string $url): bool => $url === $confirmedUrl);
+        $browser->shouldReceive('isPartialGalleryImage')->andReturn(false);
+
+        $discovery = $this->mock(ProductImageCandidateDiscovery::class);
+        $discovery->shouldReceive('sourcePageForImage')->andReturn($page);
+        $discovery->shouldReceive('sourceContextForImage')->andReturn(null);
+
+        ProductGalleryRecipe::query()->create([
+            'domain' => 'www.bhphotovideo.com',
+            'path_pattern' => '*',
+            'status' => 'active',
+            'recipe' => ['content_confirmed_product' => true],
+        ]);
+
+        [, , $draft] = $this->records();
+        $downloadCandidates = new \ReflectionMethod(ProductImageStorage::class, 'downloadCandidates');
+        $downloadCandidates->setAccessible(true);
+        $storage = app(ProductImageStorage::class);
+
+        // A single failed download is a possible blip, not proof the
+        // recipe's URLs are unreachable - only the third strike in a row
+        // (ProductGalleryRecipeTrainer::DOWNLOAD_FAILURE_THRESHOLD) degrades
+        // the recipe.
+        $candidates = $downloadCandidates->invoke($storage, [$confirmedUrl], $draft);
+        $this->assertSame([], $candidates);
+        $this->assertSame('active', ProductGalleryRecipe::query()->where('domain', 'www.bhphotovideo.com')->firstOrFail()->status);
+
+        $downloadCandidates->invoke($storage, [$confirmedUrl], $draft);
+        $this->assertSame('active', ProductGalleryRecipe::query()->where('domain', 'www.bhphotovideo.com')->firstOrFail()->status);
+
+        $downloadCandidates->invoke($storage, [$confirmedUrl], $draft);
+        $this->assertSame(
+            'learning',
+            ProductGalleryRecipe::query()->where('domain', 'www.bhphotovideo.com')->firstOrFail()->status,
+        );
+        Http::assertSent(fn (Request $request): bool => $request->url() === $confirmedUrl);
+    }
+
+    public function test_degrading_a_recipe_matches_its_lowercased_stored_domain(): void
+    {
+        // ProductGalleryRecipeTrainer::train() always stores domain as
+        // strtolower(parse_url(...)) - if the page URL happens to carry any
+        // uppercase in its host (a redirect, a non-normalized source, etc.)
+        // the degrade lookup must still find the recipe instead of silently
+        // matching nothing and leaving a broken recipe trusted forever.
+        $page = 'https://Www.BHPhotoVideo.com/c/product/1899207-REG/example.html/specs';
+        $confirmedUrl = 'https://static.bhphoto.com/images/images1600x1600/1757069749_1899207.jpg';
+        Http::fake([$confirmedUrl => Http::response('Not Found', 404)]);
+
+        $browser = $this->mock(BrowserProductGalleryExtractor::class);
+        $browser->shouldReceive('isConfirmedGalleryImage')->andReturnUsing(fn (string $url): bool => $url === $confirmedUrl);
+        $browser->shouldReceive('isPartialGalleryImage')->andReturn(false);
+
+        $discovery = $this->mock(ProductImageCandidateDiscovery::class);
+        $discovery->shouldReceive('sourcePageForImage')->andReturn($page);
+        $discovery->shouldReceive('sourceContextForImage')->andReturn(null);
+
+        ProductGalleryRecipe::query()->create([
+            'domain' => 'www.bhphotovideo.com',
+            'path_pattern' => '*',
+            'status' => 'active',
+            'recipe' => ['content_confirmed_product' => true],
+        ]);
+
+        [, , $draft] = $this->records();
+        $downloadCandidates = new \ReflectionMethod(ProductImageStorage::class, 'downloadCandidates');
+        $downloadCandidates->setAccessible(true);
+        $storage = app(ProductImageStorage::class);
+
+        foreach (range(1, 3) as $attempt) {
+            $downloadCandidates->invoke($storage, [$confirmedUrl], $draft);
+        }
+
+        $this->assertSame(
+            'learning',
+            ProductGalleryRecipe::query()->where('domain', 'www.bhphotovideo.com')->firstOrFail()->status,
+        );
+    }
+
+    public function test_a_quality_only_rejection_does_not_degrade_the_recipe(): void
+    {
+        // Too-small/unsafe-to-decode says the photo just isn't good enough,
+        // not that the recipe's URLs are unreachable - degrading here would
+        // force a pointless retrain every time a confirmed gallery simply
+        // contains a genuinely low-resolution shot.
+        $confirmedUrl = 'https://93.184.216.40/images/tiny-1899207.jpg';
+        $tiny = imagecreatetruecolor(50, 50);
+        imagefill($tiny, 0, 0, imagecolorallocate($tiny, 200, 200, 200));
+        ob_start();
+        imagejpeg($tiny, null, 90);
+        $tinyBytes = ob_get_clean();
+        imagedestroy($tiny);
+        Http::fake([$confirmedUrl => Http::response($tinyBytes, 200, ['Content-Type' => 'image/jpeg'])]);
+
+        $browser = $this->mock(BrowserProductGalleryExtractor::class);
+        $browser->shouldReceive('isConfirmedGalleryImage')->andReturnUsing(fn (string $url): bool => $url === $confirmedUrl);
+        $browser->shouldReceive('isPartialGalleryImage')->andReturn(false);
+
+        ProductGalleryRecipe::query()->create([
+            'domain' => '93.184.216.40',
+            'path_pattern' => '*',
+            'status' => 'active',
+            'recipe' => ['content_confirmed_product' => true],
+        ]);
+
+        [, , $draft] = $this->records();
+        $downloadCandidates = new \ReflectionMethod(ProductImageStorage::class, 'downloadCandidates');
+        $downloadCandidates->setAccessible(true);
+        $candidates = $downloadCandidates->invoke(app(ProductImageStorage::class), [$confirmedUrl], $draft);
+
+        $this->assertSame([], $candidates);
+        $this->assertSame(
+            'active',
+            ProductGalleryRecipe::query()->where('domain', '93.184.216.40')->firstOrFail()->status,
+        );
+    }
+
+    public function test_a_categorys_own_minimum_width_overrides_the_global_default(): void
+    {
+        // Component photos (CPU/GPU boxes, etc.) are routinely 500-700px on
+        // real retailer pages - the global 700px default was rejecting
+        // plenty of genuinely usable photos for this category specifically,
+        // burning a full search budget across dozens of sources for nothing.
+        // The "components" category ships with minimum_image_width=500 (see
+        // the migration that added the column). This suite's own setUp()
+        // pins the global default to 500 (so its other, unrelated fixtures
+        // all clear it) - raise it back to the real production default here
+        // so this test actually exercises "global rejects, category wins".
+        AppSetting::put('ai.image_minimum_width', '700');
+        $url = 'https://93.184.216.41/component-photo.jpg';
+        $medium = imagecreatetruecolor(550, 550);
+        imagefill($medium, 0, 0, imagecolorallocate($medium, 180, 180, 180));
+        ob_start();
+        imagejpeg($medium, null, 90);
+        $bytes = ob_get_clean();
+        imagedestroy($medium);
+        Http::fake([$url => Http::response($bytes, 200, ['Content-Type' => 'image/jpeg'])]);
+
+        [, , $draft] = $this->records();
+        $downloadCandidates = new \ReflectionMethod(ProductImageStorage::class, 'downloadCandidates');
+        $downloadCandidates->setAccessible(true);
+
+        // Without a category override (records()' draft has none), the
+        // global 700px default rejects a 550px-wide photo.
+        $candidates = $downloadCandidates->invoke(app(ProductImageStorage::class), [$url], $draft);
+        $this->assertSame([], $candidates);
+
+        // The exact same photo passes once the draft belongs to a category
+        // whose own minimum_image_width is lower than the global default.
+        $draft->update(['category' => 'components']);
+        $candidates = $downloadCandidates->invoke(app(ProductImageStorage::class), [$url], $draft);
+        $this->assertCount(1, $candidates);
         imagedestroy($candidates[0]['image']);
     }
 

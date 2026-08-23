@@ -67,14 +67,18 @@ class MediaRelationManager extends RelationManager
                     ->badge()
                     ->formatStateUsing(fn (?string $state): string => match ($state) {
                         'verified' => 'Vision',
+                        'source_verified' => 'Подтверждено источником',
                         'manual' => 'Вручную',
                         'rejected' => 'Отклонено',
+                        'hint_override' => 'Нарушает подсказку',
                         default => 'Не проверено',
                     })
                     ->color(fn (?string $state): string => match ($state) {
                         'verified' => 'success',
+                        'source_verified' => 'success',
                         'manual' => 'info',
                         'rejected' => 'danger',
+                        'hint_override' => 'warning',
                         default => 'warning',
                     }),
                 TextColumn::make('dimensions')

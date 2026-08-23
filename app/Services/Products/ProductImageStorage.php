@@ -12,6 +12,7 @@ use App\Services\Ai\AiSettings;
 use App\Services\Ai\ProductSearchCostBudget;
 use App\Services\Ai\ProductSearchTimeBudget;
 use GdImage;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
@@ -33,6 +34,7 @@ class ProductImageStorage
         private readonly ProductSearchTimeBudget $timeBudget,
         private readonly ProductSearchCostBudget $costBudget,
         private readonly ProductSourceAttemptRecorder $attempts,
+        private readonly ProductGalleryRecipeTrainer $recipeTrainer,
     ) {}
 
     /** @param array<int, int> $replaceMediaIds */
@@ -202,6 +204,7 @@ class ProductImageStorage
         // ProductSearchTimeBudget measure elapsed time since that original,
         // already-finished search and report zero time left immediately.
         $telegramUpdateId ??= $draft->telegram_update_id;
+        $this->lastDegradedDomains = [];
         // The previous staged gallery is replaced only after a new one was
         // stored successfully, so a failed search never leaves the draft
         // without photos (same philosophy as completeRefind).
@@ -1006,7 +1009,28 @@ class ProductImageStorage
             $chosenMethod = $partialMethod;
         }
 
-        $playwrightConfirmedComplete = in_array($chosenMethod, ['playwright', 'fallback_playwright'], true)
+        // Last resort only: every normal source and round produced nothing
+        // usable. Before finishing with zero photos, fall back to the best
+        // candidate that was otherwise acceptable (identity/color/score) but
+        // deterministically rejected only for violating the category's photo
+        // instruction. The override is explicitly labelled below so nobody
+        // mistakes it for a normal, rule-compliant result.
+        $categoryHintOverrideUsed = false;
+
+        if ($selected === []) {
+            $hintBlockedCandidate = $this->visionVerifier->takeHintBlockedCandidate($draft);
+
+            if ($hintBlockedCandidate !== null) {
+                $selected = [$hintBlockedCandidate];
+                $chosenSource = $chosenSource ?? (is_string($hintBlockedCandidate['product_page_url'] ?? null)
+                    ? ['url' => $hintBlockedCandidate['product_page_url']]
+                    : null);
+                $chosenMethod = $chosenMethod ?: 'category_hint_override';
+                $categoryHintOverrideUsed = true;
+            }
+        }
+
+        $playwrightConfirmedComplete = in_array($chosenMethod, ['playwright', 'playwright_vision', 'fallback_playwright', 'fallback_playwright_vision'], true)
             && collect($selected)->every(fn (array $candidate): bool => (bool) ($candidate['confirmed_gallery'] ?? false));
         $galleryIsPartial = $selected !== [] && ! $playwrightConfirmedComplete && (
             count($selected) < $minimumCompleteGallerySize
@@ -1135,18 +1159,30 @@ class ProductImageStorage
             'gallery_status' => $stored > 0
                 ? ($galleryIsPartial ? 'partial' : 'complete')
                 : ($previousMedia->isNotEmpty() ? $draft->gallery_status : 'missing'),
-            'gallery_notes' => $stored > 0 && $galleryIsPartial
-                ? 'После полного цикла поиска сохранён лучший частичный результат: '.$stored.' проверенных фото.'
-                : null,
+            'gallery_notes' => match (true) {
+                $stored > 0 && $categoryHintOverrideUsed => 'Не найдено ни одного фото без нарушения подсказки категории. '
+                    .'Принято как крайний вариант фото, нарушающее подсказку (см. заметку проверки у фото).',
+                $stored > 0 && $galleryIsPartial => 'После полного цикла поиска сохранён лучший частичный результат: '.$stored.' проверенных фото.',
+                default => null,
+            },
             'gallery_search_stop_reason' => $stopReason,
             'images_staged_at' => now(),
         ]);
 
         if ($progress) {
+            if ($this->lastDegradedDomains !== []) {
+                $progress(
+                    '⚠️ Рецепт для '.implode(', ', $this->lastDegradedDomains)
+                    .' помечен на переобучение: подтверждённые в браузере фото не удалось скачать обычным запросом (сайт отдаёт их только внутри своей сессии).',
+                );
+            }
+
             if ($stored > 0) {
                 $methodLabel = match ($chosenMethod) {
                     'playwright' => 'через AI-переобучение Playwright-рецепта',
+                    'playwright_vision' => 'через AI-переобучение Playwright-рецепта (неоднозначный слайдер, кадры проверены Vision)',
                     'fallback_playwright' => 'через Playwright-галерею карточки, найденной резервным поиском',
+                    'fallback_playwright_vision' => 'через Playwright-галерею карточки, найденной резервным поиском (неоднозначный слайдер, кадры проверены Vision)',
                     'fallback_discovery' => 'через резервный поиск (источник не из карточек AI-исследования)',
                     default => 'из статичной HTML-галереи карточки',
                 };
@@ -1154,12 +1190,12 @@ class ProductImageStorage
                     ? $chosenSource['url']
                     : null;
                 $progress(
-                    "📦 Итог: {$stored} фото {$methodLabel}"
-                    .($galleryIsPartial ? ' · частичный результат' : '').'.'
+                    "📦 Итог: ✅ {$stored} фото {$methodLabel}"
+                    .($galleryIsPartial ? ' · ⚠️ частичный результат' : '').'.'
                     .($sourceUrl ? "\n🔗 {$sourceUrl}" : ''),
                 );
             } else {
-                $progress('📦 Итог: подходящая галерея не найдена ни по одному источнику.');
+                $progress('📦 Итог: ❌ подходящая галерея не найдена ни по одному источнику.');
             }
         }
 
@@ -1188,6 +1224,22 @@ class ProductImageStorage
         }
 
         return Category::query()->where('slug', $slug)->first()?->minimumVerifiedImages() ?? 3;
+    }
+
+    private function requiredImageWidth(ProductDraft $draft): int
+    {
+        $slug = trim((string) $draft->category);
+        $override = $slug === '' ? null : Category::query()->where('slug', $slug)->first()?->minimumImageWidth();
+
+        return $override ?? $this->settings->imageMinimumWidth();
+    }
+
+    private function requiredImageHeight(ProductDraft $draft): int
+    {
+        $slug = trim((string) $draft->category);
+        $override = $slug === '' ? null : Category::query()->where('slug', $slug)->first()?->minimumImageHeight();
+
+        return $override ?? $this->settings->imageMinimumHeight();
     }
 
     /** @param null|callable(string): void $progress */
@@ -1729,6 +1781,9 @@ class ProductImageStorage
      */
     private array $lastDownloadRejections = [];
 
+    /** @var array<int, string> Domains degraded this call by degradeRecipesAfterTechnicalFailure(). */
+    private array $lastDegradedDomains = [];
+
     /** @param array<int, string> $urls @return array<int, array<string, mixed>> */
     private function downloadCandidates(array $urls, ProductDraft $draft): array
     {
@@ -1810,10 +1865,11 @@ class ProductImageStorage
             }
 
             $failureReason = null;
-            $download = $this->resolver->download($url, failureReason: $failureReason);
+            $refererUrl = $sourcePagesByUrl[$url] ?? null;
+            $download = $this->resolver->download($url, failureReason: $failureReason, refererUrl: $refererUrl);
 
             if (! $download && isset($renditionFallbackByUrl[$url])) {
-                $download = $this->resolver->download($renditionFallbackByUrl[$url], failureReason: $failureReason);
+                $download = $this->resolver->download($renditionFallbackByUrl[$url], failureReason: $failureReason, refererUrl: $refererUrl);
             }
 
             if (! $download) {
@@ -1822,12 +1878,15 @@ class ProductImageStorage
                 continue;
             }
 
+            $requiredWidth = $this->requiredImageWidth($draft);
+            $requiredHeight = $this->requiredImageHeight($draft);
+
             if (! $this->hasUsefulDimensions(
                 $download['width'],
                 $download['height'],
+                $requiredWidth,
+                $requiredHeight,
             )) {
-                $requiredWidth = $this->settings->imageMinimumWidth();
-                $requiredHeight = $this->settings->imageMinimumHeight();
                 $this->lastDownloadRejections[] = [
                     'url' => $url,
                     'reason' => $requiredHeight > 0
@@ -1883,7 +1942,72 @@ class ProductImageStorage
             $checksums[$checksum] = true;
         }
 
+        $this->degradeRecipesAfterTechnicalFailure($urls, $candidates, $sourcePagesByUrl);
+
         return $candidates;
+    }
+
+    /**
+     * A recipe is marked "active" once its own in-browser probe loads the
+     * candidate images successfully (see ProductGalleryRecipeTrainer) - but
+     * that probe runs inside a live Playwright session, while this download
+     * happens later over a plain HTTP request with no session/cookies. A CDN
+     * that gates images by referrer/session can pass the former and 404 the
+     * latter, and nothing before this ever reported that mismatch back to
+     * the recipe, so it stayed "active" and would fail the exact same way on
+     * every future draft for this domain. Only a genuine technical failure
+     * (network/decode) counts - a quality rejection (too_small/
+     * unsafe_to_decode) says nothing about whether the recipe's URLs are
+     * actually reachable. The threshold/cap that decides what to do about a
+     * repeated failure lives in ProductGalleryRecipeTrainer, next to the
+     * equivalent bookkeeping for training-time failures.
+     *
+     * @param  array<int, string>  $urls
+     * @param  array<int, array<string, mixed>>  $candidates
+     * @param  array<string, string>  $sourcePagesByUrl
+     */
+    private function degradeRecipesAfterTechnicalFailure(array $urls, array $candidates, array $sourcePagesByUrl): void
+    {
+        $confirmedUrls = collect($urls)->filter(fn (string $url): bool => $this->resolver->isConfirmedGalleryImage($url));
+
+        if ($confirmedUrls->isEmpty()) {
+            return;
+        }
+
+        // ProductGalleryRecipe.domain is always stored lowercase (see
+        // ProductGalleryRecipeTrainer::train()'s own strtolower(parse_url())
+        // - www is kept, unlike ProductSourcePriority::host()) - matching
+        // that exact convention here, not a different one, is what makes
+        // this lookup actually find the recipe instead of silently no-op.
+        $domainsFor = fn (Collection $urls): Collection => $urls
+            ->map(fn (string $url): string|false => parse_url($sourcePagesByUrl[$url] ?? $url, PHP_URL_HOST))
+            ->filter(fn (mixed $host): bool => is_string($host) && $host !== '')
+            ->map(fn (string $host): string => strtolower($host))
+            ->unique();
+
+        $confirmedStored = collect($candidates)->contains(fn (array $candidate): bool => (bool) ($candidate['confirmed_gallery'] ?? false));
+
+        if ($confirmedStored) {
+            $domainsFor($confirmedUrls)->each(fn (string $domain) => $this->recipeTrainer->recordConfirmedDownloadSuccess($domain));
+
+            return;
+        }
+
+        $technicallyFailed = collect($this->lastDownloadRejections)->contains(
+            fn (array $rejection): bool => $confirmedUrls->contains($rejection['url'])
+                && ! str_starts_with($rejection['reason'], 'too_small')
+                && $rejection['reason'] !== 'unsafe_to_decode'
+        );
+
+        if (! $technicallyFailed) {
+            return;
+        }
+
+        $domainsFor($confirmedUrls)->each(function (string $domain): void {
+            if ($this->recipeTrainer->recordConfirmedDownloadFailure($domain)) {
+                $this->lastDegradedDomains[] = $domain;
+            }
+        });
     }
 
     /** @param array<int, string> $existingUrls @return array{array<int, array<string, mixed>>, bool} */
@@ -2486,11 +2610,13 @@ class ProductImageStorage
     private function hasUsefulDimensions(
         int $width,
         int $height,
+        int $requiredWidth,
+        int $requiredHeight,
     ): bool {
         $ratio = $width / max($height, 1);
 
-        return $width >= $this->settings->imageMinimumWidth()
-            && $height >= $this->settings->imageMinimumHeight()
+        return $width >= $requiredWidth
+            && $height >= $requiredHeight
             && $ratio >= (float) config('product-images.minimum_ratio', 0.28)
             && $ratio <= (float) config('product-images.maximum_ratio', 3.5);
     }
