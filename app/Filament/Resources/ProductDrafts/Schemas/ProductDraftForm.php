@@ -14,7 +14,11 @@ class ProductDraftForm
 {
     public static function configure(Schema $schema): Schema
     {
+        // Without an explicit columns(1), EditRecord/CreateRecord default
+        // this top-level schema to columns(2) and our sections below only
+        // fill one of those tracks, halving the usable width.
         return $schema
+            ->columns(1)
             ->components([
                 Section::make('Результат AI')
                     ->schema([

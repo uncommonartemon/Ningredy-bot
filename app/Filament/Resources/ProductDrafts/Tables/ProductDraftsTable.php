@@ -35,6 +35,9 @@ class ProductDraftsTable
                 TextColumn::make('title')->label('Название')->searchable()->sortable()->wrap(),
                 TextColumn::make('brand')->label('Бренд')->searchable(),
                 TextColumn::make('model')->label('Модель')->searchable()->toggleable(),
+                TextColumn::make('color')->label('Цвет')->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('product_type')->label('Тип')->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('category')->label('Категория')->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('status')->label('Статус')->badge()->formatStateUsing(fn (string $state): string => match ($state) {
                     'approved' => 'Подтверждён',
                     'rejected' => 'Отклонён',
@@ -74,6 +77,8 @@ class ProductDraftsTable
                     ->formatStateUsing(fn (?string $state): string => $state ? (parse_url($state, PHP_URL_HOST) ?: $state) : '—')
                     ->toggleable(),
                 TextColumn::make('confidence')->label('AI')->numeric(decimalPlaces: 2)->sortable()->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('requested_by_telegram_user_id')->label('Telegram user')->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('product.id')->label('Товар')->formatStateUsing(fn ($state): string => $state ? "#{$state}" : '—')->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('created_at')->label('Создан')->dateTime('d.m.Y H:i')->sortable(),
                 TextColumn::make('reviewed_at')->label('Проверен')->dateTime('d.m.Y H:i')->sortable()->placeholder('—')->toggleable(),
             ])

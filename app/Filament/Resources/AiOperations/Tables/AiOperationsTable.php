@@ -41,7 +41,10 @@ class AiOperationsTable
                         ? TelegramUpdateResource::getUrl('view', ['record' => $record->telegram_update_id])
                         : null)
                     ->placeholder('—'),
+                TextColumn::make('telegram_user_id')->label('Telegram user')->placeholder('—')->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('idempotency_key')->label('Idempotency key')->toggleable(isToggledHiddenByDefault: true)->copyable(),
+                TextColumn::make('error')->label('Ошибка')->limit(50)->placeholder('—')->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('created_at')->label('Создано')->dateTime('d.m.Y H:i:s')->sortable()->toggleable(isToggledHiddenByDefault: true),
             ])
             ->filters([
                 SelectFilter::make('tool')->label('Инструмент')->options(

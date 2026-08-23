@@ -12,22 +12,27 @@ class AttributeDefinitionForm
 {
     public static function configure(Schema $schema): Schema
     {
-        return $schema->components([
-            Section::make('Атрибут')
-                ->schema([
-                    TextInput::make('key')->label('Ключ')->unique(ignoreRecord: true)->required(),
-                    TextInput::make('label')->label('Название')->required(),
-                    Select::make('data_type')->label('Тип данных')->options([
-                        'text' => 'Текст',
-                        'number' => 'Число',
-                        'boolean' => 'Да/нет',
-                    ])->default('text')->required(),
-                    TextInput::make('default_unit')->label('Единица по умолчанию')->maxLength(24),
-                    TextInput::make('sort_order')->label('Порядок')->numeric()->minValue(0)->default(0),
-                    Toggle::make('is_filterable')->label('Показывать в фильтрах')->default(true),
-                    Toggle::make('is_variant')->label('Атрибут конфигурации (SKU)')->default(true),
-                ])
-                ->columns(2),
-        ]);
+        // Without an explicit columns(1), EditRecord/CreateRecord default
+        // this top-level schema to columns(2) and our single Section below
+        // only fills one of those tracks, halving the usable width.
+        return $schema
+            ->columns(1)
+            ->components([
+                Section::make('Атрибут')
+                    ->schema([
+                        TextInput::make('key')->label('Ключ')->unique(ignoreRecord: true)->required(),
+                        TextInput::make('label')->label('Название')->required(),
+                        Select::make('data_type')->label('Тип данных')->options([
+                            'text' => 'Текст',
+                            'number' => 'Число',
+                            'boolean' => 'Да/нет',
+                        ])->default('text')->required(),
+                        TextInput::make('default_unit')->label('Единица по умолчанию')->maxLength(24),
+                        TextInput::make('sort_order')->label('Порядок')->numeric()->minValue(0)->default(0),
+                        Toggle::make('is_filterable')->label('Показывать в фильтрах')->default(true),
+                        Toggle::make('is_variant')->label('Атрибут конфигурации (SKU)')->default(true),
+                    ])
+                    ->columns(2),
+            ]);
     }
 }

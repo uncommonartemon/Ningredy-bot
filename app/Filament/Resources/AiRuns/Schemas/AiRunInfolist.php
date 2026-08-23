@@ -43,27 +43,31 @@ class AiRunInfolist
                         TextEntry::make('started_at')->label('Начат')->dateTime('d.m.Y H:i:s'),
                         TextEntry::make('completed_at')->label('Завершён')->dateTime('d.m.Y H:i:s')->placeholder('—'),
                     ])
-                    ->columns(4),
+                    ->columns(4)
+                    ->columnSpanFull(),
                 Section::make('Промпт и ответ')
                     ->schema([
                         TextEntry::make('prompt')->label('Промпт')->columnSpanFull(),
                         TextEntry::make('response')->label('Ответ')->formatStateUsing($json)->columnSpanFull(),
                         TextEntry::make('error')->label('Ошибка')->placeholder('—')->columnSpanFull(),
                     ])
-                    ->collapsed(),
+                    ->collapsed()
+                    ->columnSpanFull(),
                 Section::make('Расход')
                     ->schema([
                         KeyValueEntry::make('usage')
                             ->label('Токены и стоимость')
                             ->state(fn (AiRun $record): array => is_array($record->usage) ? $record->usage : [])
                             ->columnSpanFull(),
-                    ]),
+                    ])
+                    ->columnSpanFull(),
                 Section::make('Активность')
                     ->description('Подтверждённые события провайдера (подключение, запуск/выполнение/завершение поиска).')
                     ->schema([
                         TextEntry::make('activity')->label(null)->formatStateUsing($json)->columnSpanFull(),
                     ])
-                    ->collapsed(),
+                    ->collapsed()
+                    ->columnSpanFull(),
             ]);
     }
 }

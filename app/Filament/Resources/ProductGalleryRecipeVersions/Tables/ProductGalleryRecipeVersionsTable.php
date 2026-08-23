@@ -20,7 +20,9 @@ class ProductGalleryRecipeVersionsTable
             ->defaultSort('id', 'desc')
             ->columns([
                 TextColumn::make('id')->label('#')->sortable(),
+                TextColumn::make('product_gallery_recipe_id')->label('Рецепт #')->placeholder('—')->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('domain')->label('Домен')->searchable()->sortable(),
+                TextColumn::make('product_url')->label('Страница')->limit(50)->url(fn (ProductGalleryRecipeVersion $record): string => $record->product_url)->openUrlInNewTab()->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('trigger')->label('Причина')->badge(),
                 TextColumn::make('status')
                     ->label('Результат')
@@ -31,6 +33,7 @@ class ProductGalleryRecipeVersionsTable
                         'failed' => 'danger',
                         default => 'info',
                     }),
+                TextColumn::make('provider')->label('Провайдер')->badge()->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('model')->label('Модель')->toggleable(),
                 TextColumn::make('score')->label('Оценка')->numeric(2)->placeholder('—'),
                 TextColumn::make('result.candidate_count')->label('Новых фото')->placeholder('—'),
@@ -38,6 +41,7 @@ class ProductGalleryRecipeVersionsTable
                 TextColumn::make('error')->label('Ошибка')->limit(60)->placeholder('—')
                     ->tooltip(fn (ProductGalleryRecipeVersion $record): ?string => $record->error),
                 TextColumn::make('created_at')->label('Запуск')->dateTime('d.m.Y H:i:s')->sortable(),
+                TextColumn::make('promoted_at')->label('Опубликована')->dateTime('d.m.Y H:i:s')->placeholder('—')->toggleable(isToggledHiddenByDefault: true),
             ])
             ->filters([
                 SelectFilter::make('status')->options([

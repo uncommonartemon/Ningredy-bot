@@ -45,6 +45,14 @@ class ProductSourceAttemptsTable
                 TextColumn::make('round')->label('Раунд')->placeholder('—')->toggleable(),
                 TextColumn::make('duration_ms')->label('мс')->numeric()->placeholder('—')->toggleable(),
                 TextColumn::make('message')->label('Итог')->limit(80)->tooltip(fn ($record): ?string => $record->message),
+                TextColumn::make('telegramUpdate.id')
+                    ->label('Telegram update')
+                    ->placeholder('—')
+                    ->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('recipeVersion.id')
+                    ->label('Версия рецепта')
+                    ->placeholder('—')
+                    ->toggleable(isToggledHiddenByDefault: true),
             ])
             ->filters([
                 SelectFilter::make('actor')->options([

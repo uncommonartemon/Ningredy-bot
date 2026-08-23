@@ -20,11 +20,19 @@ class ProductGalleryRecipesTable
             ->recordUrl(fn ($record): string => ProductGalleryRecipeResource::getUrl('view', ['record' => $record]))
             ->defaultSort('last_success_at', 'desc')
             ->columns([
+                TextColumn::make('id')->label('#')->sortable()->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('domain')
                     ->label('Домен')
                     ->searchable()
                     ->copyable()
                     ->sortable(),
+                TextColumn::make('path_pattern')
+                    ->label('Шаблон пути')
+                    ->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('region')
+                    ->label('Регион')
+                    ->placeholder('—')
+                    ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('status')
                     ->label('Состояние')
                     ->badge()
@@ -70,6 +78,16 @@ class ProductGalleryRecipesTable
                     ->placeholder('—')
                     ->tooltip(fn ($record): ?string => $record->last_error)
                     ->toggleable(),
+                TextColumn::make('last_failure_kind')
+                    ->label('Тип сбоя')
+                    ->badge()
+                    ->placeholder('—')
+                    ->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('retry_after')
+                    ->label('Повтор не раньше')
+                    ->dateTime('d.m.Y H:i:s')
+                    ->placeholder('—')
+                    ->toggleable(isToggledHiddenByDefault: true),
             ])
             ->filters([
                 SelectFilter::make('status')

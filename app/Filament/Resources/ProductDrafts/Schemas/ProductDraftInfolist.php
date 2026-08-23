@@ -40,7 +40,8 @@ class ProductDraftInfolist
                         TextEntry::make('description')->label('Описание')->placeholder('—')->columnSpanFull(),
                         TextEntry::make('research_notes')->label('Внутренние заметки исследования')->placeholder('—')->columnSpanFull(),
                     ])
-                    ->columns(4),
+                    ->columns(4)
+                    ->columnSpanFull(),
                 Section::make('Состояние поиска')
                     ->schema([
                         TextEntry::make('gallery_status')
@@ -64,7 +65,8 @@ class ProductDraftInfolist
                         TextEntry::make('images_staged_at')->label('Фото сохранены')->dateTime('d.m.Y H:i:s')->placeholder('—'),
                         TextEntry::make('gallery_notes')->label('Заметка')->placeholder('—')->columnSpanFull(),
                     ])
-                    ->columns(3),
+                    ->columns(3)
+                    ->columnSpanFull(),
                 Section::make('Источники')
                     ->schema([
                         TextEntry::make('primary_source_url')->label('Основной источник')->url(fn (?string $state): ?string => $state)->openUrlInNewTab()->placeholder('—')->columnSpanFull(),
@@ -78,7 +80,8 @@ class ProductDraftInfolist
                             ])
                             ->columns(3)
                             ->columnSpanFull(),
-                    ]),
+                    ])
+                    ->columnSpanFull(),
                 Section::make('Характеристики')
                     ->schema([
                         RepeatableEntry::make('specifications')
@@ -90,7 +93,8 @@ class ProductDraftInfolist
                             ->columns(2)
                             ->columnSpanFull(),
                     ])
-                    ->collapsible(),
+                    ->collapsible()
+                    ->columnSpanFull(),
                 Section::make('Журнал действий')
                     ->description('Полный журнал попыток источников — Web Search, HTML, Playwright, Vision.')
                     ->schema([
@@ -101,7 +105,8 @@ class ProductDraftInfolist
                                 'tableFilters' => ['product_draft_id' => ['value' => $record->id]],
                             ])),
                     ])
-                    ->collapsible(),
+                    ->collapsible()
+                    ->columnSpanFull(),
                 Section::make('Проверка')
                     ->schema([
                         TextEntry::make('reviewed_at')->dateTime()->placeholder('—'),
@@ -112,7 +117,8 @@ class ProductDraftInfolist
                         TextEntry::make('updated_at')->dateTime()->placeholder('—'),
                     ])
                     ->columns(3)
-                    ->collapsed(),
+                    ->collapsed()
+                    ->columnSpanFull(),
             ]);
     }
 }

@@ -38,7 +38,8 @@ class ProductGalleryRecipeInfolist
                     IconEntry::make('source_blocked')->label('Источник заблокирован')->boolean(),
                     TextEntry::make('source_block_reason')->label('Причина блокировки')->placeholder('—')->columnSpanFull(),
                 ])
-                ->columns(4),
+                ->columns(4)
+                ->columnSpanFull(),
             Section::make('Диагностика')
                 ->description('Устойчивые признаки шаблона страницы, использованные для повторного применения и переобучения рецепта.')
                 ->schema([
@@ -52,7 +53,8 @@ class ProductGalleryRecipeInfolist
                     TextEntry::make('hard_block_urls')->label('URL с жёсткой блокировкой')->formatStateUsing($json)->columnSpanFull(),
                 ])
                 ->columns(3)
-                ->collapsible(),
+                ->collapsible()
+                ->columnSpanFull(),
             Section::make('Статистика запусков')
                 ->schema([
                     TextEntry::make('success_count')->label('Успехов'),
@@ -61,7 +63,8 @@ class ProductGalleryRecipeInfolist
                     TextEntry::make('last_failure_at')->label('Последняя ошибка')->dateTime('d.m.Y H:i:s')->placeholder('—'),
                     TextEntry::make('last_error')->label('Текст последней ошибки')->placeholder('—')->columnSpanFull(),
                 ])
-                ->columns(4),
+                ->columns(4)
+                ->columnSpanFull(),
             Section::make('AI-рецепт')
                 ->description('Разрешены только CSS-селекторы, атрибуты изображений и жёстко ограниченные клики. Ручное изменение — через отдельное опасное действие в шапке страницы.')
                 ->schema([
@@ -72,7 +75,8 @@ class ProductGalleryRecipeInfolist
                     TextEntry::make('recipe')->label('Полный JSON-рецепт')->formatStateUsing($json)->copyable()->columnSpanFull(),
                 ])
                 ->columns(3)
-                ->collapsed(),
+                ->collapsed()
+                ->columnSpanFull(),
         ]);
     }
 }

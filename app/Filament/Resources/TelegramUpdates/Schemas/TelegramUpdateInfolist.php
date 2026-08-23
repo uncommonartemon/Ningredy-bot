@@ -36,7 +36,8 @@ class TelegramUpdateInfolist
                         TextEntry::make('text')->label('Текст')->placeholder('—')->columnSpanFull(),
                         TextEntry::make('reply_to_text')->label('В ответ на')->placeholder('—')->columnSpanFull(),
                     ])
-                    ->columns(4),
+                    ->columns(4)
+                    ->columnSpanFull(),
                 Section::make('Обработка')
                     ->schema([
                         TextEntry::make('created_at')->label('Получено')->dateTime('d.m.Y H:i:s'),
@@ -44,12 +45,14 @@ class TelegramUpdateInfolist
                         TextEntry::make('cancel_requested_at')->label('Запрошена отмена')->dateTime('d.m.Y H:i:s')->placeholder('—'),
                         TextEntry::make('error')->label('Ошибка')->placeholder('—')->columnSpanFull(),
                     ])
-                    ->columns(3),
+                    ->columns(3)
+                    ->columnSpanFull(),
                 Section::make('Payload')
                     ->schema([
                         TextEntry::make('payload')->label(null)->formatStateUsing($json)->columnSpanFull(),
                     ])
-                    ->collapsed(),
+                    ->collapsed()
+                    ->columnSpanFull(),
             ]);
     }
 }

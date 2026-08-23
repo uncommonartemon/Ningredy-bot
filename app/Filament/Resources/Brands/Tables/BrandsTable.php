@@ -16,12 +16,15 @@ class BrandsTable
             ->modifyQueryUsing(fn ($query) => $query->withCount('products'))
             ->defaultSort('name')
             ->columns([
+                TextColumn::make('id')->label('#')->sortable()->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('name')->label('Название')->searchable()->sortable(),
                 TextColumn::make('slug')->label('Slug')->searchable()->sortable(),
                 TextColumn::make('country')->label('Страна')->placeholder('—')->sortable(),
                 TextColumn::make('website_url')->label('Сайт')->url(fn (?string $state): ?string => $state)->openUrlInNewTab()->placeholder('—')->limit(30),
                 TextColumn::make('products_count')->label('Товары')->badge()->sortable(),
                 ToggleColumn::make('is_active')->label('Активен')->sortable(),
+                TextColumn::make('created_at')->label('Создан')->dateTime('d.m.Y H:i')->sortable()->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('updated_at')->label('Изменён')->dateTime('d.m.Y H:i')->sortable()->toggleable(isToggledHiddenByDefault: true),
             ])
             ->recordActions([
                 EditAction::make(),

@@ -34,13 +34,15 @@ class AiOperationInfolist
                         TextEntry::make('executed_at')->label('Выполнено')->dateTime('d.m.Y H:i:s')->placeholder('—'),
                         TextEntry::make('error')->label('Ошибка')->placeholder('—')->columnSpanFull(),
                     ])
-                    ->columns(4),
+                    ->columns(4)
+                    ->columnSpanFull(),
                 Section::make('Payload и результат')
                     ->schema([
                         TextEntry::make('payload')->label('Payload')->formatStateUsing($json)->columnSpanFull(),
                         TextEntry::make('result')->label('Результат')->formatStateUsing($json)->columnSpanFull(),
                     ])
-                    ->collapsed(),
+                    ->collapsed()
+                    ->columnSpanFull(),
             ]);
     }
 }
