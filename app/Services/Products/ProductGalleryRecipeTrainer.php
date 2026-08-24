@@ -313,6 +313,17 @@ class ProductGalleryRecipeTrainer
                 || ! $telegramUpdateId
                 || $this->costBudget->limit() <= 0
                 || $this->costBudget->unmeasurable($telegramUpdateId);
+            // A source is normally allowed to spend freely until the whole
+            // search's budget runs out (see stage()'s "a source is atomic"
+            // comment) - but that lets one stubborn domain alone burn the
+            // entire search budget on training before any other candidate
+            // source ever gets a turn (seen live: 9 rounds on one Lenovo
+            // page spent the full $1 cap and left literally nothing for the
+            // other known sources). Capping how much THIS training session
+            // alone may spend, as a share of the total limit, guarantees at
+            // least a couple of other sources still get tried.
+            $costAtTrainingStart = $this->costBudget->spent($telegramUpdateId) ?? 0.0;
+            $sourceCostShare = (float) config('product-images.source_training_cost_share_fraction', 0.4);
             $previousCandidate = null;
             $previousCandidateResult = null;
             $previousProgressSignature = null;
@@ -343,6 +354,27 @@ class ProductGalleryRecipeTrainer
                     }
 
                     break;
+                }
+
+                // Not a verdict on the recipe: this domain would likely keep
+                // being tried, but it must not be allowed to spend the
+                // whole search's budget by itself before any other
+                // candidate source gets a turn. Deferred like an attempt-1
+                // global budget stop (never recordFailure()'d) so this
+                // domain gets a full, unpenalized shot on its next search
+                // instead of edging toward auto-disable over a rationing
+                // decision that had nothing to do with whether it works.
+                if (! $safetyLimited && $this->costBudget->exceededForSource($telegramUpdateId, $costAtTrainingStart, $sourceCostShare)) {
+                    $debug?->__invoke(
+                        'warning',
+                        "AI-тренер: {$host} израсходовал свою долю бюджета этого поиска после {$attempt} раунд(а/ов); оставляю бюджет другим источникам.",
+                    );
+                    $version->update([
+                        'status' => 'deferred',
+                        'error' => 'Обучение отложено: этот источник израсходовал свою долю денежного бюджета текущего поиска.',
+                    ]);
+
+                    return $bestPartialImages !== [] ? $bestPartialImages : $oldImages;
                 }
 
                 // Field order matters for OpenAI's automatic prompt caching,

@@ -61,6 +61,29 @@ class ProductSearchCostBudget
         return $limit > 0 && $spent !== null && $spent >= $limit * max(0.0, min(1.0, $fraction));
     }
 
+    /**
+     * Unlike reachedFraction() (cumulative search spend vs. the total
+     * limit), this measures the DELTA since $spentAtSourceStart - how much
+     * THIS ONE candidate source's own training has spent so far - against
+     * a share of the total limit. Without this, a single stubborn domain's
+     * recipe training can spend the entire search budget by itself (each
+     * round is only checked against the whole-search limit), leaving zero
+     * money for every other candidate source once it finally gives up.
+     */
+    public function exceededForSource(?int $telegramUpdateId, float $spentAtSourceStart, float $shareFraction): bool
+    {
+        $limit = $this->limit();
+        $spent = $this->spent($telegramUpdateId);
+
+        if ($limit <= 0 || $spent === null) {
+            return false;
+        }
+
+        $allowance = $limit * max(0.0, min(1.0, $shareFraction));
+
+        return ($spent - $spentAtSourceStart) >= $allowance;
+    }
+
     public function limit(): float
     {
         return $this->settings->maxSearchCostUsd();

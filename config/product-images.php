@@ -47,6 +47,13 @@ return [
     // Once useful candidates exist, stop training new domains at this share
     // and preserve the rest for Vision plus the independent fallback search.
     'source_exploration_budget_fraction' => (float) env('PRODUCT_IMAGE_SOURCE_BUDGET_FRACTION', 0.70),
+    // A single candidate source's own recipe training may not spend more
+    // than this share of the whole search's money budget - without this, one
+    // stubborn domain can consume the entire search budget by itself before
+    // any other candidate source ever gets tried (each training round was
+    // previously only checked against the whole-search limit, never its own
+    // share of it).
+    'source_training_cost_share_fraction' => (float) env('PRODUCT_IMAGE_SOURCE_TRAINING_COST_SHARE_FRACTION', 0.4),
     'source_preflight' => env('PRODUCT_IMAGE_SOURCE_PREFLIGHT', env('APP_ENV') !== 'testing'),
 
     // The queue worker has a larger hard timeout (2100s). Application work
