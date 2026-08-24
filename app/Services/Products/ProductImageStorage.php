@@ -2512,6 +2512,18 @@ class ProductImageStorage
         if ($host === 'media.ldlc.com' || str_ends_with($host, '.media.ldlc.com')) {
             $normalized = preg_replace('#/r\d{2,5}/#i', '/__rendition__/', $normalized) ?: $normalized;
         }
+
+        // delkom.pl embeds a hex segment between /pic3/ and the numeric
+        // product-image id that changes per rendition/format (real case: a
+        // Lenovo Legion 9i gallery stored the same photo four times -
+        // 1604x/802x/720x, .png and .webp, each with a different hex
+        // segment - as four "distinct" photos). The numeric id right before
+        // the filename is the actual stable identity; hex segment, width
+        // suffix and extension are all just rendition noise around it.
+        if ($host === 'delkom.pl' && preg_match('#/pic\d+/[0-9a-f]{4,8}/(\d+)/#i', $normalized, $matches) === 1) {
+            $normalized = preg_replace('#/pic\d+/[0-9a-f]{4,8}/\d+/#i', '/pic/'.$matches[1].'/', $normalized) ?: $normalized;
+            $normalized = preg_replace('/-\d{2,5}x\.(?:jpe?g|png|webp|gif|avif)(?=$|\?)/i', '.__image__', $normalized) ?: $normalized;
+        }
         $normalized = preg_replace(
             '/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:_(?:\d{2,5}|sea))?\.(?:jpe?g|png|webp|gif|avif)(?=$|\?)/i',
             '$1.__image__',
@@ -2586,6 +2598,11 @@ class ProductImageStorage
         $sizeSegmentScore = match (true) {
             preg_match('#/(\d{2,5})x(\d{2,5})/#i', $path, $matches) === 1 => min(4000, max((int) $matches[1], (int) $matches[2])),
             preg_match('#/(\d{2,5})w/#i', $path, $matches) === 1 => min(4000, (int) $matches[1]),
+            // A bare "-{width}x" filename suffix before the extension (e.g.
+            // delkom.pl's "...-1604x.png" / "...-720x.png") - a width-only
+            // rendition marker embedded in the filename rather than a path
+            // segment or query param.
+            preg_match('/-(\d{2,5})x\.(?:jpe?g|png|webp|gif|avif)$/i', $path, $matches) === 1 => min(4000, (int) $matches[1]),
             default => 0,
         };
 
