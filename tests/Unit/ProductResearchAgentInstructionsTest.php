@@ -44,6 +44,9 @@ class ProductResearchAgentInstructionsTest extends TestCase
         $this->assertStringContainsString('target 6-10 exact HTML product', $instructions);
         $this->assertStringContainsString('SKU/MPN/part number, EAN or UPC', $instructions);
         $this->assertStringContainsString('exact key sku, mpn, ean, upc, or', $instructions);
+        $this->assertStringContainsString('category and product_type', $instructions);
+        $this->assertStringContainsString('must never contradict each other', $instructions);
+        $this->assertStringContainsString('Decide product_type first', $instructions);
 
         $webSearch = collect($agent->tools())->first();
         $this->assertNull($webSearch->maxSearches);

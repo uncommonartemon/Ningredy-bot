@@ -37,6 +37,13 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
             slug in the "category" field, never invent a new one - pick the closest match):
             {$categories}
 
+            category and product_type (defined below) describe the same product from two different angles and
+            must never contradict each other - e.g. a motherboard, GPU, RAM module, cooler, or other separate
+            part is product_type=component, so its category must be whichever entry above is for components or
+            parts, never one meant for complete laptops or complete desktop computers. Decide product_type first
+            using its explicit rule below, then choose the category consistent with that decision - do not pick
+            category independently and risk it disagreeing with product_type.
+
             {$this->researchInstructions()}
             PROMPT;
     }
