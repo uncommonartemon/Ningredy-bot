@@ -381,7 +381,9 @@ class ProductImageVisionVerifier
             Reject only when the requested product is absent or too tiny to be useful; the frame is pure text/chart/logo,
             UI screenshot, accessory-only, unrelated media, user-generated/used/damaged imagery; quality is genuinely
             unusable; or pixels visibly contradict the product type, model, revision, or required color. Page identity
-            is valid positive evidence when pixels do not contradict it. Review every attachment independently.
+            is valid positive evidence when pixels do not contradict it. Judge each attachment's own relevance and
+            quality independently of the others - but still compare attachments against each other for the mandatory
+            duplicate check below; that check is never skipped by this permissive policy.
             POLICY
             : <<<'POLICY'
             Set publishable=false for a thumbnail, blurry or pixelated/upscaled image, watermark or promotional text,
@@ -424,9 +426,18 @@ class ProductImageVisionVerifier
             product. Use that page evidence for identity unless the pixels visibly contradict it. It never overrides
             a visible conflict, wrong color, wrong product type, prohibited packaging, or insufficient quality.
 
-            Prefer a sharp, clean, full-product hero view first, then distinct useful angles/details. Near-identical
-            shots, resized copies, and crops of the same photograph must not all be selected. Do not infer exact model,
-            color, or quality from the URL when visible evidence conflicts.
+            Prefer a sharp, clean, full-product hero view first, then distinct useful angles/details. Do not infer
+            exact model, color, or quality from the URL when visible evidence conflicts.
+
+            Mandatory duplicate check, performed after judging each image on its own: compare every attachment
+            against every other one. Two attachments are the SAME photograph - not two different angles - when they
+            show identical framing, pose, and lighting, even if their resolution, crop, aspect ratio, compression,
+            or file format differs (a small thumbnail and a large hero render of that exact same shot are still one
+            photograph). For every such group, keep only the sharpest/highest-resolution attachment as normal and
+            set publishable=false on every other member of that group, with reason stating which image number it is
+            a duplicate rendition of (e.g. "duplicate rendition of image 3, same shot at lower resolution"). This
+            check applies regardless of how many total duplicates exist or how few genuinely distinct photos would
+            remain - never keep more than one rendition of the same photograph merely to reach a higher count.
             Key specifications: {$specifications}
             Numbering follows attachment order: first attachment is image 1, etc.
             Candidate URLs and decoded resolutions:

@@ -1010,6 +1010,37 @@ class ProductImageStorageTest extends TestCase
         $this->assertSame('https://93.184.216.34/original.jpg', $media->first()->source_url);
     }
 
+    public function test_vision_prompt_explicitly_orders_duplicate_renditions_rejected_regardless_of_gallery_policy(): void
+    {
+        // Regression: a real delkom.pl gallery had the model review 10
+        // attachments where 7 were the same 2 photos at different
+        // resolutions/formats, and it approved all 10 - the prompt only had
+        // a soft aside ("must not all be selected") next to an instruction
+        // telling the model to judge attachments independently, which reads
+        // as license to skip cross-image comparison entirely. The
+        // instruction must be explicit, mechanical, and present regardless
+        // of which review policy (strict discovery vs. permissive gallery
+        // frames) is active - this is what lets the AI catch a brand new
+        // site's own duplicate-rendition convention without a URL-pattern
+        // fix for that site.
+        [, , $draft] = $this->records();
+        $verifier = app(ProductImageVisionVerifier::class);
+        $prompt = new \ReflectionMethod(ProductImageVisionVerifier::class, 'prompt');
+        $prompt->setAccessible(true);
+
+        foreach ([false, true] as $galleryFramePolicy) {
+            $text = $prompt->invoke($verifier, $draft, [], '', $galleryFramePolicy);
+
+            $this->assertStringContainsString('Mandatory duplicate check', $text);
+            $this->assertStringContainsString('identical framing, pose, and lighting', $text);
+            $this->assertStringContainsString('set publishable=false on every other member of that group', $text);
+            $this->assertStringContainsString(
+                'never keep more than one rendition of the same photograph merely to reach a higher count',
+                $text,
+            );
+        }
+    }
+
     public function test_refind_keeps_current_photos_until_replacements_are_found(): void
     {
         Queue::fake();
