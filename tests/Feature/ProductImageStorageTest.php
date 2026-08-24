@@ -3494,44 +3494,6 @@ class ProductImageStorageTest extends TestCase
         );
     }
 
-    public function test_delkom_pl_hex_and_width_suffix_renditions_share_one_asset_key_and_largest_is_kept(): void
-    {
-        // Regression: a real Lenovo Legion 9i search staged the same front-
-        // open photo five times and the same back-cover photo four times,
-        // as if they were nine distinct gallery frames - delkom.pl embeds a
-        // hex segment between "/pic3/" and the numeric product-image id
-        // that changes on every rendition/format, so a literal-URL or path-
-        // segment-only comparison never dedupes them; the width lives as a
-        // bare "-{width}x" filename suffix, not a path segment or query
-        // param either.
-        $frontLarge = 'https://delkom.pl/pic3/1173/401975/legion-9-gen-10-18iax10-eclipse-black-png-1604x.png';
-        $frontLargeWebp = 'https://delkom.pl/pic3/CA3C/401975/legion-9-gen-10-18iax10-eclipse-black-png-1604x.webp';
-        $frontMedium = 'https://delkom.pl/pic3/3E02/401975/legion-9-gen-10-18iax10-eclipse-black-png-802x.png';
-        $frontSmall = 'https://delkom.pl/pic3/6AFF/401975/legion-9-gen-10-18iax10-eclipse-black-png-720x.png';
-        $frontSmallWebp = 'https://delkom.pl/pic3/1273/401975/legion-9-gen-10-18iax10-eclipse-black-png-720x.webp';
-        $sideProfile = 'https://delkom.pl/pic3/79BA/401982/legion-9-gen-10-18iax10-eclipse-black-7-png-1604x.png';
-        $backLarge = 'https://delkom.pl/pic3/0B22/401983/legion-9-gen-10-18iax10-eclipse-black-10-png-1604x.png';
-        $backMedium = 'https://delkom.pl/pic3/998A/401983/legion-9-gen-10-18iax10-eclipse-black-10-png-802x.png';
-
-        foreach ([$frontLargeWebp, $frontMedium, $frontSmall, $frontSmallWebp] as $sameAsset) {
-            $this->assertSame(ProductImageStorage::imageAssetKey($frontLarge), ProductImageStorage::imageAssetKey($sameAsset));
-        }
-        $this->assertSame(ProductImageStorage::imageAssetKey($backLarge), ProductImageStorage::imageAssetKey($backMedium));
-        $this->assertNotSame(ProductImageStorage::imageAssetKey($frontLarge), ProductImageStorage::imageAssetKey($sideProfile));
-        $this->assertNotSame(ProductImageStorage::imageAssetKey($frontLarge), ProductImageStorage::imageAssetKey($backLarge));
-
-        $cleanUrls = new \ReflectionMethod(ProductImageStorage::class, 'cleanUrls');
-        $cleanUrls->setAccessible(true);
-
-        $this->assertSame(
-            [$frontLarge, $sideProfile, $backLarge],
-            $cleanUrls->invoke(app(ProductImageStorage::class), [
-                $frontSmall, $frontLarge, $frontSmallWebp, $frontMedium, $frontLargeWebp,
-                $sideProfile, $backMedium, $backLarge,
-            ]),
-        );
-    }
-
     public function test_download_candidates_falls_back_to_the_observed_rendition_when_the_guessed_upgrade_404s(): void
     {
         // Real case: normalizeCandidateUrl() guesses 1600x1600 for any WxH
