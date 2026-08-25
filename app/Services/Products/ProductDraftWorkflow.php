@@ -33,8 +33,11 @@ class ProductDraftWorkflow
         ?User $reviewer = null,
         ?string $telegramReviewerId = null,
     ): Product {
-        $minimumWidth = $this->settings->imageMinimumWidth();
-        $minimumHeight = $this->settings->imageMinimumHeight();
+        $category = $draft->category
+            ? Category::query()->where('slug', $draft->category)->first()
+            : null;
+        $minimumWidth = $category?->minimumImageWidth() ?? $this->settings->imageMinimumWidth();
+        $minimumHeight = $category?->minimumImageHeight() ?? $this->settings->imageMinimumHeight();
         $media = $draft->media()->get(['width', 'height', 'verification_status']);
         throw_if(
             $media->isEmpty(),

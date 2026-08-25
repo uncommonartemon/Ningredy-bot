@@ -25,6 +25,7 @@ class ProductImageResolver
         private readonly ProductSearchCostBudget $costBudget,
         private readonly ProductSourceAttemptRecorder $attempts,
         private readonly ProductSourcePageRules $pageRules,
+        private readonly BrowserProductImageTransferStore $transfers,
     ) {}
 
     /** @var array<int, true> */
@@ -227,7 +228,7 @@ class ProductImageResolver
             $reportedSourceImages = collect(is_array($source['image_urls'] ?? null) ? $source['image_urls'] : [])
                 ->filter(fn (mixed $imageUrl): bool => is_string($imageUrl) && $this->isPublicUrl($imageUrl))
                 ->map(fn (string $imageUrl): string => ProductImageStorage::normalizeCandidateUrl($imageUrl))
-                ->unique()->values()->all();
+                ->unique(fn (string $url): string => ProductImageStorage::imageAssetKey($url))->values()->all();
 
             try {
                 [$response, $finalUrl] = $this->fetch($sourceUrl);
@@ -280,6 +281,8 @@ class ProductImageResolver
                     'static_image_urls' => $browserSeedImages,
                     'minimum_verified_images' => max(1, (int) ($source['_minimum_verified_images'] ?? 3)),
                     'category_slug' => $source['_category_slug'] ?? null,
+                    'minimum_image_width' => $source['_minimum_image_width'] ?? null,
+                    'minimum_image_height' => $source['_minimum_image_height'] ?? null,
                 ];
                 $browserResult = $activeRecipeOnly
                     ? $this->browser->extract(
@@ -310,7 +313,7 @@ class ProductImageResolver
                 $browserImages = collect($browserResult)
                     ->filter(fn (mixed $imageUrl): bool => is_string($imageUrl) && $this->isPublicUrl($imageUrl))
                     ->map(fn (string $imageUrl): string => ProductImageStorage::normalizeCandidateUrl($imageUrl))
-                    ->unique()
+                    ->unique(fn (string $url): string => ProductImageStorage::imageAssetKey($url))
                     ->values()
                     ->all();
 
@@ -330,7 +333,9 @@ class ProductImageResolver
                 $debug?->__invoke('blocked', 'HTTP-запрос получил служебную страницу, и Playwright не смог открыть полноценную карточку товара.');
             }
 
-            $images = array_values(array_unique($images));
+            $images = collect($images)
+                ->unique(fn (string $url): string => ProductImageStorage::imageAssetKey($url))
+                ->values()->all();
             $sourceImageCount = max(0, count($images) - $sourceImageStart);
             foreach (array_slice($images, $sourceImageStart) as $imageUrl) {
                 $this->sourceContextsByImageUrl[ProductImageStorage::normalizeCandidateUrl($imageUrl)] = [
@@ -421,6 +426,16 @@ class ProductImageResolver
             $failureReason = 'not_public_url';
 
             return null;
+        }
+
+        if ($transferred = $this->transfers->get($url, $maxBytes)) {
+            return [
+                ...$transferred,
+                'confirmed_gallery' => $this->browser->isConfirmedGalleryImage($url)
+                    || $this->browser->isConfirmedGalleryImage($transferred['source_url']),
+                'partial_gallery' => $this->browser->isPartialGalleryImage($url)
+                    || $this->browser->isPartialGalleryImage($transferred['source_url']),
+            ];
         }
 
         try {
@@ -659,6 +674,23 @@ class ProductImageResolver
             }
         }
 
+        // A thumbnail button whose full-resolution URL only ever appears as a
+        // quoted argument to an inline onclick image-swap handler (real case:
+        // onclick="window.changeMainImage('.../02.png', this)") is invisible
+        // to every attribute query above - none of them look inside onclick.
+        // This does not depend on the handler's name or this one site: any
+        // quoted, image-extension-ending string inside an onclick is a
+        // legitimate candidate URL by the same logic as srcset or data-src.
+        foreach ($xpath->query('//*/@onclick') ?: [] as $node) {
+            if (preg_match_all(
+                '/[\'"]([^\'"\s]+\.(?:jpe?g|png|webp|gif|avif)(?:\?[^\'"\s]*)?)[\'"]/i',
+                html_entity_decode((string) $node->nodeValue, ENT_QUOTES | ENT_HTML5),
+                $onclickMatches,
+            ) > 0) {
+                $images = [...$images, ...$onclickMatches[1]];
+            }
+        }
+
         foreach ($xpath->query('//script[@type="application/ld+json"]') ?: [] as $node) {
             $structuredData = json_decode(html_entity_decode($node->nodeValue, ENT_QUOTES | ENT_HTML5), true);
 
@@ -680,7 +712,7 @@ class ProductImageResolver
             // keeps every downstream count and gallery-sufficiency decision
             // from inheriting an inflated "distinct photo" count.
             ->map(fn (string $url): string => ProductImageStorage::normalizeCandidateUrl($url))
-            ->unique()
+            ->unique(fn (string $url): string => ProductImageStorage::imageAssetKey($url))
             ->take((int) config('product-images.max_urls_per_page', 60))
             ->values()
             ->all();
@@ -739,7 +771,7 @@ class ProductImageResolver
         return collect($matches[0] ?? [])
             ->map(fn (string $url): string => str_replace(['\/', '\\/'], '/', $url))
             ->filter(fn (string $url): bool => $this->looksLikeImageUrl($url))
-            ->unique()
+            ->unique(fn (string $url): string => ProductImageStorage::imageAssetKey($url))
             ->values()
             ->all();
     }

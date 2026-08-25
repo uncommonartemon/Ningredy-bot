@@ -23,7 +23,11 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
 
     public const int MAX_OUTPUT_TOKENS = 16_000;
 
-    public const int MAX_WEB_SEARCH_CALLS = 10;
+    // Real production AiRun activity logs show successful research using
+    // 2-11 web searches (avg ~6); 12 leaves a small buffer over the observed
+    // working maximum without letting one response run away to dozens of
+    // calls. See PROJECT_LOGIC.md's Web Search section.
+    public const int MAX_WEB_SEARCH_CALLS = 12;
 
     /**
      * Get the instructions that the agent should follow.
@@ -60,6 +64,12 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
             source merely because it is an official site,
             marketplace, or retailer: all source types start equal. The application reorders candidates later
             from measured extraction and acceptance success. Use only established, verifiable sources.
+
+            A source page's own region, TLD, or locale (e.g. a manufacturer's own localized storefront such as
+            "/ja-jp/", "/de-de/") is never a reason to reject it - confirming the exact product matters, not
+            where its page happens to be hosted or what language the page text is in. The only language
+            constraint applies to text visible inside the photographs themselves, enforced separately by Vision
+            after research, not here.
 
             Always search only for a new, factory-sealed product page for identity, specifications, and
             photographs. Never select used, refurbished, renewed, recertified, second-hand, or open-box offers as

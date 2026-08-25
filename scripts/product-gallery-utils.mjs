@@ -1,4 +1,4 @@
-export const normalizeImageCandidate = (rawUrl, sourceUrl, { upgradeRendition = true } = {}) => {
+export const normalizeImageCandidate = (rawUrl, sourceUrl) => {
     let url;
 
     try {
@@ -12,41 +12,6 @@ export const normalizeImageCandidate = (rawUrl, sourceUrl, { upgradeRendition = 
     }
 
     let normalized = url.toString();
-
-    if (upgradeRendition) {
-        // Many commerce CDNs (not just one named site) expose the same
-        // immutable photo under several "WxH"/"Nw" size-bucket path
-        // segments - the same convention SIZE_SEGMENT above already
-        // recognizes for dedup - without the largest bucket ever appearing
-        // directly in the page's own DOM/network traffic. Guessing a
-        // bigger bucket by bumping the number is domain-agnostic and safe
-        // to try; what is NOT safe is assuming the guessed bucket exists
-        // for every item - it doesn't, and callers that need a real
-        // fallback if it 404s/fails to decode should also probe the
-        // { upgradeRendition: false } form of the same URL.
-        // Matches both a bare "/1280x1280/" segment and a word-prefixed one
-        // like B&H's "/images500x500/" - the leading word (if any) is kept,
-        // only the number(s) are bumped, so this stays agnostic to whatever
-        // word each CDN happens to prefix its size buckets with.
-        const sizeSegment = normalized.match(/\/([a-z_]*)(\d{2,5})(x\d{2,5}|w)\//i);
-        const currentWidth = sizeSegment ? Number.parseInt(sizeSegment[2], 10) : 0;
-
-        if (sizeSegment && currentWidth > 0 && currentWidth < UPSCALED_SIZE_PARAM_VALUE) {
-            const prefix = sizeSegment[1] || '';
-            const suffix = sizeSegment[3].toLowerCase() === 'w' ? 'w' : `x${UPSCALED_SIZE_PARAM_VALUE}`;
-            normalized = normalized.replace(sizeSegment[0], `/${prefix}${UPSCALED_SIZE_PARAM_VALUE}${suffix}/`);
-        }
-
-        // ASUS's own "//wNN" syntax (double-slash, digit right after "w",
-        // unlike the generic WxH/Nw bucket convention above) is
-        // idiosyncratic to this one CDN, so recognizing it at all is
-        // unavoidably domain-specific - mirrors ProductImageStorage::
-        // normalizeCandidateUrl()'s ASUS rule (PHP), including the same
-        // guess-then-fall-back-if-it-404s caveat.
-        if (url.hostname.endsWith('dlcdnwebimgs.asus.com')) {
-            normalized = normalized.replace(/\/\/w(?:48|64|96|184)(?=\?|$)/i, '//w800');
-        }
-    }
 
     const pathSize = Number.parseInt(normalized.match(/images(\d+)x\d+/i)?.[1] || '0', 10);
     const knownNonImageExtension = /\.(?:svg|gif|ico|pdf|html?|json|xml)(?:$|[?#])/i;
@@ -153,7 +118,7 @@ const RENDITION_DIRECTORY = /\/(?:thumb(?:nail)?s?|small|medium|large|xlarge|xxl
 // RENDITION_DIRECTORY above it is rarely adjacent to the filename. Mirrors
 // ProductImageStorage::imageAssetKey()/candidateUrlQualityScore() - keep
 // both in sync.
-const SIZE_SEGMENT = /\/\d{2,5}(?:x\d{2,5}|w)\//i;
+const SIZE_SEGMENT = /\/(?:[a-z][a-z_-]*)?\d{2,5}(?:x\d{2,5}|w)\//i;
 // Some commerce CDNs keep one immutable UUID per physical photo and append a
 // rendition marker to that same UUID (real examples: _720 and _sea).
 // The bytes and canvas can differ enough for perceptual hashing to miss the
@@ -236,7 +201,7 @@ export const urlQualityScore = (rawUrl) => {
     const uuidRenditionSize = /^\d{2,5}$/.test(uuidRendition || '')
         ? Number.parseInt(uuidRendition, 10)
         : (uuidRendition === 'sea' ? 2000 : 0);
-    const sizeSegmentMatch = url.pathname.match(/\/(\d{2,5})(?:x(\d{2,5})|w)\//i);
+    const sizeSegmentMatch = url.pathname.match(/\/(?:[a-z][a-z_-]*)?(\d{2,5})(?:x(\d{2,5})|w)\//i);
     const sizeSegmentSize = sizeSegmentMatch
         ? Math.max(Number.parseInt(sizeSegmentMatch[1], 10), Number.parseInt(sizeSegmentMatch[2] || '0', 10))
         : 0;
@@ -298,68 +263,6 @@ export const recipeActionOpensGallery = (action) => Boolean(action)
 export const recipeActionTraversesGallery = (action) => Boolean(action)
     && (action.kind !== 'click'
         || /(?:thumbnail|next|previous|arrow|visit|traverse|each|all images)/i.test(action.purpose || ''));
-
-// Many catalog CDNs (Magento-style stores, Next.js image optimizers, etc.)
-// expose a resizable image through a width/height query parameter. A
-// thumbnail caught at e.g. width=140 fails the minimum-side check even
-// though the exact same asset is available full-size at the same path -
-// bumping the parameter before giving up recovers it instead of discarding
-// a real, distinct product photo just because of the size it happened to
-// be observed at.
-export const UPSCALED_SIZE_PARAM_VALUE = 1600;
-export const UPSCALED_UUID_RENDITION_SIZE = 2880;
-
-export const withUpscaledSizeParam = (rawUrl) => {
-    let url;
-
-    try {
-        url = new URL(rawUrl);
-    } catch {
-        return null;
-    }
-
-    const sizeKeys = ['width', 'w', 'height', 'h'];
-    let changed = false;
-
-    for (const key of sizeKeys) {
-        if (!url.searchParams.has(key)) {
-            continue;
-        }
-
-        const current = Number.parseInt(url.searchParams.get(key), 10);
-
-        if (Number.isFinite(current) && current > 0 && current < UPSCALED_SIZE_PARAM_VALUE) {
-            url.searchParams.set(key, String(UPSCALED_SIZE_PARAM_VALUE));
-            changed = true;
-        }
-    }
-
-    // Shopify has no upscale query param to bump - stripping the filename
-    // size suffix instead asks the CDN for the original, unmodified master
-    // asset (mirrors the Scene7 "omit the modifier entirely" case above).
-    if (isShopifyCdnUrl(url)) {
-        const stripped = url.pathname.replace(SHOPIFY_SIZE_SUFFIX, '');
-
-        if (stripped !== url.pathname) {
-            url.pathname = stripped;
-            changed = true;
-        }
-    }
-
-    const uuidRendition = url.pathname.match(
-        /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})_(\d{2,5})\.(?:jpe?g|png|webp|gif|avif)$/i,
-    );
-
-    if (uuidRendition && Number.parseInt(uuidRendition[2], 10) < UPSCALED_UUID_RENDITION_SIZE) {
-        url.pathname = url.pathname.replace(
-            UUID_PHYSICAL_ASSET,
-            `$1_${UPSCALED_UUID_RENDITION_SIZE}.avif`,
-        );
-        changed = true;
-    }
-
-    return changed ? url.toString() : null;
-};
 
 export const imageDimensionsMeetMinimum = ({
     width,

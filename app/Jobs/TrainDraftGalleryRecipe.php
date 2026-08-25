@@ -2,8 +2,8 @@
 
 namespace App\Jobs;
 
-use App\Models\ProductDraft;
 use App\Models\Category;
+use App\Models\ProductDraft;
 use App\Services\Products\ProductGalleryRecipeTrainer;
 use App\Services\Telegram\TelegramClient;
 use App\Services\Telegram\TelegramProgressReporter;
@@ -57,9 +57,9 @@ class TrainDraftGalleryRecipe implements ShouldQueue
         throw_unless($draft->status === 'pending_review', RuntimeException::class, 'Черновик уже обработан.');
         $url = trim((string) $draft->primary_source_url);
         throw_if($url === '', RuntimeException::class, 'У черновика нет ссылки на товарную карточку.');
-        $minimumVerifiedImages = Category::query()
+        $category = Category::query()
             ->where('slug', trim((string) $draft->category))
-            ->first()?->minimumVerifiedImages() ?? 3;
+            ->first();
 
         $progress = new TelegramProgressReporter($telegram, $this->chatId);
         $progress->step('1/2 · AI изучает DOM и проверяет новый Playwright-рецепт', 1080);
@@ -79,7 +79,11 @@ class TrainDraftGalleryRecipe implements ShouldQueue
             },
             true,
             $this->telegramUpdateId,
-            context: ['minimum_verified_images' => $minimumVerifiedImages],
+            context: [
+                'minimum_verified_images' => $category?->minimumVerifiedImages() ?? 3,
+                'minimum_image_width' => $category?->minimumImageWidth(),
+                'minimum_image_height' => $category?->minimumImageHeight(),
+            ],
             userHint: $this->hint,
         );
         throw_if(count($images) < 2, RuntimeException::class, 'Новый рецепт не прошёл проверку; старый рецепт и фото сохранены.');

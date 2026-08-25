@@ -14,6 +14,8 @@ class GetCandidateRejectionDetail implements Tool
     public function __construct(
         private readonly string $url,
         private readonly string $domain,
+        private readonly ?int $telegramUpdateId = null,
+        private readonly ?int $recipeVersionId = null,
     ) {}
 
     public function description(): Stringable|string
@@ -36,6 +38,17 @@ class GetCandidateRejectionDetail implements Tool
 
         $match = ProductSourceAttempt::query()
             ->where('domain', $this->domain)
+            ->when(
+                $this->telegramUpdateId !== null,
+                fn ($query) => $query->where('telegram_update_id', $this->telegramUpdateId),
+            )
+            ->when(
+                $this->telegramUpdateId === null && $this->recipeVersionId !== null,
+                fn ($query) => $query->where(
+                    'product_gallery_recipe_version_id',
+                    $this->recipeVersionId,
+                ),
+            )
             ->whereIn('phase', ['image_download', 'fallback_image_download'])
             ->latest('id')
             ->limit(50)

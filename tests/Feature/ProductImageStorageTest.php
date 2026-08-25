@@ -147,6 +147,45 @@ class ProductImageStorageTest extends TestCase
         Storage::disk('public')->assertDirectoryEmpty("products/{$product->id}");
     }
 
+    public function test_an_out_of_enum_vision_kind_falls_back_to_uncertain_instead_of_failing_the_whole_batch(): void
+    {
+        ProductImageVisionAgent::fake(fn (string $prompt, $attachments): array => [
+            'images' => $attachments->keys()->map(fn (int $index): array => [
+                'index' => $index + 1,
+                'exact_match' => true,
+                'publishable' => true,
+                'color_match' => true,
+                // A plausible but out-of-enum value (real production case)
+                // used to throw a ValidationException and discard the whole
+                // batch, including every other validly-classified photo.
+                'kind' => $index === 0 ? 'product' : 'lifestyle',
+                'view' => $index === 0 ? 'front' : 'other',
+                'gallery_rank' => $index + 1,
+                'score' => 90 - $index,
+                'reason' => 'Fixture.',
+            ])->all(),
+        ])->preventStrayPrompts();
+        [, , $draft] = $this->records();
+
+        $accepted = app(ProductImageVisionVerifier::class)->select($draft->fresh(), [
+            [
+                'image' => imagecreatefromstring($this->jpeg(1)),
+                'source_url' => 'https://93.184.216.34/image-1.jpg',
+                'width' => 800,
+                'height' => 800,
+            ],
+            [
+                'image' => imagecreatefromstring($this->jpeg(2)),
+                'source_url' => 'https://93.184.216.34/image-2.jpg',
+                'width' => 800,
+                'height' => 800,
+            ],
+        ], 2);
+
+        $this->assertCount(1, $accepted);
+        $this->assertSame('https://93.184.216.34/image-1.jpg', $accepted[0]['source_url']);
+    }
+
     public function test_components_can_keep_all_available_images_up_to_the_global_ten_limit(): void
     {
         Storage::fake('public');
@@ -776,42 +815,19 @@ class ProductImageStorageTest extends TestCase
         ], $product->media()->pluck('source_url')->all());
     }
 
-    public function test_it_upgrades_a_numeric_wxh_rendition_segment_on_any_domain_before_downloading(): void
+    public function test_it_preserves_the_exact_observed_rendition_url(): void
     {
-        // Generic by construction (mirrors scripts/product-gallery-
-        // utils.mjs normalizeImageCandidate()): no hostname check, no
-        // site-specific magic number - only bumps a number already present
-        // in a "WxH" path segment, whatever word (if any) prefixes it.
-        $this->assertSame(
-            'https://static.bhphoto.com/images/multiple_images/images1600x1600/1767181436_IMG_2646502.jpg',
-            ProductImageStorage::normalizeCandidateUrl(
-                'https://static.bhphoto.com/images/multiple_images/images500x500/1767181436_IMG_2646502.jpg',
-            ),
-        );
-        $this->assertSame(
-            'https://static.bhphoto.com/images/images1600x1600/1767181363_1932364.jpg',
-            ProductImageStorage::normalizeCandidateUrl(
-                'https://static.bhphoto.com/images/images750x750/1767181363_1932364.jpg',
-            ),
-        );
-        $this->assertSame(
-            'https://example-other-cdn.test/media/1600x1600/product.jpg',
-            ProductImageStorage::normalizeCandidateUrl(
-                'https://example-other-cdn.test/media/240x240/product.jpg',
-            ),
-        );
-        // A word-only marker ("thumbnails") has no universal larger-size
-        // spelling to guess across CDNs - left as observed rather than
-        // inventing one.
-        $this->assertSame(
+        foreach ([
+            'https://static.bhphoto.com/images/multiple_images/images500x500/1767181436_IMG_2646502.jpg',
+            'https://static.bhphoto.com/images/images750x750/1767181363_1932364.jpg',
+            'https://example-other-cdn.test/media/240x240/product.jpg',
             'https://static.bhphoto.com/images/multiple_images/thumbnails/1767181436_IMG_2646502.jpg',
-            ProductImageStorage::normalizeCandidateUrl(
-                'https://static.bhphoto.com/images/multiple_images/thumbnails/1767181436_IMG_2646502.jpg',
-            ),
-        );
+        ] as $observed) {
+            $this->assertSame($observed, ProductImageStorage::normalizeCandidateUrl($observed));
+        }
     }
 
-    public function test_it_upgrades_asus_cdn_thumbnails_before_downloading(): void
+    public function test_it_downloads_only_the_observed_asus_cdn_url(): void
     {
         Storage::fake('public');
         config()->set('product-images.discover_after_rejection', false);
@@ -828,8 +844,9 @@ class ProductImageStorageTest extends TestCase
                 'reason' => 'Official product family image.',
             ]],
         ])->preventStrayPrompts();
-        Http::fake(function (Request $request) {
-            $this->assertStringEndsWith('//w800', $request->url());
+        $observed = 'https://dlcdnwebimgs.asus.com/gain/a57df082-80c1-4b35-9493-ff9727e4e7a4//w800';
+        Http::fake(function (Request $request) use ($observed) {
+            $this->assertSame($observed, $request->url());
 
             return Http::response($this->jpeg(44), 200, ['Content-Type' => 'image/jpeg']);
         });
@@ -841,26 +858,23 @@ class ProductImageStorageTest extends TestCase
                 'url' => 'https://www.asus.com/laptops/for-home/vivobook/asus-vivobook-15-x1504/',
                 'type' => 'manufacturer',
             ]],
-            'image_urls' => ['https://dlcdnwebimgs.asus.com/gain/a57df082-80c1-4b35-9493-ff9727e4e7a4//w48'],
+            'image_urls' => [$observed],
         ]);
 
         app(ProductImageStorage::class)->store($product, $variant, $draft->fresh());
 
         $this->assertDatabaseHas('product_media', [
             'product_id' => $product->id,
-            'source_url' => 'https://dlcdnwebimgs.asus.com/gain/a57df082-80c1-4b35-9493-ff9727e4e7a4//w800',
+            'source_url' => $observed,
             'verification_status' => 'verified',
         ]);
     }
 
-    public function test_download_candidates_falls_back_to_the_observed_asus_rendition_when_w800_404s(): void
+    public function test_download_candidates_never_requests_an_unobserved_asus_rendition(): void
     {
-        // The guessed //w800 upgrade is not guaranteed to exist for every
-        // ASUS product either - same caveat as the generic WxH case.
         $observed = 'https://dlcdnwebimgs.asus.com/gain/a57df082-80c1-4b35-9493-ff9727e4e7a4//w48';
         $guessed = 'https://dlcdnwebimgs.asus.com/gain/a57df082-80c1-4b35-9493-ff9727e4e7a4//w800';
         Http::fake([
-            $guessed => Http::response('Not Found', 404),
             $observed => Http::response($this->jpeg(21), 200, ['Content-Type' => 'image/jpeg']),
         ]);
         [, , $draft] = $this->records();
@@ -869,9 +883,8 @@ class ProductImageStorageTest extends TestCase
         $downloadCandidates->setAccessible(true);
         $candidates = $downloadCandidates->invoke(app(ProductImageStorage::class), [$observed], $draft);
 
-        $this->assertCount(1, $candidates);
-        $this->assertSame($observed, $candidates[0]['source_url']);
-        imagedestroy($candidates[0]['image']);
+        $this->assertSame([], $candidates);
+        Http::assertNotSent(fn (Request $request): bool => $request->url() === $guessed);
     }
 
     public function test_it_uses_fallback_discovery_when_research_only_returns_logos(): void
@@ -3306,90 +3319,59 @@ class ProductImageStorageTest extends TestCase
         Http::assertNotSent(fn (Request $request): bool => str_contains($request->url(), '93.184.216.34'));
     }
 
-    public function test_scene7_named_size_modifier_variants_normalize_to_the_same_url(): void
+    public function test_scene7_named_size_modifier_variants_share_a_dedupe_key_without_rewriting_urls(): void
     {
-        $normalize = fn (string $url): string => $this->invokeNormalizeCandidateUrl($url);
+        $encoded = 'https://images.samsung.com/is/image/samsung/ca-870-qvo-sata-3-2-5-ssd-mz-77q4t0b-am-Black-262825305?%241164_776_PNG%24=';
+        $raw = 'https://images.samsung.com/is/image/samsung/ca-870-qvo-sata-3-2-5-ssd-mz-77q4t0b-am-Black-262825305?$1164_776_PNG$';
 
-        // Samsung's CDN serves the exact same photo through this Scene7
-        // "named modifier" query form, seen both percent-encoded and raw
-        // depending on which page/template extracted it - without collapsing
-        // these to one URL, both get downloaded and stored as if they were
-        // two different photos (perceptual hashing alone measured a real
-        // distance of 10 between two such renditions, above the configured
-        // near-duplicate threshold of 6).
-        $encoded = $normalize('https://images.samsung.com/is/image/samsung/ca-870-qvo-sata-3-2-5-ssd-mz-77q4t0b-am-Black-262825305?%241164_776_PNG%24=');
-        $raw = $normalize('https://images.samsung.com/is/image/samsung/ca-870-qvo-sata-3-2-5-ssd-mz-77q4t0b-am-Black-262825305?$1164_776_PNG$');
-
-        $this->assertSame($encoded, $raw);
-        $this->assertSame('https://images.samsung.com/is/image/samsung/ca-870-qvo-sata-3-2-5-ssd-mz-77q4t0b-am-Black-262825305', $encoded);
+        $this->assertSame($encoded, ProductImageStorage::normalizeCandidateUrl($encoded));
+        $this->assertSame($raw, ProductImageStorage::normalizeCandidateUrl($raw));
+        $this->assertSame(ProductImageStorage::imageAssetKey($encoded), ProductImageStorage::imageAssetKey($raw));
     }
 
-    public function test_scene7_wid_hei_params_still_upscale_and_drop_scl(): void
+    public function test_scene7_query_renditions_share_a_key_but_keep_their_observed_urls(): void
     {
-        $normalized = $this->invokeNormalizeCandidateUrl(
-            'https://www.hp.com/is/image/HP/product?wid=90&hei=90&scl=3',
-        );
+        $small = 'https://www.hp.com/is/image/HP/product?wid=90&hei=90&scl=3';
+        $large = 'https://www.hp.com/is/image/HP/product?wid=1500&hei=1500';
 
-        $this->assertSame('https://www.hp.com/is/image/HP/product?wid=1500&hei=1500', $normalized);
+        $this->assertSame($small, ProductImageStorage::normalizeCandidateUrl($small));
+        $this->assertSame(ProductImageStorage::imageAssetKey($small), ProductImageStorage::imageAssetKey($large));
     }
 
-    public function test_shopify_width_and_height_variants_normalize_to_the_same_url(): void
+    public function test_shopify_width_and_height_variants_share_a_dedupe_key(): void
     {
-        // Real case (draft #27, vishalperipherals.com): the exact same photo
-        // was staged twice as "two photos" because Shopify's CDN resizes via
-        // a &width=N query param on an otherwise identical URL - perceptual
-        // hashing alone measured a real distance of 7 between the two
-        // renditions, one bit above the configured near-duplicate threshold
-        // of 6, so URL-level normalization is the only reliable defense.
-        $original = $this->invokeNormalizeCandidateUrl(
-            'https://vishalperipherals.com/cdn/shop/files/x1605va_285f809a.png?v=1753955410',
-        );
-        $resized = $this->invokeNormalizeCandidateUrl(
-            'https://vishalperipherals.com/cdn/shop/files/x1605va_285f809a.png?v=1753955410&width=1445',
-        );
+        $original = 'https://vishalperipherals.com/cdn/shop/files/x1605va_285f809a.png?v=1753955410';
+        $resized = $original.'&width=1445';
 
-        $this->assertSame($original, $resized);
-        $this->assertSame(
-            'https://vishalperipherals.com/cdn/shop/files/x1605va_285f809a.png?v=1753955410',
-            $original,
-        );
+        $this->assertSame($resized, ProductImageStorage::normalizeCandidateUrl($resized));
+        $this->assertSame(ProductImageStorage::imageAssetKey($original), ProductImageStorage::imageAssetKey($resized));
     }
 
-    public function test_shopify_cdn_domain_variants_also_normalize(): void
+    public function test_shopify_cdn_domain_variants_share_a_dedupe_key(): void
     {
-        $original = $this->invokeNormalizeCandidateUrl(
-            'https://cdn.shopify.com/s/files/1/0001/0002/products/laptop.jpg?v=1',
-        );
-        $resized = $this->invokeNormalizeCandidateUrl(
-            'https://cdn.shopify.com/s/files/1/0001/0002/products/laptop.jpg?v=1&width=800&height=800',
-        );
+        $original = 'https://cdn.shopify.com/s/files/1/0001/0002/products/laptop.jpg?v=1';
+        $resized = $original.'&width=800&height=800';
 
-        $this->assertSame($original, $resized);
+        $this->assertSame(ProductImageStorage::imageAssetKey($original), ProductImageStorage::imageAssetKey($resized));
     }
 
-    public function test_shopify_filename_suffix_variants_normalize_to_the_master_url(): void
+    public function test_shopify_filename_suffix_variants_share_the_master_asset_key(): void
     {
-        // Same real case as the query-param test above, but for Shopify's
-        // OTHER resize mechanism - a size suffix baked into the filename
-        // itself ("_180x", "_grande", "_1920x"), which the query-param strip
-        // never touches. Mirrors scripts/product-gallery-utils.mjs's
-        // imageAssetKey()/SHOPIFY_SIZE_SUFFIX - keep both in sync.
-        $master = $this->invokeNormalizeCandidateUrl(
-            'https://vishalperipherals.com/cdn/shop/files/x1605va_285f809a.png?v=1753955410',
-        );
+        $master = 'https://vishalperipherals.com/cdn/shop/files/x1605va_285f809a.png?v=1753955410';
 
-        $this->assertSame($master, $this->invokeNormalizeCandidateUrl(
+        foreach ([
             'https://vishalperipherals.com/cdn/shop/files/x1605va_285f809a_180x.png?v=1753955410',
-        ));
-        $this->assertSame($master, $this->invokeNormalizeCandidateUrl(
             'https://vishalperipherals.com/cdn/shop/files/x1605va_285f809a_grande.png?v=1753955410',
-        ));
-        $this->assertSame($master, $this->invokeNormalizeCandidateUrl(
             'https://vishalperipherals.com/cdn/shop/files/x1605va_285f809a_1920x.png?v=1753955410',
-        ));
-        $this->assertNotSame($master, $this->invokeNormalizeCandidateUrl(
-            'https://vishalperipherals.com/cdn/shop/files/x1605va_9999999b_180x.png?v=1753955410',
-        ));
+        ] as $rendition) {
+            $this->assertSame(ProductImageStorage::imageAssetKey($master), ProductImageStorage::imageAssetKey($rendition));
+            $this->assertSame($rendition, ProductImageStorage::normalizeCandidateUrl($rendition));
+        }
+
+        $this->assertNotSame(
+            ProductImageStorage::imageAssetKey($master),
+            ProductImageStorage::imageAssetKey('https://vishalperipherals.com/cdn/shop/files/x1605va_9999999b_180x.png?v=1753955410'),
+        );
     }
 
     public function test_named_rendition_directories_share_one_asset_key(): void
@@ -3454,15 +3436,8 @@ class ProductImageStorageTest extends TestCase
         $this->assertSame([$large], $cleanUrls->invoke(app(ProductImageStorage::class), [$small, $large]));
     }
 
-    public function test_bigcommerce_stencil_size_segment_renditions_share_one_asset_key_and_largest_is_kept(): void
+    public function test_bigcommerce_stencil_renditions_share_one_key_and_keep_the_largest_observed_url(): void
     {
-        // Regression: a real fleetnetwork.ca (BigCommerce Stencil) search
-        // staged the same hero photo four times (500x500, 640w, 840w,
-        // 1280x1280) as if they were four different gallery frames, wasting
-        // slots that should have gone to the product's other distinct
-        // angles. The size lives in its own path segment between
-        // "/stencil/" and "/products/", not adjacent to the filename like
-        // the named /large//xlarge/ buckets, and not a query param either.
         $thumb = 'https://cdn11.bigcommerce.com/s-xwx16vh8tc/images/stencil/500x500/products/689686/3683749/1086710301__09195.1766340706.jpg?c=2';
         $srcsetMid = 'https://cdn11.bigcommerce.com/s-xwx16vh8tc/images/stencil/640w/products/689686/3683749/1086710301__09195.1766340706.jpg?c=2';
         $srcsetWide = 'https://cdn11.bigcommerce.com/s-xwx16vh8tc/images/stencil/840w/products/689686/3683749/1086710301__09195.1766340706.jpg?c=2';
@@ -3477,34 +3452,17 @@ class ProductImageStorageTest extends TestCase
         $cleanUrls = new \ReflectionMethod(ProductImageStorage::class, 'cleanUrls');
         $cleanUrls->setAccessible(true);
 
-        // normalizeCandidateUrl()'s generic WxH bump (see that method) has
-        // no way to know 1280x1280 is already this real CDN's maximum - it
-        // proposes 1600x1600 for every candidate below that ceiling, same
-        // as any other domain. Losing the photo if 1600 turns out not to
-        // exist is prevented downstream in downloadCandidates() (see
-        // test_download_candidates_falls_back_to_the_observed_rendition_
-        // when_the_guessed_upgrade_404s), not here - cleanUrls() only
-        // proposes candidates, it never fetches.
         $this->assertSame(
-            [
-                'https://cdn11.bigcommerce.com/s-xwx16vh8tc/images/stencil/1600x1600/products/689686/3683749/1086710301__09195.1766340706.jpg?c=2',
-                'https://cdn11.bigcommerce.com/s-xwx16vh8tc/images/stencil/1600x1600/products/689686/3683750/1086710301__24458.1766340706.jpg?c=2',
-            ],
+            [$zoom, $otherAngle],
             $cleanUrls->invoke(app(ProductImageStorage::class), [$thumb, $srcsetMid, $srcsetWide, $zoom, $otherAngle]),
         );
     }
 
-    public function test_download_candidates_falls_back_to_the_observed_rendition_when_the_guessed_upgrade_404s(): void
+    public function test_download_candidates_never_requests_an_unobserved_bigcommerce_rendition(): void
     {
-        // Real case: normalizeCandidateUrl() guesses 1600x1600 for any WxH
-        // segment below that, but fleetnetwork.ca (BigCommerce Stencil)
-        // only ever serves this product up to 1280x1280 - the guess 404s.
-        // The photo must still be downloaded at the real, observed size
-        // instead of being lost entirely.
         $observed = 'https://cdn11.bigcommerce.com/s-xwx16vh8tc/images/stencil/1280x1280/products/689686/3683749/1086710301__09195.1766340706.jpg?c=2';
         $guessed = 'https://cdn11.bigcommerce.com/s-xwx16vh8tc/images/stencil/1600x1600/products/689686/3683749/1086710301__09195.1766340706.jpg?c=2';
         Http::fake([
-            $guessed => Http::response('Not Found', 404),
             $observed => Http::response($this->jpeg(21), 200, ['Content-Type' => 'image/jpeg']),
         ]);
         [, , $draft] = $this->records();
@@ -3515,6 +3473,7 @@ class ProductImageStorageTest extends TestCase
 
         $this->assertCount(1, $candidates);
         $this->assertSame($observed, $candidates[0]['source_url']);
+        Http::assertNotSent(fn (Request $request): bool => $request->url() === $guessed);
         imagedestroy($candidates[0]['image']);
     }
 
@@ -3686,19 +3645,12 @@ class ProductImageStorageTest extends TestCase
         imagedestroy($candidates[0]['image']);
     }
 
-    public function test_discovery_preserves_the_observed_rendition_until_the_download_fallback_is_built(): void
+    public function test_discovery_downloads_only_the_playwright_observed_rendition(): void
     {
-        // Production-route regression for B&H attempt 1131: Playwright had
-        // already validated the real 750x750 URL and rejected the guessed
-        // 1600x1600 rendition, but discoverCandidates() used to clean and
-        // upgrade the URL before downloadCandidates() could remember the
-        // observed fallback. The direct downloader test above did not cover
-        // that destructive pre-cleaning step.
         $page = 'https://www.bhphotovideo.com/c/product/1932364-REG/example.html/accessories';
         $observed = 'https://static.bhphoto.com/images/images750x750/1767181363_1932364.jpg';
         $guessed = 'https://static.bhphoto.com/images/images1600x1600/1767181363_1932364.jpg';
         Http::fake([
-            $guessed => Http::response('Not Found', 404),
             $observed => Http::response($this->jpeg(22), 200, ['Content-Type' => 'image/jpeg']),
         ]);
 
@@ -3722,8 +3674,8 @@ class ProductImageStorageTest extends TestCase
 
         $this->assertCount(1, $candidates);
         $this->assertSame($observed, $candidates[0]['source_url']);
-        Http::assertSent(fn (Request $request): bool => $request->url() === $guessed);
         Http::assertSent(fn (Request $request): bool => $request->url() === $observed);
+        Http::assertNotSent(fn (Request $request): bool => $request->url() === $guessed);
         imagedestroy($candidates[0]['image']);
     }
 

@@ -27,8 +27,8 @@ class FlagDomainRecipeNoteToolTest extends TestCase
 
         $this->assertTrue($result['ok']);
         $domain->refresh();
-        $this->assertStringContainsString('[auto selector_unreliable', $domain->agent_hint);
-        $this->assertStringContainsString('The viewer only opens via .zoom-btn, not .gallery-btn.', $domain->agent_hint);
+        $this->assertStringContainsString('[auto selector_unreliable', $domain->auto_agent_hint);
+        $this->assertStringContainsString('The viewer only opens via .zoom-btn, not .gallery-btn.', $domain->auto_agent_hint);
     }
 
     public function test_it_never_touches_an_existing_human_authored_line(): void
@@ -45,7 +45,7 @@ class FlagDomainRecipeNoteToolTest extends TestCase
 
         $domain->refresh();
         $this->assertStringContainsString('Always accept the cookie banner first.', $domain->agent_hint);
-        $this->assertStringContainsString('Thumbnail rail is a duplicate of the main slider.', $domain->agent_hint);
+        $this->assertStringContainsString('Thumbnail rail is a duplicate of the main slider.', $domain->auto_agent_hint);
     }
 
     public function test_auto_notes_are_capped_and_the_oldest_is_dropped(): void
@@ -60,10 +60,10 @@ class FlagDomainRecipeNoteToolTest extends TestCase
             $domain->refresh();
         }
 
-        $this->assertStringNotContainsString('Auto note number 1.', $domain->agent_hint);
-        $this->assertStringContainsString('Auto note number 2.', $domain->agent_hint);
-        $this->assertStringContainsString('Auto note number 6.', $domain->agent_hint);
-        $this->assertSame(5, substr_count($domain->agent_hint, '[auto '));
+        $this->assertStringNotContainsString('Auto note number 1.', $domain->auto_agent_hint);
+        $this->assertStringContainsString('Auto note number 2.', $domain->auto_agent_hint);
+        $this->assertStringContainsString('Auto note number 6.', $domain->auto_agent_hint);
+        $this->assertSame(5, substr_count($domain->auto_agent_hint, '[auto '));
     }
 
     public function test_it_records_an_audited_operation(): void

@@ -145,14 +145,6 @@ class ProductResearchResponseNormalizer
 
     private function canonicalProductPageUrl(string $url): string
     {
-        $host = strtolower((string) parse_url($url, PHP_URL_HOST));
-        $path = (string) parse_url($url, PHP_URL_PATH);
-
-        if (preg_match('/(^|\.)amazon\.[a-z.]+$/', $host) === 1
-            && preg_match('#/(?:[^/]+/)?dp/([A-Z0-9]{10})(?:/|$)#i', $path, $matches) === 1) {
-            return 'https://www.amazon.com/dp/'.strtoupper($matches[1]);
-        }
-
         return $url;
     }
 

@@ -8,6 +8,7 @@ use App\Services\Products\ProductImageStorage;
 use App\Services\Telegram\DraftTelegramPresenter;
 use App\Services\Telegram\TelegramClient;
 use App\Services\Telegram\TelegramProgressReporter;
+use Illuminate\Contracts\Queue\ShouldBeUniqueUntilProcessing;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
 use Illuminate\Queue\Middleware\WithoutOverlapping;
@@ -15,7 +16,7 @@ use Illuminate\Support\Facades\Cache;
 use RuntimeException;
 use Throwable;
 
-class ContinueDraftGallerySearch implements ShouldQueue
+class ContinueDraftGallerySearch implements ShouldBeUniqueUntilProcessing, ShouldQueue
 {
     use Queueable;
 
@@ -27,6 +28,8 @@ class ContinueDraftGallerySearch implements ShouldQueue
     // PROJECT_LOGIC.md requires these three numbers to move together.
     public int $timeout = 2040;
 
+    public int $uniqueFor = 2100;
+
     public function __construct(
         public int $draftId,
         public string $chatId,
@@ -34,6 +37,11 @@ class ContinueDraftGallerySearch implements ShouldQueue
         public ?int $expectedDraftTelegramUpdateId = null,
     ) {
         $this->onQueue('media');
+    }
+
+    public function uniqueId(): string
+    {
+        return $this->draftId.':'.($this->expectedDraftTelegramUpdateId ?? 'missing-generation');
     }
 
     /** @return array<int, object> */
@@ -55,6 +63,8 @@ class ContinueDraftGallerySearch implements ShouldQueue
         DraftTelegramPresenter $presenter,
         TelegramClient $telegram,
     ): void {
+        $autoChainDispatched = false;
+
         try {
             $draft = ProductDraft::query()->with('telegramUpdate')->findOrFail($this->draftId);
             throw_unless(
@@ -102,7 +112,13 @@ class ContinueDraftGallerySearch implements ShouldQueue
             // cost_budget/time_budget means that allowance really is gone,
             // so this is where the chain has to stop and report back.
             if ($fresh->gallery_status !== 'complete' && $fresh->gallery_search_stop_reason === 'exhausted') {
+                Cache::put(
+                    "draft-gallery-continue:{$this->draftId}:queued",
+                    true,
+                    $this->timeout + 60,
+                );
                 $progress->info('Все источники этого цикла проверены без результата; автоматически продолжаю новым циклом.');
+                $autoChainDispatched = true;
                 self::dispatch($this->draftId, $this->chatId, $this->telegramUpdateId, $this->expectedDraftTelegramUpdateId)
                     ->afterCommit();
 
@@ -117,7 +133,9 @@ class ContinueDraftGallerySearch implements ShouldQueue
 
             $presenter->sendReview($telegram, $this->chatId, $fresh);
         } finally {
-            Cache::forget("draft-gallery-continue:{$this->draftId}:queued");
+            if (! $autoChainDispatched) {
+                Cache::forget("draft-gallery-continue:{$this->draftId}:queued");
+            }
         }
     }
 

@@ -10,6 +10,7 @@ class ProductSourceDomain extends Model
     protected $fillable = [
         'domain',
         'agent_hint',
+        'auto_agent_hint',
     ];
 
     public function setDomainAttribute(mixed $value): void

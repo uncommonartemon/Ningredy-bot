@@ -134,6 +134,8 @@ class ProductImageResolverTest extends TestCase
                 'static_image_urls' => ['https://93.184.216.34/static-fallback.jpg'],
                 'minimum_verified_images' => 3,
                 'category_slug' => null,
+                'minimum_image_width' => null,
+                'minimum_image_height' => null,
             ], false)
             ->andReturn([
                 'https://93.184.216.34/browser-product-front.jpg',
@@ -172,6 +174,10 @@ class ProductImageResolverTest extends TestCase
                     'static_image_urls' => ['https://93.184.216.34/static.jpg'],
                     'minimum_verified_images' => 3,
                     'category_slug' => null,
+                    'minimum_image_width' => null,
+                    'minimum_image_height' => null,
+                    'minimum_image_width' => null,
+                    'minimum_image_height' => null,
                 ],
                 false,
                 true,
@@ -255,6 +261,8 @@ class ProductImageResolverTest extends TestCase
                 'static_image_urls' => ['https://93.184.216.34/hero.jpg'],
                 'minimum_verified_images' => 3,
                 'category_slug' => null,
+                'minimum_image_width' => null,
+                'minimum_image_height' => null,
             ], false)
             ->andReturn([]);
 
@@ -363,13 +371,11 @@ class ProductImageResolverTest extends TestCase
             ['url' => 'https://93.184.216.34/amazon-product'],
         ], 5);
 
-        // Amazon's size-suffix (e.g. "._AC_SL1500_") is stripped by the same
-        // normalization every candidate goes through before being counted or
-        // downloaded (ProductImageStorage::normalizeCandidateUrl()) - the
-        // suffix-free URL is Amazon's own original, full-resolution asset.
+        // The exact observed data-old-hires URLs are returned. Their Amazon
+        // rendition suffixes participate only in the non-fetchable asset key.
         $this->assertSame([
-            'https://m.media-amazon.com/images/I/MAIN.jpg',
-            'https://m.media-amazon.com/images/I/SECOND.jpg',
+            'https://m.media-amazon.com/images/I/MAIN._AC_SL1500_.jpg',
+            'https://m.media-amazon.com/images/I/SECOND._AC_SL1000_.jpg',
         ], $images);
     }
 
@@ -390,7 +396,7 @@ class ProductImageResolverTest extends TestCase
         ], 5);
 
         $this->assertSame([
-            'https://images.samsung.com/is/image/samsung/product',
+            'https://images.samsung.com/is/image/samsung/product?%241164_776_PNG%24=',
         ], $images);
     }
 }

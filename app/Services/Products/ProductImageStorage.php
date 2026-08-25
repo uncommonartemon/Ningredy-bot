@@ -1793,11 +1793,6 @@ class ProductImageStorage
         $limit = (int) config('product-images.download_candidates', 8);
         $sourcePagesByUrl = [];
         $sourceContextsByUrl = [];
-        // A guessed larger rendition (see normalizeCandidateUrl()'s WxH
-        // bump) is not guaranteed to exist for a given item - if it fails
-        // to download, fall back to the originally observed, real
-        // rendition instead of losing that photo entirely.
-        $renditionFallbackByUrl = [];
         $this->lastDownloadRejections = [];
 
         foreach ($urls as $originalUrl) {
@@ -1817,11 +1812,6 @@ class ProductImageStorage
             }
             if (is_array($context)) {
                 $sourceContextsByUrl[$key] = $context;
-            }
-
-            $observedKey = self::normalizeCandidateUrl($originalUrl, upgradeRendition: false);
-            if ($observedKey !== $key) {
-                $renditionFallbackByUrl[$key] = $observedKey;
             }
         }
 
@@ -1868,10 +1858,6 @@ class ProductImageStorage
             $failureReason = null;
             $refererUrl = $sourcePagesByUrl[$url] ?? null;
             $download = $this->resolver->download($url, failureReason: $failureReason, refererUrl: $refererUrl);
-
-            if (! $download && isset($renditionFallbackByUrl[$url])) {
-                $download = $this->resolver->download($renditionFallbackByUrl[$url], failureReason: $failureReason, refererUrl: $refererUrl);
-            }
 
             if (! $download) {
                 $this->lastDownloadRejections[] = ['url' => $url, 'reason' => $failureReason ?? 'unknown'];
@@ -2044,11 +2030,9 @@ class ProductImageStorage
         } finally {
             $this->associateAttemptsWithDraftSince($draft, $telegramUpdateId, $attemptCheckpoint);
         }
-        // Keep the exact rendition observed by the browser until
-        // downloadCandidates() has built its upgraded -> observed fallback
-        // map. Cleaning here used to turn a verified 750x750 URL into a
-        // speculative 1600x1600 URL before the downloader could remember
-        // where that guess came from.
+        // Keep exact URLs observed by the browser or page markup. Asset-key
+        // canonicalization below is dedupe-only and must never become a
+        // download target.
         $existingAssetKeys = collect($this->cleanUrls($existingUrls))
             ->map(fn (string $url): string => self::imageAssetKey($url))
             ->all();
@@ -2406,96 +2390,13 @@ class ProductImageStorage
     }
 
     /**
-     * Pure URL rewrite, no instance state - also called statically from
-     * ProductGalleryRecipeTrainer::preflight() so the "is this the same photo
-     * at another size" judgment used for downloading candidates and the one
-     * used for the AI preflight's static-gallery headcount never diverge.
+     * Normalize only the syntax of an actually observed URL. Rendition
+     * canonicalization belongs in imageAssetKey(); this return value is a
+     * download target and therefore must never contain a guessed size.
      */
-    public static function normalizeCandidateUrl(string $url, bool $upgradeRendition = true): string
+    public static function normalizeCandidateUrl(string $url): string
     {
-        $url = trim($url);
-        $host = Str::lower((string) parse_url($url, PHP_URL_HOST));
-
-        // Many commerce CDNs (not one named site) expose the same immutable
-        // photo under several "WxH" size-bucket path segments without the
-        // largest bucket ever appearing directly in the page's own HTML -
-        // matches both a bare "/1280x1280/" segment and a word-prefixed one
-        // like B&H's "/images500x500/". Bumping the number(s) already
-        // present is domain-agnostic and safe to try; the guessed bucket is
-        // not guaranteed to exist for every item (real case: fleetnetwork.ca
-        // BigCommerce Stencil products only ever have up to 1280x1280 -
-        // guessing 1600 for those would 404), so a failed download of this
-        // URL must fall back to the $upgradeRendition: false form (the
-        // originally observed, real rendition) instead of losing the photo
-        // outright - see downloadCandidates()'s $renditionFallbackByUrl.
-        if ($upgradeRendition && preg_match('#/([a-z_]*)(\d{2,5})(x\d{2,5})/#i', $url, $sizeSegment) === 1 && (int) $sizeSegment[2] < 1600) {
-            $url = preg_replace(
-                '#/'.preg_quote($sizeSegment[1].$sizeSegment[2].$sizeSegment[3], '#').'/#i',
-                '/'.$sizeSegment[1].'1600x1600/',
-                $url,
-                1,
-            ) ?: $url;
-        }
-
-        // ASUS's own "//wNN" syntax (double-slash, no "x", unlike the near-
-        // universal WxH bucket convention above) is idiosyncratic to this
-        // one CDN, so recognizing it at all is unavoidably domain-specific -
-        // but which larger rendition actually exists is still just a guess,
-        // same as the generic WxH case: not gated by $upgradeRendition would
-        // mean a failed guess has no way back to the real, observed size.
-        if ($upgradeRendition && str_contains($host, 'dlcdnwebimgs.asus.com')) {
-            return preg_replace('#//w(?:48|64|96|184)(?:\?|$)#i', '//w800', $url) ?: $url;
-        }
-
-        if ($host === 'm.media-amazon.com' || str_ends_with($host, '.media-amazon.com')) {
-            return preg_replace('#\._[^/]+(?=\.(?:jpe?g|png|webp)(?:$|\?))#i', '', $url) ?: $url;
-        }
-
-        // Shopify's image CDN ("/cdn/shop/files|products/...", on both
-        // cdn.shopify.com and every merchant's own domain proxying through
-        // it) resizes two independent ways: a width/height query param on an
-        // otherwise identical URL (real case: the same photo staged twice as
-        // "two photos" from vishalperipherals.com because the only
-        // difference was a trailing "&width=1445"), and a filename suffix
-        // ("_180x", "_600x600", "_grande", "_1920x@2x") that the query-param
-        // strip below never touches - mirrors scripts/product-gallery-utils.mjs
-        // imageAssetKey()/SHOPIFY_SIZE_SUFFIX, which must stay in sync.
-        if (str_ends_with($host, 'shopify.com') || preg_match('#/cdn/shop/(?:files|products)/#i', (string) parse_url($url, PHP_URL_PATH)) === 1) {
-            $url = preg_replace(
-                '/_(?:\d+x\d*|pico|icon|thumb|small|compact|medium|large|grande|original|master)(?:@\dx)?(?=\.(?:jpe?g|png|webp|gif)(?:$|\?))/i',
-                '',
-                $url,
-            ) ?: $url;
-            $url = preg_replace('/[?&]width=\d+/i', '', $url) ?: $url;
-
-            return preg_replace('/[?&]height=\d+/i', '', $url) ?: $url;
-        }
-
-        // Adobe Scene7 Dynamic Media ("/is/image/...") sizes images via wid/hei
-        // query params, not the URL path - Dell and other manufacturers reuse
-        // the same thumbnail URL for every gallery size selector, so the raw
-        // src is often a ~90px tab icon that fails the minimum-side check.
-        if (preg_match('#/is/image/#i', (string) parse_url($url, PHP_URL_PATH)) === 1) {
-            $url = preg_replace('/([?&])(wid|hei)=\d+/i', '$1$2=1500', $url) ?: $url;
-            $url = preg_replace('/[?&]scl=\d+/i', '', $url) ?: $url;
-
-            // Scene7 also supports a "named modifier" query form - the whole
-            // query is a single $preset$ token (e.g. Samsung's "$1164_776_PNG$")
-            // instead of key=value size params. Two pages/renditions of the
-            // same photo end up on this same base path with only this preset
-            // token differing (and sometimes percent-encoded vs not), which
-            // downstream duplicate detection was missing: perceptual hashing
-            // is scale-invariant in theory but still measured a real distance
-            // of 10 between two such renditions of one identical Samsung
-            // product photo, above the configured near-duplicate threshold of
-            // 6. Stripping the modifier token here collapses every rendition
-            // of one photo to the same URL before it is ever downloaded
-            // twice, and omitting it entirely asks Scene7 for the original,
-            // unmodified asset - usually the largest one available.
-            return preg_replace('/[?&](?:\$|%24)[^&]*(?:\$|%24)=?/i', '', $url) ?: $url;
-        }
-
-        return $url;
+        return trim(html_entity_decode($url, ENT_QUOTES | ENT_HTML5));
     }
 
     /**
@@ -2506,6 +2407,41 @@ class ProductImageStorage
     {
         $normalized = self::normalizeCandidateUrl($url);
         $host = Str::lower((string) parse_url($normalized, PHP_URL_HOST));
+        $path = (string) parse_url($normalized, PHP_URL_PATH);
+
+        if ($host === 'static.bhphoto.com' || str_ends_with($host, '.bhphoto.com')) {
+            return 'bh:'.Str::lower((string) pathinfo($path, PATHINFO_BASENAME));
+        }
+
+        if ($host === 'm.media-amazon.com' || str_ends_with($host, '.media-amazon.com')) {
+            $normalized = preg_replace(
+                '#\._[^/]+(?=\.(?:jpe?g|png|webp)(?:$|\?))#i',
+                '',
+                $normalized,
+            ) ?: $normalized;
+        }
+
+        if ($host === 'dlcdnwebimgs.asus.com' || str_ends_with($host, '.dlcdnwebimgs.asus.com')) {
+            $normalized = preg_replace('#//w\d{2,5}(?=\?|$)#i', '', $normalized) ?: $normalized;
+        }
+
+        if (preg_match('#/is/image/#i', $path) === 1) {
+            $normalized = Str::before($normalized, '?');
+        }
+
+        if (str_ends_with($host, 'shopify.com') || preg_match('#/cdn/shop/(?:files|products)/#i', $path) === 1) {
+            $normalized = preg_replace(
+                '/_(?:\d+x\d*|pico|icon|thumb|small|compact|medium|large|grande|original|master)(?:@\dx)?(?=\.(?:jpe?g|png|webp|gif)(?:$|\?))/i',
+                '',
+                $normalized,
+            ) ?: $normalized;
+            $base = Str::before($normalized, '?');
+            parse_str((string) parse_url($normalized, PHP_URL_QUERY), $query);
+            foreach (['width', 'height', 'w', 'h'] as $key) {
+                unset($query[$key]);
+            }
+            $normalized = $base.($query === [] ? '' : '?'.http_build_query($query));
+        }
 
         // LDLC encodes only the requested rendition in /r705/, /r1600/, ...;
         // the remainder of the path is the physical gallery frame.
@@ -2525,7 +2461,7 @@ class ProductImageStorage
         // path - unlike the named buckets below it is rarely adjacent to the
         // filename.
         $normalized = preg_replace(
-            '#/\d{2,5}(?:x\d{2,5}|w)/#i',
+            '#/(?:[a-z][a-z_-]*)?\d{2,5}(?:x\d{2,5}|w)/#i',
             '/__rendition__/',
             $normalized,
         ) ?: $normalized;
@@ -2584,8 +2520,8 @@ class ProductImageStorage
             : 0;
 
         $sizeSegmentScore = match (true) {
-            preg_match('#/(\d{2,5})x(\d{2,5})/#i', $path, $matches) === 1 => min(4000, max((int) $matches[1], (int) $matches[2])),
-            preg_match('#/(\d{2,5})w/#i', $path, $matches) === 1 => min(4000, (int) $matches[1]),
+            preg_match('#/(?:[a-z][a-z_-]*)?(\d{2,5})x(\d{2,5})/#i', $path, $matches) === 1 => min(4000, max((int) $matches[1], (int) $matches[2])),
+            preg_match('#/(?:[a-z][a-z_-]*)?(\d{2,5})w/#i', $path, $matches) === 1 => min(4000, (int) $matches[1]),
             default => 0,
         };
 

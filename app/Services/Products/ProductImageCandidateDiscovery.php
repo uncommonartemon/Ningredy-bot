@@ -472,6 +472,8 @@ class ProductImageCandidateDiscovery
             }
             $source['_minimum_verified_images'] = $minimumVerifiedImages;
             $source['_category_slug'] = trim((string) $draft->category) !== '' ? trim((string) $draft->category) : null;
+            $source['_minimum_image_width'] = $category?->minimumImageWidth();
+            $source['_minimum_image_height'] = $category?->minimumImageHeight();
 
             $pageImages = $progress
                 ? $this->resolver->resolve(

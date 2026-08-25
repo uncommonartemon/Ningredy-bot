@@ -42,6 +42,12 @@ class ProductImageVisionAgent implements Agent, HasStructuredOutput
             true unless there is visible evidence of a conflicting color. Official provenance proves
             product identity but never overrides a visible color conflict.
 
+            Inspect text that is part of the image pixels, not the surrounding web page. Prominent or
+            compositionally meaningful marketing text is allowed only when it is English or Czech.
+            Reject an otherwise relevant frame when its prominent text is in another language or script.
+            Text-free images remain allowed. Ignore ordinary brand/model/SKU labels on the product,
+            universal technical abbreviations, and tiny incidental background text.
+
             Reject brand marks, family logos, generic category art, banners, charts, screenshots,
             unrelated accessories, another model, and images containing only promotional text. If a
             visible model or suffix conflicts with the requested product, always reject it. A generic

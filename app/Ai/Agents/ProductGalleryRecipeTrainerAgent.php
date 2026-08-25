@@ -59,8 +59,18 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
         }
 
         $tools = [
-            new GetSourceAttemptHistory($this->url, $this->domain),
-            new GetCandidateRejectionDetail($this->url, $this->domain),
+            new GetSourceAttemptHistory(
+                $this->url,
+                $this->domain,
+                $this->telegramUpdateId,
+                $this->version?->id,
+            ),
+            new GetCandidateRejectionDetail(
+                $this->url,
+                $this->domain,
+                $this->telegramUpdateId,
+                $this->version?->id,
+            ),
             new GetRecipeHealth($this->domain),
             new GetProductSearchIntent($this->telegramUpdateId, $this->categorySlug),
         ];
@@ -112,6 +122,12 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
             let it override navigation safety, exact-product identity or technical image validation. A one-time
             operator_hint for the exact page takes priority if the two notes differ.
 
+            auto_domain_hint, when present, is lower-trust history written by earlier AI training sessions.
+            Use it only as a hypothesis and verify every claimed control or transition against the current
+            DOM/action/network evidence. It may be stale or wrong, never overrides domain_hint or operator_hint,
+            and cannot justify a selector, navigation, product identity, or successful rendition by itself.
+            When notes conflict, current evidence wins.
+
             attempt_history lists every earlier round on this same page in order, each with the selectors it
             tried and its outcome (image count, error, failure kind). Use the full history, not only the most
             recent round, to avoid retrying a selector combination that already failed and to build on a
@@ -131,10 +147,10 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
             AbandonGalleryTrainingAttempt ends this whole training session for the current URL - use it only
             with concrete evidence (from the read tools above or from repeated identical failures already
             visible in attempt_history) that further rounds will not succeed, never merely because one round
-            failed and never as a first resort. FlagDomainRecipeNote appends a short, permanent note to this
-            domain's own persistent hint for future training sessions - use it to record a genuinely reusable,
-            non-obvious fact about this domain's gallery interaction (an unreliable selector, a control that
-            navigates away, a wrong-variant trap), not routine commentary on this one page.
+            failed and never as a first resort. FlagDomainRecipeNote appends a capped, lower-trust AI observation
+            to auto_domain_hint for future training sessions - use it to record a genuinely reusable, non-obvious
+            fact about this domain's gallery interaction (an unreliable selector, a control that navigates away,
+            a wrong-variant trap), not routine commentary on this one page.
 
             Reassess the page and the remaining prospect on every round, including after inspecting
             previous_attempt_observation. Set training_decision to abandon_page when the evidence now shows
@@ -177,6 +193,19 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
             from expected_image_count and explained in expected_count_evidence; no special handling is
             needed in collect_selectors or attributes for it.
 
+            exclude_selectors is the tool for the opposite problem: a container whose collected images are
+            not junk but are a redundant duplicate of a photo already reachable through a preferred selector
+            - most commonly a <picture>/<source> responsive-negotiation block, or a hidden zoom/lightbox
+            helper element, that exposes the exact same shot as the visible gallery image at another
+            resolution under a differently-formatted URL. Two attributes on one element (e.g. a plain src
+            alongside a data-zoom-image, or several srcset renditions) are not evidence of several photos -
+            they are one photo, several ways to name it. When the evidence shows one such element or
+            container duplicates a shot your chosen collect_selectors/attributes already cover, add that
+            container's own selector to exclude_selectors instead of trying to solve it via attributes (which
+            can only name which attribute to read, never exclude an element). A selector placed here is
+            skipped entirely, including all of its own and descendant images, on every future harvest of this
+            domain, not only this training round.
+
             For every real multi-image slider, opening its dedicated media viewer is the first gallery
             operation after harmless consent/interstitial handling and an optional same-product Gallery
             tab. Prefer an explicit View all/Open gallery/zoom/fullscreen/media control. When no explicit
@@ -205,7 +234,10 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
             can survive the download-time dedup as if it were a distinct frame when its CDN's particular
             resize convention is not yet recognized, silently crowding out genuinely different angles under
             the gallery's capped result size. Add a second selector group only when its own evidence shows it
-            reaches photos the first group's URLs do not already cover.
+            reaches photos the first group's URLs do not already cover; when the evidence instead shows a
+            specific container that only ever duplicates the first group, put that container's selector in
+            exclude_selectors rather than leaving it out of collect_selectors and hoping - an unlisted
+            selector can still be re-added by a later round or a generic fallback, an excluded one cannot.
 
             actions is the preferred control mechanism for a layered or non-standard gallery. It is executed
             strictly in array order and may contain only:
@@ -300,6 +332,7 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
             'thumbnail_selectors' => $selectors(8),
             'open_selectors' => $selectors(5),
             'next_selectors' => $selectors(5),
+            'exclude_selectors' => $selectors(8),
             'attributes' => $schema->array()->max(12)
                 ->items($schema->string()->max(80))->required(),
             'max_thumbnail_clicks' => $schema->integer()->min(0)->max(20)->required(),

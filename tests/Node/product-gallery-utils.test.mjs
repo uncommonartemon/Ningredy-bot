@@ -15,7 +15,6 @@ import {
     recipeActionShouldStop,
     recipeActionTraversesGallery,
     urlQualityScore,
-    withUpscaledSizeParam,
 } from '../../scripts/product-gallery-utils.mjs';
 
 const productUrl = 'https://www.cdw.com/product/example/8501080';
@@ -80,11 +79,7 @@ test('accepts extensionless dynamic image URLs', () => {
     );
 });
 
-test('upgrades a numeric WxH rendition segment on any domain, not just one named CDN', () => {
-    // Generic by construction: no hostname check, no CDN-specific magic
-    // number - reuses UPSCALED_SIZE_PARAM_VALUE (the same ceiling already
-    // used for query-param upscaling) and only bumps the number(s) already
-    // present, whatever word (if any) prefixes them.
+test('keeps only the exact image URL observed by the browser or page markup', () => {
     const page = 'https://www.bhphotovideo.com/c/product/1932364-REG/example.html/accessories';
 
     assert.equal(
@@ -92,85 +87,30 @@ test('upgrades a numeric WxH rendition segment on any domain, not just one named
             'https://static.bhphoto.com/images/multiple_images/images500x500/1767181436_IMG_2646502.jpg',
             page,
         ),
-        'https://static.bhphoto.com/images/multiple_images/images1600x1600/1767181436_IMG_2646502.jpg',
+        'https://static.bhphoto.com/images/multiple_images/images500x500/1767181436_IMG_2646502.jpg',
     );
     assert.equal(
         normalizeImageCandidate(
             'https://static.bhphoto.com/images/images750x750/1767181363_1932364.jpg',
             page,
         ),
-        'https://static.bhphoto.com/images/images1600x1600/1767181363_1932364.jpg',
+        'https://static.bhphoto.com/images/images750x750/1767181363_1932364.jpg',
     );
     assert.equal(
         normalizeImageCandidate(
             'https://example-other-cdn.test/media/240x240/product.jpg',
             'https://example-other-cdn.test/product-page',
         ),
-        'https://example-other-cdn.test/media/1600x1600/product.jpg',
-    );
-    // A word-only size marker ("thumbnails") has no universal larger-size
-    // spelling across CDNs to guess (one site's "large" is another's
-    // "xlarge"/"full"/"original") - guessing a word would be exactly the
-    // kind of site-specific hardcoding this was rewritten to avoid, so it
-    // is left as observed rather than invented.
-    assert.equal(
-        normalizeImageCandidate(
-            'https://static.bhphoto.com/images/multiple_images/thumbnails/1767181436_IMG_2646502.jpg',
-            page,
-        ),
-        'https://static.bhphoto.com/images/multiple_images/thumbnails/1767181436_IMG_2646502.jpg',
-    );
-});
-
-test('upgradeRendition:false keeps the originally observed B&H rendition unrewritten', () => {
-    // The 2500px endpoint is a guess, not a guarantee - some SKUs only ever
-    // rendered up to 1000x1000 or 1500x1500, and the guess 404s for them.
-    // Callers need the real, observed URL back as a fallback candidate.
-    const page = 'https://www.bhphotovideo.com/c/product/1899207-REG/example.html';
-
-    assert.equal(
-        normalizeImageCandidate(
-            'https://static.bhphoto.com/images/multiple_images/thumbnails/1757069749_IMG_2568520.jpg',
-            page,
-            { upgradeRendition: false },
-        ),
-        'https://static.bhphoto.com/images/multiple_images/thumbnails/1757069749_IMG_2568520.jpg',
-    );
-    assert.equal(
-        normalizeImageCandidate(
-            'https://static.bhphoto.com/images/images500x500/1757069749_1899207.jpg',
-            page,
-            { upgradeRendition: false },
-        ),
-        'https://static.bhphoto.com/images/images500x500/1757069749_1899207.jpg',
-    );
-});
-
-test('upgrades the ASUS //wNN rendition too, with the same observed fallback', () => {
-    // ASUS's own "//wNN" syntax doesn't fit the generic WxH/Nw pattern
-    // (digit comes after "w", not before), so it needs its own small rule -
-    // but it gets the exact same guess-then-fallback treatment as every
-    // other rendition upgrade, mirroring ProductImageStorage::
-    // normalizeCandidateUrl()'s ASUS rule (PHP).
-    const page = 'https://www.asus.com/laptops/for-home/vivobook/asus-vivobook-15-x1504/';
-
-    assert.equal(
-        normalizeImageCandidate(
-            'https://dlcdnwebimgs.asus.com/gain/a57df082-80c1-4b35-9493-ff9727e4e7a4//w48',
-            page,
-        ),
-        'https://dlcdnwebimgs.asus.com/gain/a57df082-80c1-4b35-9493-ff9727e4e7a4//w800',
+        'https://example-other-cdn.test/media/240x240/product.jpg',
     );
     assert.equal(
         normalizeImageCandidate(
             'https://dlcdnwebimgs.asus.com/gain/a57df082-80c1-4b35-9493-ff9727e4e7a4//w48',
-            page,
-            { upgradeRendition: false },
+            'https://www.asus.com/laptops/example',
         ),
         'https://dlcdnwebimgs.asus.com/gain/a57df082-80c1-4b35-9493-ff9727e4e7a4//w48',
     );
 });
-
 test('requires the complete ordered action plan regardless of already collected URLs', () => {
     const actions = [
         {
@@ -346,22 +286,6 @@ test('deduplicates resized dynamic-image variants without merging gallery frames
     assert.notEqual(imageAssetKey(original), imageAssetKey(differentFrame));
 });
 
-test('upscales a small width/height query parameter instead of discarding the candidate', () => {
-    assert.equal(
-        withUpscaledSizeParam('https://www.hp.com/nl-nl/shop/media/.../frontleft.jpg?store=nl-nl&width=140&fit=bounds'),
-        'https://www.hp.com/nl-nl/shop/media/.../frontleft.jpg?store=nl-nl&width=1600&fit=bounds',
-    );
-    assert.equal(
-        withUpscaledSizeParam('https://cdn.example/photo.jpg?w=200&h=200'),
-        'https://cdn.example/photo.jpg?w=1600&h=1600',
-    );
-});
-
-test('does not touch URLs without a resizable size parameter, or already large enough', () => {
-    assert.equal(withUpscaledSizeParam('https://cdn.example/photo.jpg'), null);
-    assert.equal(withUpscaledSizeParam('https://cdn.example/photo.jpg?width=2000'), null);
-});
-
 test('deduplicates ASUS size-variant paths (//w48, //w64, //w96, //w184) as one photo', () => {
     const base = 'https://dlcdnwebimgs.asus.com/gain/a57df082-80c1-4b35-9493-ff9727e4e7a4';
     const differentPhoto = 'https://dlcdnwebimgs.asus.com/gain/7fb77e0a-97ef-4be0-babd-22892330add9';
@@ -427,30 +351,6 @@ test('never sends a complete srcset value to URL normalization as one image', ()
     const extractor = readFileSync(new URL('../../scripts/extract-product-gallery.mjs', import.meta.url), 'utf8');
 
     assert.match(extractor, /\['srcset', 'data-srcset'\]\.includes\(attribute\.toLowerCase\(\)\)/);
-});
-
-test('upscales a Shopify filename-suffix variant by stripping it down to the master asset', () => {
-    assert.equal(
-        withUpscaledSizeParam('https://vishalperipherals.com/cdn/shop/files/photo_180x.png?v=1'),
-        'https://vishalperipherals.com/cdn/shop/files/photo.png?v=1',
-    );
-    assert.equal(
-        withUpscaledSizeParam('https://vishalperipherals.com/cdn/shop/files/photo_grande.png?v=1'),
-        'https://vishalperipherals.com/cdn/shop/files/photo.png?v=1',
-    );
-    assert.equal(
-        withUpscaledSizeParam('https://vishalperipherals.com/cdn/shop/files/photo.png?v=1'),
-        null,
-    );
-});
-
-test('retries a too-small UUID rendition through its large AVIF variant', () => {
-    assert.equal(
-        withUpscaledSizeParam(
-            'https://static01.example/productimages/01988206-a540-7b98-ad88-30febd1c240b_720.jpeg',
-        ),
-        'https://static01.example/productimages/01988206-a540-7b98-ad88-30febd1c240b_2880.avif',
-    );
 });
 
 test('deduplicates named rendition directories and keeps xlarge ahead of large', () => {

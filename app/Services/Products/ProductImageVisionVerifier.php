@@ -241,6 +241,24 @@ class ProductImageVisionVerifier
                         $image['reason'] = mb_substr($image['reason'], 0, 1000);
                     }
 
+                    // The model occasionally free-associates a plausible but
+                    // out-of-enum value for one of these two fixed-vocabulary
+                    // fields (e.g. "lifestyle" instead of a listed kind).
+                    // Failing validation over it would discard the entire
+                    // already-paid review - and every already-downloaded
+                    // photo - for a single cosmetic classification miss, so
+                    // fall back to the deliberately noncommittal enum member;
+                    // "uncertain" is excluded from every allowed-kind list
+                    // downstream, so this only drops that one image instead
+                    // of the whole batch.
+                    if (! in_array($image['kind'] ?? null, ['product', 'packaging', 'detail', 'logo', 'banner', 'screenshot', 'unrelated', 'uncertain'], true)) {
+                        $image['kind'] = 'uncertain';
+                    }
+
+                    if (! in_array($image['view'] ?? null, ['front', 'angle', 'side', 'back', 'detail', 'packaging', 'other'], true)) {
+                        $image['view'] = 'other';
+                    }
+
                     return $image;
                 })
                 ->filter(fn (array $image): bool => is_int($image['index'] ?? null)
@@ -425,6 +443,12 @@ class ProductImageVisionVerifier
             the requested SKU/MPN/model. Do not require that identifier to be visibly printed on the photographed
             product. Use that page evidence for identity unless the pixels visibly contradict it. It never overrides
             a visible conflict, wrong color, wrong product type, prohibited packaging, or insufficient quality.
+
+            Mandatory image-text language rule: inspect only text rendered inside the attached image. Prominent or
+            compositionally meaningful marketing text is publishable only in English or Czech; reject the frame when
+            such text is in another language or script. A text-free photo is allowed. Ordinary brand/model/SKU labels
+            printed on the product, universal technical abbreviations, and tiny incidental background text do not
+            trigger this rejection.
 
             Prefer a sharp, clean, full-product hero view first, then distinct useful angles/details. Do not infer
             exact model, color, or quality from the URL when visible evidence conflicts.

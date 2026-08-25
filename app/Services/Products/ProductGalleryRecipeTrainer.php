@@ -85,6 +85,9 @@ class ProductGalleryRecipeTrainer
             $domainHint = is_string($domainSettings->agent_hint) && trim($domainSettings->agent_hint) !== ''
                 ? mb_substr(trim($domainSettings->agent_hint), 0, 4000)
                 : null;
+            $autoDomainHint = is_string($domainSettings->auto_agent_hint) && trim($domainSettings->auto_agent_hint) !== ''
+                ? mb_substr(trim($domainSettings->auto_agent_hint), 0, 2000)
+                : null;
 
             if ($recipe->status === 'disabled' && ! $force) {
                 $debug?->__invoke('warning', "Playwright для {$host} отключён после подтверждённой CAPTCHA/WAF.");
@@ -120,9 +123,12 @@ class ProductGalleryRecipeTrainer
             if ($domainHint !== null) {
                 $debug?->__invoke('step', "Постоянная подсказка домена {$host} передана AI-тренеру.");
             }
+            if ($autoDomainHint !== null) {
+                $debug?->__invoke('step', "AI-наблюдения домена {$host} переданы как неподтверждённая подсказка.");
+            }
 
             $debug?->__invoke('step', "AI-тренер: Playwright собирает DOM, интерактивные элементы и сетевые изображения {$host}.");
-            $scout = $this->browser->scout($url, $debug, $telegramUpdateId);
+            $scout = $this->browser->scout($url, $debug, $telegramUpdateId, $context);
             $pageScout = is_array($scout['scout'] ?? null) ? $scout['scout'] : [];
             $layoutFingerprint = app(ProductPageLayoutFingerprint::class)->make($pageScout);
             // Persist even a rejected scout: an empty fragment list can still
@@ -167,7 +173,7 @@ class ProductGalleryRecipeTrainer
             $preflightDecision = 'train_playwright';
 
             if (! $forceInteractive) {
-                $preflight = $this->preflight($url, $pageScout, $scout['diagnostics'] ?? [], $context, $domainHint, $provider, $model, $version, $telegramUpdateId, $debug);
+                $preflight = $this->preflight($url, $pageScout, $scout['diagnostics'] ?? [], $context, $domainHint, $autoDomainHint, $provider, $model, $version, $telegramUpdateId, $debug);
                 $preflightDecision = (string) ($preflight['decision'] ?? 'no_gallery');
 
                 // static_sufficient is an estimate from raw DOM markup (thumbnails
@@ -278,7 +284,7 @@ class ProductGalleryRecipeTrainer
                 // place. Reuse that measurement instead of trusting a fresh one.
                 $oldImages = $previousRecipeImages;
             } elseif (is_array($recipe->recipe) && $recipe->recipe !== []) {
-                $oldResult = $this->browser->executeRecipe($url, $recipe->recipe, 20, null, $telegramUpdateId);
+                $oldResult = $this->browser->executeRecipe($url, $recipe->recipe, 20, null, $telegramUpdateId, $context);
                 $this->recordExecutionTrace($url, $version, 0, $recipe->recipe, $oldResult, $telegramUpdateId);
                 $oldImages = $oldResult['images'] ?? [];
             }
@@ -392,6 +398,7 @@ class ProductGalleryRecipeTrainer
                 // between its 3 rounds.
                 $roundLabel = $safetyLimited ? "{$attempt}/{$safetyRounds}" : (string) $attempt;
                 $prompt = json_encode([
+                    'auto_domain_hint' => $autoDomainHint,
                     'url' => $url,
                     'max_attempts' => $safetyLimited ? $safetyRounds : null,
                     'current_recipe' => $recipe->recipe,
@@ -595,7 +602,7 @@ class ProductGalleryRecipeTrainer
                 }
 
                 $debug?->__invoke('step', "AI-тренер: проверяю рецепт, раунд {$roundLabel} · {$url}");
-                $candidateResult = $this->browser->executeRecipe($url, $candidate, 20, $debug, $telegramUpdateId);
+                $candidateResult = $this->browser->executeRecipe($url, $candidate, 20, $debug, $telegramUpdateId, $context);
                 $this->recordExecutionTrace(
                     $url,
                     $version,
@@ -855,6 +862,7 @@ class ProductGalleryRecipeTrainer
         array $diagnostics,
         array $context,
         ?string $domainHint,
+        ?string $autoDomainHint,
         string $provider,
         string $model,
         ProductGalleryRecipeVersion $version,
@@ -866,6 +874,7 @@ class ProductGalleryRecipeTrainer
             'page' => $pageScout,
             'diagnostics' => $diagnostics,
             'domain_hint' => $domainHint,
+            'auto_domain_hint' => $autoDomainHint,
             // Two raw URLs can still be the exact same photo at another size
             // (e.g. Adobe Scene7's wid/hei or $preset$ query forms) - counting
             // them as distinct before the preflight AI ever sees them would
@@ -1228,6 +1237,9 @@ class ProductGalleryRecipeTrainer
         // Stored recipes and test fixtures created before ordered actions
         // remain valid; new strict AI responses always include this field.
         $data['actions'] = is_array($data['actions'] ?? null) ? $data['actions'] : [];
+        // Same backward-compatibility rule for exclude_selectors: recipes
+        // trained before this field existed simply exclude nothing.
+        $data['exclude_selectors'] = is_array($data['exclude_selectors'] ?? null) ? $data['exclude_selectors'] : [];
         $data['actions'] = collect($data['actions'])
             ->map(function (mixed $action): mixed {
                 if (! is_array($action)) {
@@ -1290,7 +1302,7 @@ class ProductGalleryRecipeTrainer
             );
         }
 
-        foreach (['pre_click_selectors', 'collect_selectors', 'thumbnail_selectors', 'open_selectors', 'next_selectors'] as $key) {
+        foreach (['pre_click_selectors', 'collect_selectors', 'thumbnail_selectors', 'open_selectors', 'next_selectors', 'exclude_selectors'] as $key) {
             $data[$key] = collect($data[$key] ?? [])
                 ->filter(fn (mixed $selector): bool => is_string($selector) && $this->safeSelector($selector))
                 ->map(fn (string $selector): string => trim($selector))
@@ -1367,11 +1379,13 @@ class ProductGalleryRecipeTrainer
             'thumbnail_selectors' => ['present', 'array', 'max:8'],
             'open_selectors' => ['present', 'array', 'max:5'],
             'next_selectors' => ['present', 'array', 'max:5'],
+            'exclude_selectors' => ['present', 'array', 'max:8'],
             'pre_click_selectors.*' => ['string', 'max:300'],
             'collect_selectors.*' => ['string', 'max:300'],
             'thumbnail_selectors.*' => ['string', 'max:300'],
             'open_selectors.*' => ['string', 'max:300'],
             'next_selectors.*' => ['string', 'max:300'],
+            'exclude_selectors.*' => ['string', 'max:300'],
             'attributes' => ['present', 'array', 'max:12'],
             'attributes.*' => ['regex:/^(?:src|href|srcset|data-[a-z0-9_-]+)$/i', 'max:80'],
             'max_thumbnail_clicks' => ['required', 'integer', 'between:0,20'],

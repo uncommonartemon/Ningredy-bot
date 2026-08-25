@@ -5,7 +5,9 @@ namespace App\Services\Products;
 use App\Models\ProductGalleryRecipe;
 use App\Services\Ai\AiSettings;
 use App\Services\Ai\ProductSearchTimeBudget;
+use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 use Symfony\Component\Process\Exception\ProcessTimedOutException;
 use Symfony\Component\Process\Process;
 use Throwable;
@@ -23,6 +25,7 @@ class BrowserProductGalleryExtractor
         private readonly ProductSearchTimeBudget $timeBudget,
         private readonly ProductGalleryRecipeResultValidator $resultValidator,
         private readonly ProductSourceAttemptRecorder $attempts,
+        private readonly BrowserProductImageTransferStore $transfers,
     ) {}
 
     /**
@@ -81,7 +84,7 @@ class BrowserProductGalleryExtractor
 
         if ($recipe?->status === 'active') {
             $debug?->__invoke('step', "Playwright: применяю AI-рецепт для {$host}.");
-            $result = $this->executeRecipe($url, $recipe->recipe ?? [], $limit, $debug, $telegramUpdateId);
+            $result = $this->executeRecipe($url, $recipe->recipe ?? [], $limit, $debug, $telegramUpdateId, $context);
             $observedLayoutFingerprint = app(ProductPageLayoutFingerprint::class)->make(
                 is_array($result['scout'] ?? null) ? $result['scout'] : [],
             );
@@ -216,9 +219,13 @@ class BrowserProductGalleryExtractor
     }
 
     /** @return array<string, mixed> */
-    public function scout(string $url, ?callable $debug = null, ?int $telegramUpdateId = null): array
-    {
-        return $this->runScript($url, [], 20, true, $debug, $telegramUpdateId);
+    public function scout(
+        string $url,
+        ?callable $debug = null,
+        ?int $telegramUpdateId = null,
+        array $context = [],
+    ): array {
+        return $this->runScript($url, [], 20, true, $debug, $telegramUpdateId, $context);
     }
 
     /** @return array<string, mixed> */
@@ -228,10 +235,11 @@ class BrowserProductGalleryExtractor
         int $limit = 20,
         ?callable $debug = null,
         ?int $telegramUpdateId = null,
+        array $context = [],
     ): array {
         $recipe = $this->normalizeRecipeForExecution($recipe);
 
-        return $this->runScript($url, $recipe, $limit, false, $debug, $telegramUpdateId);
+        return $this->runScript($url, $recipe, $limit, false, $debug, $telegramUpdateId, $context);
     }
 
     /** @param array<string, mixed> $recipe */
@@ -271,14 +279,17 @@ class BrowserProductGalleryExtractor
         bool $scoutOnly,
         ?callable $debug,
         ?int $telegramUpdateId,
+        array $context,
     ): array {
         if (! $this->available($limit, $debug)) {
             return [];
         }
 
         $script = base_path((string) config('product-images.browser_fallback.script', 'scripts/extract-product-gallery.mjs'));
+        $transferDirectory = storage_path('framework/product-gallery-browser/'.Str::uuid());
 
         try {
+            File::ensureDirectoryExists($transferDirectory);
             $configuredTimeout = $scoutOnly
                 ? $this->settings->browserScoutTimeoutSeconds()
                 : $this->settings->browserTimeoutSeconds();
@@ -293,13 +304,18 @@ class BrowserProductGalleryExtractor
                 'PRODUCT_GALLERY_SCOUT_ONLY' => $scoutOnly ? '1' : '0',
                 'PRODUCT_GALLERY_DOM_WAIT_MS' => (string) config('product-images.browser_fallback.dom_wait_ms', 12000),
                 'PRODUCT_GALLERY_PROBE_TIMEOUT_MS' => (string) config('product-images.browser_fallback.image_probe_timeout_ms', 5000),
-                'PRODUCT_GALLERY_MINIMUM_WIDTH' => (string) $this->settings->imageMinimumWidth(),
-                'PRODUCT_GALLERY_MINIMUM_HEIGHT' => (string) $this->settings->imageMinimumHeight(),
+                'PRODUCT_GALLERY_MINIMUM_WIDTH' => (string) max(100, min(4000, (int) (
+                    $context['minimum_image_width'] ?? $this->settings->imageMinimumWidth()
+                ))),
+                'PRODUCT_GALLERY_MINIMUM_HEIGHT' => (string) max(0, min(4000, (int) (
+                    $context['minimum_image_height'] ?? $this->settings->imageMinimumHeight()
+                ))),
                 // The script must finish - with whatever it already gathered -
                 // before this process is killed at the timeout; on Windows that
                 // kill is a hard TerminateProcess, so this reserve is the
                 // script's only chance to serialize a partial result.
                 'PRODUCT_GALLERY_DEADLINE_MS' => (string) max(10000, ($timeoutSeconds - 12) * 1000),
+                'PRODUCT_GALLERY_TRANSFER_DIR' => $transferDirectory,
             ]);
             $process->setTimeout((float) $timeoutSeconds);
             $process->run();
@@ -320,6 +336,9 @@ class BrowserProductGalleryExtractor
             if (! is_array($result)) {
                 return ['images' => [], 'error' => 'Playwright returned invalid JSON.', 'failure_kind' => 'browser_protocol'];
             }
+
+            $this->transfers->remember($result['transferred_images'] ?? [], $transferDirectory);
+            unset($result['transferred_images']);
 
             $result['images'] = collect($result['images'] ?? [])
                 ->filter(fn (mixed $image): bool => is_string($image)
@@ -363,6 +382,8 @@ class BrowserProductGalleryExtractor
                 'error' => $exception->getMessage(),
                 'failure_kind' => 'browser_unavailable',
             ];
+        } finally {
+            File::deleteDirectory($transferDirectory);
         }
     }
 

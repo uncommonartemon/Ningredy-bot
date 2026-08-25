@@ -3,6 +3,7 @@
 namespace App\Providers;
 
 use App\Services\Ai\AiSettings;
+use App\Services\Products\BrowserProductImageTransferStore;
 use App\Services\Products\ProductImageResolver;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Schema;
@@ -25,6 +26,7 @@ class AppServiceProvider extends ServiceProvider
         // structurally confirmed gallery. A scoped resolver is shared inside
         // one queue job and discarded before the next job.
         $this->app->scoped(ProductImageResolver::class);
+        $this->app->scoped(BrowserProductImageTransferStore::class);
     }
 
     /**

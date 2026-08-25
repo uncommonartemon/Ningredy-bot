@@ -1,5 +1,7 @@
 import dns from 'node:dns/promises';
 import net from 'node:net';
+import { writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { chromium } from 'playwright-core';
 import {
     EXCLUDED_GALLERY_CONTEXT_PATTERN_SOURCE,
@@ -14,7 +16,6 @@ import {
     recipeActionShouldStop,
     recipeActionTraversesGallery,
     urlQualityScore,
-    withUpscaledSizeParam,
 } from './product-gallery-utils.mjs';
 
 const sourceUrl = process.argv[2];
@@ -37,6 +38,7 @@ const minimumHeight = Math.max(0, Math.min(4000, Number.parseInt(
     10,
 )));
 // PHP kills this process at its own timeout, and on Windows that kill is a
+const transferDirectory = String(process.env.PRODUCT_GALLERY_TRANSFER_DIR || '').trim();
 // hard TerminateProcess with no chance to run a signal handler - so the only
 // reliable way to keep already-gathered photos is to stop interacting and
 // probing early enough to serialize the partial result before the kill lands.
@@ -67,6 +69,7 @@ const recipeAttributes = Array.isArray(recipe.attributes)
             && /^(?:src|href|srcset|data-[a-z0-9_-]+)$/i.test(attribute))
         .slice(0, 12)
     : [];
+const recipeExcludeSelectors = recipeSelectors('exclude_selectors');
 const recipeActions = normalizeRecipeActions(recipe.actions);
 
 if (!sourceUrl) {
@@ -650,8 +653,24 @@ const collectDomImages = async () => page.evaluate(({
     extraAttributes,
     includePageFallbacks,
     excludedContextPatternSource,
+    excludeSelectors,
 }) => {
     const excludedContextPattern = new RegExp(excludedContextPatternSource.replaceAll('\\\\', '\\'), 'i');
+    // Recipe exclusions are element-exact. Using closest(selector) here lets
+    // one broad model-chosen selector erase an entire wanted subtree.
+    const matchesRecipeExclusion = (element) => {
+        for (const selector of excludeSelectors) {
+            try {
+                if (element?.matches?.(selector)) {
+                    return true;
+                }
+            } catch {
+                // Invalid exclusions fail open and remain visible in diagnostics.
+            }
+        }
+
+        return false;
+    };
     const semanticContext = (element) => {
         const parts = [];
         let current = element;
@@ -681,6 +700,9 @@ const collectDomImages = async () => page.evaluate(({
             urls.push(value.trim());
         }
     };
+    const selectedElements = [];
+    let excludedByRecipe = 0;
+    let exclusionGuardTriggered = false;
     const addSrcset = (value) => {
         if (typeof value !== 'string') {
             return;
@@ -716,8 +738,12 @@ const collectDomImages = async () => page.evaluate(({
             || mediaItem?.matches?.('video,[data-type="video"],[data-media-type="video"],[class*="video" i],[class*="360" i]')
             || /(?:^|\W)(?:video|360)(?:\W|$)/i.test(`${marker} ${mediaItemMarker}`);
     };
-    const addNode = (element) => {
+    const addNode = (element, applyRecipeExclusions = true) => {
         if (!element) {
+            return;
+        }
+        if (applyRecipeExclusions && matchesRecipeExclusion(element)) {
+            excludedByRecipe += 1;
             return;
         }
 
@@ -755,9 +781,27 @@ const collectDomImages = async () => page.evaluate(({
             add(match[2]);
         }
 
+        // Same reasoning as srcset/data-src above, applied to an inline
+        // onclick image-swap handler (real case: onclick="window.change
+        // MainImage('.../02.png', this)") - domain-agnostic: any quoted,
+        // image-extension-ending string inside onclick is a candidate,
+        // regardless of the handler function's name.
+        const onclick = element.getAttribute?.('onclick');
+
+        if (typeof onclick === 'string') {
+            for (const match of onclick.matchAll(/['"]([^'"\s]+\.(?:jpe?g|png|webp|gif|avif)(?:\?[^'"\s]*)?)['"]/gi)) {
+                add(match[1]);
+            }
+        }
+
         add(element.closest?.('a[href]')?.href);
     };
-    const addElement = (element) => {
+    const addElement = (element, applyRecipeExclusions = true) => {
+        if (applyRecipeExclusions && matchesRecipeExclusion(element)) {
+            excludedByRecipe += 1;
+            return;
+        }
+
         if (excludedContext(element)) {
             excludedContexts.push(semanticContext(element).slice(0, 700));
             return;
@@ -767,8 +811,8 @@ const collectDomImages = async () => page.evaluate(({
             return;
         }
 
-        addNode(element);
-        addNode(element?.parentElement);
+        addNode(element, applyRecipeExclusions);
+        addNode(element?.parentElement, applyRecipeExclusions);
 
         for (const child of element?.querySelectorAll?.([
             'img',
@@ -783,21 +827,33 @@ const collectDomImages = async () => page.evaluate(({
             if (isNonPhotoMedia(child)) {
                 continue;
             }
+            if (applyRecipeExclusions && matchesRecipeExclusion(child)) {
+                excludedByRecipe += 1;
+                continue;
+            }
 
-            addNode(child);
-            addNode(child.parentElement);
+            addNode(child, applyRecipeExclusions);
+            addNode(child.parentElement, applyRecipeExclusions);
         }
     };
 
     for (const selector of selectors) {
         try {
             for (const element of document.querySelectorAll(selector)) {
+                selectedElements.push(element);
                 addElement(element);
             }
         } catch {
             // Ignore an invalid selector instead of aborting the entire recipe.
         }
     }
+    // If exclusions erased every candidate, retry only the already matched
+    // collect elements without recipe exclusions. Semantic/video guards stay.
+    if (urls.length === 0 && selectedElements.length > 0 && excludedByRecipe > 0) {
+        exclusionGuardTriggered = true;
+        selectedElements.forEach((element) => addElement(element, false));
+    }
+
 
     if (includePageFallbacks) {
     for (const element of document.querySelectorAll(
@@ -824,12 +880,18 @@ const collectDomImages = async () => page.evaluate(({
 
     }
 
-    return { urls, excluded_contexts: excludedContexts };
+    return {
+        urls,
+        excluded_contexts: excludedContexts,
+        excluded_by_recipe: excludedByRecipe,
+        exclusion_guard_triggered: exclusionGuardTriggered,
+    };
 }, {
     selectors: [...new Set([...gallerySelectors, ...thumbnailSelectors])],
     extraAttributes: recipeAttributes,
     includePageFallbacks: !strictRecipe,
     excludedContextPatternSource: EXCLUDED_GALLERY_CONTEXT_PATTERN_SOURCE,
+    excludeSelectors: recipeExcludeSelectors,
 });
 
 const collectionTarget = galleryCollectionTarget(limit, recipeNumber('expected_image_count', 0, 20));
@@ -846,6 +908,9 @@ const collect = async () => {
     });
     gathered.push(...(collection.urls || []));
     excludedGalleryContexts.push(...(collection.excluded_contexts || []));
+    if (collection.exclusion_guard_triggered) {
+        collectionErrors.push('exclude_selectors removed every collected URL; retried exact collect matches without recipe exclusions');
+    }
     if (!strictRecipe) {
     priorityImages.push(...await page.locator('[data-old-hires]').evaluateAll(
         (elements) => elements
@@ -1438,6 +1503,13 @@ const captureInteractionScout = async (scopeToMedia = false) => page.evaluate(({
                     .map((attribute) => [attribute.name, attribute.value.slice(0, 500)]),
             );
             const parentControl = element.closest('button,a,[role=button]');
+            // A thumbnail button whose full-resolution URL is already a
+            // quoted literal inside its own onclick (real case: onclick=
+            // "window.changeMainImage('.../02.png', this)") needs no click
+            // at all - but the agent can only notice that if this URL is
+            // actually part of what it is shown, same reasoning as
+            // data_attributes below.
+            const parentControlOnclick = (parentControl?.getAttribute('onclick') || '').slice(0, 500) || null;
 
             return {
                 document_index: documentIndex,
@@ -1452,6 +1524,7 @@ const captureInteractionScout = async (scopeToMedia = false) => page.evaluate(({
                 in_viewport: inViewport(element),
                 within_media: Boolean(element.closest(mediaContainerSelector)),
                 parent_control_selector: parentControl ? selectorFor(parentControl) : null,
+                parent_control_onclick: parentControlOnclick,
                 data_attributes: dataAttributes,
             };
         });
@@ -1809,28 +1882,12 @@ const excludedNonPhotoUrls = await page.evaluate(() => {
     return urls;
 }).catch(() => []);
 const normalize = (rawUrl) => normalizeImageCandidate(rawUrl, sourceUrl);
-const normalizeObserved = (rawUrl) => normalizeImageCandidate(rawUrl, sourceUrl, { upgradeRendition: false });
 const excludedNonPhotoKeys = new Set(excludedNonPhotoUrls.map(normalize).filter(Boolean).map(imageAssetKey));
 const photoOnly = (url) => !excludedNonPhotoKeys.has(imageAssetKey(url));
 const domImages = gathered.map(normalize).filter(Boolean).filter(photoOnly);
 const priorityDomImages = [...new Set(priorityImages.map(normalize).filter(Boolean).filter(photoOnly))];
 const requestedImages = networkImages.map(normalize).filter(Boolean).filter(photoOnly);
 const embeddedImages = payloadImages.map(normalize).filter(Boolean).filter(photoOnly);
-// A rendition guess (any WxH path-segment bump, e.g. B&H's /images500x500/
-// -> /images1600x1600/) is speculative - the exact size directory it points
-// at isn't guaranteed to exist for every SKU. Keep the originally observed,
-// real rendition as a fallback so a guess that 404s doesn't sink the whole
-// candidate instead of just settling
-// for the smaller size we actually saw on the page.
-const renditionFallback = new Map();
-for (const rawUrl of [...gathered, ...priorityImages, ...networkImages, ...payloadImages]) {
-    const upgraded = normalize(rawUrl);
-    const observed = normalizeObserved(rawUrl);
-
-    if (upgraded && observed && upgraded !== observed) {
-        renditionFallback.set(upgraded, observed);
-    }
-}
 const allCandidates = [...new Set([...domImages, ...embeddedImages, ...requestedImages])];
 const actionPlanStatus = recipeActionPlanStatus({ actions: recipeActions, actionTrace });
 const expectedGalleryCount = recipeNumber('expected_image_count', 0, 20);
@@ -1897,35 +1954,6 @@ if (!scoutOnly) {
     for (let index = 0; index < candidatesToProbe.length && !outOfTime(); index += 4) {
         probes.push(...await Promise.all(candidatesToProbe.slice(index, index + 4).map(probeImage)));
     }
-
-    // A candidate rejected only for being too small may still be the exact
-    // same photo available at a larger size through its own width/height
-    // query parameter (see withUpscaledSizeParam) - retry those before
-    // accepting the loss of a real, distinct product angle.
-    const upscaleAttempts = probes
-        .filter((probe) => !probe.ok && probe.reason === 'dimensions_below_minimum')
-        .map((probe) => withUpscaledSizeParam(probe.url))
-        .filter((url) => url !== null)
-        .slice(0, 20);
-
-    for (let index = 0; index < upscaleAttempts.length && !outOfTime(); index += 4) {
-        probes.push(...await Promise.all(upscaleAttempts.slice(index, index + 4).map(probeImage)));
-    }
-
-    // A candidate we speculatively upgraded to a guessed larger rendition
-    // (see renditionFallback) may not actually exist at that size for this
-    // particular SKU - the guess 404s/decode-fails while the smaller size
-    // we genuinely observed on the page is real. Fall back to it rather
-    // than losing the photo entirely.
-    const renditionFallbackAttempts = probes
-        .filter((probe) => !probe.ok && probe.reason !== 'dimensions_below_minimum' && renditionFallback.has(probe.url))
-        .map((probe) => renditionFallback.get(probe.url))
-        .filter((url, index, all) => all.indexOf(url) === index)
-        .slice(0, 20);
-
-    for (let index = 0; index < renditionFallbackAttempts.length && !outOfTime(); index += 4) {
-        probes.push(...await Promise.all(renditionFallbackAttempts.slice(index, index + 4).map(probeImage)));
-    }
 }
 
 const bestImages = new Map();
@@ -1937,12 +1965,8 @@ for (const probe of probes) {
         continue;
     }
 
-    // Re-normalize without re-applying the speculative rendition upgrade:
-    // probe.url is already the exact URL that was fetched and decoded
-    // (possibly a renditionFallback candidate deliberately smaller than the
-    // guessed rendition), so upgrading it again here would rewrite a known-
-    // good fallback back into the same broken guess it was chosen to avoid.
-    const candidate = normalizeObserved(probe.url);
+    // Keep the exact URL that the browser fetched and decoded.
+    const candidate = normalize(probe.url);
 
     if (!candidate) {
         validationFailures.push({ url: probe.url, reason: 'normalization_failed' });
@@ -1972,10 +1996,47 @@ for (const probe of probes) {
 }
 
 const images = [...bestImages.values()].map((item) => item.url).slice(0, limit);
+const transferredImages = [];
+const transferFailures = [];
+
+// Reuse the same BrowserContext (cookies, referer and anti-bot session) that
+// opened the gallery. PHP may be unable to download these protected CDN URLs
+// independently, so validated bytes are handed off through private temp files.
+if (!scoutOnly && transferDirectory !== '') {
+    const selected = [...bestImages.values()].slice(0, limit);
+
+    for (let index = 0; index < selected.length; index += 4) {
+        const batch = selected.slice(index, index + 4);
+        const results = await Promise.all(batch.map(async (item, batchIndex) => {
+            const ordinal = index + batchIndex;
+
+            try {
+                if (!await publicHttpUrl(item.url)) return null;
+                const response = await context.request.get(item.url, {
+                    failOnStatusCode: false,
+                    timeout: 2500,
+                    headers: { referer: page.url() },
+                });
+                if (!response.ok()) throw new Error(`HTTP ${response.status()}`);
+                const body = await response.body();
+                if (body.length === 0 || body.length > 8_388_608) throw new Error('invalid_transfer_size');
+                const path = join(transferDirectory, `image-${ordinal}.bin`);
+                await writeFile(path, body);
+
+                return { url: item.url, final_url: response.url(), path, bytes: body.length };
+            } catch (error) {
+                transferFailures.push({ url: item.url, reason: String(error?.message || error).slice(0, 200) });
+                return null;
+            }
+        }));
+        transferredImages.push(...results.filter(Boolean));
+    }
+}
 await browser.close();
 
 process.stdout.write(JSON.stringify({
     images,
+    transferred_images: transferredImages,
     scout,
     post_interaction_scout: postInteractionScout,
     action_trace: actionTrace,
@@ -2017,5 +2078,6 @@ process.stdout.write(JSON.stringify({
         effective_minimum_height: minimumHeight,
         stopped_early: outOfTime(),
         action_plan: actionPlanStatus,
+        browser_transfer_failures: transferFailures.slice(0, 20),
     },
 }));

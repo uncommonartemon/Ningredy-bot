@@ -32,9 +32,9 @@ class FlagDomainRecipeNote implements Tool
     {
         return 'Leave a short, concrete note for future training rounds on this domain - e.g. a selector that '
             .'looked right but was unreliable, a control that navigates away instead of opening the gallery, or '
-            .'a control that picks up the wrong color/variant. This is appended to the domain\'s persistent '
-            .'operator-trusted hint (visible as domain_hint on every future round for this domain), never '
-            .'replaces or removes any existing note.';
+            .'a control that picks up the wrong color/variant. This is stored as a lower-trust AI observation '
+            .'in auto_domain_hint, separately from the human operator\'s trusted domain_hint. Future agents '
+            .'must verify it against fresh DOM/action evidence.';
     }
 
     public function handle(Request $request): Stringable|string
@@ -53,24 +53,16 @@ class FlagDomainRecipeNote implements Tool
             'flag_domain_recipe_note',
             ['domain' => $this->domainSettings->domain, 'category' => $category, 'note' => $note],
             function () use ($category, $note): array {
-                $existingLines = array_values(array_filter(
-                    preg_split('/\R/', (string) $this->domainSettings->agent_hint) ?: [],
-                    fn (string $line): bool => trim($line) !== '',
-                ));
-                $humanLines = array_values(array_filter(
-                    $existingLines,
-                    fn (string $line): bool => ! str_starts_with(trim($line), '[auto '),
-                ));
                 $autoLines = array_values(array_filter(
-                    $existingLines,
-                    fn (string $line): bool => str_starts_with(trim($line), '[auto '),
+                    preg_split('/\R/', (string) $this->domainSettings->auto_agent_hint) ?: [],
+                    fn (string $line): bool => trim($line) !== '',
                 ));
 
                 $autoLines[] = '[auto '.$category.' '.now()->toDateString().'] '.$note;
                 $autoLines = array_slice($autoLines, -self::MAX_AUTO_NOTES);
 
                 $this->domainSettings->update([
-                    'agent_hint' => implode("\n", [...$humanLines, ...$autoLines]),
+                    'auto_agent_hint' => implode("\n", $autoLines),
                 ]);
 
                 return ['ok' => true, 'auto_notes_count' => count($autoLines)];

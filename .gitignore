@@ -37,3 +37,11 @@ Thumbs.db
 
 # Unrelated to this Laravel project (a Blender MCP server) - not part of Ningredy.
 /tools/blender-mcp
+
+# Scratch coordination log between parallel Claude Code sessions working on
+# this repo at once - not project documentation, never meant to be committed.
+/AGENT_SYNC.md
+
+# Transient language-server scratch files (PHP Intelephense/phpactor) some
+# editors drop under storage/framework - never project code.
+/storage/framework/lsp-*.php

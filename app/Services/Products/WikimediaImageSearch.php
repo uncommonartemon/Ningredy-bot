@@ -2,6 +2,7 @@
 
 namespace App\Services\Products;
 
+use App\Models\Category;
 use App\Models\ProductDraft;
 use App\Services\Ai\AiSettings;
 use Illuminate\Http\Client\PendingRequest;
@@ -21,6 +22,11 @@ class WikimediaImageSearch
             return [];
         }
 
+        $category = Category::query()
+            ->where('slug', trim((string) $draft->category))
+            ->first();
+        $minimumWidth = $category?->minimumImageWidth() ?? $this->settings->imageMinimumWidth();
+        $minimumHeight = $category?->minimumImageHeight() ?? $this->settings->imageMinimumHeight();
         $images = [];
         $identityTokens = $this->identityTokens($draft);
 
@@ -60,7 +66,7 @@ class WikimediaImageSearch
                 foreach ($pages as $page) {
                     $info = $page['imageinfo'][0] ?? null;
 
-                    if (! is_array($info) || ! $this->isUseful($page, $info, $identityTokens)) {
+                    if (! is_array($info) || ! $this->isUseful($page, $info, $identityTokens, $minimumWidth, $minimumHeight)) {
                         continue;
                     }
 
@@ -127,8 +133,13 @@ class WikimediaImageSearch
     }
 
     /** @param array<string, mixed> $page @param array<string, mixed> $info @param array<int, string> $identityTokens */
-    private function isUseful(array $page, array $info, array $identityTokens): bool
-    {
+    private function isUseful(
+        array $page,
+        array $info,
+        array $identityTokens,
+        int $minimumWidth,
+        int $minimumHeight,
+    ): bool {
         $mime = Str::lower((string) ($info['mime'] ?? ''));
 
         if (! in_array($mime, ['image/jpeg', 'image/png', 'image/webp'], true)) {
@@ -139,8 +150,8 @@ class WikimediaImageSearch
         $height = (int) ($info['thumbheight'] ?? $info['height'] ?? 0);
 
         if (
-            $width < $this->settings->imageMinimumWidth()
-            || $height < $this->settings->imageMinimumHeight()
+            $width < $minimumWidth
+            || $height < $minimumHeight
         ) {
             return false;
         }

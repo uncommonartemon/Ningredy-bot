@@ -1298,7 +1298,7 @@ class ProductGalleryRecipeTrainerTest extends TestCase
         );
 
         $this->assertSame(
-            ['https://images.samsung.com/is/image/samsung/product'],
+            ['https://images.samsung.com/is/image/samsung/product?%241164_776_PNG%24='],
             $seenStaticUrls,
         );
     }
@@ -1773,7 +1773,7 @@ class ProductGalleryRecipeTrainerTest extends TestCase
         $domainSettings = ProductSourceDomain::query()->where('domain', 'notes.example')->firstOrFail();
         $this->assertStringContainsString(
             'The gallery tab navigates to a new page instead of expanding in place.',
-            $domainSettings->agent_hint,
+            $domainSettings->auto_agent_hint,
         );
     }
 }

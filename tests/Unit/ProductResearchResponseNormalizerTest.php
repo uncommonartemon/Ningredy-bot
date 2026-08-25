@@ -75,7 +75,7 @@ class ProductResearchResponseNormalizerTest extends TestCase
         $this->assertCount(1, $data['specifications']);
     }
 
-    public function test_it_canonicalizes_regional_amazon_product_links_to_amazon_com(): void
+    public function test_it_preserves_the_exact_regional_product_page_url(): void
     {
         $data = app(ProductResearchResponseNormalizer::class)->normalize([
             'primary_source_url' => 'https://www.amazon.ca/dp/B0BS4BP8FB',
@@ -87,7 +87,7 @@ class ProductResearchResponseNormalizerTest extends TestCase
             ]],
         ]);
 
-        $this->assertSame('https://www.amazon.com/dp/B0BS4BP8FB', $data['primary_source_url']);
-        $this->assertSame('https://www.amazon.com/dp/B0BS4BP8FB', $data['sources'][0]['url']);
+        $this->assertSame('https://www.amazon.ca/dp/B0BS4BP8FB', $data['primary_source_url']);
+        $this->assertSame('https://www.amazon.ca/Aspire-Laptop/dp/B0BS4BP8FB?ref_=ast_sto_dp', $data['sources'][0]['url']);
     }
 }
