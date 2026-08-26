@@ -601,7 +601,7 @@ class ProductImageStorage
             $structurallyConfirmed = $sourceIdentityConfirmed
                 && $confirmedGallery->count() >= $minimumCompleteGallerySize;
             $galleryVerification = $structurallyConfirmed
-                ? $this->confirmedGalleryVerifier->verify(
+                ? $this->verifyConfirmedGallerySafely(
                     $productPageUrl,
                     $confirmedGallery,
                     $draft,
@@ -925,7 +925,7 @@ class ProductImageStorage
                         && $confirmedGroup->count() >= $minimumCompleteGallerySize
                         && $groupPageUrl
                     ) {
-                        $groupGalleryVerification = $this->confirmedGalleryVerifier->verify(
+                        $groupGalleryVerification = $this->verifyConfirmedGallerySafely(
                             $groupPageUrl,
                             $confirmedGroup,
                             $draft,
@@ -1284,6 +1284,47 @@ class ProductImageStorage
         $category = Category::query()->where('slug', $slug)->first();
 
         return $category?->gallerySearchStrategy() ?? Category::GALLERY_SEARCH_AUTO;
+    }
+
+    /**
+     * A malformed/invalid AI response from the underlying Vision call must
+     * not crash the entire multi-source search. Real case (2026-08-26): a
+     * Rozetka gallery spot-check's Vision response was missing several
+     * required fields (schema validation failed with "images.0.reason
+     * обязательно для заполнения" and 8 more errors) - this was the one
+     * confirmed-gallery Vision path in stage() without a surrounding
+     * try/catch, so the exception propagated all the way out through
+     * ResearchProduct's tool call, burning the whole search budget and
+     * getting misattributed to the unrelated, already-completed research
+     * AiRun row. Every other Vision call in this class already degrades
+     * gracefully on failure (see the deferred-sets loop above); this makes
+     * confirmedGalleryVerifier's calls do the same - an empty, unconfirmed
+     * result, so the caller falls through to its existing "try the next
+     * candidate" path exactly as if Vision had rejected everything.
+     *
+     * @param  Collection<int, array<string, mixed>>  $candidates
+     * @return array{mode: string, candidates: Collection<int, array<string, mixed>>, cached: bool}
+     */
+    private function verifyConfirmedGallerySafely(
+        string $productPageUrl,
+        Collection $candidates,
+        ProductDraft $draft,
+        int $minimumImages,
+        ?int $telegramUpdateId,
+    ): array {
+        try {
+            return $this->confirmedGalleryVerifier->verify(
+                $productPageUrl,
+                $candidates,
+                $draft,
+                $minimumImages,
+                $telegramUpdateId,
+            );
+        } catch (Throwable $exception) {
+            report($exception);
+
+            return ['mode' => ConfirmedProductGalleryVerifier::MODE_AMBIGUOUS, 'candidates' => collect(), 'cached' => false];
+        }
     }
 
     private function minimumVerifiedImages(ProductDraft $draft): int

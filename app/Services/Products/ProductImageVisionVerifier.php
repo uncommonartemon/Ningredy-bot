@@ -207,8 +207,119 @@ class ProductImageVisionVerifier
             ->where('slug', trim((string) $draft->category))
             ->value('product_search_hint'));
         $prompt = $this->prompt($draft, $candidates, $categoryHint, $galleryFramePolicy);
+        $attachments = array_map(fn (array $candidate, int $index) => Image::fromBase64(
+            base64_encode($this->thumbnail($candidate['image'])),
+            'image/webp',
+        )->as('candidate-'.($index + 1).'.webp')->withProviderOptions(['detail' => (string) config('product-images.vision_detail', 'low')]), $candidates, array_keys($candidates));
+
+        // The mini model occasionally returns a structurally invalid batch -
+        // a missing required field (e.g. "reason") or the wrong number of
+        // image entries - that the enum/length coercion inside
+        // reviewGalleryBatch() cannot repair. Real production case
+        // (2026-08-26): a genuine Rozetka gallery review failed exactly
+        // this way and, before this retry existed, permanently wrote off an
+        // otherwise-good gallery (and crashed the whole multi-source
+        // search) over one bad model response. One retry mirrors the same
+        // self-correction ProductGalleryRecipeTrainer already gets across
+        // its own invalid-JSON training rounds.
+        $maxAttempts = 2;
+        $data = null;
+        $lastException = null;
+
+        for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
+            try {
+                $data = $this->reviewGalleryBatch(
+                    $provider,
+                    $model,
+                    $prompt,
+                    $attachments,
+                    $visionTimeout,
+                    $telegramUpdateId ?? $draft->telegram_update_id,
+                    count($candidates),
+                );
+                $lastException = null;
+
+                break;
+            } catch (Throwable $exception) {
+                $lastException = $exception;
+            }
+        }
+
+        if ($lastException !== null) {
+            report($lastException);
+
+            throw $lastException;
+        }
+
+        $reviewed = collect($data['images'])
+            ->map(function (array $review) use ($draft, $candidates): array {
+                $candidate = $candidates[$review['index'] - 1] ?? [];
+
+                return [
+                    ...$review,
+                    'hero' => $review['kind'] === 'product'
+                        && in_array($review['view'], ['front', 'angle'], true),
+                    'source_supported' => (bool) ($candidate['source_identity_confirmed'] ?? false)
+                        || $this->identityMatcher->supports($draft, (string) ($candidate['source_url'] ?? '')),
+                ];
+            });
+
+        $allowedKinds = $galleryFramePolicy
+            ? ['product', 'packaging', 'detail', 'banner']
+            : ['product', 'packaging', 'detail'];
+        $forbidsPackaging = self::categoryHintForbidsPackaging($categoryHint);
+        $qualifies = fn (array $review): bool => $review['publishable']
+            && (! filled($draft->color) || $review['color_match'])
+            && in_array($review['kind'], $allowedKinds, true)
+            && $review['score'] >= $minimumScore
+            && ($review['exact_match'] || $review['source_supported']);
+
+        if ($forbidsPackaging) {
+            $this->rememberHintBlockedCandidate(
+                $draft,
+                $reviewed->filter(fn (array $review): bool => $review['kind'] === 'packaging' && $qualifies($review)),
+                $candidates,
+                $categoryHint,
+                $model,
+            );
+        }
+
+        $reviews = $this->rankReviews($reviewed->filter(fn (array $review): bool => $qualifies($review)
+            && ! ($forbidsPackaging && $review['kind'] === 'packaging')));
+
+        return $reviews->take($limit)->map(function (array $review) use ($candidates, $model): array {
+            return [
+                ...$candidates[$review['index'] - 1],
+                'vision_kind' => $review['kind'],
+                'vision_score' => $review['score'],
+                'vision_reason' => $review['source_supported'] && ! $review['exact_match']
+                    ? 'Exact identity is supported by the source URL. '.$review['reason']
+                    : $review['reason'],
+                'vision_model' => $model,
+            ];
+        })->all();
+    }
+
+    /**
+     * One attempt at reviewing one batch - its own AiRun row per attempt, so
+     * a retry never overwrites an earlier attempt's own completed/failed
+     * status (the exact misattribution bug found and fixed in
+     * ResearchProduct.php the same day this retry was added).
+     *
+     * @param  array<int, mixed>  $attachments
+     * @return array{images: array<int, array<string, mixed>>}
+     */
+    private function reviewGalleryBatch(
+        string $provider,
+        string $model,
+        string $prompt,
+        array $attachments,
+        int $visionTimeout,
+        ?int $telegramUpdateId,
+        int $candidateCount,
+    ): array {
         $run = AiRun::query()->create([
-            'telegram_update_id' => $telegramUpdateId ?? $draft->telegram_update_id,
+            'telegram_update_id' => $telegramUpdateId,
             'provider' => $provider,
             'model' => $model,
             'status' => 'running',
@@ -217,11 +328,6 @@ class ProductImageVisionVerifier
         ]);
 
         try {
-            $attachments = array_map(fn (array $candidate, int $index) => Image::fromBase64(
-                base64_encode($this->thumbnail($candidate['image'])),
-                'image/webp',
-            )->as('candidate-'.($index + 1).'.webp')->withProviderOptions(['detail' => (string) config('product-images.vision_detail', 'low')]), $candidates, array_keys($candidates));
-
             $response = app(OpenAiHeavyOperationGate::class)->run(
                 $provider,
                 $visionTimeout,
@@ -263,21 +369,21 @@ class ProductImageVisionVerifier
                 })
                 ->filter(fn (array $image): bool => is_int($image['index'] ?? null)
                     && $image['index'] >= 1
-                    && $image['index'] <= count($candidates))
+                    && $image['index'] <= $candidateCount)
                 ->unique('index')
                 ->sortBy('index')
-                ->take(count($candidates))
+                ->take($candidateCount)
                 ->values()
                 ->all();
             $data = Validator::make($normalizedResponse, [
-                'images' => ['required', 'array', 'size:'.count($candidates)],
-                'images.*.index' => ['required', 'integer', 'between:1,'.count($candidates), 'distinct'],
+                'images' => ['required', 'array', 'size:'.$candidateCount],
+                'images.*.index' => ['required', 'integer', 'between:1,'.$candidateCount, 'distinct'],
                 'images.*.exact_match' => ['required', 'boolean'],
                 'images.*.color_match' => ['required', 'boolean'],
                 'images.*.publishable' => ['required', 'boolean'],
                 'images.*.kind' => ['required', 'in:product,packaging,detail,logo,banner,screenshot,unrelated,uncertain'],
                 'images.*.view' => ['required', 'in:front,angle,side,back,detail,packaging,other'],
-                'images.*.gallery_rank' => ['required', 'integer', 'between:1,'.count($candidates), 'distinct'],
+                'images.*.gallery_rank' => ['required', 'integer', 'between:1,'.$candidateCount, 'distinct'],
                 'images.*.score' => ['required', 'integer', 'between:0,100'],
                 'images.*.reason' => ['required', 'string', 'max:1000'],
             ])->validate();
@@ -290,60 +396,13 @@ class ProductImageVisionVerifier
                 'completed_at' => now(),
             ]);
 
-            $reviewed = collect($data['images'])
-                ->map(function (array $review) use ($draft, $candidates): array {
-                    $candidate = $candidates[$review['index'] - 1] ?? [];
-
-                    return [
-                        ...$review,
-                        'hero' => $review['kind'] === 'product'
-                            && in_array($review['view'], ['front', 'angle'], true),
-                        'source_supported' => (bool) ($candidate['source_identity_confirmed'] ?? false)
-                            || $this->identityMatcher->supports($draft, (string) ($candidate['source_url'] ?? '')),
-                    ];
-                });
-
-            $allowedKinds = $galleryFramePolicy
-                ? ['product', 'packaging', 'detail', 'banner']
-                : ['product', 'packaging', 'detail'];
-            $forbidsPackaging = self::categoryHintForbidsPackaging($categoryHint);
-            $qualifies = fn (array $review): bool => $review['publishable']
-                && (! filled($draft->color) || $review['color_match'])
-                && in_array($review['kind'], $allowedKinds, true)
-                && $review['score'] >= $minimumScore
-                && ($review['exact_match'] || $review['source_supported']);
-
-            if ($forbidsPackaging) {
-                $this->rememberHintBlockedCandidate(
-                    $draft,
-                    $reviewed->filter(fn (array $review): bool => $review['kind'] === 'packaging' && $qualifies($review)),
-                    $candidates,
-                    $categoryHint,
-                    $model,
-                );
-            }
-
-            $reviews = $this->rankReviews($reviewed->filter(fn (array $review): bool => $qualifies($review)
-                && ! ($forbidsPackaging && $review['kind'] === 'packaging')));
-
-            return $reviews->take($limit)->map(function (array $review) use ($candidates, $model): array {
-                return [
-                    ...$candidates[$review['index'] - 1],
-                    'vision_kind' => $review['kind'],
-                    'vision_score' => $review['score'],
-                    'vision_reason' => $review['source_supported'] && ! $review['exact_match']
-                        ? 'Exact identity is supported by the source URL. '.$review['reason']
-                        : $review['reason'],
-                    'vision_model' => $model,
-                ];
-            })->all();
+            return $data;
         } catch (Throwable $exception) {
             $run->update([
                 'status' => 'failed',
                 'error' => mb_substr($exception->getMessage(), 0, 5000),
                 'completed_at' => now(),
             ]);
-            report($exception);
 
             throw $exception;
         }

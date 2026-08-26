@@ -1715,6 +1715,202 @@ class ProductImageStorageTest extends TestCase
         );
     }
 
+    public function test_a_broken_vision_response_during_a_confirmed_gallery_spot_check_does_not_crash_the_whole_search(): void
+    {
+        // Real production bug (2026-08-26): reviewing a real Rozetka gallery
+        // (via the ambiguous-carousel path this same scenario exercises
+        // through the dedicated-mode fallback) got a malformed Vision
+        // response - the underlying gpt-5-mini call omitted several
+        // required schema fields ("images.0.reason обязательно для
+        // заполнения" and 8 more). Neither call site of
+        // ConfirmedProductGalleryVerifier::verify() in stage() had a
+        // try/catch, so the exception propagated all the way out through
+        // ResearchProduct's tool call - burning the whole ~$1/15-minute
+        // search budget on one bad AI response instead of just treating
+        // that one gallery as unconfirmed and moving on.
+        Storage::fake('public');
+        AppSetting::put('ai.fallback_sources_enabled', '0');
+        config()->set('product-images.max_images_by_type.laptop', 10);
+        $this->mock(ConfirmedProductGalleryVerifier::class)
+            ->shouldReceive('verify')
+            ->andThrow(new \RuntimeException('Поле «images.0.reason» обязательно для заполнения. (and 8 more errors)'));
+        $gallery = collect(range(1, 5))
+            ->map(fn (int $index): string => 'https://93.184.216.36/gallery-'.$index.'.jpg')
+            ->all();
+        $browser = $this->mock(BrowserProductGalleryExtractor::class);
+        $browser->shouldReceive('extract')->once()->andReturn($gallery);
+        $browser->shouldReceive('isConfirmedGalleryImage')
+            ->andReturnUsing(fn (string $url): bool => str_contains($url, '/gallery-'));
+        $browser->shouldReceive('isPartialGalleryImage')->andReturn(false);
+        $recipe = ProductGalleryRecipe::query()->create([
+            'domain' => '93.184.216.36',
+            'path_pattern' => '*',
+            'status' => 'active',
+            'recipe' => ['content_confirmed_product' => true],
+        ]);
+        $recipe->versions()->create([
+            'domain' => '93.184.216.36',
+            'product_url' => 'https://93.184.216.36/products/g533qs-ds76',
+            'trigger' => 'test',
+            'status' => 'active',
+            'provider' => 'fake',
+            'model' => 'fake',
+            'result' => [
+                'action_trace' => [[
+                    'phase' => 'open_expanded_gallery',
+                    'clicked' => true,
+                    'expanded_gallery_visible_after' => true,
+                ]],
+            ],
+        ]);
+        Http::fake(function (Request $request) {
+            if (str_contains($request->url(), '/products/g533qs-ds76')) {
+                return Http::response('<html><body><div class="slider"></div></body></html>', 200, [
+                    'Content-Type' => 'text/html',
+                ]);
+            }
+
+            preg_match('/gallery-(\d+)/', $request->url(), $matches);
+
+            return Http::response($this->jpeg((int) ($matches[1] ?? 1)), 200, [
+                'Content-Type' => 'image/jpeg',
+            ]);
+        });
+        [, , $draft] = $this->records();
+        $draft->update([
+            'title' => 'ASUS ROG Strix Scar 15 G533QS-DS76',
+            'brand' => 'ASUS',
+            'model' => 'G533QS-DS76',
+            'product_type' => 'laptop',
+            'primary_source_url' => 'https://93.184.216.36/products/g533qs-ds76',
+            'image_urls' => [],
+            'sources' => [[
+                'title' => 'ASUS ROG Strix Scar 15 G533QS-DS76',
+                'url' => 'https://93.184.216.36/products/g533qs-ds76',
+                'type' => 'retailer',
+                'image_urls' => [],
+            ]],
+        ]);
+
+        // Must not throw: a broken Vision response degrades this gallery to
+        // unconfirmed instead of crashing the entire multi-source search.
+        $stored = app(ProductImageStorage::class)->stage($draft->fresh());
+
+        $this->assertSame(0, $stored);
+    }
+
+    public function test_a_broken_first_vision_response_gets_one_retry_and_can_still_succeed(): void
+    {
+        // Direct follow-up to the crash-safety test above: not letting a
+        // broken response crash the search is only half the fix. The
+        // gallery recipe trainer already gets to self-correct across
+        // several rounds when it returns invalid JSON - Vision review
+        // should get the same real second chance instead of the batch
+        // being written off as unconfirmed on one bad model response.
+        Storage::fake('public');
+        AppSetting::put('ai.fallback_sources_enabled', '0');
+        config()->set('product-images.max_images_by_type.laptop', 10);
+        $visionCalls = 0;
+        ProductImageVisionAgent::fake(function (string $prompt, $attachments) use (&$visionCalls): array {
+            $visionCalls++;
+
+            if ($visionCalls === 1) {
+                // Missing the required "reason" field on every image -
+                // mirrors the real gpt-5-mini response that triggered this
+                // fix ("images.0.reason обязательно для заполнения").
+                return [
+                    'images' => $attachments->keys()->map(fn (int $index): array => [
+                        'index' => $index + 1,
+                        'exact_match' => true,
+                        'color_match' => true,
+                        'publishable' => true,
+                        'kind' => 'product',
+                        'view' => 'front',
+                        'gallery_rank' => 1,
+                    ])->all(),
+                ];
+            }
+
+            return [
+                'images' => $attachments->keys()->map(fn (int $index): array => [
+                    'index' => $index + 1,
+                    'exact_match' => true,
+                    'color_match' => true,
+                    'publishable' => true,
+                    'kind' => 'product',
+                    'view' => 'front',
+                    'gallery_rank' => 1,
+                    'score' => 95,
+                    'reason' => 'Genuine product photo.',
+                ])->all(),
+            ];
+        })->preventStrayPrompts();
+        $gallery = collect(range(1, 5))
+            ->map(fn (int $index): string => 'https://93.184.216.36/gallery-'.$index.'.jpg')
+            ->all();
+        $browser = $this->mock(BrowserProductGalleryExtractor::class);
+        $browser->shouldReceive('extract')->once()->andReturn($gallery);
+        $browser->shouldReceive('isConfirmedGalleryImage')
+            ->andReturnUsing(fn (string $url): bool => str_contains($url, '/gallery-'));
+        $browser->shouldReceive('isPartialGalleryImage')->andReturn(false);
+        $recipe = ProductGalleryRecipe::query()->create([
+            'domain' => '93.184.216.36',
+            'path_pattern' => '*',
+            'status' => 'active',
+            'recipe' => ['content_confirmed_product' => true],
+        ]);
+        $recipe->versions()->create([
+            'domain' => '93.184.216.36',
+            'product_url' => 'https://93.184.216.36/products/g533qs-ds76',
+            'trigger' => 'test',
+            'status' => 'active',
+            'provider' => 'fake',
+            'model' => 'fake',
+            'result' => [
+                'action_trace' => [[
+                    'phase' => 'open_expanded_gallery',
+                    'clicked' => true,
+                    'expanded_gallery_visible_after' => true,
+                ]],
+            ],
+        ]);
+        Http::fake(function (Request $request) {
+            if (str_contains($request->url(), '/products/g533qs-ds76')) {
+                return Http::response('<html><body><div class="slider"></div></body></html>', 200, [
+                    'Content-Type' => 'text/html',
+                ]);
+            }
+
+            preg_match('/gallery-(\d+)/', $request->url(), $matches);
+
+            return Http::response($this->jpeg((int) ($matches[1] ?? 1)), 200, [
+                'Content-Type' => 'image/jpeg',
+            ]);
+        });
+        [, , $draft] = $this->records();
+        $draft->update([
+            'title' => 'ASUS ROG Strix Scar 15 G533QS-DS76',
+            'brand' => 'ASUS',
+            'model' => 'G533QS-DS76',
+            'product_type' => 'laptop',
+            'primary_source_url' => 'https://93.184.216.36/products/g533qs-ds76',
+            'image_urls' => [],
+            'sources' => [[
+                'title' => 'ASUS ROG Strix Scar 15 G533QS-DS76',
+                'url' => 'https://93.184.216.36/products/g533qs-ds76',
+                'type' => 'retailer',
+                'image_urls' => [],
+            ]],
+        ]);
+
+        $stored = app(ProductImageStorage::class)->stage($draft->fresh());
+
+        $this->assertSame(5, $stored);
+        $this->assertSame(2, $visionCalls);
+        $this->assertSame(1, AiRun::query()->where('model', 'gpt-5.4-mini')->where('status', 'failed')->count());
+        $this->assertSame(1, AiRun::query()->where('model', 'gpt-5.4-mini')->where('status', 'completed')->count());
+    }
+
     public function test_ambiguous_confirmed_carousel_is_reviewed_as_one_permissive_batch_and_only_keeps_product_frames(): void
     {
         Storage::fake('public');
