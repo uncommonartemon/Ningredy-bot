@@ -2621,7 +2621,14 @@ class ProductImageStorageTest extends TestCase
             ->firstOrFail();
         $reasons = collect($attempt->output['rejected_candidates'] ?? [])->pluck('reason', 'url');
 
+        $this->assertDatabaseHas('product_source_attempts', [
+            'product_draft_id' => $draft->id,
+            'action' => 'download_candidates_started',
+            'status' => 'started',
+        ]);
         $this->assertSame(1, $attempt->output['downloaded_images']);
+        $this->assertSame(1, $attempt->output['rejection_summary']['too_small']);
+        $this->assertSame(1, $attempt->output['rejection_summary']['empty_response']);
         $this->assertStringStartsWith('too_small', (string) $reasons['https://93.184.216.34/too-small.jpg']);
         $this->assertSame('empty_response', $reasons['https://93.184.216.34/empty-body.jpg']);
     }

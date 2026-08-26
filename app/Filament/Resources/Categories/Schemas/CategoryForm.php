@@ -113,6 +113,16 @@ class CategoryForm
                                         ->helperText('Стабильное английское значение для URL и фильтров.')
                                         ->unique(ignoreRecord: true)
                                         ->required(),
+                                    Select::make('product_type_affinity')
+                                        ->label('Тип товаров категории')
+                                        ->helperText('Агент и валидатор используют это поле, чтобы категория не противоречила типу товара.')
+                                        ->options([
+                                            'laptop' => 'Ноутбук',
+                                            'desktop' => 'Настольный компьютер',
+                                            'component' => 'Компонент / периферия',
+                                            'other' => 'Другая техника',
+                                        ])
+                                        ->required(),
                                     Select::make('parent_id')
                                         ->label('Родительская категория')
                                         ->relationship('parent', 'name')

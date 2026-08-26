@@ -44,17 +44,26 @@ class ProductDraftTypeTest extends TestCase
         $this->assertSame('laptop', $product->product_type);
     }
 
-    public function test_draft_category_wins_over_the_product_type_mapping(): void
+    public function test_compatible_draft_category_is_preserved(): void
     {
         // The AI now picks the category directly from our live category list;
         // it should be trusted over the legacy product_type -> slug mapping
         // even when the two disagree (e.g. a monitor tagged product_type
         // "other" but correctly categorized as "components").
         $product = app(ProductDraftWorkflow::class)->approve(
-            $this->draft('Dell UltraSharp U2723QE Monitor', 'U2723QE', 'other', 'components'),
+            $this->draft('Dell UltraSharp U2723QE Monitor', 'U2723QE', 'component', 'components'),
         );
 
         $this->assertSame('components', $product->category->slug);
+    }
+
+    public function test_conflicting_draft_category_is_repaired_from_category_metadata(): void
+    {
+        $product = app(ProductDraftWorkflow::class)->approve(
+            $this->draft('Alienware 16 Area-51', 'AA16250', 'laptop', 'computers'),
+        );
+
+        $this->assertSame('laptops', $product->category->slug);
     }
 
     public function test_an_invalid_category_falls_back_to_the_product_type_mapping(): void

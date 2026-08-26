@@ -128,7 +128,10 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
             For each specification, return a stable lowercase key. Use cpu, gpu, ram, storage, display,
             screen_size and refresh_rate when applicable; use a short snake_case key for other facts. When a
             reusable catalog identifier is verified, always include it with the exact key sku, mpn, ean, upc, or
-            gtin. Never put a per-unit serial number into these fields.
+            gtin. A family/series name, list of variants, example part number, or value containing alternatives is
+            never a valid identifier. Installed CPU, GPU, RAM, storage, display, color and pack/module count must
+            each describe one selected configuration; move upgrade ceilings to separate maximum_* specifications.
+            Never put a per-unit serial number into these fields.
 
             Always classify product_type as laptop, desktop, component, or other. Laptops and notebooks are laptop;
             complete stationary PCs are desktop; separate parts, monitors, and peripherals are component.

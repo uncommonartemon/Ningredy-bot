@@ -519,6 +519,29 @@ class BrowserProductGalleryExtractor
             return false;
         }
 
+        // learned_recipe is captured before the action plan. A valid recipe
+        // may collect from a lightbox that only exists after its opener, so
+        // an empty pre-action snapshot cannot overrule stronger post-action
+        // proof. Strict validation still requires recipe_dom provenance.
+        if (data_get($result, 'diagnostics.strict_recipe') === true) {
+            $imageCount = collect($result['images'] ?? [])
+                ->filter(fn (mixed $url): bool => is_string($url) && $url !== '')
+                ->unique(fn (string $url): string => ProductImageStorage::imageAssetKey($url))
+                ->count();
+            $recipeDomCount = collect(data_get($result, 'diagnostics.validated_image_evidence', []))
+                ->filter(fn (mixed $item): bool => is_array($item)
+                    && ($item['source'] ?? null) === 'recipe_dom'
+                    && is_string($item['url'] ?? null)
+                    && $item['url'] !== '')
+                ->pluck('url')
+                ->unique(fn (string $url): string => ProductImageStorage::imageAssetKey($url))
+                ->count();
+
+            if ($imageCount > 0 && $recipeDomCount >= $imageCount) {
+                return false;
+            }
+        }
+
         // Absence of the field (an older script version, an unexpected
         // result shape) must not be read as evidence of a mismatch - only a
         // learned_recipe that was actually computed and came back empty

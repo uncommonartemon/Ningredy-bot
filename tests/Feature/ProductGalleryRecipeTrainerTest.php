@@ -1259,6 +1259,42 @@ class ProductGalleryRecipeTrainerTest extends TestCase
         $this->assertSame('active', $recipe->status);
     }
 
+    public function test_failed_preflight_is_interrupted_and_keeps_observed_images_retryable(): void
+    {
+        ProductGalleryPreflightAgent::fake(fn (): never => throw new \RuntimeException('provider temporarily unavailable'))
+            ->preventStrayPrompts();
+        ProductGalleryRecipeTrainerAgent::fake()->preventStrayPrompts();
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('scout')->once()->andReturn([
+                'scout' => [
+                    'fragments' => ['<div data-gallery></div>'],
+                    'network_image_samples' => ['https://cdn.example/browser.jpg'],
+                    'access_gate' => false,
+                    'rate_limited' => false,
+                ],
+                'diagnostics' => [],
+            ]);
+            $mock->shouldNotReceive('executeRecipe');
+        });
+
+        $images = app(ProductGalleryRecipeTrainer::class)->train(
+            'https://shop.example/product',
+            force: true,
+            context: ['static_image_urls' => ['https://cdn.example/static.jpg']],
+        );
+
+        $this->assertSame([
+            'https://cdn.example/browser.jpg',
+            'https://cdn.example/static.jpg',
+        ], $images);
+        $recipe = ProductGalleryRecipe::query()->where('domain', 'shop.example')->firstOrFail();
+        $version = $recipe->versions()->latest('id')->firstOrFail();
+        $this->assertSame('interrupted', $version->status);
+        $this->assertSame('interrupted', $version->result['preflight']['decision']);
+        $this->assertSame('learning', $recipe->status);
+        ProductGalleryRecipeTrainerAgent::assertNeverPrompted();
+    }
+
     public function test_preflight_does_not_count_two_scene7_renditions_of_one_photo_as_distinct(): void
     {
         $seenStaticUrls = null;

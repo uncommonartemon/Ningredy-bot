@@ -12,12 +12,16 @@ use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
 use App\Services\Ai\AiErrorPresenter;
 use App\Services\Ai\AiSettings;
+use App\Services\Ai\OpenAiHeavyOperationGate;
+use App\Services\Ai\ProductSearchCostBudget;
 use App\Services\Ai\ProductSearchTimeBudget;
 use App\Services\Ai\StreamingProductResearch;
+use App\Services\Products\ProductCategoryResolver;
 use App\Services\Products\ProductIdentityKey;
 use App\Services\Products\ProductImageResolver;
 use App\Services\Products\ProductImageStorage;
 use App\Services\Products\ProductPublicDescription;
+use App\Services\Products\ProductResearchConfigurationGuard;
 use App\Services\Products\ProductResearchResponseNormalizer;
 use App\Services\Products\ProductSourceAttemptRecorder;
 use App\Services\Products\ProductSourcePriority;
@@ -236,6 +240,94 @@ class ResearchProduct implements Tool
                 'image_urls.*' => ['url:http,https', 'max:2048'],
                 'confidence' => ['required', 'numeric', 'between:0,1'],
             ])->validate();
+
+            if ($data['status'] === 'found') {
+                $resolvedCategory = app(ProductCategoryResolver::class)->resolve(
+                    $data['product_type'] ?? null,
+                    $data['category'] ?? null,
+                );
+
+                if ($resolvedCategory) {
+                    $data['category'] = $resolvedCategory->slug;
+                }
+            }
+
+            $configurationGuard = app(ProductResearchConfigurationGuard::class);
+            $configurationIssues = $configurationGuard->issues($data);
+            if (($data['status'] ?? null) === 'found'
+                && ! app(ProductCategoryResolver::class)->resolve(
+                    $data['product_type'] ?? null,
+                    $data['category'] ?? null,
+                )) {
+                $configurationIssues[] = 'Category and product_type are incompatible or ambiguous in the live category configuration.';
+            }
+            $correctionAttempt = 0;
+
+            while (
+                $configurationIssues !== []
+                && $correctionAttempt < 2
+                && $timeBudget->canStart($this->update->id, 30)
+                && ! app(ProductSearchCostBudget::class)->exceeded($this->update->id)
+            ) {
+                $run->update([
+                    'invocation_id' => $response->invocationId,
+                    'status' => 'completed',
+                    'response' => $data,
+                    'usage' => [
+                        ...$response->usage->toArray(),
+                        'web_search_calls' => count($webSearchItems),
+                    ],
+                    'completed_at' => now(),
+                ]);
+                $correctionAttempt++;
+                $progress->info('Проверка обнаружила смешение конфигураций или категории; возвращаю агенту точные причины для самостоятельного исправления.');
+                $correctionPrompt = $researchPrompt.PHP_EOL
+                    .'The previous result failed deterministic catalog validation. Return a completely corrected result for one exact sellable configuration. '
+                    .'Do not defend or summarize the previous result. Validation issues: '
+                    .implode(' | ', $configurationIssues).PHP_EOL
+                    .'Previous result: '.(json_encode($data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?: '{}');
+                $correctionTimeout = $timeBudget->timeoutFor(
+                    $this->update->id,
+                    $settings->productResearchTimeoutSeconds(),
+                );
+                $run = AiRun::query()->create([
+                    'telegram_update_id' => $this->update->id,
+                    'provider' => $provider,
+                    'model' => $model,
+                    'status' => 'running',
+                    'prompt' => $correctionPrompt,
+                    'started_at' => now(),
+                ]);
+                $response = app(OpenAiHeavyOperationGate::class)->run(
+                    $provider,
+                    $correctionTimeout,
+                    fn () => ProductResearchAgent::make()->prompt(
+                        $correctionPrompt,
+                        provider: $provider,
+                        model: $model,
+                        timeout: $correctionTimeout,
+                    ),
+                );
+                $webSearchItems = [];
+                $data = $this->validateCorrectedResearchResponse($response->toArray());
+                $resolvedCategory = app(ProductCategoryResolver::class)->resolve(
+                    $data['product_type'] ?? null,
+                    $data['category'] ?? null,
+                );
+                if ($resolvedCategory) {
+                    $data['category'] = $resolvedCategory->slug;
+                }
+                $configurationIssues = $configurationGuard->issues($data);
+                if (($data['status'] ?? null) === 'found' && ! $resolvedCategory) {
+                    $configurationIssues[] = 'Category and product_type remain incompatible or ambiguous.';
+                }
+            }
+
+            if ($configurationIssues !== []) {
+                $data['status'] = 'not_found';
+                $data['research_notes'] = 'Exact configuration validation did not pass after automatic correction: '
+                    .implode(' | ', $configurationIssues);
+            }
 
             $publicDescription = $this->publicDescription ?? app(ProductPublicDescription::class);
             $normalizedDescription = $publicDescription->normalize($data);
@@ -500,6 +592,42 @@ class ResearchProduct implements Tool
 
             throw $exception;
         }
+    }
+
+    /** @return array<string, mixed> */
+    private function validateCorrectedResearchResponse(array $response): array
+    {
+        $normalized = ($this->responseNormalizer ?? app(ProductResearchResponseNormalizer::class))
+            ->normalize($response);
+
+        return Validator::make($normalized, [
+            'status' => ['required', 'in:found,not_found'],
+            'title' => ['nullable', 'string', 'max:255'],
+            'brand' => ['nullable', 'string', 'max:255'],
+            'model' => ['nullable', 'string', 'max:255'],
+            'product_type' => ['nullable', 'in:laptop,desktop,component,other'],
+            'category' => ['nullable', 'string', Rule::in(
+                Category::query()->where('is_active', true)->pluck('slug'),
+            )],
+            'color' => ['nullable', 'string', 'max:255'],
+            'description' => ['nullable', 'string', 'max:5000'],
+            'research_notes' => ['nullable', 'string', 'max:5000'],
+            'specifications' => ['present', 'array', 'max:100'],
+            'specifications.*.key' => ['required', 'string', 'max:100', 'regex:/^[a-z0-9_]+$/'],
+            'specifications.*.name' => ['required', 'string', 'max:255'],
+            'specifications.*.value' => ['required', 'string', 'max:2000'],
+            'sources' => ['present', 'array', 'max:20'],
+            'sources.*.title' => ['required', 'string', 'max:500'],
+            'sources.*.url' => ['required', 'url:http,https', 'max:2048'],
+            'sources.*.type' => ['nullable', 'in:manufacturer,retailer,marketplace,review,database,web'],
+            'sources.*.image_urls' => ['present', 'array', 'max:10'],
+            'sources.*.image_urls.*' => ['url:http,https', 'max:2048'],
+            'primary_source_url' => ['nullable', 'url:http,https', 'max:2048'],
+            'official_source_url' => ['nullable', 'url:http,https', 'max:2048'],
+            'image_urls' => ['present', 'array', 'max:10'],
+            'image_urls.*' => ['url:http,https', 'max:2048'],
+            'confidence' => ['required', 'numeric', 'between:0,1'],
+        ])->validate();
     }
 
     public function schema(JsonSchema $schema): array

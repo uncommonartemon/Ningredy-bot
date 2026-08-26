@@ -233,6 +233,26 @@ class ProductGalleryRecipeTrainer
                 }
             }
 
+            if ($preflightDecision === 'interrupted') {
+                $version->update([
+                    'status' => 'interrupted',
+                    'result' => ['preflight' => $preflight],
+                    'error' => $preflight['reason'] ?? null,
+                ]);
+
+                // Provider/transport/schema failure is not evidence about
+                // the page. Preserve real observations as provisional
+                // candidates, but do not train or publish a semantic rule.
+                return collect([
+                    ...($pageScout['network_image_samples'] ?? []),
+                    ...($context['static_image_urls'] ?? []),
+                ])
+                    ->filter(fn (mixed $url): bool => is_string($url) && $url !== '')
+                    ->map(fn (string $url): string => ProductImageStorage::normalizeCandidateUrl($url))
+                    ->unique(fn (string $url): string => ProductImageStorage::imageAssetKey($url))
+                    ->take(20)->values()->all();
+            }
+
             if ($preflightDecision === 'blocked') {
                 $failureKind = 'access_gate';
                 $this->recordFailure(
@@ -956,7 +976,7 @@ class ProductGalleryRecipeTrainer
                 'completed_at' => now(),
             ]);
             $data = [
-                'decision' => count($payload['static_image_urls']) >= 2 ? 'static_sufficient' : 'no_gallery',
+                'decision' => 'interrupted',
                 'page_kind' => 'unknown',
                 'gallery_likely' => false,
                 'hidden_images_likely' => false,
@@ -966,7 +986,7 @@ class ProductGalleryRecipeTrainer
                 'confidence' => 0,
                 'reason' => 'AI preflight failed: '.$exception->getMessage(),
             ];
-            $status = 'failed';
+            $status = 'interrupted';
         }
 
         $this->attempts->record([

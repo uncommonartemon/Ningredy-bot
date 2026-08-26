@@ -490,7 +490,41 @@ class ProductImageStorage
 
             // Browser/DOM gallery URLs are more reliable than AI-provided thumbnails.
             $urls = array_values(array_unique([...$resolvedUrls, ...$urls]));
-            $allCandidates = $this->downloadCandidates($urls, $draft);
+            $this->attempts->record([
+                'telegram_update_id' => $telegramUpdateId,
+                'product_draft_id' => $draft->id,
+                'product_url' => $source['url'],
+                'actor' => 'downloader',
+                'phase' => 'image_download',
+                'action' => 'download_candidates_started',
+                'status' => 'started',
+                'decision' => 'download_pending',
+                'input' => ['candidate_urls' => count($urls)],
+            ]);
+
+            try {
+                $allCandidates = $this->downloadCandidates($urls, $draft);
+            } catch (Throwable $exception) {
+                $this->attempts->record([
+                    'telegram_update_id' => $telegramUpdateId,
+                    'product_draft_id' => $draft->id,
+                    'product_url' => $source['url'],
+                    'actor' => 'downloader',
+                    'phase' => 'image_download',
+                    'action' => 'download_candidates',
+                    'status' => 'interrupted',
+                    'decision' => 'retry_source',
+                    'input' => ['candidate_urls' => count($urls)],
+                    'output' => [
+                        'error' => mb_substr($exception->getMessage(), 0, 2000),
+                        'rejected_candidates' => array_slice($this->lastDownloadRejections, 0, 20),
+                    ],
+                ]);
+                report($exception);
+                $progress?->__invoke('Скачивание изображений прервалось технической ошибкой; источник сохранён для повторной попытки, продолжаю поиск.');
+
+                continue;
+            }
             $downloadedCount = count($allCandidates);
 
             if ($allCandidates !== []) {
@@ -515,6 +549,7 @@ class ProductImageStorage
                 'output' => [
                     'downloaded_images' => $downloadedCount,
                     'unique_images' => count($allCandidates),
+                    'rejection_summary' => $this->downloadRejectionSummary(),
                     'rejected_candidates' => array_slice($this->lastDownloadRejections, 0, 20),
                 ],
             ]);
@@ -1932,6 +1967,18 @@ class ProductImageStorage
         $this->degradeRecipesAfterTechnicalFailure($urls, $candidates, $sourcePagesByUrl);
 
         return $candidates;
+    }
+
+    /** @return array<string, int> */
+    private function downloadRejectionSummary(): array
+    {
+        return collect($this->lastDownloadRejections)
+            ->map(fn (array $rejection): string => Str::before(
+                (string) ($rejection['reason'] ?? 'unknown'),
+                ' (',
+            ))
+            ->countBy()
+            ->all();
     }
 
     /**

@@ -948,6 +948,70 @@ class ProcessTelegramMessageTest extends TestCase
         $this->assertSame(0, ProductDraft::query()->count());
     }
 
+    public function test_research_agent_corrects_a_family_result_to_one_exact_configuration(): void
+    {
+        $base = [
+            'status' => 'found',
+            'title' => 'MSI Titan 18 HX AI A2XW',
+            'brand' => 'MSI',
+            'model' => 'Titan 18 HX AI A2XW',
+            'category' => 'laptops',
+            'product_type' => 'laptop',
+            'color' => 'Black',
+            'description' => 'Gaming laptop.',
+            'official_source_url' => null,
+            'research_notes' => null,
+            'image_urls' => [],
+            'confidence' => 0.95,
+        ];
+        ProductResearchAgent::fake([
+            [
+                ...$base,
+                'specifications' => [
+                    ['key' => 'sku', 'name' => 'SKU', 'value' => 'A2XW family; variants include A2XWJG and A2XWIG'],
+                    ['key' => 'gpu', 'name' => 'GPU', 'value' => 'RTX 5090 or RTX 5080, varies by SKU'],
+                ],
+                'sources' => [[
+                    'title' => 'MSI family page',
+                    'url' => 'https://msi.example/titan-a2xw',
+                    'type' => 'manufacturer',
+                ]],
+                'primary_source_url' => 'https://msi.example/titan-a2xw',
+            ],
+            [
+                ...$base,
+                'title' => 'MSI Titan 18 HX AI A2XWJG-614',
+                'model' => 'A2XWJG-614',
+                'specifications' => [
+                    ['key' => 'sku', 'name' => 'SKU', 'value' => 'A2XWJG-614'],
+                    ['key' => 'gpu', 'name' => 'GPU', 'value' => 'NVIDIA GeForce RTX 5090 24GB'],
+                    ['key' => 'ram', 'name' => 'RAM', 'value' => '64GB DDR5'],
+                ],
+                'sources' => [[
+                    'title' => 'Exact retailer offer',
+                    'url' => 'https://shop.example/a2xwjg-614',
+                    'type' => 'retailer',
+                ]],
+                'primary_source_url' => 'https://shop.example/a2xwjg-614',
+            ],
+        ]);
+        $update = $this->update();
+        $resolver = $this->mock(ProductImageResolver::class);
+        $resolver->shouldNotReceive('resolve');
+        $imageStorage = $this->mock(ProductImageStorage::class);
+        $imageStorage->shouldReceive('stage')->once()->andReturn(3);
+
+        $result = json_decode((new ResearchProduct($update, $resolver, imageStorage: $imageStorage))->handle(new Request([
+            'query' => 'MSI Titan 18 HX AI A2XW',
+        ])), true, flags: JSON_THROW_ON_ERROR);
+
+        $draft = ProductDraft::query()->firstOrFail();
+        $this->assertSame('found', $result['status']);
+        $this->assertSame('A2XWJG-614', $draft->model);
+        $this->assertSame('A2XWJG-614', collect($draft->specifications)->firstWhere('key', 'sku')['value']);
+        $this->assertSame(2, AiRun::query()->count());
+    }
+
     public function test_research_recognizes_a_product_already_in_the_catalog_instead_of_duplicating_it(): void
     {
         // Real production bug (2026-07-24): a later message about a product

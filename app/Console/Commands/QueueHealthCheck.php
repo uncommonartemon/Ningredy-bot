@@ -48,9 +48,10 @@ class QueueHealthCheck extends Command
 
         try {
             $minutes = intdiv($waitingSeconds, 60);
+            $queue = (string) ($oldestPending->queue ?? 'default');
             $telegram->sendMessage(
                 (string) $chatId,
-                "⚠️ Очередь не обрабатывается уже {$minutes} мин. Похоже, воркер (queue:work) не запущен или упал. Перезапустите start-ningredy.bat.",
+                "⚠️ Очередь {$queue} не обрабатывается уже {$minutes} мин. Похоже, соответствующий воркер (queue:work) не запущен или упал. Перезапустите start-ningredy.bat.",
             );
             Cache::put(self::CACHE_KEY, true, self::ALERT_COOLDOWN_SECONDS);
         } catch (Throwable $exception) {

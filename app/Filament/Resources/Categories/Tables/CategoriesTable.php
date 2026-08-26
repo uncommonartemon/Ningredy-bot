@@ -19,6 +19,16 @@ class CategoriesTable
                 TextColumn::make('id')->label('#')->sortable()->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('name')->label('English name')->searchable()->sortable(),
                 TextColumn::make('slug')->label('Slug')->searchable()->sortable(),
+                TextColumn::make('product_type_affinity')
+                    ->label('Тип товара')
+                    ->badge()
+                    ->formatStateUsing(fn (?string $state): string => match ($state) {
+                        'laptop' => 'Ноутбук',
+                        'desktop' => 'ПК',
+                        'component' => 'Компонент',
+                        'other' => 'Другое',
+                        default => 'Не задан',
+                    }),
                 TextColumn::make('translations_summary')->label('Переводы')
                     ->state(fn ($record): string => $record->translations
                         ->map(fn ($translation): string => strtoupper($translation->locale).': '.$translation->name)

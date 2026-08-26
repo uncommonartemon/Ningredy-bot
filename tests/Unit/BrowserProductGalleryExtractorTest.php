@@ -87,6 +87,29 @@ class BrowserProductGalleryExtractorTest extends TestCase
         $this->assertFalse($mismatched);
     }
 
+    public function test_strict_recipe_dom_evidence_beats_empty_pre_action_snapshot(): void
+    {
+        $mismatched = $this->invoke([
+            'collect_selectors' => ['.dialog img'],
+        ], [
+            'images' => ['https://cdn.example/product.jpg'],
+            'learned_recipe' => [
+                'collect_selectors' => [],
+                'thumbnail_selectors' => [],
+                'actions' => [],
+            ],
+            'diagnostics' => [
+                'strict_recipe' => true,
+                'validated_image_evidence' => [[
+                    'url' => 'https://cdn.example/product.jpg',
+                    'source' => 'recipe_dom',
+                ]],
+            ],
+        ]);
+
+        $this->assertFalse($mismatched);
+    }
+
     public function test_no_mismatch_when_the_recipe_configured_no_selectors_at_all(): void
     {
         $mismatched = $this->invoke([

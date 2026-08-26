@@ -16,7 +16,7 @@ class Category extends Model
     public const GALLERY_SEARCH_PLAYWRIGHT_FIRST = 'playwright_first';
 
     protected $fillable = [
-        'parent_id', 'name', 'slug', 'icon', 'sort_order', 'is_active', 'gallery_search_strategy',
+        'parent_id', 'name', 'slug', 'product_type_affinity', 'icon', 'sort_order', 'is_active', 'gallery_search_strategy',
         'minimum_verified_images', 'product_search_hint', 'minimum_image_width', 'minimum_image_height',
     ];
 
@@ -73,6 +73,7 @@ class Category extends Model
         $hint = trim((string) $this->product_search_hint);
 
         return '- '.$this->slug.': '.$this->name
+            .($this->product_type_affinity ? ' | product_type='.$this->product_type_affinity : '')
             .($hint !== '' ? ' | trusted category search hint: '.$hint : '');
     }
 
