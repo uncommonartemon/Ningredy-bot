@@ -34,6 +34,18 @@ class ProductImageEncoder
             $output = imagescale($image, (int) round(imagesx($image) * $ratio), (int) round(imagesy($image) * $ratio));
         }
 
+        // imagewebp() refuses a palette (indexed-color) image outright -
+        // common for simple diagrams/illustrations, not just photos - and
+        // imagescale() above only runs for oversized images, so a
+        // small palette PNG reaches here unconverted. Real case: an Apple
+        // support diagram was accepted by Vision but silently vanished
+        // between "accepted" and "stored" because this threw and got caught
+        // upstream. A no-op on an already-truecolor image, so safe to call
+        // unconditionally.
+        if (! imageistruecolor($output)) {
+            imagepalettetotruecolor($output);
+        }
+
         ob_start();
         imagewebp($output, null, 84);
         $encoded = ob_get_clean();
