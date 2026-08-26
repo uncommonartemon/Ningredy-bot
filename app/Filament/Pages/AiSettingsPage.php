@@ -55,6 +55,7 @@ class AiSettingsPage extends Page implements HasForms
             'fallback_sources_enabled' => $settings->fallbackSourcesEnabled(),
             'gallery_prefer_playwright_first' => $settings->galleryPreferPlaywrightFirst(),
             'gallery_agent_write_tools_enabled' => $settings->galleryAgentWriteToolsEnabled(),
+            'source_identity_agent_enabled' => $settings->sourceIdentityAgentEnabled(),
             'max_search_cost_usd' => $settings->maxSearchCostUsd(),
             'search_max_seconds' => $settings->searchMaxSeconds(),
             'search_reserve_seconds' => $settings->searchReserveSeconds(),
@@ -153,6 +154,11 @@ class AiSettingsPage extends Page implements HasForms
                                             ->label('Разрешить AI-тренеру самому решать, когда сдаваться, и оставлять заметки о домене')
                                             ->helperText('Выключено по умолчанию. Агент получает два инструмента: прекратить обучение на URL с указанием причины (учитывается в статистике отказов рецепта так же, как обычный сбой) и добавить короткую заметку в постоянную подсказку домена. Каждый вызов фиксируется в журнале AI-операций. Выключите мгновенно, если агент начнёт принимать плохие решения.')
                                             ->default(false)
+                                            ->inline(false),
+                                        Toggle::make('source_identity_agent_enabled')
+                                            ->label('Подтверждать карточку через AI, когда точный текстовый шаблон не совпал')
+                                            ->helperText('Включено по умолчанию. Быстрая текстовая проверка (модель/SKU буквально в URL или заголовке) остаётся первой и бесплатной — этот AI-вызов срабатывает только когда она не подтвердила и не опровергла карточку явно, например если страница перечисляет те же слова в другом порядке. Реальный случай: страница B&H с точным SKU MC7A4LL/A была отклонена только из-за порядка слов в URL. Выключите мгновенно, если агент начнёт подтверждать не те карточки.')
+                                            ->default(true)
                                             ->inline(false),
                                         Grid::make(2)
                                             ->schema([
@@ -361,6 +367,7 @@ class AiSettingsPage extends Page implements HasForms
         $settings->saveFallbackSourcesEnabled((bool) ($data['fallback_sources_enabled'] ?? false));
         $settings->saveGalleryPreferPlaywrightFirst((bool) ($data['gallery_prefer_playwright_first'] ?? false));
         $settings->saveGalleryAgentWriteToolsEnabled((bool) ($data['gallery_agent_write_tools_enabled'] ?? false));
+        $settings->saveSourceIdentityAgentEnabled((bool) ($data['source_identity_agent_enabled'] ?? false));
         $settings->saveMaxSearchCostUsd(
             isset($data['max_search_cost_usd']) && $data['max_search_cost_usd'] !== ''
                 ? (float) $data['max_search_cost_usd']

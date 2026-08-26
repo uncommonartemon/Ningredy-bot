@@ -25,6 +25,7 @@ use App\Services\Products\ProductImageResolver;
 use App\Services\Products\ProductImageStorage;
 use App\Services\Products\ProductImageVisionVerifier;
 use App\Services\Products\ProductPhotoManager;
+use App\Services\Products\ProductSourceIdentityJudge;
 use App\Services\Products\WikimediaImageSearch;
 use Illuminate\Filesystem\FilesystemAdapter;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -1416,6 +1417,70 @@ class ProductImageStorageTest extends TestCase
         $this->assertSame(3, $stored);
         $this->assertSame('https://93.184.216.35/products/3r2d42r4256s', $draft->fresh()->primary_source_url);
         Http::assertNotSent(fn (Request $request): bool => str_contains($request->url(), '93.184.216.34'));
+    }
+
+    public function test_the_identity_agent_can_confirm_a_source_the_literal_text_match_could_not(): void
+    {
+        // Real production bug (2026-08-26): a genuine B&H Photo Video
+        // listing for the exact requested Apple SKU was rejected by the
+        // literal text match alone because its URL ordered the same words
+        // differently than the researched model string. The literal match
+        // stays the first, free check; this proves the agent fallback can
+        // still accept a source it rejects, instead of that source being
+        // permanently unreachable - the sibling test above
+        // (test_staging_never_opens_a_foreign_card_when_an_exact_sku_was_requested)
+        // proves this exact same source is normally rejected when the judge
+        // is not mocked to override it.
+        Storage::fake('public');
+        config()->set('product-images.max_images_by_type.memory', 3);
+        ProductImageVisionAgent::fake(fn (string $prompt, $attachments): array => [
+            'images' => $attachments->keys()->map(fn (int $index): array => [
+                'index' => $index + 1,
+                'exact_match' => true,
+                'color_match' => true,
+                'publishable' => true,
+                'kind' => 'product',
+                'view' => 'front',
+                'gallery_rank' => $index + 1,
+                'score' => 98,
+                'reason' => 'Exact requested memory module.',
+            ])->all(),
+        ])->preventStrayPrompts();
+        Http::fake(function (Request $request) {
+            if ($request->url() === 'https://93.184.216.34/products/kingston-256gb') {
+                return Http::response('<html></html>', 200, ['Content-Type' => 'text/html']);
+            }
+
+            preg_match('/photo-(\d+)/', $request->url(), $match);
+
+            return Http::response($this->jpeg((int) ($match[1] ?? 1)), 200, ['Content-Type' => 'image/jpeg']);
+        });
+        $this->mock(ProductSourceIdentityJudge::class)
+            ->shouldReceive('judge')
+            ->andReturn('confirmed');
+        [, , $draft] = $this->records();
+        $draft->update([
+            'product_type' => 'memory',
+            'title' => 'OWC 256GB DDR4-3200 RDIMM 3R2D42R4256S',
+            'brand' => 'OWC',
+            'model' => '3R2D42R4256S',
+            'image_urls' => [],
+            'sources' => [[
+                'title' => 'Kingston 256GB DDR4 memory',
+                'url' => 'https://93.184.216.34/products/kingston-256gb',
+                'type' => 'retailer',
+                'image_urls' => [
+                    'https://93.184.216.34/photo-1.jpg',
+                    'https://93.184.216.34/photo-2.jpg',
+                    'https://93.184.216.34/photo-3.jpg',
+                ],
+            ]],
+        ]);
+
+        $stored = app(ProductImageStorage::class)->stage($draft->fresh());
+
+        $this->assertSame(3, $stored);
+        $this->assertSame('https://93.184.216.34/products/kingston-256gb', $draft->fresh()->primary_source_url);
     }
 
     public function test_cost_limit_is_checked_after_current_source_finishes_before_next_source_starts(): void

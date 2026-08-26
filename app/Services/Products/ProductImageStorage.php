@@ -30,6 +30,7 @@ class ProductImageStorage
         private readonly ImagePerceptualHash $perceptualHash,
         private readonly ProductImageEncoder $encoder,
         private readonly ProductIdentityMatcher $identityMatcher,
+        private readonly ProductSourceIdentityJudge $identityJudge,
         private readonly AiSettings $settings,
         private readonly ProductSearchTimeBudget $timeBudget,
         private readonly ProductSearchCostBudget $costBudget,
@@ -388,20 +389,54 @@ class ProductImageStorage
             }
 
             if ($this->identityMatcher->requiresExactIdentifier($draft) && ! $sourceIdentityConfirmed) {
-                $this->attempts->record([
-                    'telegram_update_id' => $telegramUpdateId,
-                    'product_draft_id' => $draft->id,
-                    'product_url' => $source['url'],
-                    'actor' => 'identity_validator',
-                    'phase' => 'source_selection',
-                    'action' => 'validate_product_identity',
-                    'status' => 'failed',
-                    'decision' => 'reject_unconfirmed_identifier',
-                    'output' => ['title' => $source['title'] ?? null],
-                ]);
-                $progress?->__invoke('Источник пропущен: карточка не подтверждает точную модель или SKU выбранного товара.');
+                // A literal text match rejects an exact source whose page
+                // wording lists the same model/SKU in a different word order
+                // than requested (real case: a B&H Photo Video listing for
+                // the exact requested Apple SKU, 2026-08-26). Before
+                // rejecting, let the agent judge the same evidence on
+                // meaning rather than pattern - it degrades to 'uncertain'
+                // (the prior behavior) on any failure, so this can only add
+                // acceptances, never remove one the literal check already
+                // confirmed.
+                $identityJudgment = $this->identityJudge->judge(
+                    $draft,
+                    $redirectedSource ? $finalSourceEvidence : $source,
+                    $telegramUpdateId,
+                );
 
-                continue;
+                if ($identityJudgment === 'confirmed') {
+                    $sourceIdentityConfirmed = true;
+                } elseif ($identityJudgment === 'conflicting') {
+                    $this->attempts->record([
+                        'telegram_update_id' => $telegramUpdateId,
+                        'product_draft_id' => $draft->id,
+                        'product_url' => $source['url'],
+                        'actor' => 'identity_validator',
+                        'phase' => 'source_selection',
+                        'action' => 'validate_product_identity',
+                        'status' => 'failed',
+                        'decision' => 'reject_conflicting_identifier',
+                        'output' => ['title' => $source['title'] ?? null, 'method' => 'ai_judge'],
+                    ]);
+                    $progress?->__invoke('Источник пропущен: AI подтвердил конфликтующую модель/SKU по содержимому страницы.');
+
+                    continue;
+                } else {
+                    $this->attempts->record([
+                        'telegram_update_id' => $telegramUpdateId,
+                        'product_draft_id' => $draft->id,
+                        'product_url' => $source['url'],
+                        'actor' => 'identity_validator',
+                        'phase' => 'source_selection',
+                        'action' => 'validate_product_identity',
+                        'status' => 'failed',
+                        'decision' => 'reject_unconfirmed_identifier',
+                        'output' => ['title' => $source['title'] ?? null, 'method' => 'ai_judge'],
+                    ]);
+                    $progress?->__invoke('Источник пропущен: карточка не подтверждает точную модель или SKU выбранного товара.');
+
+                    continue;
+                }
             }
 
             $urls = $this->cleanUrls($source['image_urls'] ?? []);

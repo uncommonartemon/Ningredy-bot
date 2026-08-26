@@ -68,6 +68,12 @@ return [
         'timeout' => (int) env('AI_PRODUCT_IMAGE_DISCOVERY_TIMEOUT', 75),
     ],
 
+    'product_source_identity' => [
+        'provider' => 'openai',
+        'model' => env('AI_PRODUCT_SOURCE_IDENTITY_MODEL', 'gpt-5.4-mini'),
+        'timeout' => (int) env('AI_PRODUCT_SOURCE_IDENTITY_TIMEOUT', 20),
+    ],
+
     'gallery_recipe_training' => [
         'provider' => 'openai',
         'model' => env('AI_GALLERY_RECIPE_TRAINING_MODEL', 'gpt-5.4'),

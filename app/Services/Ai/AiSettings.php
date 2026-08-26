@@ -211,6 +211,29 @@ class AiSettings
         AppSetting::put('ai.gallery_agent_write_tools_enabled', $enabled ? '1' : '0');
     }
 
+    /**
+     * On by default: a fast literal text match (ProductIdentityMatcher)
+     * rejects an exact source whose page wording lists the same model/SKU in
+     * a different word order than requested - see the real B&H Photo Video
+     * case (2026-08-26) where this cost a search its actual gallery. This
+     * agent is called only for that narrow grey zone (the literal check
+     * already failed to confirm), not for every candidate, so the cost is
+     * bounded to the rare ambiguous case rather than every search.
+     */
+    public function sourceIdentityAgentEnabled(): bool
+    {
+        $value = AppSetting::valueFor('ai.source_identity_agent_enabled');
+
+        return $value === null
+            ? true
+            : filter_var($value, FILTER_VALIDATE_BOOLEAN);
+    }
+
+    public function saveSourceIdentityAgentEnabled(bool $enabled): void
+    {
+        AppSetting::put('ai.source_identity_agent_enabled', $enabled ? '1' : '0');
+    }
+
     public function saveGalleryPreferPlaywrightFirst(bool $enabled): void
     {
         AppSetting::put('ai.gallery_prefer_playwright_first', $enabled ? '1' : '0');
