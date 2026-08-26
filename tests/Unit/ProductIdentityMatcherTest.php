@@ -163,4 +163,37 @@ class ProductIdentityMatcherTest extends TestCase
         $this->assertTrue($matcher->supportsEvidence($draft, $evidence));
         $this->assertFalse($matcher->conflicts($draft, $evidence));
     }
+
+    public function test_it_confirms_a_source_whose_url_reorders_the_model_words(): void
+    {
+        // Real production bug (2026-08-26): a genuine B&H Photo Video
+        // listing for the exact requested SKU (MC7A4LL/A) was rejected as
+        // "unconfirmed identifier" purely because its URL slug puts the
+        // screen size before the model name
+        // ("apple_mc7a4ll_a_15_macbook_air_m4"), while the researched model
+        // string is "MacBook Air 15 (M4)" - every distinguishing word is
+        // genuinely present, just in a different order, so the old
+        // concatenated-substring check never matched.
+        $draft = new ProductDraft([
+            'telegram_update_id' => 198,
+            'title' => 'Apple MacBook Air 15-inch (M4) — 16GB / 256GB (Sky Blue)',
+            'brand' => 'Apple',
+            'model' => 'MacBook Air 15 (M4)',
+            'specifications' => [
+                ['key' => 'sku', 'name' => 'SKU', 'value' => 'MC7A4LL/A'],
+            ],
+        ]);
+        $draft->setRelation('telegramUpdate', new TelegramUpdate([
+            'text' => 'Apple MacBook Air 15" (M4) ищи',
+        ]));
+
+        $source = [
+            'url' => 'https://www.bhphotovideo.com/c/product/1883955-REG/apple_mc7a4ll_a_15_macbook_air_m4.html',
+            'title' => 'Apple 15" MacBook Air (M4, Sky Blue) — B&H Photo Video product page',
+        ];
+
+        $matcher = new ProductIdentityMatcher;
+
+        $this->assertTrue($matcher->supportsSource($draft, $source));
+    }
 }

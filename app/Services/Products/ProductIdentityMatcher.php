@@ -3,6 +3,7 @@
 namespace App\Services\Products;
 
 use App\Models\ProductDraft;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Str;
 
 /**
@@ -62,12 +63,7 @@ class ProductIdentityMatcher
     /** @param array<string, mixed> $source */
     public function supportsSource(ProductDraft $draft, array $source): bool
     {
-        $evidence = $this->sourceEvidence($source);
-        $compactEvidence = $this->compact($evidence);
-
-        return $compactEvidence !== '' && collect($this->requestedIdentifiers($draft))->contains(
-            fn (string $identifier): bool => str_contains($compactEvidence, $identifier),
-        );
+        return $this->matchesRequestedIdentifier($draft, $this->compact($this->sourceEvidence($source)));
     }
 
     /** @param array<string, mixed> $source */
@@ -78,10 +74,38 @@ class ProductIdentityMatcher
 
     public function supportsEvidence(ProductDraft $draft, string $evidence): bool
     {
-        $compactEvidence = $this->compact($evidence);
+        return $this->matchesRequestedIdentifier($draft, $this->compact($evidence));
+    }
 
-        return $compactEvidence !== '' && collect($this->requestedIdentifiers($draft))->contains(
+    /**
+     * A retailer's own title/URL word order routinely differs from the
+     * requested model string's order - e.g. a real B&H Photo Video listing
+     * for the exact Apple SKU MC7A4LL/A used the slug
+     * "apple_mc7a4ll_a_15_macbook_air_m4" (size before the model name),
+     * while the researched model is "MacBook Air 15 (M4)" - every
+     * distinguishing part is genuinely present, just reordered, so the
+     * plain concatenated-substring check below rejected a page that
+     * actually was the exact product. Falling back to "every atomic part of
+     * one operator-mentioned identifier appears somewhere" is still strict
+     * (a page missing even one part still fails) but isn't fooled by
+     * harmless reordering.
+     */
+    private function matchesRequestedIdentifier(ProductDraft $draft, string $compactEvidence): bool
+    {
+        if ($compactEvidence === '') {
+            return false;
+        }
+
+        if (collect($this->requestedIdentifiers($draft))->contains(
             fn (string $identifier): bool => str_contains($compactEvidence, $identifier),
+        )) {
+            return true;
+        }
+
+        return collect($this->requestedIdentifierPartGroups($draft))->contains(
+            fn (array $parts): bool => collect($parts)->every(
+                fn (string $part): bool => str_contains($compactEvidence, $part),
+            ),
         );
     }
 
@@ -177,34 +201,17 @@ class ProductIdentityMatcher
     /** @return array<int, string> */
     private function requestedIdentifiers(ProductDraft $draft): array
     {
-        $identifiers = collect([
-            $draft->model,
-            ...collect($draft->specifications ?? [])
-                ->filter(fn (mixed $item): bool => is_array($item) && in_array($item['key'] ?? null, [
-                    'model', 'sku', 'mpn', 'ean', 'upc', 'gtin',
-                ], true))
-                ->map(fn (array $item): string => (string) ($item['value'] ?? ''))
-                ->all(),
-        ])
-            ->filter(fn (mixed $value): bool => is_string($value) && trim($value) !== '')
+        $identifiers = $this->requestedRawValues($draft)
             ->flatMap(fn (string $value): array => $this->identifierCandidates($value))
             ->unique()
             ->values()
             ->all();
 
-        if (! $draft->telegram_update_id && ! $draft->relationLoaded('telegramUpdate')) {
+        $requestCompact = $this->requestCompact($draft);
+
+        if ($requestCompact === null) {
             return $identifiers;
         }
-
-        $request = $draft->relationLoaded('telegramUpdate')
-            ? $draft->telegramUpdate?->text
-            : $draft->telegramUpdate()->value('text');
-
-        if (! is_string($request) || trim($request) === '') {
-            return $identifiers;
-        }
-
-        $requestCompact = $this->compact($request);
 
         // Only an identifier actually supplied by the operator is mandatory.
         // A SKU inferred during research (often a regional example) must not
@@ -215,12 +222,76 @@ class ProductIdentityMatcher
             ->all();
     }
 
-    /** @return array<int, string> */
-    private function identifierCandidates(string $value): array
+    /**
+     * One group per operator-mentioned identifier value, each group being
+     * every distinguishing atomic part of that one value (so "MacBook Air 15
+     * (M4)" becomes ["macbook","air","15","m4"], not a single merged
+     * string) - see matchesRequestedIdentifier() for why this needs to be
+     * order-independent.
+     *
+     * @return array<int, array<int, string>>
+     */
+    private function requestedIdentifierPartGroups(ProductDraft $draft): array
+    {
+        $rawValues = $this->requestedRawValues($draft);
+        $requestCompact = $this->requestCompact($draft);
+
+        if ($requestCompact !== null) {
+            $rawValues = $rawValues->filter(
+                fn (string $value): bool => str_contains($requestCompact, $this->compact($value)),
+            );
+        }
+
+        return $rawValues
+            ->map(fn (string $value): array => $this->atomicParts($value))
+            ->filter(fn (array $parts): bool => count($parts) >= 2)
+            ->values()
+            ->all();
+    }
+
+    /** @return Collection<int, string> */
+    private function requestedRawValues(ProductDraft $draft): Collection
+    {
+        return collect([
+            $draft->model,
+            ...collect($draft->specifications ?? [])
+                ->filter(fn (mixed $item): bool => is_array($item) && in_array($item['key'] ?? null, [
+                    'model', 'sku', 'mpn', 'ean', 'upc', 'gtin',
+                ], true))
+                ->map(fn (array $item): string => (string) ($item['value'] ?? ''))
+                ->all(),
+        ])->filter(fn (mixed $value): bool => is_string($value) && trim($value) !== '');
+    }
+
+    private function requestCompact(ProductDraft $draft): ?string
+    {
+        if (! $draft->telegram_update_id && ! $draft->relationLoaded('telegramUpdate')) {
+            return null;
+        }
+
+        $request = $draft->relationLoaded('telegramUpdate')
+            ? $draft->telegramUpdate?->text
+            : $draft->telegramUpdate()->value('text');
+
+        if (! is_string($request) || trim($request) === '') {
+            return null;
+        }
+
+        return $this->compact($request);
+    }
+
+    /**
+     * Tokenizes into independent atomic pieces (a word or a run of digits),
+     * without merging any of them into one order-dependent string.
+     *
+     * @return array<int, string>
+     */
+    private function atomicParts(string $value): array
     {
         $ascii = Str::lower(Str::ascii(urldecode($value)));
         preg_match_all('/[a-z0-9]+(?:[-_.][a-z0-9]+)*/', $ascii, $matches);
-        $parts = collect($matches[0] ?? [])
+
+        return collect($matches[0] ?? [])
             ->flatMap(fn (string $part): array => [
                 $this->compact($part),
                 ...array_map(
@@ -230,7 +301,14 @@ class ProductIdentityMatcher
             ])
             ->filter(fn (string $part): bool => strlen($part) >= 2)
             ->unique()
-            ->values();
+            ->values()
+            ->all();
+    }
+
+    /** @return array<int, string> */
+    private function identifierCandidates(string $value): array
+    {
+        $parts = collect($this->atomicParts($value));
         $combined = [$this->compact($value)];
 
         for ($index = 0; $index < $parts->count() - 1; $index++) {
