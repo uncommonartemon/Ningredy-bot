@@ -1796,14 +1796,36 @@ class ProductImageStorage
     {
         $limit = (int) config('product-images.download_limit', 20);
 
-        return collect($urls)
+        $ranked = collect($urls)
             ->filter(fn (mixed $url): bool => is_string($url))
             ->map(fn (string $url): string => self::normalizeCandidateUrl($url))
             ->filter(fn (string $url): bool => $url !== '' && ! $this->looksLikeJunk($url))
-            ->sortByDesc(fn (string $url): int => self::candidateUrlQualityScore($url))
-            ->unique(fn (string $url): string => self::imageAssetKey($url))
-            ->take($limit)
-            ->values()
+            ->map(fn (string $url): array => [
+                'url' => $url,
+                'gallery_rank' => $this->resolver->isConfirmedGalleryImage($url)
+                    ? 2
+                    : ($this->resolver->isPartialGalleryImage($url) ? 1 : 0),
+                'quality' => self::candidateUrlQualityScore($url),
+            ])
+            ->sort(fn (array $left, array $right): int => ($right['gallery_rank'] <=> $left['gallery_rank'])
+                ?: ($right['quality'] <=> $left['quality'])
+            )
+            ->unique(fn (array $item): string => self::imageAssetKey($item['url']))
+            ->values();
+
+        // A trained/confirmed (or partially confirmed) gallery must never be
+        // truncated away by the generic candidate-count cap meant to bound
+        // how many *unverified* static URLs get tried - real case: a Dell
+        // page with a full 10-image confirmed gallery plus ~50 unrelated
+        // static "feature module" images lost 9 of the 10 confirmed photos
+        // here because they scored lower by size/quality alone and fell
+        // outside download_limit before gallery_rank was ever considered
+        // downstream. Only the unranked tail counts against the limit.
+        $confirmedOrPartialCount = $ranked->filter(fn (array $item): bool => $item['gallery_rank'] > 0)->count();
+
+        return $ranked
+            ->take(max($limit, $confirmedOrPartialCount))
+            ->pluck('url')
             ->all();
     }
 
@@ -1860,7 +1882,7 @@ class ProductImageStorage
         // earlier, historically stronger domain. Preserve source-priority
         // order inside each confidence tier, but always download confirmed
         // (then partial) Playwright frames first.
-        $urls = collect($urls)
+        $rankedUrls = collect($urls)
             ->values()
             ->map(fn (string $url, int $index): array => [
                 'url' => $url,
@@ -1868,7 +1890,8 @@ class ProductImageStorage
                 'gallery_rank' => $this->resolver->isConfirmedGalleryImage($url)
                     ? 2
                     : ($this->resolver->isPartialGalleryImage($url) ? 1 : 0),
-            ])
+            ]);
+        $urls = $rankedUrls
             ->sort(fn (array $left, array $right): int => ($right['gallery_rank'] <=> $left['gallery_rank'])
                 ?: ($left['index'] <=> $right['index'])
             )

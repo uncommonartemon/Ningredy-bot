@@ -3465,6 +3465,39 @@ class ProductImageStorageTest extends TestCase
         );
     }
 
+    public function test_clean_urls_never_truncates_confirmed_gallery_photos_below_the_generic_candidate_limit(): void
+    {
+        // Live evidence: a real Dell Alienware page had a fully confirmed,
+        // click-verified 10-image gallery, but cleanUrls() sorted the whole
+        // combined pool (confirmed + ~50 unrelated static "feature module"
+        // images) by size/quality alone and cut it to download_limit before
+        // downloadCandidates()'s own confirmed-first prioritization ever ran
+        // - 9 of the 10 real gallery photos were silently discarded here
+        // because unrelated static images declared a larger size.
+        config()->set('product-images.download_limit', 5);
+
+        $confirmedUrls = collect(range(1, 5))
+            ->map(fn (int $index): string => "https://exact.example/gallery-{$index}.jpg")
+            ->all();
+        $looseUrls = collect(range(1, 10))
+            ->map(fn (int $index): string => "https://loose.example/2000x2000/feature-{$index}.jpg")
+            ->all();
+
+        $resolver = $this->mock(ProductImageResolver::class);
+        $resolver->shouldReceive('isConfirmedGalleryImage')->andReturnUsing(
+            fn (string $url): bool => str_contains($url, 'exact.example'),
+        );
+        $resolver->shouldReceive('isPartialGalleryImage')->andReturn(false);
+
+        $cleanUrls = new \ReflectionMethod(ProductImageStorage::class, 'cleanUrls');
+        $cleanUrls->setAccessible(true);
+        $result = $cleanUrls->invoke(app(ProductImageStorage::class), [...$looseUrls, ...$confirmedUrls]);
+
+        foreach ($confirmedUrls as $confirmedUrl) {
+            $this->assertContains($confirmedUrl, $result, "Confirmed gallery photo {$confirmedUrl} must survive cleanUrls().");
+        }
+    }
+
     public function test_download_candidates_never_requests_an_unobserved_bigcommerce_rendition(): void
     {
         $observed = 'https://cdn11.bigcommerce.com/s-xwx16vh8tc/images/stencil/1280x1280/products/689686/3683749/1086710301__09195.1766340706.jpg?c=2';

@@ -41,10 +41,22 @@ class ProductResearchConfigurationGuard
         return $issues;
     }
 
+    /**
+     * Real-world spec text for one exact SKU is full of "up to", "or", and
+     * "depending" that describe how one fixed component behaves - "GPU
+     * Boost up to 175W", "refresh rate up to 240Hz", "PD or DP over
+     * Thunderbolt" - not that several different components could be
+     * installed. Live evidence: this over-broad list rejected a real ASUS
+     * ROG Strix SCAR 18 and HP OMEN 16 Max search on ordinary boost-clock/
+     * refresh-rate phrasing alone, with no way for the model to phrase a
+     * genuine single-SKU spec that avoids every one of these common words.
+     * Only phrases that specifically claim several different components or
+     * SKUs are legitimate signals.
+     */
     private function ambiguous(string $value): bool
     {
         return preg_match(
-            '/\b(?:family|variants?|varies|depending|options?|or|up to|select skus?|such as|including)\b/i',
+            '/\b(?:product\s+family|families|variants?|varies\s+by\s+(?:sku|region|market|config|configuration)|multiple\s+(?:skus?|configurations?|variants?)|select\s+skus?|depending\s+on\s+(?:sku|region|market|config|configuration))\b/i',
             $value,
         ) === 1;
     }
