@@ -168,4 +168,45 @@ class TelegramProgressReporterTest extends TestCase
             && str_contains((string) ($request['text'] ?? ''), 'all lines processed')
             && ! str_contains((string) ($request['text'] ?? ''), $firstLine));
     }
+
+    public function test_log_lines_are_grouped_under_a_domain_header_with_the_full_url_shown_once(): void
+    {
+        // Real user request (2026-08-26): a multi-source search interleaves
+        // narration for several retailer domains in one flat stream, making
+        // it hard to tell which line belongs to which site. Group under a
+        // "домен X:" header the first time a domain is mentioned, and print
+        // the full product-page URL exactly once per domain instead of
+        // repeating it (or never showing it in full) on every line.
+        config(['services.telegram.bot_token' => 'test-token']);
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => ['message_id' => 555]])]);
+        $progress = new TelegramProgressReporter(app(TelegramClient::class), '123');
+        $progress->step('1/1 · test step', 60);
+
+        $progress->info('Playwright: применяю AI-рецепт для delkom.pl.');
+        $progress->info('Playwright получил фото: 16.');
+        $progress->info('Для www.catsrl.it ещё нет AI-рецепта; запускаю первичное обучение.');
+        $progress->info('Проверяю источник: https://www.catsrl.it/shop/legion-9-18iax10-25892?category=1351');
+        $progress->info('AI-тренер: gpt-5.4 строит безопасный JSON-рецепт.');
+        $progress->done('поиск завершён');
+
+        Http::assertSent(function ($request): bool {
+            $text = (string) ($request['text'] ?? '');
+
+            if (! str_ends_with($request->url(), '/editMessageText') || ! str_contains($text, 'поиск завершён')) {
+                return false;
+            }
+
+            $this->assertSame(1, substr_count($text, 'домен delkom.pl:'));
+            $this->assertSame(1, substr_count($text, 'домен catsrl.it:'));
+            // Shown once even though the real URL appears mid-sentence on a
+            // later, unrelated line too - never repeated per domain.
+            $this->assertSame(
+                1,
+                substr_count($text, 'https://www.catsrl.it/shop/legion-9-18iax10-25892?category=1351'),
+            );
+            $this->assertStringNotContainsString('домен www.catsrl.it:', $text);
+
+            return true;
+        });
+    }
 }

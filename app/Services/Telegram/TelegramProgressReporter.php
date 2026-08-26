@@ -37,6 +37,12 @@ class TelegramProgressReporter
     /** True only while rendering the final edit of a message being sealed in favor of a new continuation message. */
     private bool $sealCurrentMessage = false;
 
+    /** Domain the most recently appended log line was grouped under, or null before any domain has been mentioned. */
+    private ?string $currentLogDomain = null;
+
+    /** @var array<string, true> Domains whose full product-page URL has already been printed once. */
+    private array $announcedDomainUrls = [];
+
     /** @var array<int, array<int, array{text: string, callback_data: string}>>|null */
     private ?array $cancelButtonMarkup = null;
 
@@ -108,6 +114,77 @@ class TelegramProgressReporter
     }
 
     /**
+     * Groups consecutive lines under a "домен X:" header the first time a
+     * URL or bare domain is mentioned in a line, and prints the full
+     * product-page URL exactly once per domain instead of repeating it (or
+     * leaving it buried mid-sentence) on every line - user request
+     * (2026-08-26): a long multi-source search interleaves narration for
+     * several retailer domains, and without grouping it reads as one flat
+     * stream where it's hard to tell which lines belong to which site.
+     * Detected from the message text itself (a full https:// URL, or a
+     * bare "example.com"/"www.example.com" token) rather than requiring
+     * every one of the many call sites across the codebase to pass a
+     * domain explicitly - most thread $progress through as a plain
+     * callable, not this class, so there is no cheap way to plumb an
+     * explicit domain parameter through all of them.
+     */
+    private function appendLog(string $line): void
+    {
+        $domain = $this->detectDomain($line);
+
+        if ($domain !== null && $domain !== $this->currentLogDomain) {
+            $this->currentLogDomain = $domain;
+            $this->pushLine("\nдомен {$domain}:");
+        }
+
+        if ($domain !== null) {
+            $url = $this->detectFullUrl($line);
+
+            if ($url !== null) {
+                if (! isset($this->announcedDomainUrls[$domain])) {
+                    $this->announcedDomainUrls[$domain] = true;
+                    $this->pushLine("🔗 {$url}");
+                }
+
+                // The dedicated 🔗 line above already shows this domain's
+                // full URL once - never repeat the same long URL a second
+                // time within an ordinary narration line for that domain.
+                $line = rtrim(str_replace($url, '', $line), " \t·:-");
+            }
+        }
+
+        if ($line !== '') {
+            $this->pushLine($line);
+        }
+    }
+
+    private function detectDomain(string $line): ?string
+    {
+        if (preg_match('#https?://\S+#i', $line, $matches) === 1) {
+            $host = parse_url($matches[0], PHP_URL_HOST);
+
+            if (is_string($host) && $host !== '') {
+                return strtolower(preg_replace('/^www\./i', '', $host) ?: $host);
+            }
+        }
+
+        if (preg_match('/\b(?:www\.)?((?:[a-z0-9-]+\.)+[a-z]{2,24})\b/i', $line, $matches) === 1) {
+            return strtolower($matches[1]);
+        }
+
+        return null;
+    }
+
+    private function detectFullUrl(string $line): ?string
+    {
+        if (preg_match('#https?://\S+#i', $line, $matches) !== 1) {
+            return null;
+        }
+
+        return rtrim($matches[0], '.,;:·)');
+    }
+
+    /**
      * Appending was previously silent-truncate: once the collapsed log
      * outgrew Telegram's 4096-char message limit, buildText() kept only the
      * most recent tail and prefixed "…", so the operator lost every earlier
@@ -117,7 +194,7 @@ class TelegramProgressReporter
      * remaining lines - the full step-by-step history stays readable across
      * as many messages as it takes, instead of being cut.
      */
-    private function appendLog(string $line): void
+    private function pushLine(string $line): void
     {
         $this->log[] = $line;
 
