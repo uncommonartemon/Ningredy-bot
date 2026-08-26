@@ -989,6 +989,56 @@ class ProductImageStorageTest extends TestCase
         $this->assertSame('verified', $updated->verification_status);
     }
 
+    public function test_replacing_one_draft_photo_fails_cleanly_instead_of_leaking_a_raw_vision_crash(): void
+    {
+        // Same audit as the confirmed-gallery Vision crash
+        // (test_a_broken_vision_response_during_a_confirmed_gallery_spot_check_does_not_crash_the_whole_search):
+        // replaceDraftMedia() called selectFromCandidates() directly with no
+        // try/catch at either of its two call sites, so a Vision outage here
+        // used to surface as a raw, confusing exception instead of the
+        // method's own existing "nothing found" error.
+        Storage::fake('public');
+        ProductImageVisionAgent::fake(fn () => throw new \RuntimeException('Vision unavailable'))->preventStrayPrompts();
+        $discovery = $this->mock(ProductImageCandidateDiscovery::class);
+        $discovery->shouldReceive('sourceContextForImage')->andReturn(null)->byDefault();
+        $discovery->shouldReceive('hasTerminalFailure')->andReturn(false)->byDefault();
+        $discovery->shouldReceive('sourcePageForImage')->andReturn(null)->byDefault();
+        $discovery->shouldReceive('find')->once()->andReturn(['https://93.184.216.34/found-by-websearch.jpg']);
+        Http::fake(fn (Request $request) => Http::response(
+            $this->jpeg(9),
+            200,
+            ['Content-Type' => 'image/jpeg'],
+        ));
+        [, , $draft] = $this->records();
+        $draft->refresh();
+        $draft->update([
+            'primary_source_url' => 'https://93.184.216.34/product-page',
+            'sources' => [[
+                'title' => 'Exact retailer listing',
+                'url' => 'https://93.184.216.34/product-page',
+                'type' => 'retailer',
+            ]],
+        ]);
+        $oldPath = "drafts/{$draft->id}/old-photo.webp";
+        Storage::disk('public')->put($oldPath, 'old-photo-bytes');
+        $media = $draft->media()->create([
+            'disk' => 'public',
+            'path' => $oldPath,
+            'source_url' => 'https://93.184.216.34/old-photo.jpg',
+            'role' => 'primary',
+            'mime_type' => 'image/webp',
+            'checksum' => hash('sha256', 'old-photo-bytes'),
+            'verification_status' => 'verified',
+            'sort_order' => 0,
+            'is_primary' => true,
+        ]);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Не найдено новое непохожее фото той же модели и цвета.');
+
+        app(ProductImageStorage::class)->replaceDraftMedia($draft->fresh(), $media);
+    }
+
     public function test_it_drops_near_duplicate_images_selected_by_vision(): void
     {
         Storage::fake('public');

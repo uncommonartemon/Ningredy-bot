@@ -1475,7 +1475,7 @@ class ProductImageStorage
                 continue;
             }
 
-            $verified = $this->selectFromCandidates($draft, $candidates, 1, $telegramUpdateId);
+            $verified = $this->selectFromCandidatesSafely($draft, $candidates, 1, $telegramUpdateId, $progress);
             $selected = $this->removeNearDuplicates($verified, $excludedHashes);
             $this->destroyUnselected($candidates, $selected);
 
@@ -1495,7 +1495,7 @@ class ProductImageStorage
             // gallery discovery/top-up, then the identical vision check below
             // still guards against a wrong model/color/duplicate getting in.
             [$candidates] = $this->discoverCandidates($draft, $existingUrls, true, $progress, $telegramUpdateId);
-            $verified = $this->selectFromCandidates($draft, $candidates, 1, $telegramUpdateId);
+            $verified = $this->selectFromCandidatesSafely($draft, $candidates, 1, $telegramUpdateId, $progress);
             $selected = $this->removeNearDuplicates($verified, $excludedHashes);
             $this->destroyUnselected($candidates, $selected);
         }
@@ -1644,7 +1644,7 @@ class ProductImageStorage
                 continue;
             }
 
-            $verified = $this->selectFromCandidates($draft, $candidates, $needed, $telegramUpdateId);
+            $verified = $this->selectFromCandidatesSafely($draft, $candidates, $needed, $telegramUpdateId, $progress);
             $newlySelected = $this->removeNearDuplicates($verified, [
                 ...$excludedHashes,
                 ...$this->perceptualHashesForCandidates($selected),
@@ -1663,7 +1663,7 @@ class ProductImageStorage
                 $this->currentDraftSourceUrls($draft, max(4, $remaining * 2), $progress, $telegramUpdateId),
                 $draft,
             );
-            $verified = $this->selectFromCandidates($draft, $candidates, $remaining - count($selected), $telegramUpdateId);
+            $verified = $this->selectFromCandidatesSafely($draft, $candidates, $remaining - count($selected), $telegramUpdateId, $progress);
             $newlySelected = $this->removeNearDuplicates($verified, [
                 ...$excludedHashes,
                 ...$this->perceptualHashesForCandidates($selected),
@@ -2361,6 +2361,38 @@ class ProductImageStorage
     private function selectFromCandidates(ProductDraft $draft, array $candidates, int $remaining, ?int $telegramUpdateId = null): array
     {
         return $this->verify($draft, $candidates, $remaining, $telegramUpdateId);
+    }
+
+    /**
+     * Same audit found other selectFromCandidates() call sites
+     * (replaceDraftMedia(), topUpDraftMedia()) with the same gap the
+     * confirmed-gallery Vision crash had: no try/catch, so one broken
+     * response would crash a single-photo replace or a top-up round
+     * instead of just finding nothing new this round. Vision itself already
+     * retries once on a structurally invalid response
+     * (ProductImageVisionVerifier::reviewGalleryBatch()); this is the
+     * second-layer safety net for whatever still gets through, matching
+     * verifyConfirmedGallerySafely()'s "degrade to empty, let the caller's
+     * existing not-found handling take over" approach.
+     *
+     * @param  array<int, array<string, mixed>>  $candidates
+     * @return array<int, array<string, mixed>>
+     */
+    private function selectFromCandidatesSafely(
+        ProductDraft $draft,
+        array $candidates,
+        int $remaining,
+        ?int $telegramUpdateId,
+        ?callable $progress,
+    ): array {
+        try {
+            return $this->selectFromCandidates($draft, $candidates, $remaining, $telegramUpdateId);
+        } catch (Throwable $exception) {
+            report($exception);
+            $progress?->__invoke('Vision временно недоступен; считаю, что новых фото на этом шаге не найдено.');
+
+            return [];
+        }
     }
 
     /** @param array<int, array<string, mixed>> $candidates @return array<int, array<string, mixed>> */
