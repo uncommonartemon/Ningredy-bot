@@ -19,6 +19,9 @@ class TelegramProgressReporter
     /** Minimum seconds between edits of the same message, to stay under Telegram's per-message edit rate limit. */
     private const MIN_EDIT_INTERVAL = 1.2;
 
+    /** Appended to a message's log block when it's being sealed in favor of a fresh continuation message. */
+    private const CONTINUED_MARKER = "\n… продолжение в следующем сообщении";
+
     private float $startedAt;
 
     private ?int $messageId = null;
@@ -30,6 +33,9 @@ class TelegramProgressReporter
 
     /** @var array<int, string> Collapsed detail lines (info, warning). */
     private array $log = [];
+
+    /** True only while rendering the final edit of a message being sealed in favor of a new continuation message. */
+    private bool $sealCurrentMessage = false;
 
     /** @var array<int, array<int, array{text: string, callback_data: string}>>|null */
     private ?array $cancelButtonMarkup = null;
@@ -83,7 +89,7 @@ class TelegramProgressReporter
         ];
 
         if ($detail !== null && $detail !== '') {
-            $this->log[] = "{$this->elapsed()}с · {$detail}";
+            $this->appendLog("{$this->elapsed()}с · {$detail}");
         }
 
         $this->render();
@@ -91,14 +97,72 @@ class TelegramProgressReporter
 
     public function info(string $message): void
     {
-        $this->log[] = "🔎 {$this->elapsed()}с · {$message}";
+        $this->appendLog("🔎 {$this->elapsed()}с · {$message}");
         $this->render();
     }
 
     public function warning(string $message): void
     {
-        $this->log[] = "⚠️ {$this->elapsed()}с · {$message}";
+        $this->appendLog("⚠️ {$this->elapsed()}с · {$message}");
         $this->render();
+    }
+
+    /**
+     * Appending was previously silent-truncate: once the collapsed log
+     * outgrew Telegram's 4096-char message limit, buildText() kept only the
+     * most recent tail and prefixed "…", so the operator lost every earlier
+     * step from view with no way to scroll back to it. Now the current
+     * message is sealed (edited one last time with only what already fits,
+     * plus a note that it continues) and a brand new message picks up the
+     * remaining lines - the full step-by-step history stays readable across
+     * as many messages as it takes, instead of being cut.
+     */
+    private function appendLog(string $line): void
+    {
+        $this->log[] = $line;
+
+        $stepsText = $this->stepsText();
+        $wrapper = "\n\n<blockquote expandable></blockquote>";
+        $budget = max(0, 4096 - mb_strlen($stepsText) - mb_strlen($wrapper));
+        $logText = implode("\n", array_map($this->escape(...), $this->log));
+
+        if ($budget <= 0 || mb_strlen($logText) <= $budget) {
+            return;
+        }
+
+        $effectiveBudget = $budget - mb_strlen(self::CONTINUED_MARKER);
+        $kept = [];
+        $keptLength = 0;
+
+        foreach ($this->log as $candidate) {
+            $addition = ($kept === [] ? 0 : 1) + mb_strlen($this->escape($candidate));
+
+            if ($keptLength + $addition > $effectiveBudget) {
+                break;
+            }
+
+            $kept[] = $candidate;
+            $keptLength += $addition;
+        }
+
+        // A single line alone doesn't fit even in an otherwise-empty
+        // message - nothing sane left to split; buildText()'s own
+        // last-resort truncation still applies to that one line.
+        if ($kept === []) {
+            return;
+        }
+
+        $overflow = array_slice($this->log, count($kept));
+        $this->log = $kept;
+        $this->sealCurrentMessage = true;
+        $this->render(force: true);
+        $this->sealCurrentMessage = false;
+
+        // The sealed message keeps its id forever and is never edited again
+        // - a fresh message starts for the overflow so an already-read
+        // segment never silently changes underneath the operator.
+        $this->messageId = null;
+        $this->log = $overflow;
     }
 
     public function done(string $message): void
@@ -251,12 +315,17 @@ class TelegramProgressReporter
         }
     }
 
-    private function buildText(): string
+    private function stepsText(): string
     {
-        $stepsText = implode("\n", array_map(
+        return implode("\n", array_map(
             fn (array $step): string => $this->escape($this->statusIcon($step['status'])." {$step['label']}"),
             $this->steps,
         ));
+    }
+
+    private function buildText(): string
+    {
+        $stepsText = $this->stepsText();
 
         if ($this->log === []) {
             return mb_substr($stepsText, 0, 4096);
@@ -270,6 +339,10 @@ class TelegramProgressReporter
         }
 
         $logText = implode("\n", array_map($this->escape(...), $this->log));
+
+        if ($this->sealCurrentMessage) {
+            $logText .= self::CONTINUED_MARKER;
+        }
 
         if (mb_strlen($logText) > $budget) {
             $logText = '… '.mb_substr($logText, -1 * ($budget - 2));

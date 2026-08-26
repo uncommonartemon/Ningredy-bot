@@ -118,4 +118,54 @@ class TelegramProgressReporterTest extends TestCase
             && str_contains((string) ($request['text'] ?? ''), 'retry'));
         Http::assertNotSent(fn ($request): bool => str_ends_with($request->url(), '/sendMessage'));
     }
+
+    public function test_a_log_that_outgrows_the_message_limit_seals_it_and_continues_in_a_new_message(): void
+    {
+        // Previously this silently truncated to only the newest lines, with
+        // no way to scroll back to whatever pushed the message over 4096
+        // chars. It must instead seal the first message (keeping the oldest
+        // lines intact and visible) and roll the rest into a second message.
+        config(['services.telegram.bot_token' => 'test-token']);
+        $nextMessageId = 111;
+        Http::fake(function () use (&$nextMessageId) {
+            return Http::response(['ok' => true, 'result' => ['message_id' => $nextMessageId++]]);
+        });
+        $createdMessageIds = [];
+        $progress = new TelegramProgressReporter(
+            app(TelegramClient::class),
+            '123',
+            onMessageCreated: function (int $messageId) use (&$createdMessageIds): void {
+                $createdMessageIds[] = $messageId;
+            },
+        );
+        $progress->step('1/1 · test step', 60);
+
+        $firstLine = 'first line marking the start of the log '.str_repeat('a', 3000);
+        $progress->info($firstLine);
+
+        for ($i = 0; $i < 20; $i++) {
+            $progress->info('filler line '.$i.' '.str_repeat('b', 100));
+        }
+
+        // done() always forces a render, so it reliably flushes the final
+        // in-memory state regardless of the per-message edit throttle that
+        // may have silently skipped some of the intermediate info() calls.
+        $progress->done('all lines processed');
+
+        // Exactly one rollover is expected for this input size: the mega
+        // first line plus a handful of filler lines fills the first message,
+        // and every filler line after that comfortably fits in the second.
+        $this->assertCount(2, $createdMessageIds, 'expected exactly one rollover to a second message');
+        [$sealedMessageId, $continuationMessageId] = $createdMessageIds;
+
+        Http::assertSent(fn ($request): bool => str_ends_with($request->url(), '/editMessageText')
+            && (int) ($request['message_id'] ?? 0) === $sealedMessageId
+            && str_contains((string) ($request['text'] ?? ''), $firstLine)
+            && str_contains((string) ($request['text'] ?? ''), 'продолжение в следующем сообщении'));
+        Http::assertSent(fn ($request): bool => str_ends_with($request->url(), '/editMessageText')
+            && (int) ($request['message_id'] ?? 0) === $continuationMessageId
+            && str_contains((string) ($request['text'] ?? ''), 'filler line 19')
+            && str_contains((string) ($request['text'] ?? ''), 'all lines processed')
+            && ! str_contains((string) ($request['text'] ?? ''), $firstLine));
+    }
 }
