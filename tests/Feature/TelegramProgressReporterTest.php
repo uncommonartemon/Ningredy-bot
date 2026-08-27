@@ -209,4 +209,46 @@ class TelegramProgressReporterTest extends TestCase
             return true;
         });
     }
+
+    public function test_mechanical_training_pings_are_dropped_but_decisions_and_outcomes_still_show(): void
+    {
+        // User request (2026-08-27): keep every real step visible, but cut
+        // mechanical low-information pings ("раунд N", "строит/исправляет
+        // рецепт", web-search connectivity chatter) that repeat many times
+        // per source down to nothing, so the log stays short and dry.
+        config(['services.telegram.bot_token' => 'test-token']);
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => ['message_id' => 555]])]);
+        $progress = new TelegramProgressReporter(app(TelegramClient::class), '123');
+        $progress->step('1/1 · test step', 60);
+
+        $progress->info('OpenAI ответил; поток Web Search подключён.');
+        $progress->info('Web Search запущен.');
+        $progress->info('Web Search ищет точные страницы товара.');
+        $progress->info('Web Search завершён; анализирую результаты.');
+        $progress->info('AI-тренер: Playwright собирает DOM, интерактивные элементы и сетевые изображения delkom.pl.');
+        $progress->info('AI-тренер: gpt-5.4 строит безопасный JSON-рецепт.');
+        $progress->info('AI-тренер: проверяю рецепт, раунд 1');
+        $progress->info('AI-тренер: gpt-5.4 исправляет рецепт по DOM и результату предыдущего раунда.');
+        $progress->info('AI-тренер: проверяю рецепт, раунд 2');
+        $progress->info('AI-рецепт проверен и опубликован. Фото: 16.');
+        $progress->done('поиск завершён');
+
+        Http::assertSent(function ($request): bool {
+            $text = (string) ($request['text'] ?? '');
+
+            if (! str_ends_with($request->url(), '/editMessageText') || ! str_contains($text, 'поиск завершён')) {
+                return false;
+            }
+
+            $this->assertStringNotContainsString('Web Search', $text);
+            $this->assertStringNotContainsString('OpenAI ответил', $text);
+            $this->assertStringNotContainsString('собирает DOM', $text);
+            $this->assertStringNotContainsString('строит безопасный JSON-рецепт', $text);
+            $this->assertStringNotContainsString('проверяю рецепт, раунд', $text);
+            $this->assertStringNotContainsString('исправляет рецепт по DOM', $text);
+            $this->assertStringContainsString('AI-рецепт проверен и опубликован. Фото: 16.', $text);
+
+            return true;
+        });
+    }
 }

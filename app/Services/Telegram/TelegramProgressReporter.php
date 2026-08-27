@@ -103,6 +103,10 @@ class TelegramProgressReporter
 
     public function info(string $message): void
     {
+        if ($this->isNoise($message)) {
+            return;
+        }
+
         $this->appendLog("🔎 {$this->elapsed()}с · {$message}");
         $this->render();
     }
@@ -111,6 +115,38 @@ class TelegramProgressReporter
     {
         $this->appendLog("⚠️ {$this->elapsed()}с · {$message}");
         $this->render();
+    }
+
+    /**
+     * User request (2026-08-27): keep every step visible (see appendLog's
+     * domain grouping and the earlier message-rollover fix) but cut the
+     * mechanical, low-information pings that repeat many times per source -
+     * "раунд N", "строит/исправляет рецепт", web-search connectivity pings -
+     * down to nothing, so what's left is short and dry. Decisions and
+     * outcomes (a preflight verdict, a final photo count, an abandon
+     * reason, an identity rejection) are never matched here and always
+     * still show.
+     */
+    private function isNoise(string $message): bool
+    {
+        static $patterns = [
+            '/^OpenAI ответил; поток Web Search подключён\.$/u',
+            '/^Web Search запущен\.$/u',
+            '/^Web Search ищет точные страницы товара\.$/u',
+            '/^Web Search завершён; анализирую результаты\.$/u',
+            '/^AI-тренер: Playwright собирает DOM,/u',
+            '/^AI-тренер: \S+ строит безопасный JSON-рецепт\.$/u',
+            '/^AI-тренер: проверяю рецепт, раунд \d+/u',
+            '/^AI-тренер: \S+ исправляет рецепт по DOM/u',
+        ];
+
+        foreach ($patterns as $pattern) {
+            if (preg_match($pattern, $message) === 1) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
