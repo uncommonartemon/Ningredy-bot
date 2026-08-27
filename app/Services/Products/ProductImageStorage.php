@@ -2002,17 +2002,17 @@ class ProductImageStorage
             $requiredWidth = $this->requiredImageWidth($draft);
             $requiredHeight = $this->requiredImageHeight($draft);
 
-            if (! $this->hasUsefulDimensions(
+            $dimensionRejection = $this->dimensionRejectionReason(
                 $download['width'],
                 $download['height'],
                 $requiredWidth,
                 $requiredHeight,
-            )) {
+            );
+
+            if ($dimensionRejection !== null) {
                 $this->lastDownloadRejections[] = [
                     'url' => $url,
-                    'reason' => $requiredHeight > 0
-                        ? "too_small ({$download['width']}x{$download['height']}; required {$requiredWidth}x{$requiredHeight})"
-                        : "too_small ({$download['width']}x{$download['height']}; required width>={$requiredWidth}, height=any)",
+                    'reason' => $dimensionRejection,
                 ];
 
                 continue;
@@ -2090,10 +2090,10 @@ class ProductImageStorage
      * the recipe, so it stayed "active" and would fail the exact same way on
      * every future draft for this domain. Only a genuine technical failure
      * (network/decode) counts - a quality rejection (too_small/
-     * unsafe_to_decode) says nothing about whether the recipe's URLs are
-     * actually reachable. The threshold/cap that decides what to do about a
-     * repeated failure lives in ProductGalleryRecipeTrainer, next to the
-     * equivalent bookkeeping for training-time failures.
+     * bad_aspect_ratio/unsafe_to_decode) says nothing about whether the
+     * recipe's URLs are actually reachable. The threshold/cap that decides
+     * what to do about a repeated failure lives in ProductGalleryRecipeTrainer,
+     * next to the equivalent bookkeeping for training-time failures.
      *
      * @param  array<int, string>  $urls
      * @param  array<int, array<string, mixed>>  $candidates
@@ -2129,6 +2129,7 @@ class ProductImageStorage
         $technicallyFailed = collect($this->lastDownloadRejections)->contains(
             fn (array $rejection): bool => $confirmedUrls->contains($rejection['url'])
                 && ! str_starts_with($rejection['reason'], 'too_small')
+                && ! str_starts_with($rejection['reason'], 'bad_aspect_ratio')
                 && $rejection['reason'] !== 'unsafe_to_decode'
         );
 
@@ -2728,12 +2729,46 @@ class ProductImageStorage
         int $requiredWidth,
         int $requiredHeight,
     ): bool {
-        $ratio = $width / max($height, 1);
+        return $this->dimensionRejectionReason($width, $height, $requiredWidth, $requiredHeight) === null;
+    }
 
-        return $width >= $requiredWidth
-            && $height >= $requiredHeight
-            && $ratio >= (float) config('product-images.minimum_ratio', 0.28)
-            && $ratio <= (float) config('product-images.maximum_ratio', 3.5);
+    /**
+     * Two independent bounds share this gate - a minimum width/height and an
+     * aspect-ratio range - but they used to collapse into a single "too_small"
+     * reason string even when width/height both passed and only the ratio
+     * bound failed (e.g. a 720x64 edge/port close-up: 720 clears the width
+     * floor, but ratio 11.25 blows past the 3.5 max). Naming the ratio
+     * rejection separately keeps rejected_candidates honest about which
+     * bound actually fired.
+     */
+    private function dimensionRejectionReason(
+        int $width,
+        int $height,
+        int $requiredWidth,
+        int $requiredHeight,
+    ): ?string {
+        if ($width < $requiredWidth || $height < $requiredHeight) {
+            return $requiredHeight > 0
+                ? "too_small ({$width}x{$height}; required {$requiredWidth}x{$requiredHeight})"
+                : "too_small ({$width}x{$height}; required width>={$requiredWidth}, height=any)";
+        }
+
+        $ratio = $width / max($height, 1);
+        $minRatio = (float) config('product-images.minimum_ratio', 0.28);
+        $maxRatio = (float) config('product-images.maximum_ratio', 3.5);
+
+        if ($ratio < $minRatio || $ratio > $maxRatio) {
+            return sprintf(
+                'bad_aspect_ratio (%dx%d; ratio %.2f; required %.2f-%.2f)',
+                $width,
+                $height,
+                $ratio,
+                $minRatio,
+                $maxRatio,
+            );
+        }
+
+        return null;
     }
 
     /**

@@ -2944,6 +2944,74 @@ class ProductImageStorageTest extends TestCase
         $this->assertSame('empty_response', $reasons['https://93.184.216.34/empty-body.jpg']);
     }
 
+    public function test_a_wide_thin_edge_crop_is_labelled_bad_aspect_ratio_instead_of_too_small(): void
+    {
+        // Real gap (2026-08-27): a 720x64 back-edge/port close-up cleared the
+        // width>=700 floor (and there is no height floor in production) but
+        // still failed the separate 0.28-3.5 ratio bound at 11.25. The old
+        // reason string still said "too_small (720x64; required width>=700,
+        // height=any)" - misleading, since width and height both pass; only
+        // the ratio bound actually rejected it.
+        AppSetting::put('ai.image_minimum_width', '700');
+        AppSetting::put('ai.image_minimum_height', '0');
+
+        Storage::fake('public');
+        ProductImageVisionAgent::fake(fn (string $prompt, $attachments): array => [
+            'images' => $attachments->keys()->map(fn (int $index): array => [
+                'index' => $index + 1,
+                'exact_match' => true,
+                'color_match' => true,
+                'publishable' => true,
+                'kind' => 'product',
+                'view' => 'front',
+                'gallery_rank' => 1,
+                'score' => 98,
+                'reason' => 'Exact product image.',
+            ])->all(),
+        ])->preventStrayPrompts();
+        [, , $draft] = $this->records();
+        $draft->refresh();
+        $draft->update([
+            'primary_source_url' => 'https://93.184.216.34/product-page',
+            'image_urls' => [],
+            'sources' => [[
+                'title' => 'Store',
+                'url' => 'https://93.184.216.34/product-page',
+                'type' => 'retailer',
+                'image_urls' => [
+                    'https://93.184.216.34/good-photo.jpg',
+                    'https://93.184.216.34/thin-strip.jpg',
+                ],
+            ]],
+        ]);
+        Http::fake(function (Request $request) {
+            if (str_contains($request->url(), 'thin-strip')) {
+                return Http::response($this->thinJpeg(), 200, ['Content-Type' => 'image/jpeg']);
+            }
+
+            if (str_contains($request->url(), 'good-photo')) {
+                return Http::response($this->jpeg(3), 200, ['Content-Type' => 'image/jpeg']);
+            }
+
+            return Http::response('<html></html>', 200, ['Content-Type' => 'text/html']);
+        });
+
+        app(ProductImageStorage::class)->stage($draft->fresh());
+
+        $attempt = ProductSourceAttempt::query()
+            ->where('product_draft_id', $draft->id)
+            ->where('action', 'download_candidates')
+            ->firstOrFail();
+        $reasons = collect($attempt->output['rejected_candidates'] ?? [])->pluck('reason', 'url');
+
+        $this->assertSame(1, $attempt->output['rejection_summary']['bad_aspect_ratio']);
+        $this->assertArrayNotHasKey('too_small', $attempt->output['rejection_summary']);
+        $this->assertStringStartsWith(
+            'bad_aspect_ratio (720x64; ratio 11.25;',
+            (string) $reasons['https://93.184.216.34/thin-strip.jpg'],
+        );
+    }
+
     public function test_staging_still_opens_a_second_known_card_but_skips_broad_ai_search_when_reserve_is_disabled(): void
     {
         // "Пробовать резервные источники" only ever gates the costlier,
@@ -4323,6 +4391,20 @@ class ProductImageStorageTest extends TestCase
     private function tinyJpeg(): string
     {
         $image = imagecreatetruecolor(50, 50);
+        $white = imagecolorallocate($image, 255, 255, 255);
+        imagefill($image, 0, 0, $white);
+        ob_start();
+        imagejpeg($image, null, 80);
+        $jpeg = ob_get_clean();
+        imagedestroy($image);
+
+        return $jpeg;
+    }
+
+    /** Clears the width>=700 floor but fails the separate 0.28-3.5 ratio bound. */
+    private function thinJpeg(): string
+    {
+        $image = imagecreatetruecolor(720, 64);
         $white = imagecolorallocate($image, 255, 255, 255);
         imagefill($image, 0, 0, $white);
         ob_start();
