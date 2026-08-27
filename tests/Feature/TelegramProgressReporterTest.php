@@ -251,4 +251,37 @@ class TelegramProgressReporterTest extends TestCase
             return true;
         });
     }
+
+    public function test_a_source_first_seen_without_a_recipe_still_gets_its_url_shown_once(): void
+    {
+        // Real gap (2026-08-27): a source discovered through fallback search
+        // whose very first mention is "нет AI-рецепта; запускаю первичное
+        // обучение" (or a CAPTCHA/WAF block) never happened to contain a
+        // full URL in that sentence - only the bare domain - so the "домен
+        // X:" header appeared with no 🔗 link at all, even though the
+        // caller (BrowserProductGalleryExtractor/ProductGalleryRecipeTrainer)
+        // knows the exact page URL at that point. Fixed by appending the URL
+        // to those specific messages at the source.
+        config(['services.telegram.bot_token' => 'test-token']);
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => ['message_id' => 555]])]);
+        $progress = new TelegramProgressReporter(app(TelegramClient::class), '123');
+        $progress->step('1/1 · test step', 60);
+
+        $progress->info('Для rozetka.com.ua ещё нет AI-рецепта; запускаю первичное обучение. · https://rozetka.com.ua/ua/123456789/');
+        $progress->info('Playwright для rozetka.com.ua отключён: CAPTCHA/WAF: повторный вход тем же Playwright с высокой вероятностью снова будет заблокирован. HTML-поиск не отключён. · https://rozetka.com.ua/ua/123456789/');
+        $progress->done('поиск завершён');
+
+        Http::assertSent(function ($request): bool {
+            $text = (string) ($request['text'] ?? '');
+
+            if (! str_ends_with($request->url(), '/editMessageText') || ! str_contains($text, 'поиск завершён')) {
+                return false;
+            }
+
+            $this->assertSame(1, substr_count($text, 'домен rozetka.com.ua:'));
+            $this->assertSame(1, substr_count($text, 'https://rozetka.com.ua/ua/123456789/'));
+
+            return true;
+        });
+    }
 }

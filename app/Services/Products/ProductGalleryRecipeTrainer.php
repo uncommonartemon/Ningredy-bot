@@ -791,7 +791,7 @@ class ProductGalleryRecipeTrainer
                 );
             }
 
-            $debug?->__invoke('error', 'AI-тренер: '.$exception->getMessage());
+            $debug?->__invoke('error', 'AI-тренер: '.$exception->getMessage().' · '.$url);
             Log::warning('Gallery recipe training failed.', [
                 'host' => $host,
                 'failure_kind' => $failureKind,
@@ -1218,7 +1218,7 @@ class ProductGalleryRecipeTrainer
         if ($disable) {
             $debug?->__invoke(
                 'warning',
-                "Playwright для {$recipe->domain} отключён: {$disableReason} HTML-поиск не отключён.",
+                "Playwright для {$recipe->domain} отключён: {$disableReason} HTML-поиск не отключён. · {$url}",
             );
         }
     }

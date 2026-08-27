@@ -63,7 +63,7 @@ class BrowserProductGalleryExtractor
         }
 
         if ($recipe?->status === 'disabled') {
-            $debug?->__invoke('warning', "Playwright для {$host} отключён после подтверждённой CAPTCHA/WAF. Обычный HTML-поиск остаётся доступен.");
+            $debug?->__invoke('warning', "Playwright для {$host} отключён после подтверждённой CAPTCHA/WAF. Обычный HTML-поиск остаётся доступен. · {$url}");
 
             return [];
         }
@@ -156,11 +156,11 @@ class BrowserProductGalleryExtractor
             $debug?->__invoke('warning', 'Сохранённый рецепт перестал давать галерею; запускаю AI-переобучение.');
         } else {
             if ($activeRecipeOnly) {
-                $debug?->__invoke('step', 'Для '.$host.' нет активного рецепта; режим Vision-first продолжает со статичными фотографиями без обучения Playwright.');
+                $debug?->__invoke('step', 'Для '.$host.' нет активного рецепта; режим Vision-first продолжает со статичными фотографиями без обучения Playwright. · '.$url);
 
                 return [];
             }
-            $debug?->__invoke('step', "Для {$host} ещё нет AI-рецепта; запускаю первичное обучение.");
+            $debug?->__invoke('step', "Для {$host} ещё нет AI-рецепта; запускаю первичное обучение. · {$url}");
         }
 
         $images = app(ProductGalleryRecipeTrainer::class)->train(
