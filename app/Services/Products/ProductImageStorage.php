@@ -910,8 +910,18 @@ class ProductImageStorage
                     $groupSource = is_array($groupCandidates[0]['page_source_context'] ?? null)
                         ? $groupCandidates[0]['page_source_context']
                         : ($groupPageUrl ? ['url' => $groupPageUrl] : null);
+                    // Wholesale acceptance skips per-frame Vision entirely, so it
+                    // is reserved for a source that agrees with the card it is
+                    // about to illustrate. A shop selling the same model in a
+                    // different configuration passes every identifier check by
+                    // design (regional part numbers must not reject good cards),
+                    // and its gallery then became the card's source while the
+                    // card's own specifications said otherwise. Such a source is
+                    // not rejected - its photos are usually the same chassis -
+                    // it simply has to earn its frames one by one.
                     $groupIdentityConfirmed = is_array($groupSource)
                         && ! $this->identityMatcher->conflictsSource($draft, $groupSource)
+                        && ! $this->identityMatcher->conflictsConfiguration($draft, $groupSource)
                         && $this->identityMatcher->supportsSource($draft, $groupSource);
                     $groupGalleryVerification = null;
 

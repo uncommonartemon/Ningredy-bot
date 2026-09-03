@@ -176,6 +176,69 @@ class ProductIdentityMatcher
     }
 
     /** @param array<string, mixed> $source */
+    /**
+     * Identifier matching deliberately only enforces what the operator typed,
+     * because a researched part number is often a regional example and rejecting
+     * on it would throw away legitimate regional cards. That leaves a gap the
+     * fallback search walked straight into: a shop selling the same model in a
+     * different configuration passes every identifier check, and its photos then
+     * become the card's source while the card's own specifications say something
+     * else (seen live: a 32 GB draft sourced from a 16 GB listing).
+     *
+     * Only installed memory is compared. It is the one configuration value
+     * written unambiguously as "16 gb" in titles and slugs; storage appears as
+     * "1-024-tb" and similar forms that cannot be parsed reliably, and a wrong
+     * guess here would reject good sources. A conflict therefore needs the
+     * evidence to state memory sizes explicitly and none of them to be the one
+     * the draft committed to - evidence that says nothing about memory, which is
+     * the common case, never conflicts.
+     *
+     * @param  array<string, mixed>  $source
+     */
+    public function conflictsConfiguration(ProductDraft $draft, array $source): bool
+    {
+        $expected = $this->memorySizes($this->draftMemoryValue($draft));
+
+        if ($expected === []) {
+            return false;
+        }
+
+        $found = $this->memorySizes($this->sourceEvidence($source));
+
+        return $found !== [] && array_intersect($expected, $found) === [];
+    }
+
+    private function draftMemoryValue(ProductDraft $draft): string
+    {
+        return collect($draft->specifications ?? [])
+            ->filter(fn (mixed $item): bool => is_array($item))
+            ->filter(function (array $item): bool {
+                $key = Str::lower((string) ($item['key'] ?? '').' '.($item['name'] ?? ''));
+
+                return (str_contains($key, 'ram') || str_contains($key, 'memor') || str_contains($key, 'память'))
+                    && ! str_contains($key, 'maximum')
+                    && ! str_contains($key, 'video')
+                    && ! str_contains($key, 'graphic');
+            })
+            ->map(fn (array $item): string => (string) ($item['value'] ?? ''))
+            ->implode(' ');
+    }
+
+    /** @return array<int, int> */
+    private function memorySizes(string $evidence): array
+    {
+        preg_match_all('/(?<!\d)(\d{1,3})\s*[-_ ]?\s*gb\b/i', str_replace(['-', '_'], ' ', Str::lower($evidence)), $matches);
+
+        return collect($matches[1] ?? [])
+            ->map(fn (string $size): int => (int) $size)
+            // Sizes outside plausible installed memory are something else on the
+            // page - a disk, a bundled card, a promotion.
+            ->filter(fn (int $size): bool => $size >= 2 && $size <= 256 && ($size & ($size - 1)) === 0)
+            ->unique()
+            ->values()
+            ->all();
+    }
+
     private function sourceEvidence(array $source): string
     {
         return implode(' ', array_filter([
