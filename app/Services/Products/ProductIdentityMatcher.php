@@ -213,7 +213,7 @@ class ProductIdentityMatcher
      *
      * @param  array<string, mixed>  $source
      */
-    public function conflictsConfiguration(ProductDraft $draft, array $source): bool
+    public function conflictsMemoryConfiguration(ProductDraft $draft, array $source): bool
     {
         $expected = $this->memorySizes($this->draftMemoryValue($draft));
 

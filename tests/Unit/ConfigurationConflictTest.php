@@ -17,7 +17,7 @@ class ConfigurationConflictTest extends TestCase
         // photos came from a shop selling the 16 GB build of the same model. Every
         // identifier check passed, because identifiers are only enforced as far as
         // the operator typed them and the operator named only the model.
-        $this->assertTrue(app(ProductIdentityMatcher::class)->conflictsConfiguration(
+        $this->assertTrue(app(ProductIdentityMatcher::class)->conflictsMemoryConfiguration(
             $this->draftWithMemory('32 GB LPDDR5X (onboard)'),
             ['url' => 'https://www.cyclotron.de/shop/nx-ksgeg-00n-acer-swift-go-14-sfg14-73-intel-arc-graphics-16-gb-ram-1-024-tb-ssd-nvme-423849'],
         ));
@@ -27,7 +27,7 @@ class ConfigurationConflictTest extends TestCase
     {
         // The common shape: evidence is just a product URL. Silence must stay
         // silence, or the gate would reject most legitimate sources.
-        $this->assertFalse(app(ProductIdentityMatcher::class)->conflictsConfiguration(
+        $this->assertFalse(app(ProductIdentityMatcher::class)->conflictsMemoryConfiguration(
             $this->draftWithMemory('32 GB LPDDR5X'),
             ['url' => 'https://shop.example.com/acer-swift-go-14-sfg14-73'],
         ));
@@ -35,7 +35,7 @@ class ConfigurationConflictTest extends TestCase
 
     public function test_the_same_configuration_does_not_conflict(): void
     {
-        $this->assertFalse(app(ProductIdentityMatcher::class)->conflictsConfiguration(
+        $this->assertFalse(app(ProductIdentityMatcher::class)->conflictsMemoryConfiguration(
             $this->draftWithMemory('32 GB LPDDR5X'),
             ['url' => 'https://shop.example.com/swift-go-14-32-gb-ram-2-tb-ssd'],
         ));
@@ -45,7 +45,7 @@ class ConfigurationConflictTest extends TestCase
     {
         // A comparison or picker page naming both sizes still contains the one
         // the draft wants, so it stays eligible.
-        $this->assertFalse(app(ProductIdentityMatcher::class)->conflictsConfiguration(
+        $this->assertFalse(app(ProductIdentityMatcher::class)->conflictsMemoryConfiguration(
             $this->draftWithMemory('32 GB'),
             ['title' => 'Acer Swift Go 14 — 16 GB or 32 GB RAM'],
         ));
@@ -53,7 +53,7 @@ class ConfigurationConflictTest extends TestCase
 
     public function test_a_draft_without_a_memory_specification_cannot_conflict(): void
     {
-        $this->assertFalse(app(ProductIdentityMatcher::class)->conflictsConfiguration(
+        $this->assertFalse(app(ProductIdentityMatcher::class)->conflictsMemoryConfiguration(
             $this->draftWithMemory(null),
             ['url' => 'https://shop.example.com/swift-go-14-16-gb-ram'],
         ));
@@ -67,7 +67,7 @@ class ConfigurationConflictTest extends TestCase
             ['key' => 'maximum_memory', 'name' => 'Maximum supported memory', 'value' => '32 GB'],
         ]);
 
-        $this->assertFalse(app(ProductIdentityMatcher::class)->conflictsConfiguration(
+        $this->assertFalse(app(ProductIdentityMatcher::class)->conflictsMemoryConfiguration(
             $draft,
             ['url' => 'https://shop.example.com/swift-go-14-16-gb-ram'],
         ));
@@ -83,7 +83,7 @@ class ConfigurationConflictTest extends TestCase
             ['key' => 'memory_slots', 'name' => 'Memory slots', 'value' => 'expandable to 64 GB'],
         ]);
 
-        $this->assertTrue(app(ProductIdentityMatcher::class)->conflictsConfiguration(
+        $this->assertTrue(app(ProductIdentityMatcher::class)->conflictsMemoryConfiguration(
             $draft,
             ['url' => 'https://shop.example.com/swift-go-14-64-gb-ram'],
         ));
@@ -93,7 +93,7 @@ class ConfigurationConflictTest extends TestCase
     {
         // A card's own memory is a power of two in the same range, so counting
         // it would reject a source whose only sin is naming its GPU.
-        $this->assertFalse(app(ProductIdentityMatcher::class)->conflictsConfiguration(
+        $this->assertFalse(app(ProductIdentityMatcher::class)->conflictsMemoryConfiguration(
             $this->draftWithMemory('32 GB'),
             ['url' => 'https://shop.example.com/blade-18-geforce-rtx-5080-16gb'],
         ));
@@ -103,7 +103,7 @@ class ConfigurationConflictTest extends TestCase
     {
         // The mirror image: a 16 GB machine with a 32 GB card used to satisfy a
         // 32 GB draft, because every size on the page was thrown into one pool.
-        $this->assertTrue(app(ProductIdentityMatcher::class)->conflictsConfiguration(
+        $this->assertTrue(app(ProductIdentityMatcher::class)->conflictsMemoryConfiguration(
             $this->draftWithMemory('32 GB'),
             ['title' => 'Gaming laptop, 16 GB RAM, RTX 5090 32 GB GDDR7'],
         ));
@@ -113,7 +113,7 @@ class ConfigurationConflictTest extends TestCase
     {
         // The window around a size stops at the next size, so the SSD's words
         // describe the SSD and the 32 GB in front of it stays system memory.
-        $this->assertFalse(app(ProductIdentityMatcher::class)->conflictsConfiguration(
+        $this->assertFalse(app(ProductIdentityMatcher::class)->conflictsMemoryConfiguration(
             $this->draftWithMemory('32 GB'),
             ['title' => 'Swift Go 14, 32 GB, 256 GB SSD'],
         ));

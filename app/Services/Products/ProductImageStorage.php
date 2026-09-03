@@ -348,8 +348,15 @@ class ProductImageStorage
                 break;
             }
 
+            $reuseOnly = (bool) ($source['_reuse_only'] ?? $activeRecipeOnly);
+
+            // This reservation exists to stop training new domains once most of
+            // the money is spent, and a source that may only reuse an existing
+            // recipe trains nothing - stopping there would skip the free half
+            // of the search to protect a budget it does not spend.
             if (
                 $sourceIndex > 0
+                && ! $reuseOnly
                 && $deferredVisionSets !== []
                 && $this->costBudget->reachedFraction(
                     $telegramUpdateId,
@@ -364,8 +371,6 @@ class ProductImageStorage
                 $progress?->__invoke('Резерв времени достигнут: новые источники больше не открываю, завершаю текущий результат.');
                 break;
             }
-
-            $reuseOnly = (bool) ($source['_reuse_only'] ?? $activeRecipeOnly);
 
             if ($progress) {
                 $progress('Проверяю источник '.($sourceIndex + 1).'/'.$sourceQueue->count()
@@ -396,7 +401,7 @@ class ProductImageStorage
             // caught here instead. The source is not rejected: its photos are
             // usually the same chassis, it simply has to earn its frames one by
             // one. The same gate guards the fallback search below.
-            $configurationConflict = $this->identityMatcher->conflictsConfiguration($draft, $finalSourceEvidence);
+            $configurationConflict = $this->identityMatcher->conflictsMemoryConfiguration($draft, $finalSourceEvidence);
 
             if ($this->identityMatcher->conflictsSource($draft, $source)) {
                 $this->attempts->record([
@@ -980,7 +985,7 @@ class ProductImageStorage
                     // it simply has to earn its frames one by one.
                     $groupIdentityConfirmed = is_array($groupSource)
                         && ! $this->identityMatcher->conflictsSource($draft, $groupSource)
-                        && ! $this->identityMatcher->conflictsConfiguration($draft, $groupSource)
+                        && ! $this->identityMatcher->conflictsMemoryConfiguration($draft, $groupSource)
                         && $this->identityMatcher->supportsSource($draft, $groupSource);
                     $groupGalleryVerification = null;
 
