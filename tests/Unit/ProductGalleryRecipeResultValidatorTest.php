@@ -469,6 +469,54 @@ class ProductGalleryRecipeResultValidatorTest extends TestCase
         $this->assertStringContainsString('nested follow-up', $result['reason']);
     }
 
+    public function test_a_zoom_that_was_still_enlarging_sends_the_round_back(): void
+    {
+        // The recipe asked for two presses and the image was still growing on
+        // the second, so these frames are below the page's full resolution.
+        // Recording that in the trace was not enough on its own: validation
+        // passed, training ended, and the agent never got a round in which to
+        // raise its own number.
+        $result = app(ProductGalleryRecipeResultValidator::class)->validate(
+            $this->zoomingOpenerRecipe(afterEachLimit: 2),
+            [
+                'images' => $this->images(3),
+                'diagnostics' => ['distinct_dom_assets' => 3],
+                'action_trace' => [
+                    $this->openerTrace(),
+                    $this->zoomTrace(followupRepetition: 0, changed: true),
+                    [...$this->zoomTrace(followupRepetition: 1, changed: true), 'after_each_truncated' => true],
+                ],
+            ],
+        );
+
+        $this->assertFalse($result['passed']);
+        $this->assertStringContainsString('Raise after_each_limit', $result['reason']);
+    }
+
+    public function test_a_zoom_already_at_the_schema_ceiling_is_accepted_as_it_is(): void
+    {
+        // Nothing left to ask for, so a still-growing image stops being a
+        // reason to spend another training round.
+        $trace = [$this->openerTrace()];
+
+        for ($press = 0; $press < 20; $press++) {
+            $trace[] = $this->zoomTrace(followupRepetition: $press, changed: true);
+        }
+
+        $trace[19]['after_each_truncated'] = true;
+
+        $result = app(ProductGalleryRecipeResultValidator::class)->validate(
+            $this->zoomingOpenerRecipe(afterEachLimit: 20),
+            [
+                'images' => $this->images(3),
+                'diagnostics' => ['distinct_dom_assets' => 3],
+                'action_trace' => $trace,
+            ],
+        );
+
+        $this->assertTrue($result['passed'], $result['reason'] ?? '');
+    }
+
     /** @return array<string, mixed> */
     private function zoomingOpenerRecipe(int $afterEachLimit): array
     {

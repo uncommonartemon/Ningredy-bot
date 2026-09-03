@@ -6,6 +6,13 @@ use App\Services\Ai\AiSettings;
 
 class ProductGalleryRecipeResultValidator
 {
+    /**
+     * The largest after_each_limit the recipe schema accepts. A zoom that is
+     * still enlarging at this many presses has nothing left to ask for, so it
+     * stops being a reason to send the round back.
+     */
+    private const AFTER_EACH_LIMIT_CEILING = 20;
+
     public function __construct(private readonly AiSettings $settings) {}
 
     /** @return array{passed: bool, expected: int, extracted: int, reason: string} */
@@ -298,6 +305,23 @@ class ProductGalleryRecipeResultValidator
         $selector = trim((string) ($action['after_each_selector'] ?? ''));
         if ($selector === '') {
             return null;
+        }
+
+        // The runner ran out of allowed presses while the image was still
+        // getting bigger, so the recipe stops below the resolution the page
+        // offers. Recording that in the trace was not enough on its own:
+        // validation passed, training ended, and the agent never got a round in
+        // which to raise its own number. Sending the round back is what gives
+        // it that chance - and once it has asked for everything the schema
+        // allows, a still-zooming control is accepted rather than looped on.
+        $limit = max(1, (int) ($action['after_each_limit'] ?? 1));
+
+        if ($limit < self::AFTER_EACH_LIMIT_CEILING && $actionTrace->contains(
+            fn (array $item): bool => ($item['after_each_truncated'] ?? false) === true,
+        )) {
+            return 'Gallery zoom stopped early: '.$selector.' was still enlarging the image after '
+                .$limit.' presses, so the frames are below this page\'s full resolution. '
+                .'Raise after_each_limit for this action.';
         }
 
         return $this->missingAfterEachFollowup($selector, $action, $actionTrace, $requiredClicks);
