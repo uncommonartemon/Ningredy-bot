@@ -210,6 +210,83 @@ class TelegramProgressReporterTest extends TestCase
         });
     }
 
+    public function test_an_exception_is_reported_as_a_fact_not_as_the_page_it_came_with(): void
+    {
+        // Every line here is verbatim from one real search (2026-09-03): a
+        // blocked page arrived as its whole HTML body, a Playwright failure as
+        // a call log with a Windows path, and a cURL timeout carrying a link
+        // to curl.se's error index - which the domain grouping then announced
+        // as a shop the search had found.
+        config(['services.telegram.bot_token' => 'test-token']);
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => ['message_id' => 555]])]);
+        $progress = new TelegramProgressReporter(app(TelegramClient::class), '123');
+        $progress->step('1/1 · test step', 60);
+
+        $progress->info('HTML страницы недоступен: HTTP request returned status code 403:'
+            ."\n".'<!DOCTYPE html><html lang="en"><head><title>CAPTCHA page</title>'
+            .'<meta http-equiv="Content-Type" content="text/html"></head><body>Access denied</body></html>');
+        $progress->info('HTML страницы недоступен: cURL error 28: Operation timed out after 7005 milliseconds'
+            .' with 0 bytes received (see https://curl.se/libcurl/c/libcurl-errors.html)'
+            .' for https://marketplace.nvidia.com/en-us/consumer/gaming-laptops/asus-rog-zephyrus-g16/');
+        $progress->info('AI-тренер: Playwright не получил полезную DOM-структуру страницы.'
+            .' page.goto: net::ERR_HTTP2_PROTOCOL_ERROR at'."\n".'Call log:'."\n"
+            .'  - navigating to "", waiting until "domcontentloaded"'."\n"
+            .'    at C:\\Users\\Buffout\\Desktop\\ningredy\\scripts\\extract-product-gallery.mjs:1572:35');
+        $progress->done('поиск завершён');
+
+        Http::assertSent(function ($request): bool {
+            $text = (string) ($request['text'] ?? '');
+
+            if (! str_ends_with($request->url(), '/editMessageText') || ! str_contains($text, 'поиск завершён')) {
+                return false;
+            }
+
+            $this->assertStringContainsString('status code 403.', $text);
+            $this->assertStringNotContainsString('CAPTCHA page', $text);
+            $this->assertStringNotContainsString('DOCTYPE', $text);
+            // curl.se documents the error; it is not a source anyone opened.
+            $this->assertStringNotContainsString('curl.se', $text);
+            $this->assertStringContainsString('cURL error 28', $text);
+            $this->assertStringNotContainsString('Call log', $text);
+            $this->assertStringNotContainsString('extract-product-gallery.mjs', $text);
+
+            return true;
+        });
+    }
+
+    public function test_the_same_rejection_repeated_is_counted_rather_than_reprinted(): void
+    {
+        // One fallback round rejected a dozen pages for the same reason, and
+        // each took its own line - the same sentence over and over, pushing
+        // everything that actually differed off the screen.
+        config(['services.telegram.bot_token' => 'test-token']);
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => ['message_id' => 555]])]);
+        $progress = new TelegramProgressReporter(app(TelegramClient::class), '123');
+        $progress->step('1/1 · test step', 60);
+
+        for ($repeat = 0; $repeat < 4; $repeat++) {
+            $progress->info('Найденная страница пропущена: после открытия она не подтверждает точную модель/SKU товара');
+        }
+
+        $progress->info('Раунд резервного поиска 1 не дал загружаемых фото.');
+        $progress->done('поиск завершён');
+
+        Http::assertSent(function ($request): bool {
+            $text = (string) ($request['text'] ?? '');
+
+            if (! str_ends_with($request->url(), '/editMessageText') || ! str_contains($text, 'поиск завершён')) {
+                return false;
+            }
+
+            $this->assertSame(1, substr_count($text, 'не подтверждает точную модель/SKU товара'));
+            $this->assertStringContainsString('×4', $text);
+            // What differed still stands on its own line.
+            $this->assertStringContainsString('Раунд резервного поиска 1', $text);
+
+            return true;
+        });
+    }
+
     public function test_mechanical_training_pings_are_dropped_but_decisions_and_outcomes_still_show(): void
     {
         // User request (2026-08-27): keep every real step visible, but cut

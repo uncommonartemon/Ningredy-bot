@@ -22,6 +22,9 @@ class TelegramProgressReporter
     /** Appended to a message's log block when it's being sealed in favor of a fresh continuation message. */
     private const CONTINUED_MARKER = "\n… продолжение в следующем сообщении";
 
+    /** Opens the continuation message, so a segment on its own is not read as a search that started over. */
+    private const CONTINUATION_HEADER = '↩️ продолжение поиска';
+
     private float $startedAt;
 
     private ?int $messageId = null;
@@ -42,6 +45,14 @@ class TelegramProgressReporter
 
     /** @var array<string, true> Domains whose full product-page URL has already been printed once. */
     private array $announcedDomainUrls = [];
+
+    /** What the last appended line said, so an identical next one is counted instead of repeated. */
+    private ?string $lastLineMeaning = null;
+
+    /** The last appended line as written, kept so its repeat counter can be rewritten in place. */
+    private string $lastLineText = '';
+
+    private int $repeatedLineCount = 1;
 
     /** @var array<int, array<int, array{text: string, callback_data: string}>>|null */
     private ?array $cancelButtonMarkup = null;
@@ -107,14 +118,39 @@ class TelegramProgressReporter
             return;
         }
 
-        $this->appendLog("🔎 {$this->elapsed()}с · {$message}");
+        $this->appendLog("🔎 {$this->elapsed()}с · {$this->condense($message)}");
         $this->render();
     }
 
     public function warning(string $message): void
     {
-        $this->appendLog("⚠️ {$this->elapsed()}с · {$message}");
+        $this->appendLog("⚠️ {$this->elapsed()}с · {$this->condense($message)}");
         $this->render();
+    }
+
+    /**
+     * An exception message is written for a log file, not for a phone. A
+     * blocked page arrived here as its whole HTML body ("403: <!DOCTYPE
+     * html><html lang=en><head><title>CAPTCHA page..."), a Playwright failure
+     * as a call log with a Windows file path, and a cURL timeout as prose
+     * carrying a link to curl.se's error index - which the domain grouping
+     * below then announced as a source the search had supposedly found.
+     * Everything here keeps the fact and drops the packaging.
+     */
+    private function condense(string $message): string
+    {
+        // "(see https://curl.se/...)" is documentation about the error, not a
+        // page anyone visited.
+        $message = (string) preg_replace('/\s*\(see [^)]*\)/u', '', $message);
+        // Past "status code 403:" there is only the blocked page's own HTML.
+        $message = (string) preg_replace('/(status code \d{3})\s*:.*$/us', '$1.', $message);
+        // A stack frame or a Playwright call log says nothing to an operator.
+        $message = (string) preg_replace('/\s*(?:Call log:|at [A-Z]:\\\\|\n\s*at\s).*$/us', '', $message);
+
+        // No blanket length cap: the longest lines in the log are the agent's
+        // own reasoning about a page, which is the most useful thing in it.
+        // Only the packaging above is removed, never prose.
+        return trim((string) preg_replace('/\s+/u', ' ', strip_tags($message)));
     }
 
     /**
@@ -138,6 +174,10 @@ class TelegramProgressReporter
             '/^AI-тренер: \S+ строит безопасный JSON-рецепт\.$/u',
             '/^AI-тренер: проверяю рецепт, раунд \d+/u',
             '/^AI-тренер: \S+ исправляет рецепт по DOM/u',
+            // One blocked page announced itself three times over: the training
+            // start, the Playwright shutdown with its reason, and this. The
+            // shutdown line already carries the reason and what stays possible.
+            '/^AI-тренер: Playwright обнаружил защитную страницу/u',
         ];
 
         foreach ($patterns as $pattern) {
@@ -194,6 +234,22 @@ class TelegramProgressReporter
         }
     }
 
+    /**
+     * What a line says, with the elapsed counter and any repeat suffix taken
+     * off. A header or a URL line is never collapsed - each one introduces
+     * something new even when the wording matches.
+     */
+    private function lineMeaning(string $line): ?string
+    {
+        if (str_starts_with(ltrim($line), 'домен ') || str_starts_with(ltrim($line), '🔗')) {
+            return null;
+        }
+
+        $meaning = trim((string) preg_replace('/^(\X)\s*\d+с\s*·\s*/u', '$1 ', $line));
+
+        return $meaning === '' ? null : $meaning;
+    }
+
     private function detectDomain(string $line): ?string
     {
         if (preg_match('#https?://\S+#i', $line, $matches) === 1) {
@@ -232,6 +288,24 @@ class TelegramProgressReporter
      */
     private function pushLine(string $line): void
     {
+        // One fallback round rejects a dozen pages for the same reason, and
+        // each rejection used to take its own line - the same sentence twelve
+        // times, pushing everything that actually differed off the screen.
+        // The elapsed prefix makes them unequal as strings, so comparison is
+        // on what the line says, not when it was said.
+        $meaning = $this->lineMeaning($line);
+
+        if ($meaning !== null && $meaning === $this->lastLineMeaning) {
+            $this->repeatedLineCount++;
+            $this->log[count($this->log) - 1] = $this->lastLineText.' ×'.$this->repeatedLineCount;
+            $this->render();
+
+            return;
+        }
+
+        $this->lastLineMeaning = $meaning;
+        $this->lastLineText = $line;
+        $this->repeatedLineCount = 1;
         $this->log[] = $line;
 
         $stepsText = $this->stepsText();
@@ -273,9 +347,18 @@ class TelegramProgressReporter
 
         // The sealed message keeps its id forever and is never edited again
         // - a fresh message starts for the overflow so an already-read
-        // segment never silently changes underneath the operator.
+        // segment never silently changes underneath the operator. It opens by
+        // saying it is a continuation and repeats the domain heading, so a
+        // segment read on its own is not mistaken for a search that restarted
+        // in the middle of a shop.
         $this->messageId = null;
-        $this->log = $overflow;
+        $this->log = [
+            self::CONTINUATION_HEADER,
+            ...($this->currentLogDomain === null ? [] : ["домен {$this->currentLogDomain}:"]),
+            ...$overflow,
+        ];
+        $this->lastLineMeaning = null;
+        $this->repeatedLineCount = 1;
     }
 
     public function done(string $message): void
