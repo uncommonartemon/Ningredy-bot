@@ -185,16 +185,36 @@ class ProductGalleryRecipeTrainer
                 // train a real, reusable, Vision-verified recipe instead of
                 // trusting that estimate - slower and costlier per search, but the
                 // trained recipe is reused on every later visit to this domain.
+                // The trade only pays while the search can still afford it. Seen
+                // live (2026-09-03, draft #95): three sources in a row reported
+                // full-size static photos already in the DOM, the override
+                // trained on all three, every training failed, and a whole
+                // dollar bought one partial photo - the last source still had
+                // five static photos waiting when the budget ran out. Past the
+                // same reservation the source loop uses, the estimate is taken
+                // at its word: photos in hand beat a recipe nobody can pay for.
+                $canAffordToDisbelieve = ! $this->costBudget->reachedFraction(
+                    $telegramUpdateId,
+                    (float) config('product-images.source_exploration_budget_fraction', 0.70),
+                );
+
                 if (
                     $preflightDecision === 'static_sufficient'
                     && ($preflight['gallery_likely'] ?? false)
                     && $this->settings->galleryPreferPlaywrightFirst()
                 ) {
-                    $debug?->__invoke(
-                        'step',
-                        'Предфильтр сказал "статики достаточно", но найдена настоящая галерея - обучаю Playwright-рецепт вместо доверия оценке количества фото: '.$url,
-                    );
-                    $preflightDecision = 'train_playwright';
+                    if ($canAffordToDisbelieve) {
+                        $debug?->__invoke(
+                            'step',
+                            'Предфильтр сказал "статики достаточно", но найдена настоящая галерея - обучаю Playwright-рецепт вместо доверия оценке количества фото: '.$url,
+                        );
+                        $preflightDecision = 'train_playwright';
+                    } else {
+                        $debug?->__invoke(
+                            'step',
+                            'Бюджет на исходе: беру статичную галерею как есть, не обучая рецепт: '.$url,
+                        );
+                    }
                 }
             } else {
                 $debug?->__invoke('step', 'AI-предфильтр пропущен: предыдущая статичная галерея дала слишком мало разных фото, принудительно кликаю по слайдеру.');

@@ -260,7 +260,11 @@ class TelegramProgressReporter
             }
         }
 
-        if (preg_match('/\b(?:www\.)?((?:[a-z0-9-]+\.)+[a-z]{2,24})\b/i', $line, $matches) === 1) {
+        // A dotted word followed by a colon is a method or a label, not a host:
+        // "page.goto: Timeout 20000ms exceeded" was announced as a shop the
+        // search had found, complete with its own heading. A real mention is
+        // followed by a space or ends the sentence.
+        if (preg_match('/\b(?:www\.)?((?:[a-z0-9-]+\.)+[a-z]{2,24})\b(?!\s*[:(])/i', $line, $matches) === 1) {
             return strtolower($matches[1]);
         }
 

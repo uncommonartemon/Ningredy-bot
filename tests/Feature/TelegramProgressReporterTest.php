@@ -254,6 +254,36 @@ class TelegramProgressReporterTest extends TestCase
         });
     }
 
+    public function test_a_method_name_in_an_error_is_not_announced_as_a_shop(): void
+    {
+        // Verbatim from a real search (2026-09-03): "page.goto" got its own
+        // "домен page.goto:" heading, so a Playwright method was presented as a
+        // store the search had found - while the page it actually failed on was
+        // never named.
+        config(['services.telegram.bot_token' => 'test-token']);
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => ['message_id' => 555]])]);
+        $progress = new TelegramProgressReporter(app(TelegramClient::class), '123');
+        $progress->step('1/1 · test step', 60);
+
+        $progress->info('AI-тренер: Playwright не получил полезную DOM-структуру страницы. page.goto: Timeout 20000ms exceeded.');
+        $progress->info('Для www.catsrl.it ещё нет AI-рецепта; запускаю первичное обучение.');
+        $progress->done('поиск завершён');
+
+        Http::assertSent(function ($request): bool {
+            $text = (string) ($request['text'] ?? '');
+
+            if (! str_ends_with($request->url(), '/editMessageText') || ! str_contains($text, 'поиск завершён')) {
+                return false;
+            }
+
+            $this->assertStringNotContainsString('домен page.goto', $text);
+            // A real host mentioned mid-sentence still groups as before.
+            $this->assertStringContainsString('домен catsrl.it:', $text);
+
+            return true;
+        });
+    }
+
     public function test_the_same_rejection_repeated_is_counted_rather_than_reprinted(): void
     {
         // One fallback round rejected a dozen pages for the same reason, and
