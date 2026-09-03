@@ -273,7 +273,11 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
             put that already-observed zoom control in after_each_selector on the click_each action. The runner will
             click it after every selected thumbnail, up to after_each_limit and stopping early on no change, while
             collecting after every click. This is the compact replayable form of: thumbnail 1 -> zoom -> collect,
-            thumbnail 2 -> zoom -> collect, and so on. Never invent the follow-up selector from a hint alone.
+            thumbnail 2 -> zoom -> collect, and so on. The follow-up works on a plain click as well: the frame the
+            opening click reveals needs the same zoom as every later one, or that first photo stays at the viewer's
+            default size while the rest come back at full resolution. If a trace entry reports
+            after_each_truncated, the page kept enlarging after the last allowed press - raise after_each_limit for
+            that action in the next round. Never invent the follow-up selector from a hint alone.
             Copy a stable supplied selector when possible. Use purpose to state the expected state transition.
             The runner collects image URLs after every action and returns an exact action trace. If actions is
             non-empty, it replaces the legacy pre-click/thumbnail/open/next click order. The legacy selector

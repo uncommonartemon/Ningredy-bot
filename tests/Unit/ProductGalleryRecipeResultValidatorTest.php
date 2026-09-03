@@ -391,6 +391,131 @@ class ProductGalleryRecipeResultValidatorTest extends TestCase
     }
 
     /** @return array<int, string> */
+    public function test_a_zoom_control_that_disappears_at_maximum_is_exhaustion_not_failure(): void
+    {
+        // A "zoom in" button that removes itself once the image is at full size
+        // has finished its job. Its missing-selector entry carries clicked=false,
+        // so it counted for nothing and a working recipe was thrown away.
+        $result = app(ProductGalleryRecipeResultValidator::class)->validate(
+            $this->zoomingOpenerRecipe(afterEachLimit: 3),
+            [
+                'images' => $this->images(3),
+                'diagnostics' => ['distinct_dom_assets' => 3],
+                'action_trace' => [
+                    $this->openerTrace(),
+                    $this->zoomTrace(followupRepetition: 0, changed: true),
+                    [
+                        'action' => 'click',
+                        'action_index' => 0,
+                        'parent_repetition' => 0,
+                        'followup_repetition' => 1,
+                        'after_each' => true,
+                        'clicked' => false,
+                        'changed' => false,
+                        'selector_missing' => true,
+                        'selector_match_count' => 0,
+                    ],
+                ],
+            ],
+        );
+
+        $this->assertTrue($result['passed'], $result['reason'] ?? '');
+    }
+
+    public function test_the_opening_click_owes_its_zoom_follow_up_too(): void
+    {
+        // The frame the opener reveals needs the same enlargement as the frames
+        // an arrow reaches later, or one gallery comes back at two resolutions.
+        $result = app(ProductGalleryRecipeResultValidator::class)->validate(
+            $this->zoomingOpenerRecipe(afterEachLimit: 2),
+            [
+                'images' => $this->images(3),
+                'diagnostics' => ['distinct_dom_assets' => 3],
+                'action_trace' => [$this->openerTrace()],
+            ],
+        );
+
+        $this->assertFalse($result['passed']);
+        $this->assertStringContainsString('nested follow-up', $result['reason']);
+    }
+
+    public function test_a_zoom_selector_that_never_worked_is_still_a_broken_step(): void
+    {
+        // Nothing was ever clicked, so the missing selector is not exhaustion -
+        // it is a step of the plan that does not exist on the page.
+        $result = app(ProductGalleryRecipeResultValidator::class)->validate(
+            $this->zoomingOpenerRecipe(afterEachLimit: 2),
+            [
+                'images' => $this->images(3),
+                'diagnostics' => ['distinct_dom_assets' => 3],
+                'action_trace' => [
+                    $this->openerTrace(),
+                    [
+                        'action' => 'click',
+                        'action_index' => 0,
+                        'parent_repetition' => 0,
+                        'followup_repetition' => 0,
+                        'after_each' => true,
+                        'clicked' => false,
+                        'changed' => false,
+                        'selector_missing' => true,
+                        'selector_match_count' => 0,
+                    ],
+                ],
+            ],
+        );
+
+        $this->assertFalse($result['passed']);
+        $this->assertStringContainsString('nested follow-up', $result['reason']);
+    }
+
+    /** @return array<string, mixed> */
+    private function zoomingOpenerRecipe(int $afterEachLimit): array
+    {
+        return [
+            'gallery_present' => true,
+            'content_confirmed_product' => true,
+            'expected_image_count' => 3,
+            'open_selectors' => ['img.main'],
+            'actions' => [[
+                'kind' => 'click',
+                'selector' => 'img.main',
+                'limit' => 1,
+                'purpose' => 'Open viewer',
+                'after_each_selector' => 'button.zoom',
+                'after_each_limit' => $afterEachLimit,
+            ]],
+        ];
+    }
+
+    /** @return array<string, mixed> */
+    private function openerTrace(): array
+    {
+        return [
+            'action' => 'click',
+            'action_index' => 0,
+            'selector_match_count' => 1,
+            'clicked' => true,
+            'changed' => true,
+            'expanded_gallery_visible_after' => true,
+        ];
+    }
+
+    /** @return array<string, mixed> */
+    private function zoomTrace(int $followupRepetition, bool $changed): array
+    {
+        return [
+            'action' => 'click',
+            'action_index' => 0,
+            'parent_repetition' => 0,
+            'followup_repetition' => $followupRepetition,
+            'after_each' => true,
+            'clicked' => true,
+            'changed' => $changed,
+            'selector_match_count' => 1,
+        ];
+    }
+
     private function images(int $count): array
     {
         return collect(range(1, $count))

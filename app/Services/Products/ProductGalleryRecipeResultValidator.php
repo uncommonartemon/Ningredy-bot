@@ -221,6 +221,14 @@ class ProductGalleryRecipeResultValidator
                     return 'Action plan incomplete at step '.($actionIndex + 1).': gallery viewer did not open.';
                 }
 
+                // The opening click may carry the zoom control too, so the frame
+                // it reveals reaches the same resolution as the ones an arrow
+                // reaches later. One press, so one follow-up sequence is owed.
+                $afterEachError = $this->incompleteAfterEachAction($action, $actionTrace, 1);
+                if ($afterEachError !== null) {
+                    return $afterEachError;
+                }
+
                 continue;
             }
 
@@ -319,7 +327,18 @@ class ProductGalleryRecipeResultValidator
                 && ($item['navigated_away'] ?? false) !== true,
         );
 
-        $exhausted = $followups->contains(
+        // A zoom control that vanishes at maximum magnification has finished its
+        // job, but it was read as an unfinished plan and failed the whole recipe:
+        // the missing-selector entry it leaves carries clicked=false, so it
+        // counted for nothing. It only means exhaustion after the control worked
+        // at least once - a selector that was never there at all is still a
+        // broken step.
+        $disappeared = $followups->isNotEmpty() && $actionTrace->contains(
+            fn (array $item): bool => ($item['after_each'] ?? false) === true
+                && (int) ($item['parent_repetition'] ?? -1) === $repetition
+                && ($item['selector_missing'] ?? false) === true,
+        );
+        $exhausted = $disappeared || $followups->contains(
             fn (array $item): bool => ($item['changed'] ?? null) === false,
         );
 

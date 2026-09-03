@@ -1703,6 +1703,17 @@ try {
                     break;
                 }
 
+                // A multi-element selector is walked one element per repetition,
+                // so a limit larger than the strip only re-presses its last
+                // thumbnail - and the validator, which requires min(limit,
+                // matches) clicks there, never asked for those presses either.
+                // A single control is the opposite shape (one arrow pressed
+                // limit times) and must not be capped: doing that is what lost
+                // every frame past the first.
+                if (currentCount > 1 && repetition >= currentCount) {
+                    break;
+                }
+
                 const targetIndex = action.kind === 'click_each'
                     ? Math.min(action.index + repetition, currentCount - 1)
                     : Math.min(action.index, currentCount - 1);
@@ -1801,7 +1812,7 @@ try {
                 const trace = actionTrace.at(-1) || {};
                 trace.expanded_gallery_visible_after = await expandedGalleryVisible();
 
-                if (clicked && action.kind === 'click_each' && action.after_each_selector) {
+                if (clicked && ['click', 'click_each'].includes(action.kind) && action.after_each_selector) {
                     const followupLocator = page.locator(action.after_each_selector);
                     const followupLimit = Math.max(1, action.after_each_limit || 1);
 
@@ -1872,6 +1883,15 @@ try {
 
                         if (!followupClicked || followupTrace.changed !== true) {
                             break;
+                        }
+
+                        if (followupRepetition === followupLimit - 1) {
+                            // The declared limit ran out while the image was
+                            // still changing, so this page zooms further than
+                            // the recipe asks for. Recorded rather than guessed
+                            // at here: the training agent owns the number and
+                            // can raise it once it can see that it was short.
+                            followupTrace.after_each_truncated = true;
                         }
                     }
                 }

@@ -307,7 +307,13 @@ export const normalizeRecipeActions = (actions) => (Array.isArray(actions) ? act
             wait_after_ms: Math.max(50, Math.min(1500, Number.parseInt(action.wait_after_ms || '250', 10) || 250)),
             purpose: typeof action.purpose === 'string' ? action.purpose.slice(0, 200) : '',
         };
-        const afterEachSelector = action.kind === 'click_each' && safeRecipeSelector(action.after_each_selector)
+        // A plain click carries a follow-up too. The opening click is what puts
+        // the first frame on screen, and with the zoom control attachable only
+        // to the traversal that follows it, that frame stayed at the viewer's
+        // default size while every frame reached by an arrow was enlarged - one
+        // gallery, two resolutions.
+        const afterEachSelector = ['click', 'click_each'].includes(action.kind)
+            && safeRecipeSelector(action.after_each_selector)
             ? action.after_each_selector.trim()
             : null;
 
@@ -348,6 +354,32 @@ export const recipeActionPlanStatus = ({ actions, actionTrace }) => {
         let complete = false;
         let completion = 'not_executed';
 
+        // Whether every declared follow-up actually ran, by the same rule the
+        // server-side validator applies - a control that stopped changing or
+        // disappeared has finished, anything else owes the remaining presses.
+        const afterEachComplete = (presses) => {
+            if (!action.after_each_selector) {
+                return true;
+            }
+
+            const afterEachLimit = Math.max(1, action.after_each_limit || 1);
+
+            for (let repetition = 0; repetition < presses; repetition++) {
+                const ofThisPress = afterEachTraces.filter(
+                    (item) => Number.parseInt(item.parent_repetition, 10) === repetition,
+                );
+                const followups = ofThisPress.filter((item) => item.clicked === true);
+                const exhausted = followups.some((item) => item.changed === false)
+                    || (followups.length > 0 && ofThisPress.some((item) => item.selector_missing === true));
+
+                if (!exhausted && followups.length < afterEachLimit) {
+                    return false;
+                }
+            }
+
+            return true;
+        };
+
         if (action.kind === 'click') {
             const openerWorked = !recipeActionOpensGallery(action)
                 || clicked.some((item) => item.changed === true || item.expanded_gallery_visible_after === true);
@@ -355,26 +387,31 @@ export const recipeActionPlanStatus = ({ actions, actionTrace }) => {
             completion = complete
                 ? 'clicked'
                 : (clicked.length ? 'gallery_did_not_open' : 'not_clicked');
+
+            if (complete && !afterEachComplete(1)) {
+                complete = false;
+                completion = 'after_each_incomplete';
+            }
         } else if (action.kind === 'click_each') {
-            requiredClicks = Math.min(action.limit, Math.max(1, selectorMatches));
-            complete = clicked.length >= requiredClicks;
+            // Same split as the server-side validator: several matched controls
+            // are walked one each and can never need more clicks than they have
+            // elements, while a single control is a next arrow re-pressed limit
+            // times. Capping that one at the match count reported a one-click
+            // traversal as 'all_matches_clicked' - telling the training agent
+            // its plan had worked while the validator was rejecting the very
+            // same run for stopping early.
+            requiredClicks = selectorMatches > 1
+                ? Math.min(action.limit, selectorMatches)
+                : action.limit;
+            const exhausted = selectorMatches <= 1
+                && primaryTraces.some((item) => item.clicked === true && item.changed === false);
+            const presses = exhausted ? clicked.length : requiredClicks;
+            complete = exhausted || clicked.length >= requiredClicks;
             completion = complete ? 'all_matches_clicked' : 'matches_left_unclicked';
 
-            if (complete && action.after_each_selector) {
-                const afterEachLimit = Math.max(1, action.after_each_limit || 1);
-                for (let repetition = 0; repetition < requiredClicks; repetition++) {
-                    const followups = afterEachTraces.filter((item) => Number.parseInt(
-                        item.parent_repetition,
-                        10,
-                    ) === repetition && item.clicked === true);
-                    const exhausted = followups.some((item) => item.changed === false);
-
-                    if (!exhausted && followups.length < afterEachLimit) {
-                        complete = false;
-                        completion = 'after_each_incomplete';
-                        break;
-                    }
-                }
+            if (complete && !afterEachComplete(presses)) {
+                complete = false;
+                completion = 'after_each_incomplete';
             }
         } else if (action.kind === 'click_until_no_change') {
             const exhausted = clicked.some((item) => item.changed === false);
