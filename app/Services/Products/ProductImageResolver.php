@@ -439,7 +439,7 @@ class ProductImageResolver
         }
 
         try {
-            [$response, $finalUrl] = $this->fetch($url, $refererUrl);
+            [$response, $finalUrl] = $this->fetch($url, $refererUrl, asDocument: false);
             $bytes = $response->body();
 
             if ($bytes === '') {
@@ -495,7 +495,48 @@ class ProductImageResolver
     }
 
     /** @return array{Response, string} */
-    private function fetch(string $url, ?string $refererUrl = null): array
+    /**
+     * A bot filter scores the whole header set, not the User-Agent alone. This
+     * request already claimed to be Chrome while sending one hybrid Accept for
+     * both pages and images and none of the Sec-* headers every real Chrome
+     * emits - a combination no browser produces. Sending what the claimed
+     * browser would actually send for this kind of resource removes that
+     * particular tell. It does not defeat a genuine challenge page: once a WAF
+     * has decided to challenge, only a real browser session gets through, which
+     * is what the Playwright path is for.
+     *
+     * @return array<string, string>
+     */
+    private function browserHeaders(bool $asDocument): array
+    {
+        $common = [
+            'User-Agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
+            'Accept-Language' => 'en-US,en;q=0.9',
+            'Sec-Ch-Ua' => '"Not)A;Brand";v="8", "Chromium";v="138", "Google Chrome";v="138"',
+            'Sec-Ch-Ua-Mobile' => '?0',
+            'Sec-Ch-Ua-Platform' => '"Windows"',
+        ];
+
+        return $asDocument
+            ? [
+                ...$common,
+                'Accept' => 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                'Sec-Fetch-Dest' => 'document',
+                'Sec-Fetch-Mode' => 'navigate',
+                'Sec-Fetch-Site' => 'none',
+                'Sec-Fetch-User' => '?1',
+                'Upgrade-Insecure-Requests' => '1',
+            ]
+            : [
+                ...$common,
+                'Accept' => 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+                'Sec-Fetch-Dest' => 'image',
+                'Sec-Fetch-Mode' => 'no-cors',
+                'Sec-Fetch-Site' => 'cross-site',
+            ];
+    }
+
+    private function fetch(string $url, ?string $refererUrl = null, bool $asDocument = true): array
     {
         for ($redirects = 0; $redirects <= 3; $redirects++) {
             if (! $this->isPublicUrl($url)) {
@@ -509,9 +550,7 @@ class ProductImageResolver
             // back to the image's own origin when no page URL is known keeps
             // prior behavior for callers that never had one to pass.
             $response = Http::withHeaders([
-                'User-Agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
-                'Accept' => 'text/html,application/xhtml+xml,image/avif,image/webp,image/*;q=0.8',
-                'Accept-Language' => 'en-US,en;q=0.9',
+                ...$this->browserHeaders($asDocument),
                 'Referer' => $refererUrl !== null && $refererUrl !== '' ? $refererUrl : $this->origin($url).'/',
                 'Cache-Control' => 'no-cache',
             ])->withoutRedirecting()

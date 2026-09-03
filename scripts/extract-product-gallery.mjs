@@ -171,13 +171,19 @@ if (!await publicHttpUrl(sourceUrl)) {
 
 let browser;
 
+let launchedChannel = null;
+
 for (const channel of [process.env.PRODUCT_IMAGE_BROWSER_CHANNEL || 'msedge', 'chrome', null]) {
     try {
         browser = await chromium.launch({
-            headless: true,
+            // Headless is detectable at the browser level regardless of what the
+            // headers claim, so a machine with a display can trade visibility
+            // for reach on WAF-protected sites.
+            headless: process.env.PRODUCT_IMAGE_BROWSER_HEADLESS !== 'false',
             args: ['--disable-blink-features=AutomationControlled'],
             ...(channel ? { channel } : {}),
         });
+        launchedChannel = channel;
         break;
     } catch {
         // Try the next locally available Chromium channel.
@@ -189,11 +195,22 @@ if (!browser) {
     process.exit(3);
 }
 
+// A real Edge/Chrome install already sends a legitimate User-Agent, and its
+// Client Hints (sec-ch-ua, navigator.userAgentData) report the true build. An
+// override claiming a version that install does not have contradicts those
+// hints, which is a stronger bot signal than the honest header would be - the
+// previous default claimed Chrome/Edg 150 while no such build exists. Only the
+// bundled Chromium needs a rewrite, because its own agent says HeadlessChrome.
+const overrideUserAgent = process.env.PRODUCT_IMAGE_BROWSER_USER_AGENT
+    || (launchedChannel === null
+        ? 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36'
+        : null);
 const context = await browser.newContext({
     viewport: { width: 1440, height: 1100 },
     locale: 'en-US',
-    userAgent: process.env.PRODUCT_IMAGE_BROWSER_USER_AGENT
-        || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36 Edg/150.0.0.0',
+    // A locale without a matching timezone is its own small inconsistency.
+    timezoneId: process.env.PRODUCT_IMAGE_BROWSER_TIMEZONE || 'America/New_York',
+    ...(overrideUserAgent ? { userAgent: overrideUserAgent } : {}),
 });
 await context.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
