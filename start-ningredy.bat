@@ -55,6 +55,11 @@ exit /b 0
 
 :run
 
+rem Reaching this line means the lock above was taken, so no other legitimate
+rem instance is running and anything still alive is an orphan of a previous
+rem start - see the script for why they survive a closed window.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\clear-leftover-processes.ps1"
+
 rem Everything still queued belongs to the previous run: this window is the only
 rem way the bot is stopped, so those jobs were killed rather than finished, and
 rem starting fresh workers on them replays yesterday's requests.
