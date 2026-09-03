@@ -47,6 +47,38 @@ class ProductGalleryRecipeRouterTest extends TestCase
         ));
     }
 
+    public function test_a_product_name_written_into_the_path_is_not_a_page_type(): void
+    {
+        $router = app(ProductGalleryRecipeRouter::class);
+
+        // Live case (2026-09-03): this shop already had a working recipe, the
+        // probe ran it without an LLM, and it still paid for a second training
+        // - because the next laptop's name made the path look like a page type
+        // nobody had ever seen.
+        $this->assertSame(
+            $router->pathPatternForUrl('https://shop.example/product/lenovo-legion-pro-7-16iax10h-ai-pc-16-intel-core-ultra-9-275hx-3/8377744'),
+            $router->pathPatternForUrl('https://shop.example/product/predator-helios-neo-16-ai-phn16-73-773d-16-gaming-notebook-wqxg/8500067'),
+        );
+        $this->assertSame('/product/*/*', $router->pathPatternForUrl(
+            'https://shop.example/product/predator-helios-neo-16-ai-phn16-73-773d-16-gaming-notebook-wqxg/8500067',
+        ));
+    }
+
+    public function test_a_short_taxonomy_segment_keeps_its_own_scope(): void
+    {
+        $router = app(ProductGalleryRecipeRouter::class);
+
+        // The bar for "this is a product name" has to stay above the length of
+        // a category node, or two genuinely different layouts share one recipe
+        // and both break. These two are live, working scopes.
+        $this->assertSame('/en-us/shop/dell-laptops/xps-13-laptop/spd/*', $router->pathPatternForUrl(
+            'https://shop.example/en-us/shop/dell-laptops/xps-13-laptop/spd/xps-13-9350',
+        ));
+        $this->assertSame('/gaming-laptops/razer-blade-18/*', $router->pathPatternForUrl(
+            'https://shop.example/gaming-laptops/razer-blade-18/rz09-05299',
+        ));
+    }
+
     public function test_a_readable_path_word_is_not_mistaken_for_an_id(): void
     {
         $router = app(ProductGalleryRecipeRouter::class);

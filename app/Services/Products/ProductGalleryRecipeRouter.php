@@ -237,6 +237,24 @@ class ProductGalleryRecipeRouter
         return preg_match('/^\d{4,}(?:[-_.][A-Za-z0-9]+)*$/', $segment) === 1
             || preg_match('/^(?=[A-Z0-9]*\d)[A-Z0-9]{8,}$/', $segment) === 1
             || preg_match('/^[0-9a-f]{16,}$/i', $segment) === 1
-            || preg_match('/^[0-9a-f]{8}-[0-9a-f-]{27,}$/i', $segment) === 1;
+            || preg_match('/^[0-9a-f]{8}-[0-9a-f-]{27,}$/i', $segment) === 1
+            || $this->looksLikeProductName($segment);
+    }
+
+    /**
+     * Some shops write the product's whole name into the path
+     * ("/product/predator-helios-neo-16-ai-phn16-73-773d-16-gaming-notebook-wqxg/8500067"),
+     * so every laptop looked like a page type nobody had ever seen and paid for
+     * its own training. Measured on the live case: one shop, two products, two
+     * recipes, the second trained minutes after the first.
+     *
+     * The bar is deliberately high - this many words in one segment is a title,
+     * while a taxonomy node is short ("dell-laptops", "gaming-laptops",
+     * "xps-13-laptop"). Collapsing those would merge genuinely different page
+     * layouts onto one recipe, which is what path scoping exists to prevent.
+     */
+    private function looksLikeProductName(string $segment): bool
+    {
+        return mb_strlen($segment) >= 20 && substr_count($segment, '-') >= 3;
     }
 }
