@@ -552,7 +552,7 @@ class ProductImageCandidateDiscovery
             (int) config('product-images.max_images', 10),
         ));
 
-        return collect($urls)
+        $kept = collect($urls)
             ->values()
             ->map(function (string $url, int $index): array {
                 $key = ProductImageStorage::normalizeCandidateUrl($url);
@@ -590,5 +590,53 @@ class ProductImageCandidateDiscovery
             ->pluck('url')
             ->values()
             ->all();
+
+        $this->recordCappedSources($urls, $kept);
+
+        return $kept;
+    }
+
+    /**
+     * A page whose frames do not survive these caps disappears without a word:
+     * the operator is told "recipe published, 12 photos" and then never hears
+     * what became of them, and the database holds no answer either. Seen live
+     * (2026-09-03, draft #88) - one shop's trained gallery was announced and
+     * silently never downloaded, and there was nothing to read afterwards but
+     * the absence of a row. The cap is legitimate; being unable to see it act
+     * is not.
+     *
+     * @param  array<int, string>  $all
+     * @param  array<int, string>  $kept
+     */
+    private function recordCappedSources(array $all, array $kept): void
+    {
+        $pageOf = function (string $url): ?string {
+            $key = ProductImageStorage::normalizeCandidateUrl($url);
+            $page = $this->sourceContextsByImageUrl[$key]['url'] ?? $this->sourcePagesByImageUrl[$key] ?? null;
+
+            return is_string($page) && $page !== '' ? rtrim($page, '/') : null;
+        };
+        $survivors = collect($kept)->map($pageOf)->filter()->unique()->all();
+        $dropped = collect($all)
+            ->map($pageOf)
+            ->filter()
+            ->unique()
+            ->reject(fn (string $page): bool => in_array($page, $survivors, true))
+            ->values();
+
+        foreach ($dropped as $page) {
+            $this->attempts->record([
+                'product_url' => $page,
+                'actor' => 'downloader',
+                'phase' => 'fallback_image_download',
+                'action' => 'select_discovered_candidates',
+                'status' => 'failed',
+                'decision' => 'drop_source_over_candidate_limit',
+                'output' => [
+                    'kept_sources' => count($survivors),
+                    'candidate_limit' => max(1, (int) config('product-images.ai_result_limit', 20)),
+                ],
+            ]);
+        }
     }
 }

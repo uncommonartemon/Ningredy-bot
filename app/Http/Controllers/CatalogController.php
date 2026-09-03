@@ -7,15 +7,17 @@ use App\Models\Brand;
 use App\Models\Category;
 use App\Models\Product;
 use App\Models\ProductVariant;
+use App\Services\Catalog\ProductCardPayload;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
 use Illuminate\Support\Arr;
-use Illuminate\Support\Facades\Storage;
 use Inertia\Inertia;
 use Inertia\Response;
 
 class CatalogController extends Controller
 {
+    public function __construct(private readonly ProductCardPayload $cards) {}
+
     public function __invoke(Request $request): Response
     {
         $filters = $request->validate([
@@ -55,7 +57,7 @@ class CatalogController extends Controller
         $perPage = min((int) ($filters['per_page'] ?? 12), 50);
 
         $products = $query->paginate($perPage)->withQueryString()
-            ->through(fn (Product $product): array => $this->productPayload($product));
+            ->through(fn (Product $product): array => $this->cards->for($product));
 
         return Inertia::render('Catalog/Index', [
             'products' => $products,
@@ -254,38 +256,5 @@ class CatalogController extends Controller
             ]);
 
         return ['key' => $key, 'label' => $label, 'options' => $options];
-    }
-
-    private function productPayload(Product $product): array
-    {
-        $variant = $product->variants->firstWhere('is_default', true) ?: $product->variants->first();
-
-        return [
-            'id' => $product->id,
-            'slug' => $product->slug,
-            'title' => $product->title,
-            'brand' => $product->brand?->name,
-            'model' => $product->model,
-            'type' => $product->product_type,
-            'category' => $product->category ? [
-                'name' => $product->category->name,
-                'slug' => $product->category->slug,
-                'translations' => $product->category->translations->pluck('name', 'locale')->all(),
-            ] : null,
-            'price' => $variant?->price !== null ? (float) $variant->price : null,
-            'compare_at_price' => $variant?->compare_at_price !== null ? (float) $variant->compare_at_price : null,
-            'currency' => $variant?->currency ?: 'CZK',
-            'stock_status' => $variant?->stock_status ?: 'unknown',
-            'image' => $product->catalogMedia?->path && $product->catalogMedia?->disk
-                ? ($product->catalogMedia->disk === 'public'
-                    ? '/storage/'.str_replace('\\', '/', $product->catalogMedia->path)
-                    : Storage::disk($product->catalogMedia->disk)->url($product->catalogMedia->path))
-                : $product->catalogMedia?->url,
-            'attributes' => $variant?->attributes->map(fn (AttributeValue $attribute) => [
-                'key' => $attribute->definition->key,
-                'label' => $attribute->definition->label,
-                'value' => $attribute->value,
-            ])->values() ?? collect(),
-        ];
     }
 }
