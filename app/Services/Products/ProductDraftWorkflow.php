@@ -181,7 +181,7 @@ class ProductDraftWorkflow
         $identifiers = collect($draft->specifications ?? [])
             ->filter(fn (mixed $item): bool => is_array($item))
             ->mapWithKeys(fn (array $item): array => [
-                Str::lower((string) ($item['key'] ?? $item['name'] ?? '')) => trim((string) ($item['value'] ?? '')),
+                Str::lower((string) ($item['key'] ?? $item['name'] ?? '')) => $this->identifierValue((string) ($item['value'] ?? '')),
             ]);
         $specifications = collect($draft->specifications ?? [])
             ->mapWithKeys(fn (mixed $item, mixed $key): array => [
@@ -213,6 +213,26 @@ class ProductDraftWorkflow
         ])->save();
 
         return $variant;
+    }
+
+    /**
+     * Research writes specification values for humans, so an identifier often
+     * arrives with its explanation attached - seen live: "MC7A4LL/A (US retailer
+     * / MFG part number for 15-inch M4 - 16 GB / 256 GB - Sky Blue)". Stored
+     * whole, that value can never equal the same product's plain MC7A4LL/A from
+     * another source, which breaks both duplicate detection and the variant
+     * fingerprint built from these fields below.
+     *
+     * Only separators that prose uses and identifiers do not are cut: a bracket,
+     * a dash with spaces around it, or a comma. A hyphen inside a token is left
+     * alone, because real identifiers are full of them (XPS9350-5342GLD).
+     */
+    private function identifierValue(string $value): string
+    {
+        $normalized = trim(preg_replace('/[\(\[\{].*$/u', '', trim($value)) ?? $value);
+        $normalized = trim((string) preg_split('/\s+[-\x{2010}-\x{2015}]\s+|\s*[,;]\s+/u', $normalized, 2)[0]);
+
+        return $normalized === '' ? trim($value) : mb_substr($normalized, 0, 100);
     }
 
     private function syncAttributes(Product $product, ProductVariant $variant, Category $category, array $specifications): void

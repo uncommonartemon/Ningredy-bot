@@ -13,7 +13,7 @@ class ProductGalleryRecipeResultValidatorTest extends TestCase
     public function test_five_of_thirteen_structurally_observed_frames_is_not_complete(): void
     {
         $result = app(ProductGalleryRecipeResultValidator::class)->validate(
-            ['gallery_present' => true, 'expected_image_count' => 13],
+            ['gallery_present' => true, 'content_confirmed_product' => true, 'expected_image_count' => 13],
             [
                 'images' => $this->images(5),
                 'diagnostics' => ['distinct_dom_assets' => 13],
@@ -28,7 +28,7 @@ class ProductGalleryRecipeResultValidatorTest extends TestCase
     public function test_ten_of_thirteen_structurally_observed_frames_is_complete_at_global_limit(): void
     {
         $result = app(ProductGalleryRecipeResultValidator::class)->validate(
-            ['gallery_present' => true, 'expected_image_count' => 13],
+            ['gallery_present' => true, 'content_confirmed_product' => true, 'expected_image_count' => 13],
             [
                 'images' => $this->images(10),
                 'diagnostics' => ['distinct_dom_assets' => 13],
@@ -43,7 +43,7 @@ class ProductGalleryRecipeResultValidatorTest extends TestCase
     public function test_category_minimum_remains_fallback_when_gallery_size_is_unknown(): void
     {
         $result = app(ProductGalleryRecipeResultValidator::class)->validate(
-            ['gallery_present' => true, 'expected_image_count' => 13],
+            ['gallery_present' => true, 'content_confirmed_product' => true, 'expected_image_count' => 13],
             ['images' => $this->images(3)],
         );
 
@@ -56,6 +56,7 @@ class ProductGalleryRecipeResultValidatorTest extends TestCase
         $result = app(ProductGalleryRecipeResultValidator::class)->validate(
             [
                 'gallery_present' => true,
+                'content_confirmed_product' => true,
                 'expected_image_count' => 16,
                 'open_selectors' => ['button.open'],
                 'actions' => [
@@ -108,6 +109,7 @@ class ProductGalleryRecipeResultValidatorTest extends TestCase
         $result = app(ProductGalleryRecipeResultValidator::class)->validate(
             [
                 'gallery_present' => true,
+                'content_confirmed_product' => true,
                 'expected_image_count' => 16,
                 'open_selectors' => ['button.open'],
                 'actions' => [
@@ -219,6 +221,7 @@ class ProductGalleryRecipeResultValidatorTest extends TestCase
         $result = app(ProductGalleryRecipeResultValidator::class)->validate(
             [
                 'gallery_present' => true,
+                'content_confirmed_product' => true,
                 'expected_image_count' => 3,
                 'open_selectors' => ['button.open'],
                 'actions' => [[
@@ -247,6 +250,7 @@ class ProductGalleryRecipeResultValidatorTest extends TestCase
     {
         $recipe = [
             'gallery_present' => true,
+            'content_confirmed_product' => true,
             'expected_image_count' => 3,
             'actions' => [[
                 'kind' => 'click_until_no_change',
@@ -288,7 +292,7 @@ class ProductGalleryRecipeResultValidatorTest extends TestCase
     public function test_partial_browser_result_cannot_publish_a_recipe_even_with_enough_urls(): void
     {
         $result = app(ProductGalleryRecipeResultValidator::class)->validate(
-            ['gallery_present' => true, 'expected_image_count' => 3],
+            ['gallery_present' => true, 'content_confirmed_product' => true, 'expected_image_count' => 3],
             [
                 'images' => $this->images(3),
                 'failure_kind' => 'browser_crash',
@@ -332,7 +336,7 @@ class ProductGalleryRecipeResultValidatorTest extends TestCase
     public function test_unprobed_urls_cannot_publish_a_recipe(): void
     {
         $result = app(ProductGalleryRecipeResultValidator::class)->validate(
-            ['gallery_present' => true, 'expected_image_count' => 3],
+            ['gallery_present' => true, 'content_confirmed_product' => true, 'expected_image_count' => 3],
             [
                 'images' => $this->images(3),
                 'diagnostics' => ['validated_candidates' => 1],
@@ -347,7 +351,7 @@ class ProductGalleryRecipeResultValidatorTest extends TestCase
     {
         $images = $this->images(3);
         $result = app(ProductGalleryRecipeResultValidator::class)->validate(
-            ['gallery_present' => true, 'expected_image_count' => 3],
+            ['gallery_present' => true, 'content_confirmed_product' => true, 'expected_image_count' => 3],
             [
                 'images' => $images,
                 'diagnostics' => [
@@ -369,7 +373,7 @@ class ProductGalleryRecipeResultValidatorTest extends TestCase
     {
         $images = $this->images(3);
         $result = app(ProductGalleryRecipeResultValidator::class)->validate(
-            ['gallery_present' => true, 'expected_image_count' => 3],
+            ['gallery_present' => true, 'content_confirmed_product' => true, 'expected_image_count' => 3],
             [
                 'images' => $images,
                 'diagnostics' => [
