@@ -29,6 +29,27 @@ class ReuseFirstSourceQueueTest extends TestCase
         $this->assertFalse($queue[3]['_reuse_only']);
     }
 
+    public function test_the_cheap_pass_keeps_the_ranking_order_among_ready_sources(): void
+    {
+        // Queueing only the source that had to move let a weaker third source
+        // overtake an equally ready first one - the opposite of what the
+        // ranking decided. The whole reuse-ready set moves, in its own order.
+        $queue = app(ProductSourcePriority::class)->reuseFirstQueue([
+            $this->source('https://best.test/p/1', activeRecipe: true),
+            $this->source('https://new-shop.test/p/2'),
+            $this->source('https://weaker.test/p/3', activeRecipe: true),
+        ]);
+
+        $this->assertSame([
+            'https://best.test/p/1',
+            'https://weaker.test/p/3',
+            'https://best.test/p/1',
+            'https://new-shop.test/p/2',
+            'https://weaker.test/p/3',
+        ], array_column($queue, 'url'));
+        $this->assertSame([true, true, false, false, false], array_column($queue, '_reuse_only'));
+    }
+
     public function test_a_recipe_on_another_path_of_the_same_domain_also_counts(): void
     {
         // A compatible recipe from the same domain is probed without an LLM,

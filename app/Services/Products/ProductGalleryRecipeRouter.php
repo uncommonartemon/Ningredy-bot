@@ -186,7 +186,7 @@ class ProductGalleryRecipeRouter
      * be earned by more than one blocked path; a single one keeps the block to
      * itself.
      */
-    private const DOMAIN_BLOCK_THRESHOLD = 2;
+    public const DOMAIN_BLOCK_THRESHOLD = 2;
 
     public function domainIsBlocked(string $url): bool
     {

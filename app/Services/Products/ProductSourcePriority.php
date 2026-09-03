@@ -3,6 +3,7 @@
 namespace App\Services\Products;
 
 use App\Models\ProductGalleryRecipe;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Str;
 use Throwable;
 
@@ -49,12 +50,18 @@ class ProductSourcePriority
      * then follows with training allowed, and runs only because that cheap pass
      * found nothing complete.
      *
-     * Reuse-ready sources already ahead of every trainable one are not
-     * duplicated - the ranking tries them first anyway, so a second entry would
-     * buy nothing but a repeated browser run. Neither is a source with nothing
-     * to reuse: the staging loop only accepts a gallery on Playwright-confirmed
-     * frames, so such a source cannot win a no-training pass. A search that may
-     * not train at all (a Vision-first category) walks the list exactly once.
+     * The cheap pass keeps the ranking's own order: it is the whole reuse-ready
+     * set, not only the sources that had to be moved. Queueing just the moved
+     * ones let a weaker third source overtake a better first one that was
+     * equally ready, which is the opposite of what the ranking decided. It is
+     * built at all only when at least one reuse-ready source sits behind a
+     * trainable one - otherwise the ranking already tries them first and a
+     * second entry would buy nothing but a repeated browser run.
+     *
+     * A source with nothing to reuse is never queued twice: the staging loop
+     * only accepts a gallery on Playwright-confirmed frames, so such a source
+     * cannot win a no-training pass. A search that may not train at all (a
+     * Vision-first category) walks the list exactly once.
      *
      * @param  array<int, array<string, mixed>>  $cardSources
      * @return array<int, array<string, mixed>>
@@ -74,9 +81,9 @@ class ProductSourcePriority
             }
         }
 
-        $reuseFirst = $firstTrainable === null
-            ? []
-            : array_filter(array_slice($sources, $firstTrainable + 1), $reusable);
+        $movesSomething = $firstTrainable !== null
+            && array_filter(array_slice($sources, $firstTrainable + 1), $reusable) !== [];
+        $reuseFirst = $movesSomething ? array_filter($sources, $reusable) : [];
 
         return [
             ...array_map(
@@ -130,7 +137,17 @@ class ProductSourcePriority
             ->contains(fn (string $blocked): bool => self::hostsMatch($host, $blocked));
     }
 
-    /** @return array<int, string> */
+    /**
+     * One blocked path is not a blocked domain. The router draws that line at
+     * DOMAIN_BLOCK_THRESHOLD and lets a single blocked path stop only itself -
+     * but this list was built from any single row with source_blocked=true and
+     * removed the whole domain from every ranking, so the source never reached
+     * the staging loop the router would have let through. One shop refusing one
+     * product page took its entire catalogue out of the search. The threshold
+     * now comes from the router, so the two cannot drift apart again.
+     *
+     * @return array<int, string>
+     */
     public function blockedDomains(): array
     {
         if ($this->blockedDomainsCache !== null) {
@@ -140,10 +157,14 @@ class ProductSourcePriority
         try {
             return $this->blockedDomainsCache = ProductGalleryRecipe::query()
                 ->where('source_blocked', true)
-                ->pluck('domain')
-                ->filter(fn (mixed $domain): bool => is_string($domain) && $domain !== '')
-                ->map(fn (string $domain): string => self::host('https://'.$domain))
-                ->unique()->values()->all();
+                ->get(['domain', 'path_pattern'])
+                ->filter(fn (ProductGalleryRecipe $recipe): bool => is_string($recipe->domain) && $recipe->domain !== '')
+                ->groupBy(fn (ProductGalleryRecipe $recipe): string => self::host('https://'.$recipe->domain))
+                // A row scoped to the whole domain says so itself and needs no
+                // second opinion; separate paths have to agree with each other.
+                ->filter(fn (Collection $blocked): bool => $blocked->count() >= ProductGalleryRecipeRouter::DOMAIN_BLOCK_THRESHOLD
+                    || $blocked->contains(fn (ProductGalleryRecipe $recipe): bool => $recipe->path_pattern === '*'))
+                ->keys()->values()->all();
         } catch (Throwable) {
             return $this->blockedDomainsCache = [];
         }

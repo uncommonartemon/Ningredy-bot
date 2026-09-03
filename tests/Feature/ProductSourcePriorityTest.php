@@ -133,6 +133,40 @@ class ProductSourcePriorityTest extends TestCase
         ], $sorted);
     }
 
+    public function test_one_blocked_product_page_does_not_remove_the_whole_shop(): void
+    {
+        // The router lets a single blocked path stop only itself, but this list
+        // was built from any one blocked row and removed the domain from every
+        // ranking - so the source never reached the loop the router would have
+        // allowed, and one refused product page took a whole catalogue out of
+        // the search. A second blocked path is what makes it a domain.
+        ProductGalleryRecipe::query()->create([
+            'domain' => 'shop.example',
+            'path_pattern' => '/p/one-product/*',
+            'status' => 'disabled',
+            'source_blocked' => true,
+            'source_block_reason' => 'Confirmed WAF.',
+        ]);
+
+        $priority = app(ProductSourcePriority::class);
+
+        $this->assertSame(['https://shop.example/p/other-product'], array_column($priority->sortSources([
+            ['url' => 'https://shop.example/p/other-product', 'type' => 'retailer'],
+        ], 'Example'), 'url'));
+
+        ProductGalleryRecipe::query()->create([
+            'domain' => 'shop.example',
+            'path_pattern' => '/p/second-product/*',
+            'status' => 'disabled',
+            'source_blocked' => true,
+            'source_block_reason' => 'Confirmed WAF.',
+        ]);
+
+        $this->assertSame([], app(ProductSourcePriority::class)->sortSources([
+            ['url' => 'https://shop.example/p/other-product', 'type' => 'retailer'],
+        ], 'Example'));
+    }
+
     public function test_globally_blocked_source_is_removed_before_processing(): void
     {
         ProductGalleryRecipe::query()->create([
