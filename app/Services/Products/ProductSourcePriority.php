@@ -36,6 +36,61 @@ class ProductSourcePriority
     }
 
     /**
+     * The order the staging loop actually walks its sources in.
+     *
+     * Training a recipe is by far the most expensive step of a search, and it
+     * used to happen on the first source before any later source was ever asked
+     * whether it already has a working recipe - a draft whose third source was
+     * an already-solved domain still paid for training on the first. A source
+     * that can produce a gallery out of what already exists (its own active
+     * recipe, or a compatible one from the same domain) is therefore pulled in
+     * front of the first source that would have to be trained, marked
+     * _reuse_only so the loop runs it without training; the full ranked list
+     * then follows with training allowed, and runs only because that cheap pass
+     * found nothing complete.
+     *
+     * Reuse-ready sources already ahead of every trainable one are not
+     * duplicated - the ranking tries them first anyway, so a second entry would
+     * buy nothing but a repeated browser run. Neither is a source with nothing
+     * to reuse: the staging loop only accepts a gallery on Playwright-confirmed
+     * frames, so such a source cannot win a no-training pass. A search that may
+     * not train at all (a Vision-first category) walks the list exactly once.
+     *
+     * @param  array<int, array<string, mixed>>  $cardSources
+     * @return array<int, array<string, mixed>>
+     */
+    public function reuseFirstQueue(array $cardSources, bool $trainingDisabled = false): array
+    {
+        $sources = array_values($cardSources);
+        $reusable = fn (array $source): bool => (bool) ($source['_preflight_active_recipe'] ?? false)
+            || (bool) ($source['_preflight_known_recipe_domain'] ?? false);
+        $firstTrainable = null;
+
+        foreach ($sources as $index => $source) {
+            if (! $trainingDisabled && ! $reusable($source)) {
+                $firstTrainable = $index;
+
+                break;
+            }
+        }
+
+        $reuseFirst = $firstTrainable === null
+            ? []
+            : array_filter(array_slice($sources, $firstTrainable + 1), $reusable);
+
+        return [
+            ...array_map(
+                fn (array $source): array => [...$source, '_reuse_only' => true],
+                array_values($reuseFirst),
+            ),
+            ...array_map(
+                fn (array $source): array => [...$source, '_reuse_only' => $trainingDisabled],
+                $sources,
+            ),
+        ];
+    }
+
+    /**
      * $sourcePagesByUrl maps an image URL to the product page it was found on -
      * many manufacturer sites (HP, Dell, ...) host photos on a dedicated CDN
      * subdomain (e.g. hp.widen.net) that is entirely unrelated to the page

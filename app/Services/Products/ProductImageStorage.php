@@ -313,6 +313,19 @@ class ProductImageStorage
         // mechanism further down: the broad AI web search for sources this
         // draft's own research never found at all (discoverCandidates()).
 
+        // Sources whose domain already has a usable recipe are tried before any
+        // training happens - see ProductSourcePriority::reuseFirstQueue() for
+        // why, and for which of them are worth queueing twice.
+        $sourceQueue = collect($this->sourcePriority->reuseFirstQueue($cardSources->all(), $activeRecipeOnly));
+        $reuseFirstCount = $sourceQueue->count() - $cardSources->count();
+
+        if ($reuseFirstCount > 0) {
+            $progress?->__invoke(
+                'Ниже по списку есть карточки с готовыми рецептами ('.$reuseFirstCount
+                    .'): пробую их до обучения новых.',
+            );
+        }
+
         $selected = [];
         $chosenSource = null;
         $chosenMethod = null;
@@ -322,7 +335,7 @@ class ProductImageStorage
         $partialFromDiscovery = false;
         $deferredVisionSets = [];
 
-        foreach ($cardSources as $sourceIndex => $source) {
+        foreach ($sourceQueue as $sourceIndex => $source) {
             // A source is atomic: once its HTML/Playwright/recipe/Vision pass
             // starts, it is allowed to finish. The money limit is checked only
             // here, between sources, so a nearly-trained recipe is never
@@ -352,8 +365,11 @@ class ProductImageStorage
                 break;
             }
 
+            $reuseOnly = (bool) ($source['_reuse_only'] ?? $activeRecipeOnly);
+
             if ($progress) {
-                $progress('Проверяю источник '.($sourceIndex + 1).'/'.$cardSources->count().': '.$source['url']);
+                $progress('Проверяю источник '.($sourceIndex + 1).'/'.$sourceQueue->count()
+                    .($reuseOnly && ! $activeRecipeOnly ? ' (только готовый рецепт)' : '').': '.$source['url']);
             }
 
             $source['_minimum_verified_images'] = $minimumCompleteGallerySize;
@@ -475,7 +491,7 @@ class ProductImageStorage
                         }
                     },
                     $telegramUpdateId,
-                    activeRecipeOnly: $activeRecipeOnly,
+                    activeRecipeOnly: $reuseOnly,
                 );
             } finally {
                 $this->associateAttemptsWithDraftSince($draft, $telegramUpdateId, $attemptCheckpoint);
@@ -646,6 +662,35 @@ class ProductImageStorage
 
                         continue;
                     }
+                }
+
+                // One source can reach this point twice - once in the pass that
+                // may only reuse an existing recipe, once when it is allowed to
+                // train - and two reserve sets of largely the same frames would
+                // have Vision paid twice for a single page. Only the larger set
+                // survives.
+                $previousSetIndex = null;
+
+                foreach ($deferredVisionSets as $index => $set) {
+                    if (($set['source']['url'] ?? null) === ($source['url'] ?? null)) {
+                        $previousSetIndex = $index;
+
+                        break;
+                    }
+                }
+
+                if ($previousSetIndex !== null) {
+                    $previousCandidates = $deferredVisionSets[$previousSetIndex]['candidates'];
+
+                    if (count($previousCandidates) >= count($allCandidates)) {
+                        $this->destroy($allCandidates);
+                        $progress?->__invoke('Этот источник уже лежит в резерве с не меньшим набором кадров; второй набор не сохраняю.');
+
+                        continue;
+                    }
+
+                    $this->destroy($previousCandidates);
+                    array_splice($deferredVisionSets, $previousSetIndex, 1);
                 }
 
                 $deferredVisionSets[] = [
