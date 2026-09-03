@@ -22,12 +22,23 @@ class RecoverStuckDraftGallerySearches extends Command
 
     private const MAX_RECOVERY_ATTEMPTS = 3;
 
+    /**
+     * Recovery is for a search the operator is still waiting on, not for the
+     * archaeology of every draft that ever stalled. Without a ceiling this
+     * picked up drafts from previous days - one surfaced in the middle of an
+     * unrelated live search and read, reasonably enough, as the bot answering
+     * yesterday's question. Anything older than this is the operator's to
+     * resume by hand from the draft's own "continue search" button.
+     */
+    private const ABANDON_AFTER_HOURS = 6;
+
     public function handle(): int
     {
         ProductDraft::query()
             ->where('status', 'pending_review')
             ->whereNull('images_staged_at')
             ->where('created_at', '<=', now()->subMinutes(self::STUCK_AFTER_MINUTES))
+            ->where('created_at', '>', now()->subHours(self::ABANDON_AFTER_HOURS))
             ->with('telegramUpdate')
             ->each(function (ProductDraft $draft): void {
                 $chatId = $draft->telegramUpdate?->chat_id;

@@ -2,8 +2,15 @@
 
 namespace Tests\Unit;
 
+use App\Models\ProductGalleryRecipe;
+use App\Services\Ai\AiSettings;
+use App\Services\Ai\ProductSearchTimeBudget;
+use App\Services\Products\BrowserProductImageTransferStore;
 use App\Services\Products\BrowserProductGalleryExtractor;
+use App\Services\Products\ProductGalleryRecipeResultValidator;
+use App\Services\Products\ProductGalleryRecipeRouter;
 use App\Services\Products\ProductGalleryRecipeTrainer;
+use App\Services\Products\ProductSourceAttemptRecorder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use ReflectionMethod;
 use Tests\TestCase;
@@ -152,6 +159,136 @@ class BrowserProductGalleryExtractorTest extends TestCase
             $recipe['collect_selectors'],
         );
         $this->assertSame(['button.w-16.h-16'], $recipe['thumbnail_selectors']);
+    }
+
+    public function test_compatible_domain_recipe_is_bound_after_strict_success_without_ai_training(): void
+    {
+        $recipeBody = [
+            'gallery_present' => true,
+            'content_confirmed_product' => true,
+            'expected_image_count' => 2,
+            'collect_selectors' => ['.product-gallery img'],
+            'actions' => [],
+        ];
+        $recipe = ProductGalleryRecipe::query()->create([
+            'domain' => 'shop.example',
+            'path_pattern' => '/notebooks/*',
+            'status' => 'active',
+            'success_count' => 4,
+            'recipe' => $recipeBody,
+        ]);
+        $result = [
+            'images' => [
+                'https://cdn.example/product-front.jpg',
+                'https://cdn.example/product-side.jpg',
+            ],
+            'learned_recipe' => [
+                'collect_selectors' => ['.product-gallery img'],
+                'thumbnail_selectors' => [],
+                'actions' => [],
+            ],
+            'diagnostics' => [
+                'validated_candidates' => 2,
+                'observed_gallery_count' => 2,
+            ],
+        ];
+
+        $attempt = $this->invokeCompatibleAttempt(
+            $this->extractorReturning($result),
+            'https://shop.example/components/case-1',
+        );
+
+        $this->assertTrue($attempt['passed']);
+        $this->assertSame($result['images'], $attempt['images']);
+        $this->assertDatabaseCount('product_gallery_recipes', 1);
+        $this->assertSame(5, $recipe->refresh()->success_count);
+        $this->assertSame(['/components/*'], $recipe->compatible_path_patterns);
+        $this->assertTrue($recipe->is(app(ProductGalleryRecipeRouter::class)->activeRecipeForUrl(
+            'https://shop.example/components/case-2',
+        )));
+    }
+
+    public function test_failed_unconfirmed_path_probe_does_not_damage_recipe_health(): void
+    {
+        $recipe = ProductGalleryRecipe::query()->create([
+            'domain' => 'shop.example',
+            'path_pattern' => '/notebooks/*',
+            'status' => 'active',
+            'success_count' => 4,
+            'failure_count' => 2,
+            'recipe' => [
+                'gallery_present' => true,
+                'content_confirmed_product' => true,
+                'expected_image_count' => 2,
+                'collect_selectors' => ['.product-gallery img'],
+                'actions' => [],
+            ],
+        ]);
+        $attempt = $this->invokeCompatibleAttempt(
+            $this->extractorReturning([
+                'images' => ['https://cdn.example/only-one.jpg'],
+                'learned_recipe' => [
+                    'collect_selectors' => [],
+                    'thumbnail_selectors' => [],
+                    'actions' => [],
+                ],
+                'diagnostics' => ['validated_candidates' => 1],
+            ]),
+            'https://shop.example/components/case-1',
+        );
+
+        $this->assertFalse($attempt['passed']);
+        $this->assertSame(4, $recipe->refresh()->success_count);
+        $this->assertSame(2, $recipe->failure_count);
+        $this->assertNull($recipe->compatible_path_patterns);
+    }
+
+    private function extractorReturning(array $result): BrowserProductGalleryExtractor
+    {
+        return new class(
+            app(AiSettings::class),
+            app(ProductSearchTimeBudget::class),
+            app(ProductGalleryRecipeResultValidator::class),
+            app(ProductSourceAttemptRecorder::class),
+            app(BrowserProductImageTransferStore::class),
+            app(ProductGalleryRecipeRouter::class),
+            $result,
+        ) extends BrowserProductGalleryExtractor
+        {
+            public function __construct(
+                AiSettings $settings,
+                ProductSearchTimeBudget $timeBudget,
+                ProductGalleryRecipeResultValidator $resultValidator,
+                ProductSourceAttemptRecorder $attempts,
+                BrowserProductImageTransferStore $transfers,
+                ProductGalleryRecipeRouter $recipeRouter,
+                private readonly array $fakeResult,
+            ) {
+                parent::__construct($settings, $timeBudget, $resultValidator, $attempts, $transfers, $recipeRouter);
+            }
+
+            public function executeRecipe(
+                string $url,
+                array $recipe,
+                int $limit = 20,
+                ?callable $debug = null,
+                ?int $telegramUpdateId = null,
+                array $context = [],
+            ): array {
+                return $this->fakeResult;
+            }
+        };
+    }
+
+    /** @return array{passed: bool, images: array<int, string>} */
+    private function invokeCompatibleAttempt(
+        BrowserProductGalleryExtractor $extractor,
+        string $url,
+    ): array {
+        $method = new ReflectionMethod(BrowserProductGalleryExtractor::class, 'tryCompatibleDomainRecipes');
+        $method->setAccessible(true);
+
+        return $method->invoke($extractor, $url, 10, 2, null, null, null, []);
     }
 
     private function invoke(array $recipe, array $result): bool

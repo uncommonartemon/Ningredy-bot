@@ -197,10 +197,14 @@ class ProcessTelegramMessageTest extends TestCase
         });
         Http::assertSent(fn (HttpRequest $request): bool => str_ends_with($request->url(), '/sendMessage')
             && str_contains((string) ($request['text'] ?? ''), "Итого: черновик #{$draft->id}")
+            // Publishing owns the top row alone; the per-photo verbs live one
+            // level down behind 🖼 Фото, and the irreversible reject sits last,
+            // away from the button next to which it used to be mis-tapped.
             && data_get($request['reply_markup'] ?? [], 'inline_keyboard.0.0.callback_data') === "draft:add:{$draft->id}"
-            && data_get($request['reply_markup'] ?? [], 'inline_keyboard.1.0.callback_data') === "draft:enhance:{$draft->id}"
-            && data_get($request['reply_markup'] ?? [], 'inline_keyboard.1.1.callback_data') === "draft:replace:{$draft->id}"
-            && data_get($request['reply_markup'] ?? [], 'inline_keyboard.2.0.callback_data') === "draft:source:{$draft->id}");
+            && data_get($request['reply_markup'] ?? [], 'inline_keyboard.1.0.callback_data') === "draft:photos:{$draft->id}"
+            && data_get($request['reply_markup'] ?? [], 'inline_keyboard.1.1.callback_data') === "draft:source:{$draft->id}"
+            && collect(data_get($request['reply_markup'] ?? [], 'inline_keyboard', []))->last()[0]['callback_data']
+                === "draft:reject:{$draft->id}");
     }
 
     public function test_a_stale_draft_id_for_an_already_approved_draft_does_not_reshow_it_as_ready(): void

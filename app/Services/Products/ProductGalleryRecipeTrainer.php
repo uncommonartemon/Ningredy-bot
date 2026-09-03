@@ -31,6 +31,7 @@ class ProductGalleryRecipeTrainer
         private readonly ProductGalleryRecipeResultValidator $resultValidator,
         private readonly ProductSourceAttemptRecorder $attempts,
         private readonly ProductSourcePageRules $pageRules,
+        private readonly ProductGalleryRecipeRouter $recipeRouter,
     ) {}
 
     public function train(
@@ -63,7 +64,8 @@ class ProductGalleryRecipeTrainer
             return [];
         }
 
-        $lock = Cache::lock('gallery-recipe-training:'.sha1($host), 360);
+        $pathPattern = $this->recipeRouter->pathPatternForUrl($url);
+        $lock = Cache::lock('gallery-recipe-training:'.sha1($host.'|'.$pathPattern), 360);
 
         if (! $lock->get()) {
             $debug?->__invoke('warning', "AI-тренер {$host} уже запущен другим воркером.");
@@ -75,9 +77,9 @@ class ProductGalleryRecipeTrainer
         $failureRecorded = false;
 
         try {
-            $recipe = ProductGalleryRecipe::query()->firstOrCreate(
-                ['domain' => $host, 'path_pattern' => '*'],
-                ['status' => 'learning'],
+            $recipe = $this->recipeRouter->recipeForTraining(
+                $url,
+                reuseLegacyFallback: $trigger !== 'automatic_failure',
             );
             $domainSettings = ProductSourceDomain::query()->firstOrCreate([
                 'domain' => ProductSourcePriority::host($url),
@@ -315,7 +317,7 @@ class ProductGalleryRecipeTrainer
             $candidateResult = [];
             $candidateImages = [];
             $bestPartialImages = $oldImages;
-            $bestPartialResult = [];
+            $bestPartialResult = $oldImages === [] ? [] : ['images' => $oldImages];
             $promote = false;
             // A single blip in which value the AI guessed is normal
             // correction; the same validation RULE failing repeatedly (a
@@ -354,6 +356,7 @@ class ProductGalleryRecipeTrainer
             $previousCandidateResult = null;
             $previousProgressSignature = null;
             $stagnantRounds = 0;
+            $emptyRounds = 0;
             $stalled = false;
             $stuckOnValidation = false;
             $agentAbandoned = false;
@@ -448,14 +451,20 @@ class ProductGalleryRecipeTrainer
                         ? "AI-тренер: {$model} строит безопасный JSON-рецепт."
                         : "AI-тренер: {$model} исправляет рецепт по DOM и результату предыдущего раунда.",
                 );
-                $run = $telegramUpdateId ? AiRun::query()->create([
+                // Training started from the Filament recipe screen carries no
+                // Telegram update, and ai_runs.telegram_update_id used to be
+                // NOT NULL - so those rounds were skipped here entirely and
+                // operator-triggered retraining cost nothing visible in the
+                // audit trail. The column is nullable now, so every round is
+                // recorded regardless of what triggered it.
+                $run = AiRun::query()->create([
                     'telegram_update_id' => $telegramUpdateId,
                     'provider' => $provider,
                     'model' => $model,
                     'status' => 'running',
                     'prompt' => $prompt ?: '{}',
                     'started_at' => now(),
-                ]) : null;
+                ]);
                 $abandonSignal = new GalleryTrainingAbandonSignal;
 
                 try {
@@ -476,6 +485,7 @@ class ProductGalleryRecipeTrainer
                             domainSettings: $domainSettings,
                             update: $update,
                             abandonSignal: $abandonSignal,
+                            visionImageUrls: $this->observedImageUrls($pageScout, $feedback),
                         )->prompt(
                             $prompt ?: '{}',
                             provider: $provider,
@@ -632,9 +642,25 @@ class ProductGalleryRecipeTrainer
                     $telegramUpdateId,
                 );
                 $candidateImages = $candidateResult['images'] ?? [];
-                if (count($candidateImages) > count($bestPartialImages)) {
-                    $bestPartialImages = $candidateImages;
-                    $bestPartialResult = $candidateResult;
+                // Different valid interaction plans for the same product page
+                // may expose complementary gallery frames. Preserve the union
+                // of URLs actually observed across rounds instead of keeping
+                // only the largest individual round. Downstream verification
+                // still decides which candidates are safe to store.
+                $mergedPartialImages = collect([
+                    ...$bestPartialImages,
+                    ...$candidateImages,
+                ])
+                    ->filter(fn (mixed $image): bool => is_string($image) && $image !== '')
+                    ->unique(fn (string $image): string => ProductImageStorage::imageAssetKey($image))
+                    ->values()
+                    ->all();
+                if (count($mergedPartialImages) > count($bestPartialImages)) {
+                    $bestPartialImages = $mergedPartialImages;
+                    $bestPartialResult = [
+                        ...$candidateResult,
+                        'images' => $bestPartialImages,
+                    ];
                 }
                 $contextMinimum = max(0, (int) ($context['minimum_verified_images'] ?? 0));
                 $validation = $this->resultValidator->validate(
@@ -671,6 +697,27 @@ class ProductGalleryRecipeTrainer
                     $debug?->__invoke(
                         'warning',
                         'AI-тренер три раунда подряд не получил новых фото, нового DOM-состояния или успешного перехода; прекращаю этот URL и перехожу к следующему источнику.',
+                    );
+
+                    break;
+                }
+
+                // Collecting literally nothing is a different failure from
+                // collecting too few: the clicks worked and the DOM moved, yet
+                // no image was reachable by any selector at all. That is what a
+                // canvas-rendered viewer looks like from here, and no amount of
+                // selector correction fixes it - live case 2026-09-03, where
+                // acer.com's Scene7 viewer took seven rounds to produce zero
+                // frames every time. The stagnation rule above cannot catch it
+                // because each round moves the DOM differently, so its progress
+                // signature keeps changing.
+                $emptyRounds = count($candidateImages) === 0 ? $emptyRounds + 1 : 0;
+
+                if ($emptyRounds >= self::MAX_EMPTY_COLLECTION_ROUNDS) {
+                    $stalled = true;
+                    $debug?->__invoke(
+                        'warning',
+                        'AI-тренер: '.$emptyRounds.' раунда подряд не собрали ни одного кадра - на странице, похоже, нет извлекаемых селектором изображений; прекращаю этот URL.',
                     );
 
                     break;
@@ -771,6 +818,13 @@ class ProductGalleryRecipeTrainer
                 'last_error' => null,
                 'last_failure_kind' => null,
                 'retry_after' => null,
+                // Nothing in the codebase used to clear source_blocked, so a
+                // single CAPTCHA left the domain without Playwright forever even
+                // after it demonstrably let the browser back in. A completed,
+                // validated training run is that demonstration.
+                'source_blocked' => false,
+                'source_block_reason' => null,
+                'source_blocked_at' => null,
             ]);
             $debug?->__invoke('done', 'AI-рецепт проверен и опубликован. Фото: '.count($candidateImages).'.');
 
@@ -876,6 +930,43 @@ class ProductGalleryRecipeTrainer
     }
 
     /** @return array<string, mixed> */
+    /**
+     * Keep the Vision tool constrained to URLs the browser already exposed in
+     * the sanitized initial page or the previous post-interaction observation.
+     * Page content may influence the agent, but it cannot turn the tool into an
+     * arbitrary URL fetcher.
+     *
+     * @return array<int, string>
+     */
+    private function observedImageUrls(mixed ...$observations): array
+    {
+        $urls = [];
+        $walk = function (mixed $value) use (&$walk, &$urls): void {
+            if (is_array($value)) {
+                foreach ($value as $child) {
+                    $walk($child);
+                }
+
+                return;
+            }
+
+            if (is_string($value) && filter_var($value, FILTER_VALIDATE_URL) !== false) {
+                $urls[] = $value;
+            }
+        };
+
+        foreach ($observations as $observation) {
+            $walk($observation);
+        }
+
+        return collect($urls)
+            ->map(fn (string $url): string => ProductImageStorage::normalizeCandidateUrl($url))
+            ->unique()
+            ->take(80)
+            ->values()
+            ->all();
+    }
+
     private function preflight(
         string $url,
         array $pageScout,
@@ -1020,6 +1111,16 @@ class ProductGalleryRecipeTrainer
     // stuck loop can consume the whole search's time/cost budget alone.
     private const MAX_IDENTICAL_VALIDATION_FAILURES = 3;
 
+    /**
+     * Rounds that execute their clicks yet collect no image whatsoever. Two
+     * empty rounds followed by a correct one is a real, tested path (a wrong
+     * selector, then the modal's own selector once the viewer DOM is visible),
+     * so the cut has to sit above it. Beyond that the evidence says nothing on
+     * the page is reachable by a selector at all - a canvas-rendered viewer -
+     * and every further round is a paid guess that cannot succeed.
+     */
+    private const MAX_EMPTY_COLLECTION_ROUNDS = 3;
+
     private const DOWNLOAD_FAILURE_KIND = 'download_unreachable';
 
     // A single blip (transient network hiccup) must not force a retrain -
@@ -1049,13 +1150,22 @@ class ProductGalleryRecipeTrainer
      *
      * @return bool True if this call just moved the recipe to "learning".
      */
-    public function recordConfirmedDownloadFailure(string $domain, ?callable $debug = null): bool
+    public function recordConfirmedDownloadFailure(string $domainOrUrl, ?callable $debug = null): bool
     {
-        $recipe = ProductGalleryRecipe::query()->where('domain', $domain)->where('status', 'active')->first();
+        $isUrl = filter_var($domainOrUrl, FILTER_VALIDATE_URL) !== false;
+        $recipe = $isUrl
+            ? $this->recipeRouter->activeRecipeForUrl($domainOrUrl)
+            : ProductGalleryRecipe::query()
+                ->where('domain', strtolower($domainOrUrl))
+                ->where('status', 'active')
+                ->orderByDesc('success_count')
+                ->first();
 
         if (! $recipe) {
             return false;
         }
+
+        $domain = $recipe->domain;
 
         $failedAfterLastSuccess = ! $recipe->last_success_at
             || ! $recipe->last_failure_at
@@ -1109,14 +1219,23 @@ class ProductGalleryRecipeTrainer
      * domain's images are currently reachable, so a prior run of blips
      * shouldn't count toward the failure threshold above.
      */
-    public function recordConfirmedDownloadSuccess(string $domain): void
+    public function recordConfirmedDownloadSuccess(string $domainOrUrl): void
     {
-        ProductGalleryRecipe::query()
-            ->where('domain', $domain)
+        $recipeId = filter_var($domainOrUrl, FILTER_VALIDATE_URL) !== false
+            ? $this->recipeRouter->activeRecipeForUrl($domainOrUrl)?->id
+            : null;
+        $query = ProductGalleryRecipe::query()
             ->where('status', 'active')
             ->where('last_failure_kind', self::DOWNLOAD_FAILURE_KIND)
-            ->where('failure_count', '>', 0)
-            ->update(['failure_count' => 0]);
+            ->where('failure_count', '>', 0);
+
+        if ($recipeId !== null) {
+            $query->whereKey($recipeId);
+        } else {
+            $query->where('domain', strtolower($domainOrUrl));
+        }
+
+        $query->update(['failure_count' => 0]);
     }
 
     /**
@@ -1160,20 +1279,37 @@ class ProductGalleryRecipeTrainer
             $hardBlockCount++;
         }
 
-        $disableAfter = match ($kind) {
-            'access_gate' => 1,
-            'recipe_mismatch', 'dom_unusable', 'agent_abandoned' => 2,
-            'browser_timeout', 'browser_protocol' => 3,
+        // A challenge page looks identical whether the WAF is reacting to this
+        // IP's recent request volume or refusing headless browsers outright, so
+        // the page itself cannot tell the two apart - but the domain's own
+        // history can. Playwright that has already succeeded here proves the
+        // browser is acceptable to this site, which leaves reputation/rate as
+        // the explanation, and that decays on its own. A domain that has never
+        // once let Playwright through gets the original treatment, because
+        // waiting for a fingerprint block to expire never ends.
+        $playwrightWorkedHereBefore = $kind === 'access_gate' && ProductGalleryRecipe::query()
+            ->where('domain', $recipe->domain)
+            ->where('success_count', '>', 0)
+            ->exists();
+
+        $disableAfter = match (true) {
+            $playwrightWorkedHereBefore => 4,
+            $kind === 'access_gate' => 1,
+            in_array($kind, ['recipe_mismatch', 'dom_unusable', 'agent_abandoned'], true) => 2,
+            in_array($kind, ['browser_timeout', 'browser_protocol'], true) => 3,
             default => PHP_INT_MAX,
         };
         $disable = $failureCount >= $disableAfter;
 
-        $retryAfter = $disable ? null : match ($kind) {
-            'rate_limited' => now()->addMinutes(30),
-            'browser_timeout', 'browser_protocol' => now()->addMinutes(min(60, 2 ** min(5, $failureCount))),
-            'browser_unavailable', 'browser_process' => now()->addMinutes(15),
-            'ai_timeout', 'ai_rate_limited' => now()->addMinutes(15),
-            'recipe_mismatch', 'dom_unusable', 'agent_abandoned' => now()->addMinutes(10),
+        $retryAfter = $disable ? null : match (true) {
+            // Backs off far harder than the other kinds: hammering a WAF is how
+            // a soft challenge turns into a real IP ban.
+            $kind === 'access_gate' => now()->addMinutes(min(1440, 30 * (4 ** max(0, $hardBlockCount - 1)))),
+            $kind === 'rate_limited' => now()->addMinutes(30),
+            in_array($kind, ['browser_timeout', 'browser_protocol'], true) => now()->addMinutes(min(60, 2 ** min(5, $failureCount))),
+            in_array($kind, ['browser_unavailable', 'browser_process'], true) => now()->addMinutes(15),
+            in_array($kind, ['ai_timeout', 'ai_rate_limited'], true) => now()->addMinutes(15),
+            in_array($kind, ['recipe_mismatch', 'dom_unusable', 'agent_abandoned'], true) => now()->addMinutes(10),
             default => now()->addMinutes(15),
         };
         $pausePlaywright = in_array($kind, [
@@ -1197,7 +1333,12 @@ class ProductGalleryRecipeTrainer
         $error = $disable
             ? "Playwright отключён: {$disableReason} Обычный HTML-поиск продолжает работать; включить домен снова можно вручную."
             : mb_substr($exception->getMessage(), 0, 4000);
-        $sourceBlock = $kind === 'access_gate' ? [
+        // Blocking the source is the widest decision this method can take - it
+        // takes Playwright away from every path of the domain - so it is now
+        // reserved for the case that actually earns it: a gate we have decided
+        // to stop retrying. While the recipe is merely paused, the domain stays
+        // usable and simply waits out its backoff.
+        $sourceBlock = $kind === 'access_gate' && $disable ? [
             'source_blocked' => true,
             'source_block_reason' => $disableReason,
             'source_blocked_at' => now(),
@@ -1393,6 +1534,9 @@ class ProductGalleryRecipeTrainer
             'actions.*.index' => ['required', 'integer', 'between:0,20'],
             'actions.*.limit' => ['required', 'integer', 'between:1,20'],
             'actions.*.wait_after_ms' => ['required', 'integer', 'between:50,1500'],
+            'actions.*.after_each_selector' => ['nullable', 'string', 'max:300'],
+            'actions.*.after_each_limit' => ['nullable', 'integer', 'between:1,20'],
+            'actions.*.after_each_wait_after_ms' => ['nullable', 'integer', 'between:50,1500'],
             'actions.*.purpose' => ['required', 'string', 'max:200'],
             'pre_click_selectors' => ['present', 'array', 'max:5'],
             'collect_selectors' => ['present', 'array', 'max:12'],

@@ -389,7 +389,7 @@ const galleryStateSelectors = [...new Set([
     ...(strictRecipe ? [] : genericGallerySelectors),
     ...gallerySelectors,
     ...thumbnailSelectors,
-    ...recipeActions.map((action) => action.selector),
+    ...recipeActions.flatMap((action) => [action.selector, action.after_each_selector].filter(Boolean)),
     '[data-type=image][data-image-id]',
     'button[data-type=image]',
     '[class*=thumbnail i] li',
@@ -1625,7 +1625,7 @@ try {
         ...thumbnailSelectors,
         ...openSelectors,
         ...nextSelectors,
-        ...recipeActions.map((action) => action.selector),
+        ...recipeActions.flatMap((action) => [action.selector, action.after_each_selector].filter(Boolean)),
     ])]) {
         selectorCounts[selector] = await page.locator(selector).count().catch(() => 0);
     }
@@ -1667,9 +1667,17 @@ try {
                 continue;
             }
 
-            const repetitions = action.kind === 'click'
-                ? 1
-                : Math.min(action.limit, action.kind === 'click_each' ? matched : action.limit);
+            // limit is how many times the recipe asked for this control to be
+            // pressed, not how many elements the selector happens to match.
+            // Capping it at the match count silently broke every single-element
+            // traversal control: a "next" arrow is one element on virtually any
+            // site, so "advance three frames" executed exactly one click and the
+            // remaining frames were never revealed (observed live on a B&H modal
+            // recipe that declared 4 frames and returned 3). targetIndex below
+            // already clamps to the last available element, so a multi-element
+            // selector still walks its elements while a single control is simply
+            // re-pressed.
+            const repetitions = action.kind === 'click' ? 1 : action.limit;
 
             for (let repetition = 0; repetition < repetitions && !leftProductPage && !outOfTime(); repetition++) {
                 const currentCount = await locator.count().catch(() => 0);
@@ -1776,10 +1784,86 @@ try {
                 const trace = actionTrace.at(-1) || {};
                 trace.expanded_gallery_visible_after = await expandedGalleryVisible();
 
+                if (clicked && action.kind === 'click_each' && action.after_each_selector) {
+                    const followupLocator = page.locator(action.after_each_selector);
+                    const followupLimit = Math.max(1, action.after_each_limit || 1);
+
+                    for (let followupRepetition = 0; followupRepetition < followupLimit && !leftProductPage && !outOfTime(); followupRepetition++) {
+                        const followupCount = await followupLocator.count().catch(() => 0);
+
+                        if (followupCount < 1) {
+                            actionTrace.push({
+                                action: action.kind,
+                                phase: 'ai_action_followup',
+                                selector: action.after_each_selector,
+                                action_index: actionIndex,
+                                parent_repetition: repetition,
+                                followup_repetition: followupRepetition,
+                                purpose: action.purpose,
+                                clicked: false,
+                                changed: false,
+                                selector_missing: true,
+                                selector_match_count: 0,
+                                after_each: true,
+                            });
+                            break;
+                        }
+
+                        const followupTarget = followupLocator.first();
+                        const followupSafety = await followupTarget.evaluate((element) => {
+                            const signal = [
+                                element.id, element.className, element.getAttribute('aria-label'),
+                                element.getAttribute('title'), element.getAttribute('data-selenium'),
+                                element.getAttribute('href'), element.textContent,
+                            ].filter(Boolean).join(' ');
+                            const forbidden = /(buy|add.?to.?cart|checkout|place.?order|account|sign.?in|log.?in|wishlist|share|review|compare|subscribe|submit)/i.test(signal);
+                            const media = element.closest('[class*=gallery i],[class*=media i],[class*=image i],[class*=zoom i],[data-selenium*=media i],[data-selenium*=zoom i]');
+
+                            return { safe: !forbidden && Boolean(media || /zoom|enlarge|magnif|maximi[sz]e/i.test(signal)) };
+                        }).catch(() => ({ safe: false }));
+                        if (followupSafety.safe !== true) {
+                            actionTrace.push({
+                                action: action.kind, phase: 'ai_action_followup',
+                                selector: action.after_each_selector, action_index: actionIndex,
+                                parent_repetition: repetition, followup_repetition: followupRepetition,
+                                clicked: false, changed: false, unsafe_control: true,
+                                selector_match_count: followupCount, after_each: true,
+                            });
+                            break;
+                        }
+                        await followupTarget.scrollIntoViewIfNeeded({ timeout: 700 }).catch(() => {});
+                        const followupClicked = await clickAndWaitForGalleryChange(followupTarget, {
+                            action: action.kind,
+                            phase: 'ai_action_followup',
+                            selector: action.after_each_selector,
+                            index: 0,
+                            action_index: actionIndex,
+                            repetition: followupRepetition,
+                            parent_repetition: repetition,
+                            followup_repetition: followupRepetition,
+                            purpose: action.purpose,
+                            wait_after_ms: action.after_each_wait_after_ms,
+                            selector_match_count: followupCount,
+                            after_each: true,
+                        });
+                        await collect();
+                        const followupTrace = actionTrace.at(-1) || {};
+                        followupTrace.after_each = true;
+                        followupTrace.parent_repetition = repetition;
+                        followupTrace.followup_repetition = followupRepetition;
+                        followupTrace.expanded_gallery_visible_after = await expandedGalleryVisible();
+
+                        if (!followupClicked || followupTrace.changed !== true) {
+                            break;
+                        }
+                    }
+                }
+
                 if (recipeActionShouldStop({
                     kind: action.kind,
                     clicked,
                     changed: trace.changed,
+                    matchCount: currentCount,
                 })) {
                     break;
                 }

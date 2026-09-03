@@ -31,7 +31,7 @@ class RestageDraftGalleryPhotos implements ShouldQueue
     // AiSettings::searchMaxSeconds(), max 1800s). The job's own hard timeout
     // must stay above that ceiling plus overhead, and below the queue
     // worker's --timeout (2160s, see run-queue-worker.bat / the systemd
-    // unit) - PROJECT_LOGIC.md requires all three numbers to move together.
+    // unit) - PROJECT_STRATEGY.md requires all three numbers to move together.
     public int $timeout = 2040;
 
     public function __construct(

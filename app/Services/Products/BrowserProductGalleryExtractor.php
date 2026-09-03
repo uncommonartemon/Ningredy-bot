@@ -2,7 +2,6 @@
 
 namespace App\Services\Products;
 
-use App\Models\ProductGalleryRecipe;
 use App\Services\Ai\AiSettings;
 use App\Services\Ai\ProductSearchTimeBudget;
 use Illuminate\Support\Facades\File;
@@ -14,6 +13,8 @@ use Throwable;
 
 class BrowserProductGalleryExtractor
 {
+    private const MAX_COMPATIBLE_RECIPE_ATTEMPTS = 3;
+
     /** @var array<string, true> */
     private array $confirmedGalleryImages = [];
 
@@ -26,6 +27,7 @@ class BrowserProductGalleryExtractor
         private readonly ProductGalleryRecipeResultValidator $resultValidator,
         private readonly ProductSourceAttemptRecorder $attempts,
         private readonly BrowserProductImageTransferStore $transfers,
+        private readonly ProductGalleryRecipeRouter $recipeRouter,
     ) {}
 
     /**
@@ -52,14 +54,17 @@ class BrowserProductGalleryExtractor
 
         $host = strtolower((string) parse_url($url, PHP_URL_HOST));
         $recipe = null;
+        $domainBlocked = false;
 
         try {
-            $recipe = ProductGalleryRecipe::query()
-                ->where('domain', $host)
-                ->where('path_pattern', '*')
-                ->first();
+            $domainBlocked = $this->recipeRouter->domainIsBlocked($url);
+            $recipe = $this->recipeRouter->recipeForUrl($url);
         } catch (Throwable) {
             // The migration may not have been run yet.
+        }
+
+        if ($domainBlocked) {
+            return [];
         }
 
         if ($recipe?->status === 'disabled') {
@@ -117,7 +122,7 @@ class BrowserProductGalleryExtractor
                 ]);
                 $debug?->__invoke('done', 'Playwright получил фото: '.count($images).'.');
 
-                return $images;
+                return $previousRecipeImages ?? $images;
             }
 
             if ($selectorsMismatched) {
@@ -144,21 +149,52 @@ class BrowserProductGalleryExtractor
                     ? 'Recipe selectors matched nothing on this page (layout mismatch).'
                     : $validation['reason'],
             ]);
+
+            $compatibleAttempt = $this->tryCompatibleDomainRecipes(
+                $url,
+                $limit,
+                $minimumSuccessCount,
+                $recipe->id,
+                $debug,
+                $telegramUpdateId,
+                $context,
+            );
+            if ($compatibleAttempt['passed']) {
+                return $compatibleAttempt['images'];
+            }
+            if (count($compatibleAttempt['images']) > count($previousRecipeImages ?? [])) {
+                $previousRecipeImages = $compatibleAttempt['images'];
+            }
+
             if ($activeRecipeOnly) {
                 $debug?->__invoke(
                     'warning',
                     'Готовый рецепт для '.$host.' не подтвердил полную галерею; в режиме Vision-first не переобучаю его, а передаю найденные кадры в Vision.',
                 );
 
-                return $images;
+                return $previousRecipeImages ?? $images;
             }
 
             $debug?->__invoke('warning', 'Сохранённый рецепт перестал давать галерею; запускаю AI-переобучение.');
         } else {
+            $compatibleAttempt = $this->tryCompatibleDomainRecipes(
+                $url,
+                $limit,
+                $minimumSuccessCount,
+                null,
+                $debug,
+                $telegramUpdateId,
+                $context,
+            );
+            if ($compatibleAttempt['passed']) {
+                return $compatibleAttempt['images'];
+            }
+            $previousRecipeImages = $compatibleAttempt['images'];
+
             if ($activeRecipeOnly) {
                 $debug?->__invoke('step', 'Для '.$host.' нет активного рецепта; режим Vision-first продолжает со статичными фотографиями без обучения Playwright. · '.$url);
 
-                return [];
+                return $previousRecipeImages;
             }
             $debug?->__invoke('step', "Для {$host} ещё нет AI-рецепта; запускаю первичное обучение. · {$url}");
         }
@@ -173,10 +209,8 @@ class BrowserProductGalleryExtractor
             previousRecipeImages: $previousRecipeImages,
         );
 
-        $trainedRecipe = ProductGalleryRecipe::query()
-            ->where('domain', $host)
-            ->where('path_pattern', '*')
-            ->first();
+        $trainedRecipe = $this->recipeRouter->exactRecipeForUrl($url)
+            ?? $this->recipeRouter->recipeForUrl($url);
         $latestVersion = $trainedRecipe?->versions()->latest('id')->first();
 
         if ($latestVersion?->status === 'partial') {
@@ -206,6 +240,87 @@ class BrowserProductGalleryExtractor
         }
 
         return $images;
+    }
+
+    /**
+     * Before paying for AI training, try the most successful active recipes
+     * already known on this domain. A failed hypothesis does not damage that
+     * recipe's health because this path was never one of its confirmed scopes.
+     *
+     * @param  null|callable(string, string): void  $debug
+     * @return array{passed: bool, images: array<int, string>}
+     */
+    private function tryCompatibleDomainRecipes(
+        string $url,
+        int $limit,
+        int $minimumSuccessCount,
+        ?int $excludeRecipeId,
+        ?callable $debug,
+        ?int $telegramUpdateId,
+        array $context,
+    ): array {
+        $bestImages = [];
+        $candidates = $this->recipeRouter->compatibleCandidatesForUrl(
+            $url,
+            $excludeRecipeId,
+            self::MAX_COMPATIBLE_RECIPE_ATTEMPTS,
+        );
+
+        foreach ($candidates as $candidate) {
+            $debug?->__invoke(
+                'step',
+                'Playwright: без LLM проверяю совместимость успешного рецепта домена с новым path.',
+            );
+            $result = $this->executeRecipe(
+                $url,
+                $candidate->recipe ?? [],
+                $limit,
+                $debug,
+                $telegramUpdateId,
+                $context,
+            );
+            $this->recordBrowserResult($url, $result, $telegramUpdateId, 'compatible_recipe_probe');
+            $images = is_array($result['images'] ?? null) ? $result['images'] : [];
+            if (count($images) > count($bestImages)) {
+                $bestImages = $images;
+            }
+
+            $validation = $this->resultValidator->validate(
+                $candidate->recipe ?? [],
+                $result,
+                minimumSuccessCount: $minimumSuccessCount,
+            );
+            $selectorsMismatched = $this->recipeSelectorsMismatchPage(
+                $candidate->recipe ?? [],
+                $result,
+            );
+
+            if (! $validation['passed'] || $selectorsMismatched) {
+                continue;
+            }
+
+            $observedLayoutFingerprint = app(ProductPageLayoutFingerprint::class)->make(
+                is_array($result['scout'] ?? null) ? $result['scout'] : [],
+            );
+            $updates = [
+                'last_success_at' => now(),
+                'last_error' => null,
+            ];
+            if ($observedLayoutFingerprint !== null) {
+                $updates['last_observed_layout_fingerprint'] = $observedLayoutFingerprint;
+            }
+            $candidate->increment('success_count', 1, $updates);
+            $this->recipeRouter->bindCompatiblePath($candidate, $url);
+            $this->rememberConfirmedGalleryImages($images);
+            $debug?->__invoke(
+                'done',
+                'Существующий рецепт домена подтвердился на новом path: '.count($images).' фото. Новый рецепт не создаю.',
+            );
+
+            return ['passed' => true, 'images' => $images];
+        }
+
+        return ['passed' => false, 'images' => $bestImages];
     }
 
     public function isConfirmedGalleryImage(string $url): bool

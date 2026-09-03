@@ -24,6 +24,22 @@ class ProductGalleryRecipeTrainerTest extends TestCase
 {
     use RefreshDatabase;
 
+    public function test_observed_image_urls_accepts_null_before_the_first_feedback_round(): void
+    {
+        $method = new \ReflectionMethod(ProductGalleryRecipeTrainer::class, 'observedImageUrls');
+        $method->setAccessible(true);
+
+        $this->assertSame(
+            ['https://exact.example/first.jpg', 'https://exact.example/second.jpg'],
+            $method->invoke(
+                app(ProductGalleryRecipeTrainer::class),
+                ['https://exact.example/first.jpg'],
+                null,
+                ['https://exact.example/second.jpg'],
+            ),
+        );
+    }
+
     public function test_an_overlong_action_purpose_is_truncated_instead_of_rejecting_the_recipe(): void
     {
         $method = new \ReflectionMethod(ProductGalleryRecipeTrainer::class, 'validateRecipe');
@@ -1081,6 +1097,66 @@ class ProductGalleryRecipeTrainerTest extends TestCase
         $this->assertSame('partial', $version->status);
     }
 
+    public function test_partial_training_accumulates_complementary_gallery_frames_across_rounds(): void
+    {
+        ProductGalleryRecipeTrainerAgent::fake(fn (): array => $this->validRecipeResponse([
+            'expected_image_count' => 5,
+            'expected_count_evidence' => 'Five product gallery frames are expected.',
+        ]))->preventStrayPrompts();
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('scout')->once()->andReturn([
+                'scout' => [
+                    'title' => 'Exact product',
+                    'fragments' => ['<div data-gallery></div>'],
+                    'interactive_controls' => [],
+                    'network_image_samples' => [],
+                    'access_gate' => false,
+                    'rate_limited' => false,
+                ],
+                'diagnostics' => [],
+            ]);
+            $mock->shouldReceive('executeRecipe')->times(3)->andReturn(
+                [
+                    'images' => [
+                        'https://cdn.example/frame-2.jpg',
+                        'https://cdn.example/frame-3.jpg',
+                        'https://cdn.example/frame-4.jpg',
+                    ],
+                    'diagnostics' => ['observed_gallery_count' => 5, 'validated_candidates' => 3],
+                ],
+                [
+                    'images' => [
+                        'https://cdn.example/frame-1.jpg',
+                        'https://cdn.example/frame-2.jpg',
+                    ],
+                    'diagnostics' => ['observed_gallery_count' => 5, 'validated_candidates' => 2],
+                ],
+                [
+                    'images' => [
+                        'https://cdn.example/frame-1.jpg',
+                        'https://cdn.example/frame-2.jpg',
+                    ],
+                    'diagnostics' => ['observed_gallery_count' => 5, 'validated_candidates' => 2],
+                ],
+            );
+        });
+
+        $images = app(ProductGalleryRecipeTrainer::class)->train(
+            'https://shop.example/exact-product',
+            force: true,
+        );
+
+        $this->assertSame([
+            'https://cdn.example/frame-2.jpg',
+            'https://cdn.example/frame-3.jpg',
+            'https://cdn.example/frame-4.jpg',
+            'https://cdn.example/frame-1.jpg',
+        ], $images);
+        $version = ProductGalleryRecipeVersion::query()->where('domain', 'shop.example')->latest('id')->firstOrFail();
+        $this->assertSame('partial', $version->status);
+        $this->assertSame(4, $version->result['best_partial_count']);
+    }
+
     public function test_recipe_is_rejected_when_it_extracts_only_two_of_seven_observed_images(): void
     {
         ProductGalleryRecipeTrainerAgent::fake(fn (): array => [
@@ -1491,6 +1567,55 @@ class ProductGalleryRecipeTrainerTest extends TestCase
         $this->assertSame(1, $recipe->failure_count);
         $this->assertDatabaseMissing('product_source_page_rules', ['domain' => 'unclear.example']);
         $version = $recipe->versions()->latest('id')->firstOrFail();
+        $this->assertSame('page_stalled', $version->result['failure_kind']);
+    }
+
+    public function test_rounds_that_keep_collecting_nothing_stop_even_when_the_dom_keeps_moving(): void
+    {
+        // Live case 2026-09-03: acer.com renders its gallery into a Scene7
+        // canvas, so no selector can ever reach an image. Every round clicked
+        // successfully and moved the DOM differently, which kept the stagnation
+        // signature changing and let the session burn seven paid rounds on a
+        // page that cannot be scraped by selector at all.
+        AppSetting::put('ai.gallery_training_max_rounds', '10');
+        $round = 0;
+        ProductGalleryRecipeTrainerAgent::fake(fn (): array => $this->validRecipeResponse())->preventStrayPrompts();
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock) use (&$round): void {
+            $mock->shouldReceive('scout')->once()->andReturn([
+                'scout' => [
+                    'title' => 'Canvas viewer product page',
+                    'fragments' => ['<div class=viewer><canvas></canvas></div>'],
+                    'interactive_controls' => [],
+                    'network_image_samples' => [],
+                    'access_gate' => false,
+                    'rate_limited' => false,
+                ],
+                'diagnostics' => [],
+            ]);
+            // Never any image, but a different DOM state every time - exactly
+            // what defeats the stagnation rule.
+            $mock->shouldReceive('executeRecipe')->times(3)->andReturnUsing(function () use (&$round): array {
+                $round++;
+
+                return [
+                    'images' => [],
+                    'diagnostics' => ['distinct_dom_assets' => $round],
+                    'action_trace' => [['action' => 'click', 'clicked' => true, 'changed' => true, 'round' => $round]],
+                    'post_interaction_scout' => ['fragments' => ['<canvas data-round="'.$round.'"></canvas>']],
+                ];
+            });
+        });
+
+        $this->assertSame([], app(ProductGalleryRecipeTrainer::class)->train(
+            'https://canvas-viewer.example/product',
+            force: true,
+        ));
+        $version = ProductGalleryRecipe::query()
+            ->where('domain', 'canvas-viewer.example')
+            ->firstOrFail()
+            ->versions()
+            ->latest('id')
+            ->firstOrFail();
         $this->assertSame('page_stalled', $version->result['failure_kind']);
     }
 

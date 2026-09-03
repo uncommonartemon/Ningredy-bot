@@ -274,6 +274,7 @@ class ProductImageStorage
                         '_preflight_blocked' => (bool) ($preflight['blocked'] ?? false),
                         '_preflight_unavailable' => (bool) ($preflight['unavailable'] ?? false),
                         '_preflight_active_recipe' => (bool) ($preflight['active_recipe'] ?? false),
+                        '_preflight_known_recipe_domain' => (bool) ($preflight['known_recipe_domain'] ?? false),
                         // Set on a 401/403/429 or a detected JS/cookie gate:
                         // the cheap HTTP fetch was refused, but a real
                         // headless browser often gets through where it
@@ -297,6 +298,7 @@ class ProductImageStorage
                     $this->identityMatcher->supportsSource($draft, $source) ? 1 : 0,
                     $source['_preflight_is_primary'] ? 1 : 0,
                     $source['_preflight_active_recipe'] ? 1 : 0,
+                    $source['_preflight_known_recipe_domain'] ? 1 : 0,
                     $source['_preflight_browser_probe_required'] ? 1 : 0,
                     count($source['image_urls'] ?? []) >= $minimumCompleteGallerySize ? 1 : 0,
                     -$source['_preflight_index'],
@@ -563,7 +565,11 @@ class ProductImageStorage
             $downloadedCount = count($allCandidates);
 
             if ($allCandidates !== []) {
-                $uniqueCandidates = $this->removeNearDuplicates($allCandidates, $excludedHashes);
+                $uniqueCandidates = $this->removeNearDuplicates(
+                    $allCandidates,
+                    $excludedHashes,
+                    preserveConfirmedGalleryFrames: true,
+                );
                 $this->destroyUnselected($allCandidates, $uniqueCandidates);
                 $allCandidates = array_map(fn (array $candidate): array => [
                     ...$candidate,
@@ -622,7 +628,7 @@ class ProductImageStorage
                     $allCandidates = $verifiedCandidates;
 
                     if ($allCandidates === []) {
-                        $progress?->__invoke('Vision отклонил содержимое слайдера как нетоварное; продолжаю со следующей карточкой.');
+                        $progress?->__invoke('Gallery-агент не подтвердил, что слайдер целиком относится к этому товару; продолжаю со следующей карточкой.');
 
                         continue;
                     }
@@ -652,33 +658,26 @@ class ProductImageStorage
                     'action' => 'verify_gallery',
                     'status' => 'deferred',
                     'decision' => $galleryVerification !== null
-                        ? 'retain_vision_filtered_partial_and_try_next_source'
+                        ? 'reject_unconfirmed_gallery_and_try_next_source'
                         : 'try_next_source_before_vision',
                     'input' => ['downloaded_images' => count($allCandidates)],
                 ]);
                 $progress?->__invoke($galleryVerification !== null
-                    ? 'После пакетной Vision-проверки фото меньше минимума категории; сохраняю частичный набор и продолжаю поиск.'
+                    ? 'Gallery-агент не подтвердил монолитный слайдер; продолжаю поиск без тихого покадрового отбора.'
                     : 'Подтверждённый слайдер не получен; сохраняю набор в резерв и сначала проверяю следующую страницу.');
 
                 continue;
             }
 
-            $verificationMode = $galleryVerification['mode'];
             $selected = $verifiedGallery
                 ->take($target)
                 ->map(fn (array $candidate): array => [
                     ...$candidate,
-                    'verification_status' => $verificationMode === ConfirmedProductGalleryVerifier::MODE_DEDICATED
-                        ? 'source_verified'
-                        : 'verified',
-                    'verification_notes' => $verificationMode === ConfirmedProductGalleryVerifier::MODE_DEDICATED
-                        ? 'Exact product source and dedicated Playwright gallery; one representative Vision check.'
-                        : ($candidate['vision_reason'] ?? 'Ambiguous Playwright carousel accepted by batch Vision review.'),
+                    'verification_status' => 'source_verified',
+                    'verification_notes' => 'Exact product source and coherent complete Playwright gallery confirmed by the gallery agent; Vision is advisory only.',
                 ])
                 ->all();
-            $progress?->__invoke($verificationMode === ConfirmedProductGalleryVerifier::MODE_DEDICATED
-                ? 'Playwright подтвердил выделенную товарную галерею: Vision проверил один кадр, принимаю остальные '.count($selected).' фото.'
-                : 'Playwright нашёл неоднозначный слайдер: Vision пакетно проверил все кадры и принял '.count($selected).' фото.');
+            $progress?->__invoke('Playwright и gallery-агент подтвердили точную монолитную галерею: принимаю все '.count($selected).' фото и прекращаю обход источников.');
             $this->attempts->record([
                 'telegram_update_id' => $telegramUpdateId,
                 'product_draft_id' => $draft->id,
@@ -687,9 +686,7 @@ class ProductImageStorage
                 'phase' => 'image_verification',
                 'action' => 'verify_gallery',
                 'status' => 'completed',
-                'decision' => $verificationMode === ConfirmedProductGalleryVerifier::MODE_DEDICATED
-                    ? 'accept_dedicated_gallery_after_representative_check'
-                    : 'accept_ambiguous_gallery_after_batch_vision',
+                'decision' => 'accept_agent_confirmed_atomic_gallery',
                 'input' => ['downloaded_images' => count($allCandidates)],
                 'output' => [
                     'accepted_images' => count($selected),
@@ -701,9 +698,7 @@ class ProductImageStorage
             $this->destroy($partialSelected);
             $partialSelected = [];
             $chosenSource = [...$source, 'url' => $productPageUrl];
-            $chosenMethod = $verificationMode === ConfirmedProductGalleryVerifier::MODE_DEDICATED
-                ? 'playwright'
-                : 'playwright_vision';
+            $chosenMethod = 'playwright';
             break;
         }
 
@@ -940,26 +935,19 @@ class ProductImageStorage
                         && $confirmedGroup->count() >= $minimumCompleteGallerySize
                         && $groupPageUrl
                     ) {
-                        $verificationMode = $groupGalleryVerification['mode'];
                         $selected = $confirmedGroup
                             ->take($target)
                             ->map(fn (array $candidate): array => [
                                 ...$candidate,
                                 'source_identity_confirmed' => true,
-                                'verification_status' => $verificationMode === ConfirmedProductGalleryVerifier::MODE_DEDICATED
-                                    ? 'source_verified'
-                                    : 'verified',
-                                'verification_notes' => $verificationMode === ConfirmedProductGalleryVerifier::MODE_DEDICATED
-                                    ? 'Exact product source and dedicated Playwright gallery discovered during fallback search.'
-                                    : ($candidate['vision_reason'] ?? 'Ambiguous fallback carousel accepted by batch Vision review.'),
+                                'verification_status' => 'source_verified',
+                                'verification_notes' => 'Exact product source and coherent complete Playwright gallery confirmed by the gallery agent during fallback search.',
                             ])
                             ->all();
                         $this->destroy($partialSelected);
                         $partialSelected = [];
                         $chosenSource = $groupSource;
-                        $chosenMethod = $verificationMode === ConfirmedProductGalleryVerifier::MODE_DEDICATED
-                            ? 'fallback_playwright'
-                            : 'fallback_playwright_vision';
+                        $chosenMethod = 'fallback_playwright';
                         $this->attempts->record([
                             'telegram_update_id' => $telegramUpdateId,
                             'product_draft_id' => $draft->id,
@@ -968,18 +956,14 @@ class ProductImageStorage
                             'phase' => 'image_verification',
                             'action' => 'verify_discovered_gallery',
                             'status' => 'completed',
-                            'decision' => $verificationMode === ConfirmedProductGalleryVerifier::MODE_DEDICATED
-                                ? 'accept_dedicated_gallery_after_representative_check'
-                                : 'accept_ambiguous_gallery_after_batch_vision',
+                            'decision' => 'accept_agent_confirmed_atomic_gallery',
                             'input' => ['downloaded_images' => count($groupCandidates)],
                             'output' => [
                                 'accepted_images' => count($selected),
                                 'accepted_urls' => collect($selected)->pluck('source_url')->values()->all(),
                             ],
                         ]);
-                        $progress?->__invoke($verificationMode === ConfirmedProductGalleryVerifier::MODE_DEDICATED
-                            ? 'Резервный поиск нашёл выделенную Playwright-галерею: один кадр проверен Vision, принимаю '.count($selected).' фото и прекращаю обход источников.'
-                            : 'Резервный поиск нашёл неоднозначный слайдер: Vision пакетно принял '.count($selected).' фото и прекращаю обход источников.');
+                        $progress?->__invoke('Резервный поиск нашёл точную монолитную Playwright-галерею: принимаю все '.count($selected).' фото и прекращаю обход источников.');
 
                         break;
                     }
@@ -1927,6 +1911,13 @@ class ProductImageStorage
         $sourcePagesByUrl = [];
         $sourceContextsByUrl = [];
         $this->lastDownloadRejections = [];
+        // Each request below already has its own connect/read timeout, but a
+        // long run of slow-yet-not-instantly-failing URLs from one source can
+        // still add up past any reasonable budget with no single failure to
+        // point to - observed live on 2026-09-01 (Dell XPS 13 search): a
+        // worker held this loop open for 9+ minutes downloading one source's
+        // confirmed frames. This bounds the whole loop, not one request.
+        $downloadDeadline = microtime(true) + (float) config('product-images.http.download_wall_clock_cap_seconds', 90);
 
         foreach ($urls as $originalUrl) {
             if (! is_string($originalUrl)) {
@@ -1974,11 +1965,32 @@ class ProductImageStorage
             ->pluck('url')
             ->all();
 
+        // download_candidates bounds unverified scraping work; it must never
+        // truncate a gallery that Playwright has already validated as one
+        // atomic slider. This was observable on B&H: training published 11
+        // verified frames, the generic limit downloaded only 10, and the
+        // category minimum of 10 was then missed after downstream dedupe.
+        $confirmedUrlCount = collect($urls)
+            ->filter(fn (string $url): bool => $this->resolver->isConfirmedGalleryImage($url))
+            ->count();
+        $effectiveLimit = max($limit, $confirmedUrlCount);
+
         $confirmedDownloads = 0;
         $confirmedStopThreshold = $this->minimumVerifiedImages($draft);
+        // Every accepted candidate keeps its decoded GdImage alive for the rest
+        // of the loop, and a decoded truecolor bitmap costs about four bytes per
+        // pixel - so isSafeToDecode()'s 20MP per-image ceiling is ~80MB each.
+        // That was survivable while the loop stopped at download_candidates (10),
+        // but a confirmed Playwright gallery deliberately lifts that cap to keep
+        // the slider whole, and an 18-frame gallery then decoded 18 bitmaps at
+        // once and killed the worker outright (observed live 2026-09-02: memory
+        // exhausted at imagecreatefromstring, whole search lost). Budgeting the
+        // retained pixels turns that into a partial gallery instead.
+        $decodedPixelBudget = max(1_000_000, (int) config('product-images.decoded_pixel_budget', 60_000_000));
+        $decodedPixels = 0;
 
         foreach ($urls as $url) {
-            if (count($candidates) >= $limit) {
+            if (count($candidates) >= $effectiveLimit) {
                 break;
             }
 
@@ -1986,6 +1998,12 @@ class ProductImageStorage
                 ! $this->resolver->isConfirmedGalleryImage($url)
                 && $confirmedDownloads >= $confirmedStopThreshold
             ) {
+                break;
+            }
+
+            if (microtime(true) >= $downloadDeadline) {
+                $this->lastDownloadRejections[] = ['url' => $url, 'reason' => 'download_wall_clock_budget_exceeded'];
+
                 break;
             }
 
@@ -2007,6 +2025,7 @@ class ProductImageStorage
                 $download['height'],
                 $requiredWidth,
                 $requiredHeight,
+                allowExtremeAspectRatio: $this->resolver->isConfirmedGalleryImage($url),
             );
 
             if ($dimensionRejection !== null) {
@@ -2037,6 +2056,18 @@ class ProductImageStorage
                 continue;
             }
 
+            $imagePixels = max(1, $download['width'] * $download['height']);
+
+            // The first candidate is always attempted - isSafeToDecode() above
+            // already bounds a single image, and returning nothing at all would
+            // be worse than one big frame. Every later one has to fit the budget
+            // alongside what is already being held.
+            if ($decodedPixels > 0 && $decodedPixels + $imagePixels > $decodedPixelBudget) {
+                $this->lastDownloadRejections[] = ['url' => $url, 'reason' => 'decoded_memory_budget_exceeded'];
+
+                break;
+            }
+
             $image = @imagecreatefromstring($download['bytes']);
 
             if (! $image instanceof GdImage) {
@@ -2044,6 +2075,8 @@ class ProductImageStorage
 
                 continue;
             }
+
+            $decodedPixels += $imagePixels;
 
             $pageContext = $sourceContextsByUrl[$url] ?? null;
             $pageIdentityConfirmed = is_array($pageContext)
@@ -2112,16 +2145,15 @@ class ProductImageStorage
         // - www is kept, unlike ProductSourcePriority::host()) - matching
         // that exact convention here, not a different one, is what makes
         // this lookup actually find the recipe instead of silently no-op.
-        $domainsFor = fn (Collection $urls): Collection => $urls
-            ->map(fn (string $url): string|false => parse_url($sourcePagesByUrl[$url] ?? $url, PHP_URL_HOST))
-            ->filter(fn (mixed $host): bool => is_string($host) && $host !== '')
-            ->map(fn (string $host): string => strtolower($host))
+        $sourcePagesFor = fn (Collection $urls): Collection => $urls
+            ->map(fn (string $url): string => $sourcePagesByUrl[$url] ?? $url)
+            ->filter(fn (string $url): bool => filter_var($url, FILTER_VALIDATE_URL) !== false)
             ->unique();
 
         $confirmedStored = collect($candidates)->contains(fn (array $candidate): bool => (bool) ($candidate['confirmed_gallery'] ?? false));
 
         if ($confirmedStored) {
-            $domainsFor($confirmedUrls)->each(fn (string $domain) => $this->recipeTrainer->recordConfirmedDownloadSuccess($domain));
+            $sourcePagesFor($confirmedUrls)->each(fn (string $sourceUrl) => $this->recipeTrainer->recordConfirmedDownloadSuccess($sourceUrl));
 
             return;
         }
@@ -2137,9 +2169,9 @@ class ProductImageStorage
             return;
         }
 
-        $domainsFor($confirmedUrls)->each(function (string $domain): void {
-            if ($this->recipeTrainer->recordConfirmedDownloadFailure($domain)) {
-                $this->lastDegradedDomains[] = $domain;
+        $sourcePagesFor($confirmedUrls)->each(function (string $sourceUrl): void {
+            if ($this->recipeTrainer->recordConfirmedDownloadFailure($sourceUrl)) {
+                $this->lastDegradedDomains[] = strtolower((string) parse_url($sourceUrl, PHP_URL_HOST));
             }
         });
     }
@@ -2514,16 +2546,26 @@ class ProductImageStorage
      * @param  array<int, array<string, mixed>>  $candidates
      * @return array<int, array<string, mixed>>
      */
-    private function removeNearDuplicates(array $candidates, array $excludedHashes = []): array
-    {
+    private function removeNearDuplicates(
+        array $candidates,
+        array $excludedHashes = [],
+        bool $preserveConfirmedGalleryFrames = false,
+    ): array {
         $threshold = (int) config('product-images.duplicate_hash_threshold', 6);
         $kept = [];
-        $hashes = array_values(array_filter($excludedHashes, fn (mixed $hash): bool => is_string($hash) && $hash !== ''));
+        $excludedHashes = array_values(array_filter($excludedHashes, fn (mixed $hash): bool => is_string($hash) && $hash !== ''));
+        $keptHashes = [];
 
         foreach ($candidates as $candidate) {
             $hash = $this->perceptualHash->hash($candidate['image']);
 
-            foreach ($hashes as $existingHash) {
+            // Explicitly rejected/existing photos always win, including over a
+            // confirmed gallery frame. The exception below applies only to
+            // comparisons between frames of the same Playwright-confirmed
+            // atomic gallery: different laptop angles can be perceptually
+            // close and must not be silently removed after the browser has
+            // already proved that they are separate slider items.
+            foreach ($excludedHashes as $existingHash) {
                 if ($this->perceptualHash->distance($hash, $existingHash) <= $threshold) {
                     Log::info('Near-duplicate product image dropped.', [
                         'source_url' => $candidate['source_url'] ?? null,
@@ -2533,7 +2575,19 @@ class ProductImageStorage
                 }
             }
 
-            $hashes[] = $hash;
+            if (! ($preserveConfirmedGalleryFrames && ($candidate['confirmed_gallery'] ?? false))) {
+                foreach ($keptHashes as $existingHash) {
+                    if ($this->perceptualHash->distance($hash, $existingHash) <= $threshold) {
+                        Log::info('Near-duplicate product image dropped.', [
+                            'source_url' => $candidate['source_url'] ?? null,
+                        ]);
+
+                        continue 2;
+                    }
+                }
+            }
+
+            $keptHashes[] = $hash;
             $kept[] = $candidate;
         }
 
@@ -2746,11 +2800,16 @@ class ProductImageStorage
         int $height,
         int $requiredWidth,
         int $requiredHeight,
+        bool $allowExtremeAspectRatio = false,
     ): ?string {
         if ($width < $requiredWidth || $height < $requiredHeight) {
             return $requiredHeight > 0
                 ? "too_small ({$width}x{$height}; required {$requiredWidth}x{$requiredHeight})"
                 : "too_small ({$width}x{$height}; required width>={$requiredWidth}, height=any)";
+        }
+
+        if ($allowExtremeAspectRatio) {
+            return null;
         }
 
         $ratio = $width / max($height, 1);

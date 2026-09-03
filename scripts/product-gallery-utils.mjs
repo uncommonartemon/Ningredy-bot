@@ -298,14 +298,33 @@ export const normalizeRecipeActions = (actions) => (Array.isArray(actions) ? act
     .filter((action) => action && typeof action === 'object'
         && SAFE_RECIPE_ACTION_KINDS.has(action.kind)
         && safeRecipeSelector(action.selector))
-    .map((action) => ({
-        kind: action.kind,
-        selector: action.selector.trim(),
-        index: Math.max(0, Math.min(20, Number.parseInt(action.index || '0', 10) || 0)),
-        limit: Math.max(1, Math.min(20, Number.parseInt(action.limit || '1', 10) || 1)),
-        wait_after_ms: Math.max(50, Math.min(1500, Number.parseInt(action.wait_after_ms || '250', 10) || 250)),
-        purpose: typeof action.purpose === 'string' ? action.purpose.slice(0, 200) : '',
-    }));
+    .map((action) => {
+        const normalized = {
+            kind: action.kind,
+            selector: action.selector.trim(),
+            index: Math.max(0, Math.min(20, Number.parseInt(action.index || '0', 10) || 0)),
+            limit: Math.max(1, Math.min(20, Number.parseInt(action.limit || '1', 10) || 1)),
+            wait_after_ms: Math.max(50, Math.min(1500, Number.parseInt(action.wait_after_ms || '250', 10) || 250)),
+            purpose: typeof action.purpose === 'string' ? action.purpose.slice(0, 200) : '',
+        };
+        const afterEachSelector = action.kind === 'click_each' && safeRecipeSelector(action.after_each_selector)
+            ? action.after_each_selector.trim()
+            : null;
+
+        if (afterEachSelector) {
+            normalized.after_each_selector = afterEachSelector;
+            normalized.after_each_limit = Math.max(
+                1,
+                Math.min(20, Number.parseInt(action.after_each_limit || '1', 10) || 1),
+            );
+            normalized.after_each_wait_after_ms = Math.max(
+                50,
+                Math.min(1500, Number.parseInt(action.after_each_wait_after_ms || '250', 10) || 250),
+            );
+        }
+
+        return normalized;
+    });
 
 // URL count is deliberately absent from this contract. An AI recipe is a
 // mandatory browser program: every declared step must execute according to
@@ -318,7 +337,9 @@ export const recipeActionPlanStatus = ({ actions, actionTrace }) => {
             && typeof item === 'object'
             && item.action === action.kind
             && Number.parseInt(item.action_index, 10) === actionIndex);
-        const clicked = traces.filter((item) => item.clicked === true);
+        const primaryTraces = traces.filter((item) => item.after_each !== true);
+        const clicked = primaryTraces.filter((item) => item.clicked === true);
+        const afterEachTraces = traces.filter((item) => item.after_each === true);
         const selectorMatches = traces.reduce(
             (maximum, item) => Math.max(maximum, Number.parseInt(item.selector_match_count || '0', 10) || 0),
             0,
@@ -338,6 +359,23 @@ export const recipeActionPlanStatus = ({ actions, actionTrace }) => {
             requiredClicks = Math.min(action.limit, Math.max(1, selectorMatches));
             complete = clicked.length >= requiredClicks;
             completion = complete ? 'all_matches_clicked' : 'matches_left_unclicked';
+
+            if (complete && action.after_each_selector) {
+                const afterEachLimit = Math.max(1, action.after_each_limit || 1);
+                for (let repetition = 0; repetition < requiredClicks; repetition++) {
+                    const followups = afterEachTraces.filter((item) => Number.parseInt(
+                        item.parent_repetition,
+                        10,
+                    ) === repetition && item.clicked === true);
+                    const exhausted = followups.some((item) => item.changed === false);
+
+                    if (!exhausted && followups.length < afterEachLimit) {
+                        complete = false;
+                        completion = 'after_each_incomplete';
+                        break;
+                    }
+                }
+            }
         } else if (action.kind === 'click_until_no_change') {
             const exhausted = clicked.some((item) => item.changed === false);
             complete = exhausted || clicked.length >= action.limit;
@@ -371,10 +409,20 @@ export const recipeActionPlanStatus = ({ actions, actionTrace }) => {
 // A detached or covered thumbnail must not abort traversal of every remaining
 // thumbnail. Its failed click stays in the trace, so validation still rejects
 // an incomplete plan and the next AI round receives exact feedback.
-export const recipeActionShouldStop = ({ kind, clicked, changed }) => {
+//
+// matchCount separates the two shapes a click_each can take. With several
+// matching elements every repetition targets a different one, so an unchanged
+// click says nothing about the next. With exactly one match - the usual shape
+// of a next/prev arrow - every repetition re-presses the very same control, so
+// once it stops responding the remaining repetitions provably cannot help.
+export const recipeActionShouldStop = ({ kind, clicked, changed, matchCount }) => {
     if (!clicked) {
         return kind !== 'click_each';
     }
 
-    return kind === 'click_until_no_change' && changed !== true;
+    if (kind === 'click_until_no_change') {
+        return changed !== true;
+    }
+
+    return kind === 'click_each' && matchCount === 1 && changed !== true;
 };

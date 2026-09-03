@@ -13,15 +13,16 @@ class ConfirmedProductGalleryVerifier
     public const MODE_AMBIGUOUS = 'ambiguous';
 
     public function __construct(
-        private readonly ProductImageVisionVerifier $visionVerifier,
         private readonly ProductSourceAttemptRecorder $attempts,
+        private readonly ProductGalleryRecipeRouter $recipeRouter,
     ) {}
 
     /**
-     * A structurally complete Playwright result is not automatically a product
-     * gallery. A dedicated media viewer/strong gallery counter needs one
-     * representative pixel check per recipe version; an ambiguous carousel is
-     * reviewed as one permissive Vision batch for the concrete product.
+     * Pixel inspection is advisory evidence used by the recipe-training agent,
+     * not a second autonomous frame selector. Once the exact source, coherent
+     * product content and complete Playwright traversal have been established,
+     * keep the gallery atomic. An uncertain/negative agent decision returns no
+     * trusted gallery and lets the caller continue with another source.
      *
      * @param  Collection<int, array<string, mixed>>  $candidates
      * @return array{mode: string, candidates: Collection<int, array<string, mixed>>, cached: bool}
@@ -39,156 +40,35 @@ class ConfirmedProductGalleryVerifier
 
         $recipe = $this->recipeFor($productPageUrl);
         $mode = $this->mode($recipe, $minimumImages);
+        $recipeData = is_array($recipe?->recipe) ? $recipe->recipe : [];
+        $contentConfirmed = ($recipeData['content_confirmed_product'] ?? false) === true;
 
-        if ($mode === self::MODE_DEDICATED) {
-            return $this->verifyDedicated(
-                $recipe,
-                $productPageUrl,
-                $candidates,
-                $draft,
-                $telegramUpdateId,
-            );
-        }
+        // Compatibility for a recipe already pixel-checked before Vision was
+        // demoted to an advisory agent tool. No new standalone Vision verdict
+        // is created or consulted here.
+        $legacyVisionConfirmed = ($recipeData['content_verified_by_vision'] ?? false) === true;
+        $accepted = $contentConfirmed || $legacyVisionConfirmed;
 
-        return $this->verifyAmbiguous(
-            $recipe,
-            $productPageUrl,
-            $candidates,
-            $draft,
-            $telegramUpdateId,
-        );
-    }
-
-    /** @return array{mode: string, candidates: Collection<int, array<string, mixed>>, cached: bool} */
-    private function verifyDedicated(
-        ?ProductGalleryRecipe $recipe,
-        string $productPageUrl,
-        Collection $candidates,
-        ProductDraft $draft,
-        ?int $telegramUpdateId,
-    ): array {
-        $verified = $recipe?->recipe['content_verified_by_vision'] ?? null;
-
-        if (is_bool($verified)) {
-            return [
-                'mode' => self::MODE_DEDICATED,
-                'candidates' => $verified ? $candidates : collect(),
-                'cached' => true,
-            ];
-        }
-
-        $representative = $candidates->first();
-        $approved = $this->visionVerifier->select($draft, [$representative], 1, $telegramUpdateId);
-        $passed = $approved !== [];
-        $this->updateRecipe($recipe, function (array $data) use ($passed): array {
-            $data['gallery_verification_mode'] = self::MODE_DEDICATED;
-            $data['content_verified_by_vision'] = $passed;
-
-            return $data;
-        });
         $this->record(
             $draft,
             $telegramUpdateId,
             $productPageUrl,
-            'spot_check_dedicated_gallery',
-            $passed ? 'content_confirmed' : 'content_rejected',
-            1,
-            $passed ? $candidates->count() : 0,
-            false,
+            $accepted ? 'accept_agent_confirmed_gallery' : 'reject_unconfirmed_gallery_content',
+            $accepted ? 'content_confirmed' : 'content_uncertain',
+            $candidates->count(),
+            $accepted ? $candidates->count() : 0,
         );
-
-        if (! $passed) {
-            // A dedicated gallery may still start on a non-product poster or
-            // another harmless extra frame. Do not poison the whole recipe
-            // forever from that one unlucky representative: fall back to the
-            // same all-frame review used for ambiguous carousels.
-            return $this->verifyAmbiguous(
-                $recipe,
-                $productPageUrl,
-                $candidates,
-                $draft,
-                $telegramUpdateId,
-            );
-        }
 
         return [
-            'mode' => self::MODE_DEDICATED,
-            'candidates' => $candidates,
-            'cached' => false,
+            'mode' => $mode,
+            'candidates' => $accepted ? $candidates : collect(),
+            'cached' => true,
         ];
-    }
-
-    /** @return array{mode: string, candidates: Collection<int, array<string, mixed>>, cached: bool} */
-    private function verifyAmbiguous(
-        ?ProductGalleryRecipe $recipe,
-        string $productPageUrl,
-        Collection $candidates,
-        ProductDraft $draft,
-        ?int $telegramUpdateId,
-    ): array {
-        $signature = $this->batchSignature($draft, $candidates);
-        $cache = is_array($recipe?->recipe['gallery_batch_verifications'] ?? null)
-            ? $recipe->recipe['gallery_batch_verifications']
-            : [];
-        $cached = is_array($cache[$signature] ?? null) ? $cache[$signature] : null;
-
-        if ($cached !== null && is_array($cached['accepted_asset_keys'] ?? null)) {
-            $acceptedKeys = array_fill_keys($cached['accepted_asset_keys'], true);
-            $accepted = $candidates
-                ->filter(fn (array $candidate): bool => isset($acceptedKeys[$this->assetKey($candidate)]))
-                ->values();
-
-            return ['mode' => self::MODE_AMBIGUOUS, 'candidates' => $accepted, 'cached' => true];
-        }
-
-        $accepted = collect($this->visionVerifier->selectGalleryFrames(
-            $draft,
-            $candidates->all(),
-            $candidates->count(),
-            $telegramUpdateId,
-        ))->values();
-        $acceptedAssetKeys = $accepted
-            ->map(fn (array $candidate): string => $this->assetKey($candidate))
-            ->unique()
-            ->values()
-            ->all();
-
-        $this->updateRecipe($recipe, function (array $data) use ($signature, $acceptedAssetKeys): array {
-            unset($data['content_verified_by_vision']);
-            $data['gallery_verification_mode'] = self::MODE_AMBIGUOUS;
-            $entries = is_array($data['gallery_batch_verifications'] ?? null)
-                ? $data['gallery_batch_verifications']
-                : [];
-            $entries[$signature] = [
-                'accepted_asset_keys' => $acceptedAssetKeys,
-                'checked_at' => now()->toIso8601String(),
-            ];
-            $data['gallery_batch_verifications'] = array_slice($entries, -20, null, true);
-
-            return $data;
-        });
-        $this->record(
-            $draft,
-            $telegramUpdateId,
-            $productPageUrl,
-            'batch_check_ambiguous_gallery',
-            $accepted->isNotEmpty() ? 'content_filtered' : 'content_rejected',
-            $candidates->count(),
-            $accepted->count(),
-            false,
-        );
-
-        return ['mode' => self::MODE_AMBIGUOUS, 'candidates' => $accepted, 'cached' => false];
     }
 
     private function recipeFor(string $productPageUrl): ?ProductGalleryRecipe
     {
-        $host = strtolower((string) parse_url($productPageUrl, PHP_URL_HOST));
-
-        return ProductGalleryRecipe::query()
-            ->where('domain', $host)
-            ->where('path_pattern', '*')
-            ->first();
+        return $this->recipeRouter->recipeForUrl($productPageUrl);
     }
 
     private function mode(?ProductGalleryRecipe $recipe, int $minimumImages): string
@@ -221,45 +101,15 @@ class ConfirmedProductGalleryVerifier
             ? self::MODE_DEDICATED
             : self::MODE_AMBIGUOUS;
 
-        $this->updateRecipe($recipe, function (array $data) use ($mode): array {
+        if ($recipe) {
+            $recipe->refresh();
+            $data = is_array($recipe->recipe) ? $recipe->recipe : [];
             $data['gallery_verification_mode'] = $mode;
-
-            if ($mode === self::MODE_AMBIGUOUS) {
-                unset($data['content_verified_by_vision']);
-            }
-
-            return $data;
-        });
-
-        return $mode;
-    }
-
-    /** @param Collection<int, array<string, mixed>> $candidates */
-    private function batchSignature(ProductDraft $draft, Collection $candidates): string
-    {
-        $assets = $candidates->map(fn (array $candidate): string => $this->assetKey($candidate))->sort()->values()->all();
-
-        return hash('sha256', json_encode([
-            'identity' => [$draft->brand, $draft->model, $draft->color],
-            'assets' => $assets,
-        ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
-    }
-
-    /** @param array<string, mixed> $candidate */
-    private function assetKey(array $candidate): string
-    {
-        return ProductImageStorage::imageAssetKey((string) ($candidate['source_url'] ?? ''));
-    }
-
-    /** @param callable(array<string, mixed>): array<string, mixed> $mutator */
-    private function updateRecipe(?ProductGalleryRecipe $recipe, callable $mutator): void
-    {
-        if (! $recipe) {
-            return;
+            unset($data['gallery_batch_verifications']);
+            $recipe->update(['recipe' => $data]);
         }
 
-        $recipe->refresh();
-        $recipe->update(['recipe' => $mutator(is_array($recipe->recipe) ? $recipe->recipe : [])]);
+        return $mode;
     }
 
     private function record(
@@ -270,18 +120,17 @@ class ConfirmedProductGalleryVerifier
         string $decision,
         int $reviewed,
         int $accepted,
-        bool $cached,
     ): void {
         $this->attempts->record([
             'telegram_update_id' => $telegramUpdateId,
             'product_draft_id' => $draft->id,
             'product_url' => $productPageUrl,
-            'actor' => 'vision',
+            'actor' => 'gallery_agent',
             'phase' => 'image_verification',
             'action' => $action,
             'status' => 'completed',
             'decision' => $decision,
-            'input' => ['reviewed_images' => $reviewed, 'cached' => $cached],
+            'input' => ['gallery_images' => $reviewed],
             'output' => ['accepted_images' => $accepted],
         ]);
     }

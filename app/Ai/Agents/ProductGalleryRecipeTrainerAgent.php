@@ -8,6 +8,7 @@ use App\Ai\Tools\GetCandidateRejectionDetail;
 use App\Ai\Tools\GetProductSearchIntent;
 use App\Ai\Tools\GetRecipeHealth;
 use App\Ai\Tools\GetSourceAttemptHistory;
+use App\Ai\Tools\InspectGalleryImages;
 use App\Models\ProductGalleryRecipe;
 use App\Models\ProductGalleryRecipeVersion;
 use App\Models\ProductSourceDomain;
@@ -50,6 +51,8 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
         private readonly ?ProductSourceDomain $domainSettings = null,
         private readonly ?TelegramUpdate $update = null,
         private readonly ?GalleryTrainingAbandonSignal $abandonSignal = null,
+        /** @var array<int, string> */
+        private readonly array $visionImageUrls = [],
     ) {}
 
     public function tools(): iterable
@@ -74,6 +77,10 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
             new GetRecipeHealth($this->domain),
             new GetProductSearchIntent($this->telegramUpdateId, $this->categorySlug),
         ];
+
+        if ($this->visionImageUrls !== []) {
+            $tools[] = new InspectGalleryImages($this->visionImageUrls, $this->telegramUpdateId);
+        }
 
         if (app(AiSettings::class)->galleryAgentWriteToolsEnabled()) {
             if ($this->version !== null && $this->recipe !== null && $this->abandonSignal !== null) {
@@ -140,7 +147,17 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
             GetRecipeHealth (this domain's own failure/retrain history, including whether it is already close
             to being disabled), and GetProductSearchIntent (the operator's original Telegram request text and
             this category's own search hint, when the DOM evidence alone is ambiguous about which variant,
-            color or configuration is wanted). Call one only when you are genuinely unsure why a previous
+            color or configuration is wanted), and InspectGalleryImages when pixels are needed to understand
+            whether observed image URLs belong to one product gallery or contain prominent non-English/non-Czech
+            text. Vision is advisory evidence for you: it never chooses or removes frames, never proves an exact
+            SKU from a visually shared chassis, and never invents selectors. Use page URL/title/SKU/specification
+            evidence for exact identity and DOM/action/count evidence for gallery membership and completeness.
+            Call the visual tool on representative observed URLs, and on further batches when the first batch is
+            uncertain or does not cover a visibly different frame type. Effects, lifestyle backgrounds, side/rear
+            views, closed products and details remain valid when the product is meaningfully visible. A failed or
+            uncertain Vision call must keep content_confirmed_product=false until other positive evidence resolves
+            the ambiguity; it must never silently discard an image or end the whole source search.
+            Call one only when you are genuinely unsure why a previous
             round failed or what is actually wanted; do not call them speculatively every round.
 
             You may also have two tools that take a real, audited action instead of only reading:
@@ -246,6 +263,17 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
             - click_each: click consecutive matched elements starting at index, up to limit;
             - click_until_no_change: click the same matched element up to limit and stop when DOM/network
               gallery state no longer changes.
+            Numeric fields have hard accepted ranges and a value outside them throws the whole recipe away
+            for that round, however good its selectors are: index 0-20, limit 1-20, wait_after_ms and
+            after_each_wait_after_ms 50-1500, after_each_limit 1-20, max_thumbnail_clicks 0-20,
+            max_next_clicks 0-15, wait_after_click_ms 50-1000. A page that needs a longer settle than 1500ms
+            must be handled with an extra action or a click_until_no_change, never by exceeding the bound.
+            Every action must also return after_each_selector, after_each_limit and after_each_wait_after_ms.
+            Set all three to null normally. When selecting each thumbnail resets a nested zoom/enlargement state,
+            put that already-observed zoom control in after_each_selector on the click_each action. The runner will
+            click it after every selected thumbnail, up to after_each_limit and stopping early on no change, while
+            collecting after every click. This is the compact replayable form of: thumbnail 1 -> zoom -> collect,
+            thumbnail 2 -> zoom -> collect, and so on. Never invent the follow-up selector from a hint alone.
             Copy a stable supplied selector when possible. Use purpose to state the expected state transition.
             The runner collects image URLs after every action and returns an exact action trace. If actions is
             non-empty, it replaces the legacy pre-click/thumbnail/open/next click order. The legacy selector
@@ -287,8 +315,19 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
               to another priced $Y for SKU-B, same model name on both. Different prices or different SKU
               codes on sibling cards mean the images belong to different configurations being
               compared, not different views of one product, even when the model name text is identical.
+            - Spare part sold for the product: a replacement screen assembly, palmrest, battery, keyboard,
+              motherboard or cable. This case defeats model matching by design - the page legitimately
+              carries the exact model name and a genuine part number, and its photos really are a coherent
+              set of views of one object - so neither the model text nor slider coherence can catch it.
+              What gives it away is what the object is: a bare component with connectors, ribbon cables,
+              antenna wires, screw holes or mounting brackets exposed, photographed against a plain
+              backdrop, with surrounding text about replacement, installation, compatibility or "fits
+              models...". The requested unit is the finished product a customer receives, never a
+              component sold to repair it, so set content_confirmed_product=false here.
             When no such evidence exists either way, or it is ambiguous, set it to false rather than
-            assuming. This is independent of confidence, which is about whether the recipe will technically
+            assuming. When markup cannot establish what visually different frames contain, use
+            InspectGalleryImages on URLs already present in the supplied evidence before deciding. This is
+            independent of confidence, which is about whether the recipe will technically
             execute - content_confirmed_product is about whether the images are the product being sold.
             PROMPT;
     }
@@ -305,6 +344,9 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
             'index' => $schema->integer()->min(0)->max(20)->required(),
             'limit' => $schema->integer()->min(1)->max(20)->required(),
             'wait_after_ms' => $schema->integer()->min(50)->max(1500)->required(),
+            'after_each_selector' => $schema->string()->max(300)->nullable()->required(),
+            'after_each_limit' => $schema->integer()->min(1)->max(20)->nullable()->required(),
+            'after_each_wait_after_ms' => $schema->integer()->min(50)->max(1500)->nullable()->required(),
             'purpose' => $schema->string()->max(200)->required(),
         ])->withoutAdditionalProperties())->required();
 

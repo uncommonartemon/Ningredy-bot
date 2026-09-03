@@ -290,6 +290,17 @@ class TelegramWebhookController extends Controller
             return;
         }
 
+        if (preg_match('/^draft:photos:(\d+)$/', $data, $photoMenuMatches) === 1) {
+            $this->handleDraftPhotoMenu(
+                draftId: (int) $photoMenuMatches[1],
+                callbackId: $callbackId,
+                chatId: $chatId,
+                update: $update,
+            );
+
+            return;
+        }
+
         if (preg_match('/^draft:source:(\d+)$/', $data, $sourceMenuMatches) === 1) {
             $this->handleDraftSourceMenu(
                 draftId: (int) $sourceMenuMatches[1],
@@ -697,6 +708,26 @@ class TelegramWebhookController extends Controller
         } catch (Throwable $exception) {
             report($exception);
         }
+    }
+
+    private function handleDraftPhotoMenu(
+        int $draftId,
+        string $callbackId,
+        string $chatId,
+        TelegramUpdate $update,
+    ): void {
+        $draft = ProductDraft::query()->find($draftId);
+
+        if (! $draft || $draft->status !== 'pending_review') {
+            $this->telegram->answerCallbackQuery($callbackId, 'Черновик не найден или уже обработан.');
+            $update->update(['status' => 'not_found', 'processed_at' => now()]);
+
+            return;
+        }
+
+        $this->telegram->answerCallbackQuery($callbackId, 'Выберите действие с фотографиями.');
+        $this->draftPresenter->sendPhotoMenu($this->telegram, $chatId, $draft);
+        $update->update(['status' => 'completed', 'processed_at' => now()]);
     }
 
     private function handleDraftSourceMenu(

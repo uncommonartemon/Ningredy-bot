@@ -78,6 +78,30 @@ class ProductImagePreflightTest extends TestCase
         $this->assertSame(['https://93.184.216.34/images/full.webp'], $result['static_image_urls']);
     }
 
+    public function test_recipe_on_another_path_is_only_a_known_domain_signal(): void
+    {
+        ProductGalleryRecipe::query()->create([
+            'domain' => '93.184.216.34',
+            'path_pattern' => '/notebooks/*',
+            'status' => 'active',
+            'recipe' => [],
+        ]);
+        Http::fake([
+            'https://93.184.216.34/components/case-1312' => Http::response(
+                '<html><body><h1>PC case</h1></body></html>',
+                200,
+                ['Content-Type' => 'text/html'],
+            ),
+        ]);
+
+        $result = app(ProductImageResolver::class)->preflightSource([
+            'url' => 'https://93.184.216.34/components/case-1312',
+        ]);
+
+        $this->assertFalse($result['active_recipe']);
+        $this->assertTrue($result['known_recipe_domain']);
+    }
+
     public function test_preflight_returns_identity_from_the_actual_page_html(): void
     {
         Http::fake([

@@ -2,6 +2,7 @@
 
 namespace App\Services\Telegram;
 
+use App\Models\Category;
 use App\Models\ProductDraft;
 use App\Services\Ai\AiSettings;
 use App\Services\Products\ProductSourcePriority;
@@ -149,14 +150,14 @@ class DraftTelegramPresenter
             ]];
         }
 
+        // The publishing action gets its own row: it used to sit shoulder to
+        // shoulder with the irreversible "Отменить", which is the one mis-tap
+        // on this card that costs a whole search.
         $rows = [
+            [['text' => '✅ Добавить в каталог', 'callback_data' => "draft:add:{$draft->id}"]],
             [
-                ['text' => '✅ Добавить', 'callback_data' => "draft:add:{$draft->id}"],
-                ['text' => '✖ Отменить', 'callback_data' => "draft:reject:{$draft->id}"],
-            ],
-            [
-                ['text' => '✨ Улучшить', 'callback_data' => "draft:enhance:{$draft->id}"],
-                ['text' => '🔄 Заменить', 'callback_data' => "draft:replace:{$draft->id}"],
+                ['text' => '🖼 Фото', 'callback_data' => "draft:photos:{$draft->id}"],
+                ['text' => '🔗 Источник', 'callback_data' => "draft:source:{$draft->id}"],
             ],
         ];
 
@@ -168,20 +169,74 @@ class DraftTelegramPresenter
                 'text' => $label,
                 'callback_data' => "draft:continue-search:{$draft->id}",
             ]];
-        } elseif ($draft->media()->count() <= 2) {
+        } elseif ($mediaCount <= 2) {
             $rows[] = [
                 ['text' => '🔍 Найти ещё доп. фото', 'callback_data' => "draft:findmore:{$draft->id}"],
             ];
         }
 
+        // Retraining is buried under "Источник" for a normal card, because a
+        // working gallery needs no explanation. When the result itself says the
+        // extraction fell short, the operator's hint is the single most useful
+        // thing they can give, so it stops being a two-tap discovery problem.
+        if ($this->galleryFellShort($draft, $mediaCount)) {
+            $rows[] = [[
+                'text' => '🧠 Переобучить с подсказкой',
+                'callback_data' => "draft:source-hint:{$draft->id}",
+            ]];
+        }
+
         $rows[] = [
-            ['text' => '🔗 Источник', 'callback_data' => "draft:source:{$draft->id}"],
-        ];
-        $rows[] = [
-            ['text' => '🗑 Удалить фото', 'callback_data' => "draft:delete:{$draft->id}"],
+            ['text' => '✖ Отменить черновик', 'callback_data' => "draft:reject:{$draft->id}"],
         ];
 
         return ['inline_keyboard' => $rows];
+    }
+
+    /**
+     * "Fell short" is read from what the search itself recorded, not guessed
+     * from the photo count alone: a partial gallery is one the pipeline already
+     * knows is incomplete, and a card under its own category minimum is one the
+     * operator will have to fix by hand anyway.
+     */
+    private function galleryFellShort(ProductDraft $draft, int $mediaCount): bool
+    {
+        if ($mediaCount === 0) {
+            return false;
+        }
+
+        if ($draft->gallery_status === 'partial') {
+            return true;
+        }
+
+        $category = trim((string) $draft->category);
+        $minimum = $category === ''
+            ? 0
+            : (int) (Category::query()->where('slug', $category)->first()?->minimumVerifiedImages() ?? 0);
+
+        return $minimum > 0 && $mediaCount < $minimum;
+    }
+
+    public function sendPhotoMenu(TelegramClient $telegram, string $chatId, ProductDraft $draft): array
+    {
+        // One concept, one entry point: these three used to be three separate
+        // top-level buttons that all opened the very same photo picker.
+        $buttons = [
+            [
+                ['text' => '✨ Улучшить', 'callback_data' => "draft:enhance:{$draft->id}"],
+                ['text' => '🔄 Заменить', 'callback_data' => "draft:replace:{$draft->id}"],
+            ],
+            [['text' => '🗑 Удалить', 'callback_data' => "draft:delete:{$draft->id}"]],
+            [['text' => '← Назад', 'callback_data' => "draft:review:{$draft->id}"]],
+        ];
+
+        return $this->messageLifecycle->replaceControlMessage(
+            $telegram,
+            $draft,
+            $chatId,
+            "🖼 Фотографии черновика #{$draft->id} ({$draft->media()->count()} шт.)\nЧто сделать?",
+            ['inline_keyboard' => $buttons],
+        );
     }
 
     public function sendSourceMenu(TelegramClient $telegram, string $chatId, ProductDraft $draft): array

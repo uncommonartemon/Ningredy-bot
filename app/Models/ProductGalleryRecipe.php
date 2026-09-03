@@ -8,7 +8,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 class ProductGalleryRecipe extends Model
 {
     protected $fillable = [
-        'domain', 'path_pattern', 'region', 'sample_path', 'layout_fingerprint',
+        'domain', 'path_pattern', 'compatible_path_patterns', 'region', 'sample_path', 'layout_fingerprint',
         'last_observed_layout_fingerprint', 'recipe', 'status', 'source_blocked', 'source_block_reason',
         'source_blocked_at', 'success_count', 'failure_count',
         'consecutive_hard_blocks', 'hard_block_urls', 'last_success_at', 'last_failure_at', 'last_error',
@@ -19,6 +19,7 @@ class ProductGalleryRecipe extends Model
     {
         return [
             'recipe' => 'array',
+            'compatible_path_patterns' => 'array',
             'source_blocked' => 'boolean',
             'source_blocked_at' => 'datetime',
             'hard_block_urls' => 'array',

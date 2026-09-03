@@ -26,7 +26,7 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
     // Real production AiRun activity logs show successful research using
     // 2-11 web searches (avg ~6); 12 leaves a small buffer over the observed
     // working maximum without letting one response run away to dozens of
-    // calls. See PROJECT_LOGIC.md's Web Search section.
+    // calls. See PROJECT_STRATEGY.md's Web Search section.
     public const int MAX_WEB_SEARCH_CALLS = 12;
 
     /**

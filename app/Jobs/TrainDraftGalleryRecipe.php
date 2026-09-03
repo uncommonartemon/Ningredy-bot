@@ -4,6 +4,7 @@ namespace App\Jobs;
 
 use App\Models\Category;
 use App\Models\ProductDraft;
+use App\Services\Products\OperatorDomainHintRecorder;
 use App\Services\Products\ProductGalleryRecipeTrainer;
 use App\Services\Telegram\TelegramClient;
 use App\Services\Telegram\TelegramProgressReporter;
@@ -46,6 +47,7 @@ class TrainDraftGalleryRecipe implements ShouldQueue
     public function handle(
         ProductGalleryRecipeTrainer $trainer,
         TelegramClient $telegram,
+        OperatorDomainHintRecorder $hints,
     ): void {
         $draft = ProductDraft::query()->with('media')->findOrFail($this->draftId);
         throw_unless(
@@ -60,6 +62,12 @@ class TrainDraftGalleryRecipe implements ShouldQueue
         $category = Category::query()
             ->where('slug', trim((string) $draft->category))
             ->first();
+
+        // The hint is knowledge about this site, not about this one draft, so
+        // it is persisted for the domain before training starts: every later
+        // search on the domain then receives it as domain_hint, even though
+        // this run's own recipe may be retrained or dropped many times over.
+        $hints->remember($url, $this->hint);
 
         $progress = new TelegramProgressReporter($telegram, $this->chatId);
         $progress->step('1/2 · AI изучает DOM и проверяет новый Playwright-рецепт', 1080);

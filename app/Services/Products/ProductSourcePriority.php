@@ -8,13 +8,13 @@ use Throwable;
 
 class ProductSourcePriority
 {
-    /** @var array<string, ProductGalleryRecipe|null> */
-    private array $recipeCache = [];
-
     /** @var array<int, string>|null */
     private ?array $blockedDomainsCache = null;
 
-    public function __construct(private readonly ProductSourceMetrics $metrics) {}
+    public function __construct(
+        private readonly ProductSourceMetrics $metrics,
+        private readonly ProductGalleryRecipeRouter $recipeRouter,
+    ) {}
 
     /** @param array<int, mixed> $sources @return array<int, array<string, mixed>> */
     public function sortSources(array $sources, ?string $brand): array
@@ -106,9 +106,13 @@ class ProductSourcePriority
      */
     private function extractionScore(string $url): int
     {
-        $recipe = $this->recipeFor($url);
+        try {
+            $matchingRecipe = $this->recipeRouter->recipeForUrl($url);
+        } catch (Throwable) {
+            return $this->metrics->score($url);
+        }
 
-        if ($recipe?->source_blocked || $recipe?->status === 'disabled') {
+        if ($matchingRecipe?->source_blocked || $matchingRecipe?->status === 'disabled') {
             return -1_000_000;
         }
 
@@ -117,6 +121,11 @@ class ProductSourcePriority
         if ($measuredScore !== 0) {
             return $measuredScore;
         }
+
+        $matchingActive = $matchingRecipe?->status === 'active';
+        $recipe = $matchingActive
+            ? $matchingRecipe
+            : ($this->recipeRouter->bestActiveRecipeForDomain($url) ?? $matchingRecipe);
 
         if (! $recipe) {
             return 0;
@@ -130,34 +139,12 @@ class ProductSourcePriority
         if ($recipe->status === 'active' && $successes > 0) {
             $smoothedRate = ($successes + 1) / ($attempts + 2);
 
-            return 50_000
+            return ($matchingActive ? 50_000 : 5_000)
                 + (int) round($smoothedRate * 5_000)
                 + min(500, $successes);
         }
 
         return $failures > 0 ? -1 * min(10_000, $failures) : 0;
-    }
-
-    private function recipeFor(string $url): ?ProductGalleryRecipe
-    {
-        $host = self::host($url);
-
-        if ($host === '') {
-            return null;
-        }
-
-        if (array_key_exists($host, $this->recipeCache)) {
-            return $this->recipeCache[$host];
-        }
-
-        try {
-            return $this->recipeCache[$host] = ProductGalleryRecipe::query()
-                ->where('domain', $host)
-                ->where('path_pattern', '*')
-                ->first();
-        } catch (Throwable) {
-            return $this->recipeCache[$host] = null;
-        }
     }
 
     public static function hostsMatch(string $left, string $right): bool

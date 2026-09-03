@@ -214,6 +214,57 @@ test('one failed thumbnail click does not abort the remaining click_each travers
     }), true);
 });
 
+test('a single-element click_each control stops once it stops responding', () => {
+    // A next/prev arrow matches one element, so every repetition re-presses the
+    // same control: an unchanged press means the remaining ones cannot help.
+    assert.equal(recipeActionShouldStop({
+        kind: 'click_each',
+        clicked: true,
+        changed: false,
+        matchCount: 1,
+    }), true);
+    // Still responding: keep traversing.
+    assert.equal(recipeActionShouldStop({
+        kind: 'click_each',
+        clicked: true,
+        changed: true,
+        matchCount: 1,
+    }), false);
+    // Several matches means the next repetition targets a different element,
+    // so one unchanged click must not abort the traversal.
+    assert.equal(recipeActionShouldStop({
+        kind: 'click_each',
+        clicked: true,
+        changed: false,
+        matchCount: 6,
+    }), false);
+});
+
+test('requires the nested after-each action for every visited thumbnail', () => {
+    const actions = [{
+        kind: 'click_each', selector: '.thumb', index: 0, limit: 2,
+        wait_after_ms: 100, purpose: 'Visit each image and enlarge it',
+        after_each_selector: '.zoom-plus', after_each_limit: 2, after_each_wait_after_ms: 100,
+    }];
+    const primary = [0, 1].map((repetition) => ({
+        action: 'click_each', action_index: 0, repetition,
+        selector_match_count: 2, clicked: true, changed: true,
+    }));
+    const followup = (parent_repetition, followup_repetition, changed) => ({
+        action: 'click_each', action_index: 0, after_each: true,
+        parent_repetition, followup_repetition, clicked: true, changed,
+    });
+
+    assert.equal(recipeActionPlanStatus({
+        actions,
+        actionTrace: [...primary, followup(0, 0, true), followup(0, 1, true), followup(1, 0, true)],
+    }).complete, false);
+    assert.equal(recipeActionPlanStatus({
+        actions,
+        actionTrace: [...primary, followup(0, 0, true), followup(0, 1, true), followup(1, 0, false)],
+    }).complete, true);
+});
+
 test('checks configured image width and height independently for every source', () => {
     assert.equal(imageDimensionsMeetMinimum({
         width: 1000,
@@ -449,6 +500,9 @@ test('normalizes the safe ordered AI action plan and rejects executable selector
             index: 0,
             limit: 8,
             wait_after_ms: 150,
+            after_each_selector: ' button[data-zoom-plus] ',
+            after_each_limit: 30,
+            after_each_wait_after_ms: 10,
             purpose: 'Visit each photo',
         },
         {
@@ -484,6 +538,9 @@ test('normalizes the safe ordered AI action plan and rejects executable selector
             index: 0,
             limit: 8,
             wait_after_ms: 150,
+            after_each_selector: 'button[data-zoom-plus]',
+            after_each_limit: 20,
+            after_each_wait_after_ms: 50,
             purpose: 'Visit each photo',
         },
     ]);

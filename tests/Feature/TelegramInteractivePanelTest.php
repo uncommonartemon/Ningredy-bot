@@ -178,6 +178,111 @@ class TelegramInteractivePanelTest extends TestCase
         Http::assertNotSent(fn (ClientRequest $request): bool => str_ends_with($request->url(), '/sendMessage'));
     }
 
+    public function test_photo_button_opens_one_menu_for_all_three_per_photo_verbs(): void
+    {
+        Queue::fake();
+        $draft = $this->pendingDraftWithMedia();
+
+        $this->postJson('/api/telegram/webhook', [
+            'update_id' => 3120,
+            'callback_query' => [
+                'id' => 'callback-photo-menu',
+                'from' => ['id' => 12345, 'username' => 'admin'],
+                'data' => "draft:photos:{$draft->id}",
+                'message' => [
+                    'message_id' => 86,
+                    'chat' => ['id' => 98765],
+                ],
+            ],
+        ], $this->headers())->assertOk();
+
+        Http::assertSent(function (ClientRequest $request) use ($draft): bool {
+            if (! str_ends_with($request->url(), '/sendMessage')) {
+                return false;
+            }
+
+            $callbacks = collect(data_get($request['reply_markup'] ?? [], 'inline_keyboard', []))
+                ->flatten(1)
+                ->pluck('callback_data')
+                ->all();
+
+            return str_contains((string) ($request['text'] ?? ''), "Фотографии черновика #{$draft->id}")
+                && in_array("draft:enhance:{$draft->id}", $callbacks, true)
+                && in_array("draft:replace:{$draft->id}", $callbacks, true)
+                && in_array("draft:delete:{$draft->id}", $callbacks, true);
+        });
+    }
+
+    public function test_a_partial_gallery_surfaces_the_hint_retrain_button_on_the_main_card(): void
+    {
+        // The operator's hint is the most useful thing they can give exactly
+        // when the extraction fell short, so it must not stay two taps deep
+        // behind "Источник" in that case.
+        Queue::fake();
+        $draft = $this->pendingDraftWithMedia();
+        $draft->update(['gallery_status' => 'partial']);
+
+        $this->postJson('/api/telegram/webhook', [
+            'update_id' => 3121,
+            'callback_query' => [
+                'id' => 'callback-review-partial',
+                'from' => ['id' => 12345, 'username' => 'admin'],
+                'data' => "draft:review:{$draft->id}",
+                'message' => [
+                    'message_id' => 87,
+                    'chat' => ['id' => 98765],
+                ],
+            ],
+        ], $this->headers())->assertOk();
+
+        Http::assertSent(function (ClientRequest $request) use ($draft): bool {
+            if (! str_ends_with($request->url(), '/sendMessage')) {
+                return false;
+            }
+
+            $callbacks = collect(data_get($request['reply_markup'] ?? [], 'inline_keyboard', []))
+                ->flatten(1)
+                ->pluck('callback_data')
+                ->all();
+
+            return in_array("draft:source-hint:{$draft->id}", $callbacks, true);
+        });
+    }
+
+    public function test_a_complete_gallery_keeps_retraining_out_of_the_main_card(): void
+    {
+        Queue::fake();
+        $draft = $this->pendingDraftWithMedia();
+        $draft->update(['gallery_status' => 'complete']);
+
+        $this->postJson('/api/telegram/webhook', [
+            'update_id' => 3122,
+            'callback_query' => [
+                'id' => 'callback-review-complete',
+                'from' => ['id' => 12345, 'username' => 'admin'],
+                'data' => "draft:review:{$draft->id}",
+                'message' => [
+                    'message_id' => 88,
+                    'chat' => ['id' => 98765],
+                ],
+            ],
+        ], $this->headers())->assertOk();
+
+        Http::assertSent(function (ClientRequest $request) use ($draft): bool {
+            if (! str_ends_with($request->url(), '/sendMessage')) {
+                return false;
+            }
+
+            $callbacks = collect(data_get($request['reply_markup'] ?? [], 'inline_keyboard', []))
+                ->flatten(1)
+                ->pluck('callback_data')
+                ->all();
+
+            return in_array("draft:add:{$draft->id}", $callbacks, true)
+                && ! in_array("draft:source-hint:{$draft->id}", $callbacks, true);
+        });
+    }
+
     public function test_enhance_button_opens_numbered_draft_photo_selection(): void
     {
         Queue::fake();

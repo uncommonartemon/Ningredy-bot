@@ -126,6 +126,94 @@ class ProductGalleryRecipeResultValidatorTest extends TestCase
         $this->assertSame(10, $result['expected']);
     }
 
+    public function test_a_single_arrow_pressed_once_cannot_pass_a_multi_frame_traversal(): void
+    {
+        // Real case (2026-09-02, B&H modal recipe): the recipe declared 4 frames
+        // and asked for three presses of one next arrow, the runner pressed it
+        // once, and validation passed anyway because the required click count
+        // was capped at the arrow's own match count of 1.
+        $result = app(ProductGalleryRecipeResultValidator::class)->validate(
+            [
+                'gallery_present' => true,
+                'content_confirmed_product' => true,
+                'expected_image_count' => 4,
+                'open_selectors' => ['img.main'],
+                'actions' => [
+                    ['kind' => 'click', 'selector' => 'img.main', 'limit' => 1, 'purpose' => 'Open viewer'],
+                    ['kind' => 'click_each', 'selector' => 'button.next', 'limit' => 3, 'after_each_selector' => ''],
+                ],
+            ],
+            [
+                'images' => $this->images(3),
+                'diagnostics' => ['distinct_dom_assets' => 3],
+                'action_trace' => [[
+                    'action' => 'click',
+                    'action_index' => 0,
+                    'selector_match_count' => 1,
+                    'clicked' => true,
+                    'changed' => true,
+                    'expanded_gallery_visible_after' => true,
+                ], [
+                    'action' => 'click_each',
+                    'action_index' => 1,
+                    'repetition' => 0,
+                    'selector_match_count' => 1,
+                    'clicked' => true,
+                    'changed' => true,
+                ]],
+            ],
+        );
+
+        $this->assertFalse($result['passed']);
+        $this->assertStringContainsString('clicked 1 of 3', $result['reason']);
+    }
+
+    public function test_a_single_arrow_that_runs_out_of_frames_early_still_passes(): void
+    {
+        // The same arrow legitimately exhausts before its limit: the press that
+        // changes nothing is the end of the gallery, not an incomplete plan.
+        $result = app(ProductGalleryRecipeResultValidator::class)->validate(
+            [
+                'gallery_present' => true,
+                'content_confirmed_product' => true,
+                'expected_image_count' => 3,
+                'open_selectors' => ['img.main'],
+                'actions' => [
+                    ['kind' => 'click', 'selector' => 'img.main', 'limit' => 1, 'purpose' => 'Open viewer'],
+                    ['kind' => 'click_each', 'selector' => 'button.next', 'limit' => 5],
+                ],
+            ],
+            [
+                'images' => $this->images(3),
+                'diagnostics' => ['distinct_dom_assets' => 3],
+                'action_trace' => [[
+                    'action' => 'click',
+                    'action_index' => 0,
+                    'selector_match_count' => 1,
+                    'clicked' => true,
+                    'changed' => true,
+                    'expanded_gallery_visible_after' => true,
+                ], [
+                    'action' => 'click_each',
+                    'action_index' => 1,
+                    'repetition' => 0,
+                    'selector_match_count' => 1,
+                    'clicked' => true,
+                    'changed' => true,
+                ], [
+                    'action' => 'click_each',
+                    'action_index' => 1,
+                    'repetition' => 1,
+                    'selector_match_count' => 1,
+                    'clicked' => true,
+                    'changed' => false,
+                ]],
+            ],
+        );
+
+        $this->assertTrue($result['passed']);
+    }
+
     public function test_opener_click_without_a_gallery_state_change_is_rejected(): void
     {
         $result = app(ProductGalleryRecipeResultValidator::class)->validate(
@@ -210,6 +298,35 @@ class ProductGalleryRecipeResultValidatorTest extends TestCase
 
         $this->assertFalse($result['passed']);
         $this->assertStringContainsString('Browser execution was partial', $result['reason']);
+    }
+
+    public function test_observed_zoom_control_rejects_low_resolution_thumbnail_traversal_without_after_each(): void
+    {
+        $result = app(ProductGalleryRecipeResultValidator::class)->validate(
+            [
+                'gallery_present' => true,
+                'content_confirmed_product' => true,
+                'expected_image_count' => 2,
+                'actions' => [['kind' => 'click_each', 'selector' => '.thumb', 'limit' => 2]],
+            ],
+            [
+                'images' => $this->images(2),
+                'action_trace' => collect(range(0, 1))->map(fn (int $repetition): array => [
+                    'action' => 'click_each', 'action_index' => 0, 'repetition' => $repetition,
+                    'selector_match_count' => 2, 'clicked' => true,
+                ])->all(),
+                'diagnostics' => ['validated_image_evidence' => [
+                    ['width' => 750], ['width' => 750],
+                ]],
+                'post_interaction_scout' => ['action_candidates' => [[
+                    'selector' => 'button[data-zoom-plus]',
+                    'title' => 'Zoom plus',
+                ]]],
+            ],
+        );
+
+        $this->assertFalse($result['passed']);
+        $this->assertStringContainsString('after_each_selector', $result['reason']);
     }
 
     public function test_unprobed_urls_cannot_publish_a_recipe(): void

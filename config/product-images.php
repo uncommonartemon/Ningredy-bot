@@ -13,6 +13,12 @@ return [
     ],
     'download_limit' => 20,
     'download_candidates' => 10,
+    // Total decoded pixels one download pass may hold in memory at once. A
+    // decoded truecolor bitmap costs ~4 bytes per pixel, so this is roughly a
+    // 240MB ceiling on retained images - the loop stops with a partial gallery
+    // instead of exhausting the worker's memory_limit, which loses the whole
+    // search. Raise it only together with the workers' memory_limit.
+    'decoded_pixel_budget' => 60_000_000,
     // Width and height are checked independently so useful wide product shots
     // are not reduced to one ambiguous "minimum side" setting.
     'minimum_width' => (int) env('PRODUCT_IMAGE_MINIMUM_WIDTH', 700),
@@ -25,6 +31,12 @@ return [
     'http' => [
         'connect_timeout' => 3,
         'timeout' => 7,
+        // Bounds the WHOLE download_candidates loop for one source, not a
+        // single request - each request above is already capped, but many
+        // slow-but-not-instantly-failing URLs in sequence can still add up
+        // past any reasonable per-source budget with no single request ever
+        // failing outright to point to.
+        'download_wall_clock_cap_seconds' => 90,
     ],
 
     // How many source pages one resolve pass may open, how many image URLs a
@@ -75,6 +87,10 @@ return [
     // publication images are selected.
     'vision_candidates' => 4,
     'vision_detail' => env('PRODUCT_IMAGE_VISION_DETAIL', 'low'),
+    // Gallery-agent Vision is only an on-demand visual observation tool. Keep
+    // more detail than the broad candidate filter so small text/model conflicts
+    // and unusual product framing are less likely to be missed.
+    'gallery_agent_vision_detail' => env('PRODUCT_GALLERY_AGENT_VISION_DETAIL', 'high'),
     'vision_max_batches' => 3,
     // Keep independent page galleries separate and let Vision try the best
     // few sequentially. Images from different pages are never mixed.

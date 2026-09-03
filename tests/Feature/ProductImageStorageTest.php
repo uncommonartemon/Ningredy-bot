@@ -1661,16 +1661,15 @@ class ProductImageStorageTest extends TestCase
         ));
     }
 
-    public function test_confirmed_slider_gets_exactly_one_vision_spot_check_the_first_time_and_it_is_remembered(): void
+    public function test_confirmed_slider_uses_the_gallery_agent_verdict_without_a_standalone_vision_gate(): void
     {
         // A fully confirmed, identity-matched slider can still show
         // something other than the product itself (e.g. a manufacturing/
         // materials-story carousel using the same slider markup), and the AI
         // trainer's own claim that the content is confirmed isn't trusted
-        // blindly - Vision spot-checks exactly one frame the first time this
-        // recipe's confirmed path is used, then remembers the verdict on the
-        // recipe so later searches against the same domain don't pay for it
-        // again.
+        // The gallery agent already confirmed coherent product content while
+        // training the recipe. Post-download Vision must not independently
+        // re-decide or filter this atomic slider.
         Storage::fake('public');
         AppSetting::put('ai.fallback_sources_enabled', '0');
         config()->set('product-images.max_images_by_type.laptop', 10);
@@ -1753,10 +1752,10 @@ class ProductImageStorageTest extends TestCase
         $stored = app(ProductImageStorage::class)->stage($draft->fresh());
 
         $this->assertSame(5, $stored);
-        $this->assertSame(1, $visionCalls);
-        $this->assertTrue(
-            ProductGalleryRecipe::query()->where('domain', '93.184.216.36')->firstOrFail()
-                ->recipe['content_verified_by_vision'],
+        $this->assertSame(0, $visionCalls);
+        $this->assertArrayNotHasKey(
+            'content_verified_by_vision',
+            ProductGalleryRecipe::query()->where('domain', '93.184.216.36')->firstOrFail()->recipe,
         );
         $this->assertSame(
             'dedicated',
@@ -1849,14 +1848,10 @@ class ProductImageStorageTest extends TestCase
         $this->assertSame(0, $stored);
     }
 
-    public function test_a_broken_first_vision_response_gets_one_retry_and_can_still_succeed(): void
+    public function test_confirmed_gallery_does_not_invoke_the_old_standalone_vision_retry_path(): void
     {
-        // Direct follow-up to the crash-safety test above: not letting a
-        // broken response crash the search is only half the fix. The
-        // gallery recipe trainer already gets to self-correct across
-        // several rounds when it returns invalid JSON - Vision review
-        // should get the same real second chance instead of the batch
-        // being written off as unconfirmed on one bad model response.
+        // A malformed response fake is deliberately installed. It must remain
+        // untouched because confirmed galleries no longer enter this path.
         Storage::fake('public');
         AppSetting::put('ai.fallback_sources_enabled', '0');
         config()->set('product-images.max_images_by_type.laptop', 10);
@@ -1956,12 +1951,11 @@ class ProductImageStorageTest extends TestCase
         $stored = app(ProductImageStorage::class)->stage($draft->fresh());
 
         $this->assertSame(5, $stored);
-        $this->assertSame(2, $visionCalls);
-        $this->assertSame(1, AiRun::query()->where('model', 'gpt-5.4-mini')->where('status', 'failed')->count());
-        $this->assertSame(1, AiRun::query()->where('model', 'gpt-5.4-mini')->where('status', 'completed')->count());
+        $this->assertSame(0, $visionCalls);
+        $this->assertSame(0, AiRun::query()->where('model', 'gpt-5.4-mini')->count());
     }
 
-    public function test_ambiguous_confirmed_carousel_is_reviewed_as_one_permissive_batch_and_only_keeps_product_frames(): void
+    public function test_agent_confirmed_carousel_remains_atomic_even_when_structural_mode_is_ambiguous(): void
     {
         Storage::fake('public');
         AppSetting::put('ai.fallback_sources_enabled', '0');
@@ -2056,26 +2050,25 @@ class ProductImageStorageTest extends TestCase
             },
         );
 
-        $this->assertSame(3, $stored);
-        $this->assertSame(1, $visionCalls);
+        $this->assertSame(5, $stored);
+        $this->assertSame(0, $visionCalls);
         $this->assertSame($gallery[0], $draft->fresh()->media()->orderBy('sort_order')->firstOrFail()->source_url);
-        $this->assertCount(1, ProductGalleryRecipe::query()
-            ->where('domain', '93.184.216.37')
-            ->firstOrFail()
-            ->recipe['gallery_batch_verifications']);
+        $this->assertArrayNotHasKey(
+            'gallery_batch_verifications',
+            ProductGalleryRecipe::query()->where('domain', '93.184.216.37')->firstOrFail()->recipe,
+        );
         $this->assertSame(
             'ambiguous',
             ProductGalleryRecipe::query()->where('domain', '93.184.216.37')->firstOrFail()
                 ->recipe['gallery_verification_mode'],
         );
-        // Real production report: an ambiguous slider confirmed by batch
-        // Vision was mislabeled as a plain static HTML gallery in the final
-        // summary, because chosenMethod's 'playwright_vision' value had no
-        // case in the label match - it must credit Playwright, not static.
+        // Structural ambiguity is metadata only after the agent has positively
+        // confirmed one coherent product gallery; the final method remains
+        // Playwright and no per-frame filter is introduced.
         $this->assertStringContainsString('AI-переобучение Playwright-рецепта', end($messages));
     }
 
-    public function test_a_rejected_dedicated_spot_check_falls_back_to_batch_instead_of_poisoning_the_recipe(): void
+    public function test_a_recipe_without_agent_content_confirmation_is_not_trusted_or_sent_to_vision(): void
     {
         [, , $draft] = $this->records();
         $recipe = ProductGalleryRecipe::query()->create([
@@ -2087,9 +2080,7 @@ class ProductImageStorageTest extends TestCase
         $candidates = collect(range(1, 5))->map(fn (int $index): array => [
             'source_url' => 'https://gallery.example/frame-'.$index.'.jpg',
         ]);
-        $vision = $this->mock(ProductImageVisionVerifier::class);
-        $vision->shouldReceive('select')->once()->with($draft, [$candidates->first()], 1, null)->andReturn([]);
-        $vision->shouldReceive('selectGalleryFrames')->once()->andReturn($candidates->slice(1)->values()->all());
+        ProductImageVisionAgent::fake()->preventStrayPrompts();
 
         $result = app(ConfirmedProductGalleryVerifier::class)->verify(
             'https://gallery.example/product/test',
@@ -2099,10 +2090,10 @@ class ProductImageStorageTest extends TestCase
             null,
         );
 
-        $this->assertSame('ambiguous', $result['mode']);
-        $this->assertCount(4, $result['candidates']);
+        $this->assertSame('dedicated', $result['mode']);
+        $this->assertCount(0, $result['candidates']);
         $storedRecipe = $recipe->fresh()->recipe;
-        $this->assertSame('ambiguous', $storedRecipe['gallery_verification_mode']);
+        $this->assertSame('dedicated', $storedRecipe['gallery_verification_mode']);
         $this->assertArrayNotHasKey('content_verified_by_vision', $storedRecipe);
     }
 
@@ -2608,7 +2599,10 @@ class ProductImageStorageTest extends TestCase
             'domain' => 'exact.example',
             'path_pattern' => '*',
             'status' => 'active',
-            'recipe' => ['gallery_verification_mode' => 'dedicated'],
+            'recipe' => [
+                'gallery_verification_mode' => 'dedicated',
+                'content_confirmed_product' => true,
+            ],
         ]);
 
         $discovery = $this->mock(ProductImageCandidateDiscovery::class);
@@ -2666,7 +2660,7 @@ class ProductImageStorageTest extends TestCase
         );
 
         $this->assertSame(7, $stored);
-        $this->assertSame(1, $visionCalls);
+        $this->assertSame(0, $visionCalls);
         $this->assertCount(7, $downloaded);
         $this->assertTrue(collect($downloaded)->every(fn (string $url): bool => str_contains($url, 'confirmed-')));
         $this->assertSame($exactPage, $draft->fresh()->primary_source_url);
@@ -2942,6 +2936,74 @@ class ProductImageStorageTest extends TestCase
         $this->assertSame(1, $attempt->output['rejection_summary']['empty_response']);
         $this->assertStringStartsWith('too_small', (string) $reasons['https://93.184.216.34/too-small.jpg']);
         $this->assertSame('empty_response', $reasons['https://93.184.216.34/empty-body.jpg']);
+    }
+
+    public function test_a_large_gallery_stops_at_the_decode_budget_instead_of_killing_the_worker(): void
+    {
+        // Real crash (2026-09-02): an 18-frame confirmed gallery decoded 18
+        // truecolor bitmaps at once - every accepted candidate holds its
+        // GdImage for the rest of the loop - and exhausted the worker's 512MB
+        // limit at imagecreatefromstring, losing the entire search. A partial
+        // gallery is strictly better than a dead worker.
+        config()->set('product-images.decoded_pixel_budget', 700_000);
+        AppSetting::put('ai.image_minimum_width', '700');
+        AppSetting::put('ai.image_minimum_height', '0');
+
+        Storage::fake('public');
+        ProductImageVisionAgent::fake(fn (string $prompt, $attachments): array => [
+            'images' => $attachments->keys()->map(fn (int $index): array => [
+                'index' => $index + 1,
+                'exact_match' => true,
+                'color_match' => true,
+                'publishable' => true,
+                'kind' => 'product',
+                'view' => 'front',
+                'gallery_rank' => 1,
+                'score' => 98,
+                'reason' => 'Exact product image.',
+            ])->all(),
+        ])->preventStrayPrompts();
+        [, , $draft] = $this->records();
+        $draft->refresh();
+        $draft->update([
+            'primary_source_url' => 'https://93.184.216.34/product-page',
+            'image_urls' => [],
+            'sources' => [[
+                'title' => 'Store',
+                'url' => 'https://93.184.216.34/product-page',
+                'type' => 'retailer',
+                // 720x600 = 432 000 пикселей each: the first fits the budget,
+                // the second would push past it.
+                'image_urls' => [
+                    'https://93.184.216.34/photo-1.jpg',
+                    'https://93.184.216.34/photo-2.jpg',
+                    'https://93.184.216.34/photo-3.jpg',
+                ],
+            ]],
+        ]);
+        Http::fake(function (Request $request) {
+            // Distinct content per URL: identical bytes would be dropped by the
+            // checksum dedupe before the budget could ever be reached.
+            if (preg_match('/photo-(\d)\.jpg/', $request->url(), $photo) === 1) {
+                return Http::response($this->jpeg(6 + (int) $photo[1]), 200, ['Content-Type' => 'image/jpeg']);
+            }
+
+            return Http::response('<html></html>', 200, ['Content-Type' => 'text/html']);
+        });
+
+        app(ProductImageStorage::class)->stage($draft->fresh());
+
+        $attempt = ProductSourceAttempt::query()
+            ->where('product_draft_id', $draft->id)
+            ->where('action', 'download_candidates')
+            ->firstOrFail();
+        $reasons = collect($attempt->output['rejected_candidates'] ?? [])->pluck('reason');
+
+        // The budget is per download pass, and stage() may run more than one,
+        // so the guarantee under test is "the pass stopped and said why", not an
+        // exact surviving count.
+        $this->assertLessThan(3, $attempt->output['downloaded_images']);
+        $this->assertTrue($reasons->contains('decoded_memory_budget_exceeded'));
     }
 
     public function test_a_wide_thin_edge_crop_is_labelled_bad_aspect_ratio_instead_of_too_small(): void
@@ -3875,6 +3937,66 @@ class ProductImageStorageTest extends TestCase
         foreach ($confirmedUrls as $confirmedUrl) {
             $this->assertContains($confirmedUrl, $result, "Confirmed gallery photo {$confirmedUrl} must survive cleanUrls().");
         }
+    }
+
+    public function test_download_candidates_does_not_truncate_a_confirmed_gallery_at_the_generic_limit(): void
+    {
+        config()->set('product-images.download_candidates', 10);
+        config()->set('product-images.download_limit', 20);
+
+        $urls = collect(range(1, 11))
+            ->map(fn (int $index): string => 'https://exact.example/gallery-'.$index.'.jpg')
+            ->all();
+        $downloaded = [];
+
+        $resolver = $this->mock(ProductImageResolver::class);
+        $resolver->shouldReceive('sourceContextForImage')->andReturn(null)->byDefault();
+        $resolver->shouldReceive('isConfirmedGalleryImage')->andReturn(true);
+        $resolver->shouldReceive('isPartialGalleryImage')->andReturn(false)->byDefault();
+        $resolver->shouldReceive('download')->andReturnUsing(function (string $url) use (&$downloaded): array {
+            $downloaded[] = $url;
+            preg_match('/gallery-(\d+)\.jpg$/', $url, $match);
+
+            return [
+                'bytes' => $this->jpeg(300 + (int) ($match[1] ?? 1)),
+                'source_url' => $url,
+                'mime_type' => 'image/jpeg',
+                'width' => 720,
+                'height' => 600,
+                'confirmed_gallery' => true,
+                'partial_gallery' => false,
+            ];
+        });
+
+        [, , $draft] = $this->records();
+        $method = new \ReflectionMethod(ProductImageStorage::class, 'downloadCandidates');
+        $method->setAccessible(true);
+        $candidates = $method->invoke(app(ProductImageStorage::class), $urls, $draft);
+
+        $this->assertCount(11, $downloaded);
+        $this->assertCount(11, $candidates);
+
+        foreach ($candidates as $candidate) {
+            imagedestroy($candidate['image']);
+        }
+    }
+
+    public function test_near_duplicate_filter_preserves_confirmed_atomic_gallery_frames(): void
+    {
+        $first = imagecreatefromstring($this->jpeg(401));
+        $second = imagecreatefromstring($this->jpegCopy(401));
+        $candidates = [
+            ['source_url' => 'https://exact.example/gallery-1.jpg', 'confirmed_gallery' => true, 'image' => $first],
+            ['source_url' => 'https://exact.example/gallery-2.jpg', 'confirmed_gallery' => true, 'image' => $second],
+        ];
+
+        $method = new \ReflectionMethod(ProductImageStorage::class, 'removeNearDuplicates');
+        $method->setAccessible(true);
+        $result = $method->invoke(app(ProductImageStorage::class), $candidates, [], true);
+
+        $this->assertCount(2, $result);
+        imagedestroy($first);
+        imagedestroy($second);
     }
 
     public function test_download_candidates_never_requests_an_unobserved_bigcommerce_rendition(): void

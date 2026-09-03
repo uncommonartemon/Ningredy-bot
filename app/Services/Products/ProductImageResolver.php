@@ -2,7 +2,6 @@
 
 namespace App\Services\Products;
 
-use App\Models\ProductGalleryRecipe;
 use App\Services\Ai\AiSettings;
 use App\Services\Ai\ProductSearchCostBudget;
 use App\Services\Ai\ProductSearchTimeBudget;
@@ -26,6 +25,7 @@ class ProductImageResolver
         private readonly ProductSourceAttemptRecorder $attempts,
         private readonly ProductSourcePageRules $pageRules,
         private readonly BrowserProductImageTransferStore $transfers,
+        private readonly ProductGalleryRecipeRouter $recipeRouter,
     ) {}
 
     /** @var array<int, true> */
@@ -51,6 +51,7 @@ class ProductImageResolver
             'reason' => null,
             'static_image_urls' => [],
             'active_recipe' => false,
+            'known_recipe_domain' => false,
             'browser_probe_required' => false,
             'final_url' => $url,
             'identity_evidence' => '',
@@ -83,13 +84,11 @@ class ProductImageResolver
         }
 
         try {
-            $recipe = ProductGalleryRecipe::query()
-                ->where('domain', $host)
-                ->where('path_pattern', '*')
-                ->first();
+            $recipe = $this->recipeRouter->recipeForUrl($url);
             $result['active_recipe'] = $recipe?->status === 'active';
+            $result['known_recipe_domain'] = $this->recipeRouter->domainHasActiveRecipe($url);
 
-            if ($recipe?->source_blocked) {
+            if ($this->recipeRouter->domainIsBlocked($url)) {
                 $result['blocked'] = true;
                 $result['reason'] = 'known_domain_block';
             } else {
@@ -138,6 +137,7 @@ class ProductImageResolver
             'decision' => $result['reason'] ?: 'candidate_ranked',
             'output' => [
                 'active_recipe' => $result['active_recipe'],
+                'known_recipe_domain' => $result['known_recipe_domain'],
                 'static_count' => count($result['static_image_urls']),
                 'identity_evidence_present' => $result['identity_evidence'] !== '',
                 'page_rule' => $result['reason'] === 'known_unsuitable_page',

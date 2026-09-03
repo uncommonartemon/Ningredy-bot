@@ -32,6 +32,12 @@ if not exist "node_modules\concurrently" (
 )
 
 title Ningredy
+
+rem Everything still queued belongs to the previous run: this window is the only
+rem way the bot is stopped, so those jobs were killed rather than finished, and
+rem starting fresh workers on them replays yesterday's requests.
+php artisan bot:clear-stale
+
 echo Starting Ningredy in a single window...
 echo   Web:      http://127.0.0.1:8000
 echo   Queues:   assistant, voice, media, default

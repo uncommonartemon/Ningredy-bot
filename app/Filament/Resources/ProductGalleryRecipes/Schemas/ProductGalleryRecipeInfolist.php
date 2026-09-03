@@ -20,6 +20,11 @@ class ProductGalleryRecipeInfolist
                 ->schema([
                     TextEntry::make('domain')->label('Домен')->copyable(),
                     TextEntry::make('path_pattern')->label('Шаблон пути'),
+                    TextEntry::make('compatible_path_patterns')
+                        ->label('Подтверждённые совместимые path')
+                        ->formatStateUsing($json)
+                        ->placeholder('—')
+                        ->columnSpanFull(),
                     TextEntry::make('status')
                         ->label('Состояние')
                         ->badge()

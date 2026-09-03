@@ -25,7 +25,7 @@ class ContinueDraftGallerySearch implements ShouldBeUniqueUntilProcessing, Shoul
     // Must exceed the internal search deadline (AiSettings::searchMaxSeconds(),
     // max 1800s) with room for the post-search reserve (save draft, cleanup,
     // reply to Telegram) and stay under the queue worker's --timeout (2160s).
-    // PROJECT_LOGIC.md requires these three numbers to move together.
+    // PROJECT_STRATEGY.md requires these three numbers to move together.
     public int $timeout = 2040;
 
     public int $uniqueFor = 2100;
