@@ -2,8 +2,10 @@
 
 namespace Tests\Unit;
 
+use App\Ai\Agents\ProductImageDiscoveryAgent;
 use App\Ai\Agents\ProductResearchAgent;
 use App\Models\Category;
+use App\Services\Ai\AiSettings;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\JsonSchema\JsonSchemaTypeFactory;
 use Laravel\Ai\Attributes\Strict;
@@ -14,6 +16,16 @@ use Tests\TestCase;
 class ProductResearchAgentInstructionsTest extends TestCase
 {
     use RefreshDatabase;
+
+    public function test_an_operator_can_point_web_search_at_one_country(): void
+    {
+        // The hint is a setting rather than a constant, so narrowing the search
+        // back down is a decision the operator can take and undo in seconds.
+        app(AiSettings::class)->saveProductSearchCountry('de');
+
+        $this->assertSame('DE', collect(app(ProductResearchAgent::class)->tools())->first()->country);
+        $this->assertSame('DE', collect(app(ProductImageDiscoveryAgent::class)->tools())->first()->country);
+    }
 
     public function test_unspecified_condition_and_configuration_do_not_trigger_clarification(): void
     {
@@ -50,7 +62,12 @@ class ProductResearchAgentInstructionsTest extends TestCase
 
         $webSearch = collect($agent->tools())->first();
         $this->assertNull($webSearch->maxSearches);
-        $this->assertSame('US', $webSearch->country);
+        // No country hint unless an operator sets one. A hardcoded 'US' filled
+        // the candidate lists with the same American retailers - the ones that
+        // then block by IP reputation - while European shops that would have
+        // answered never surfaced. Where a shop is has never been a reason to
+        // reject it; the only language rule is about text inside the photos.
+        $this->assertNull($webSearch->country);
 
         $options = TextGenerationOptions::forAgent($agent);
         $this->assertSame(ProductResearchAgent::MAX_OUTPUT_TOKENS, $options->maxTokens);

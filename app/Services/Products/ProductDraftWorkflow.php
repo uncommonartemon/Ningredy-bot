@@ -183,9 +183,20 @@ class ProductDraftWorkflow
             ->mapWithKeys(fn (array $item): array => [
                 Str::lower((string) ($item['key'] ?? $item['name'] ?? '')) => $this->identifierValue((string) ($item['value'] ?? '')),
             ]);
+        // Specification text is written by an AI, so one day the same machine
+        // arrives as "32 GB" and the next as "32 ГБ" - hashed raw, those became
+        // one product with two variants. Transliteration folds the alphabets
+        // together and collapsing punctuation folds "32gb" in with them. It
+        // deliberately stops there: turning "1 TB" into "1024 GB" would be a
+        // guess about the world, not a normalization of how it was written.
+        $normalize = fn (string $text): string => trim((string) preg_replace(
+            '/[^a-z0-9]+/',
+            '',
+            Str::lower(Str::ascii($text)),
+        ));
         $specifications = collect($draft->specifications ?? [])
             ->mapWithKeys(fn (mixed $item, mixed $key): array => [
-                Str::lower((string) (is_array($item) ? ($item['name'] ?? $key) : $key)) => Str::lower(trim((string) (is_array($item) ? ($item['value'] ?? '') : $item))),
+                $normalize((string) (is_array($item) ? ($item['name'] ?? $key) : $key)) => $normalize((string) (is_array($item) ? ($item['value'] ?? '') : $item)),
             ])->sortKeys()->all();
         $fingerprint = sha1(json_encode([
             'color' => Str::lower((string) $draft->color),

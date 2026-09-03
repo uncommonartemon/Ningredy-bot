@@ -39,6 +39,11 @@ export const galleryContextLooksExcluded = (signal) => new RegExp(
     'i',
 ).test(String(signal || '').replace(/([a-z])([A-Z])/g, '$1 $2'));
 
+// Mirrors ProductGalleryRecipeResultValidator: the largest after_each_limit the
+// recipe schema accepts, so a zoom already asking for the maximum is judged the
+// same way on both sides.
+const AFTER_EACH_LIMIT_CEILING = 20;
+
 const PRODUCT_SECTION_SEGMENT = /^(?:sp|specification|specifications|specs|overview|details|features|gallery|media|images?|photos?|product-images?|product-media)$/i;
 const GALLERY_SECTION_SEGMENT = /^(?:gallery|media|images?|photos?|product-images?|product-media)$/i;
 
@@ -363,6 +368,15 @@ export const recipeActionPlanStatus = ({ actions, actionTrace }) => {
             }
 
             const afterEachLimit = Math.max(1, action.after_each_limit || 1);
+
+            // The zoom ran out of allowed presses while the image was still
+            // growing. The server rejects that and hands the round back, so
+            // reporting the step as finished here would tell the agent its plan
+            // worked while the same run was being sent back to it.
+            if (afterEachLimit < AFTER_EACH_LIMIT_CEILING
+                && afterEachTraces.some((item) => item.after_each_truncated === true)) {
+                return false;
+            }
 
             for (let repetition = 0; repetition < presses; repetition++) {
                 const ofThisPress = afterEachTraces.filter(

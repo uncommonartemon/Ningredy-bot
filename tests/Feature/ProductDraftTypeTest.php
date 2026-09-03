@@ -163,6 +163,45 @@ class ProductDraftTypeTest extends TestCase
         Queue::assertPushed(StoreProductImages::class);
     }
 
+    public function test_the_same_configuration_spelled_two_ways_is_one_variant(): void
+    {
+        // Specification text comes from an AI, so the same machine arrives as
+        // "16 GB" one day and "16 ГБ" the next. Hashed raw, that published one
+        // product with two variants of a configuration that never differed.
+        $english = $this->draft('Lenovo IdeaPad Slim 3', 'IdeaPad Slim 3', 'laptop');
+        $russian = $this->draft('Lenovo IdeaPad Slim 3', 'IdeaPad Slim 3', 'laptop');
+        $russian->update(['specifications' => [
+            ['key' => 'cpu', 'name' => 'CPU', 'value' => 'AMD Ryzen 5'],
+            ['key' => 'ram', 'name' => 'RAM', 'value' => '16 ГБ'],
+            ['key' => 'storage', 'name' => 'SSD', 'value' => '512ГБ'],
+        ]]);
+
+        $workflow = app(ProductDraftWorkflow::class);
+        $product = $workflow->approve($english);
+        $workflow->approve($russian->refresh());
+
+        $this->assertSame(1, $product->refresh()->variants()->count());
+    }
+
+    public function test_a_genuinely_different_configuration_stays_its_own_variant(): void
+    {
+        // The other direction: folding how text is written must not fold the
+        // machines themselves together.
+        $small = $this->draft('Lenovo IdeaPad Slim 3', 'IdeaPad Slim 3', 'laptop');
+        $large = $this->draft('Lenovo IdeaPad Slim 3', 'IdeaPad Slim 3', 'laptop');
+        $large->update(['specifications' => [
+            ['key' => 'cpu', 'name' => 'CPU', 'value' => 'AMD Ryzen 5'],
+            ['key' => 'ram', 'name' => 'RAM', 'value' => '32 GB'],
+            ['key' => 'storage', 'name' => 'SSD', 'value' => '512 GB'],
+        ]]);
+
+        $workflow = app(ProductDraftWorkflow::class);
+        $product = $workflow->approve($small);
+        $workflow->approve($large->refresh());
+
+        $this->assertSame(2, $product->refresh()->variants()->count());
+    }
+
     private function draft(string $title, string $model, ?string $productType, ?string $category = null): ProductDraft
     {
         $update = TelegramUpdate::query()->create([

@@ -2,6 +2,7 @@
 
 namespace App\Ai\Agents;
 
+use App\Services\Ai\AiSettings;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
 use Laravel\Ai\Attributes\MaxTokens;
 use Laravel\Ai\Contracts\Agent;
@@ -61,9 +62,12 @@ class ProductImageDiscoveryAgent implements Agent, HasProviderOptions, HasStruct
 
     public function tools(): iterable
     {
+        $country = app(AiSettings::class)->productSearchCountry();
+
         return [
-            (new WebSearch)
-                ->location(country: 'US'),
+            $country === null
+                ? new WebSearch
+                : (new WebSearch)->location(country: $country),
         ];
     }
 

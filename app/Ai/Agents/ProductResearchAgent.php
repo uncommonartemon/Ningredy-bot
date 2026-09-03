@@ -3,6 +3,7 @@
 namespace App\Ai\Agents;
 
 use App\Models\Category;
+use App\Services\Ai\AiSettings;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
 use Laravel\Ai\Attributes\MaxTokens;
 use Laravel\Ai\Attributes\Strict;
@@ -161,9 +162,12 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
      */
     public function tools(): iterable
     {
+        $country = app(AiSettings::class)->productSearchCountry();
+
         return [
-            (new WebSearch)
-                ->location(country: 'US'),
+            $country === null
+                ? new WebSearch
+                : (new WebSearch)->location(country: $country),
         ];
     }
 

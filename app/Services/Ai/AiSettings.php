@@ -212,6 +212,33 @@ class AiSettings
     }
 
     /**
+     * Which country web search is told to search from, or null for no hint at
+     * all. Both search agents used to carry a hardcoded 'US', which is why the
+     * candidate lists filled with the same handful of American retailers - the
+     * ones that then block by IP reputation - while European shops that would
+     * have answered were never surfaced. Where a shop is has never been a
+     * reason to reject it here: the only language rule is about text visible
+     * inside the photographs, and Vision enforces that separately.
+     */
+    public function productSearchCountry(): ?string
+    {
+        try {
+            $value = trim((string) AppSetting::valueFor('ai.product_search_country'));
+        } catch (Throwable) {
+            // Building an agent must not depend on the settings table being
+            // reachable - no hint is the safe answer, and it is the default.
+            return null;
+        }
+
+        return $value === '' ? null : strtoupper(substr($value, 0, 2));
+    }
+
+    public function saveProductSearchCountry(?string $country): void
+    {
+        AppSetting::put('ai.product_search_country', strtoupper(trim((string) $country)));
+    }
+
+    /**
      * On by default: a fast literal text match (ProductIdentityMatcher)
      * rejects an exact source whose page wording lists the same model/SKU in
      * a different word order than requested - see the real B&H Photo Video
