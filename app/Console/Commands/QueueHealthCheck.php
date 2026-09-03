@@ -26,10 +26,19 @@ class QueueHealthCheck extends Command
      * is treated as abandoned. A live product search writes ProductSourceAttempt
      * rows and AiRun rows continuously - training rounds land every few seconds
      * to a couple of minutes - so total silence for this long means the worker
-     * that held the job is gone. Generous enough that a single slow AI call
-     * cannot trip it.
+     * that held the job is gone - unless an AI call is still open, which
+     * searchIsAlive() checks separately, because that one case really can be
+     * silent for longer than this.
      */
     private const SILENT_AFTER_SECONDS = 480;
+
+    /**
+     * The longest a single AI call may stay open before the job holding it is
+     * considered abandoned anyway. Above ProcessTelegramMessage's own research
+     * ceiling, below the 2220s retry_after that would otherwise be the only
+     * recovery, so a worker killed mid-call still comes back on its own.
+     */
+    private const AI_CALL_CEILING_SECONDS = 1500;
 
     public function handle(TelegramClient $telegram): int
     {
@@ -136,14 +145,31 @@ class QueueHealthCheck extends Command
     {
         $silentSince = now()->subSeconds(self::SILENT_AFTER_SECONDS);
 
-        return DB::table('product_source_attempts')
-            ->where('telegram_update_id', $telegramUpdateId)
-            ->where('created_at', '>', $silentSince)
-            ->exists()
+        if (
+            DB::table('product_source_attempts')
+                ->where('telegram_update_id', $telegramUpdateId)
+                ->where('created_at', '>', $silentSince)
+                ->exists()
             || DB::table('ai_runs')
                 ->where('telegram_update_id', $telegramUpdateId)
                 ->where('updated_at', '>', $silentSince)
-                ->exists();
+                ->exists()
+        ) {
+            return true;
+        }
+
+        // One AI call writes nothing at all while it runs, and the longest ones
+        // - product research walking web search, the main conversational agent -
+        // outlast the silence window legitimately. Releasing that job starts a
+        // second copy of a request already being paid for, so an unfinished run
+        // counts as life of its own until it passes the ceiling any single call
+        // can reach. Every call opens its row as 'running' before it starts, so
+        // this is a real marker rather than an inference from silence.
+        return DB::table('ai_runs')
+            ->where('telegram_update_id', $telegramUpdateId)
+            ->where('status', 'running')
+            ->where('created_at', '>', now()->subSeconds(self::AI_CALL_CEILING_SECONDS))
+            ->exists();
     }
 
     /**

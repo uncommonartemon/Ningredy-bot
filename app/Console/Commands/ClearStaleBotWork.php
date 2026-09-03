@@ -26,8 +26,26 @@ class ClearStaleBotWork extends Command
 
     protected $description = 'Drop queued jobs and cancel in-flight requests left behind by a previous run.';
 
+    /** How recent application activity has to be to mean another bot is running. */
+    private const ALIVE_WITHIN_SECONDS = 120;
+
     public function handle(): int
     {
+        // The docblock above holds only while this is the single instance, and
+        // a second launch is one double-click away - the operator has already
+        // ended up with three schedulers running at once. Started next to a
+        // working bot, this command would delete the job it is busy with and
+        // cancel the request it is answering, so it looks for signs of life
+        // first and refuses rather than guess.
+        if ($this->anotherBotIsWorking()) {
+            $this->warn(
+                'Очистка отменена: бот уже запущен и прямо сейчас работает. '
+                    .'Закройте предыдущее окно, если хотите начать с чистой очереди.',
+            );
+
+            return self::SUCCESS;
+        }
+
         $jobs = Schema::hasTable('jobs') ? DB::table('jobs')->count() : 0;
 
         if ($jobs > 0) {
@@ -43,5 +61,22 @@ class ClearStaleBotWork extends Command
         $this->info("Очистка перед стартом: снято задач из очереди — {$jobs}, отменено незавершённых запросов — {$cancelled}.");
 
         return self::SUCCESS;
+    }
+
+    /**
+     * A job held by a worker is not proof on its own - that is exactly what a
+     * killed run leaves behind. Recent writes are: only a process that is still
+     * executing keeps producing attempt and AI-run rows.
+     */
+    private function anotherBotIsWorking(): bool
+    {
+        if (! Schema::hasTable('jobs') || DB::table('jobs')->whereNotNull('reserved_at')->doesntExist()) {
+            return false;
+        }
+
+        $aliveSince = now()->subSeconds(self::ALIVE_WITHIN_SECONDS);
+
+        return DB::table('product_source_attempts')->where('created_at', '>', $aliveSince)->exists()
+            || DB::table('ai_runs')->where('updated_at', '>', $aliveSince)->exists();
     }
 }
