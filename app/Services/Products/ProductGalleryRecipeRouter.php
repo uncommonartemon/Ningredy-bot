@@ -224,9 +224,18 @@ class ProductGalleryRecipeRouter
         );
     }
 
+    /**
+     * An id in the middle of the path used to survive into the pattern, so
+     * every product on such a shop got its own scope and its own training run:
+     * /c/product/1876268-REG/asus... became "/c/product/1876268-REG/*" instead
+     * of "/c/product/*", and the next product looked like an unknown page type
+     * again. Measured against real listings, an id there is either digits with
+     * a suffix or an all-caps alphanumeric code, so both are recognised now.
+     */
     private function looksDynamic(string $segment): bool
     {
-        return preg_match('/^\d{4,}$/', $segment) === 1
+        return preg_match('/^\d{4,}(?:[-_.][A-Za-z0-9]+)*$/', $segment) === 1
+            || preg_match('/^(?=[A-Z0-9]*\d)[A-Z0-9]{8,}$/', $segment) === 1
             || preg_match('/^[0-9a-f]{16,}$/i', $segment) === 1
             || preg_match('/^[0-9a-f]{8}-[0-9a-f-]{27,}$/i', $segment) === 1;
     }

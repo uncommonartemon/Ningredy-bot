@@ -29,6 +29,38 @@ class ProductGalleryRecipeRouterTest extends TestCase
         ));
     }
 
+    public function test_an_id_in_the_middle_of_the_path_does_not_give_every_product_its_own_scope(): void
+    {
+        $router = app(ProductGalleryRecipeRouter::class);
+
+        // Live consequence before this: four separate recipes for one shop, one
+        // per product, each starting its training from nothing.
+        $this->assertSame(
+            $router->pathPatternForUrl('https://shop.example/c/product/1218008-REG/apple_mc7a4ll_a.html'),
+            $router->pathPatternForUrl('https://shop.example/c/product/1876268-REG/asus_rog_zephyrus.html'),
+        );
+        $this->assertSame('/c/product/*/*', $router->pathPatternForUrl(
+            'https://shop.example/c/product/1876268-REG/asus_rog_zephyrus.html',
+        ));
+        $this->assertSame('/dp/*/*', $router->pathPatternForUrl(
+            'https://shop.example/dp/B0ABCDE123/ref=sr_1_1',
+        ));
+    }
+
+    public function test_a_readable_path_word_is_not_mistaken_for_an_id(): void
+    {
+        $router = app(ProductGalleryRecipeRouter::class);
+
+        // Recognising ids too eagerly is the opposite failure: it would merge
+        // genuinely different page types onto one recipe.
+        $this->assertSame('/en-us/shop/dell-laptops/xps-13-laptop/spd/*', $router->pathPatternForUrl(
+            'https://shop.example/en-us/shop/dell-laptops/xps-13-laptop/spd/xps-13-9350',
+        ));
+        $this->assertSame('/gaming-laptops/razer-blade-18/*', $router->pathPatternForUrl(
+            'https://shop.example/gaming-laptops/razer-blade-18/rz09-05299',
+        ));
+    }
+
     public function test_one_domain_can_keep_separate_recipes_for_separate_paths(): void
     {
         $router = app(ProductGalleryRecipeRouter::class);
