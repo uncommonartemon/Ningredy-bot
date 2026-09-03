@@ -372,6 +372,15 @@ class ProductImageStorage
             ];
             $sourceIdentityConfirmed = $this->identityMatcher->supportsSource($draft, $source)
                 && (! $redirectedSource || $this->identityMatcher->supportsSource($draft, $finalSourceEvidence));
+            // Wholesale acceptance of a whole slider skips per-frame Vision, so
+            // it is reserved for a source that agrees with the card it is about
+            // to illustrate. A shop selling the same model in another memory
+            // configuration passes every identifier check by design - regional
+            // part numbers must not reject good cards - so the disagreement is
+            // caught here instead. The source is not rejected: its photos are
+            // usually the same chassis, it simply has to earn its frames one by
+            // one. The same gate guards the fallback search below.
+            $configurationConflict = $this->identityMatcher->conflictsConfiguration($draft, $finalSourceEvidence);
 
             if ($this->identityMatcher->conflictsSource($draft, $source)) {
                 $this->attempts->record([
@@ -605,7 +614,12 @@ class ProductImageStorage
                 ->filter(fn (array $candidate): bool => (bool) ($candidate['confirmed_gallery'] ?? false))
                 ->values();
             $structurallyConfirmed = $sourceIdentityConfirmed
+                && ! $configurationConflict
                 && $confirmedGallery->count() >= $minimumCompleteGallerySize;
+
+            if ($configurationConflict && $confirmedGallery->count() >= $minimumCompleteGallerySize) {
+                $progress?->__invoke('Источник продаёт другую конфигурацию памяти: кадры проверю по одному, не целиком.');
+            }
             $galleryVerification = $structurallyConfirmed
                 ? $this->verifyConfirmedGallerySafely(
                     $productPageUrl,

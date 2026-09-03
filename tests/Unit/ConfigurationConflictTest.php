@@ -73,6 +73,52 @@ class ConfigurationConflictTest extends TestCase
         ));
     }
 
+    public function test_a_memory_ceiling_beside_installed_memory_does_not_widen_what_is_accepted(): void
+    {
+        // "32 GB installed, up to 64 GB supported" must not make a 64 GB
+        // listing look like the same machine: only the installed line counts.
+        $draft = $this->draftWithSpecifications([
+            ['key' => 'memory', 'name' => 'Installed memory', 'value' => '32 GB LPDDR5X'],
+            ['key' => 'max_memory_capacity', 'name' => 'Memory capacity', 'value' => '64 GB'],
+            ['key' => 'memory_slots', 'name' => 'Memory slots', 'value' => 'expandable to 64 GB'],
+        ]);
+
+        $this->assertTrue(app(ProductIdentityMatcher::class)->conflictsConfiguration(
+            $draft,
+            ['url' => 'https://shop.example.com/swift-go-14-64-gb-ram'],
+        ));
+    }
+
+    public function test_graphics_memory_on_the_source_is_not_read_as_system_memory(): void
+    {
+        // A card's own memory is a power of two in the same range, so counting
+        // it would reject a source whose only sin is naming its GPU.
+        $this->assertFalse(app(ProductIdentityMatcher::class)->conflictsConfiguration(
+            $this->draftWithMemory('32 GB'),
+            ['url' => 'https://shop.example.com/blade-18-geforce-rtx-5080-16gb'],
+        ));
+    }
+
+    public function test_graphics_memory_cannot_stand_in_for_the_missing_system_memory(): void
+    {
+        // The mirror image: a 16 GB machine with a 32 GB card used to satisfy a
+        // 32 GB draft, because every size on the page was thrown into one pool.
+        $this->assertTrue(app(ProductIdentityMatcher::class)->conflictsConfiguration(
+            $this->draftWithMemory('32 GB'),
+            ['title' => 'Gaming laptop, 16 GB RAM, RTX 5090 32 GB GDDR7'],
+        ));
+    }
+
+    public function test_storage_beside_the_installed_size_leaves_it_readable(): void
+    {
+        // The window around a size stops at the next size, so the SSD's words
+        // describe the SSD and the 32 GB in front of it stays system memory.
+        $this->assertFalse(app(ProductIdentityMatcher::class)->conflictsConfiguration(
+            $this->draftWithMemory('32 GB'),
+            ['title' => 'Swift Go 14, 32 GB, 256 GB SSD'],
+        ));
+    }
+
     private function draftWithMemory(?string $memory): ProductDraft
     {
         return $this->draftWithSpecifications($memory === null ? [] : [

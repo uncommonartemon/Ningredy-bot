@@ -30,6 +30,24 @@ class ProductIdentityMatcher
         'memory', 'storage', 'quiet', 'blue', 'card', 'edition',
     ];
 
+    /** A specification naming a limit rather than what is installed. */
+    private const MEMORY_CEILING_KEY = '/\b(?:max|maximum|supported|expandable|upgrad\w*|slot|socket)/';
+
+    private const MEMORY_CEILING_VALUE = '/\b(?:up to|maximum|expandable)\b/';
+
+    /**
+     * System memory, including its module names. "lpddr5x" and "ddr5" qualify;
+     * "gddr6" deliberately does not - the leading g is exactly what separates a
+     * graphics card's memory from the machine's own.
+     */
+    private const INSTALLED_MEMORY_CONTEXT = '/\b(?:ram|memory|unified|dimm|sodimm)\b|\b(?:lp)?ddr/';
+
+    /** Memory that belongs to something other than the machine's own configuration. */
+    private const OTHER_MEMORY_CONTEXT = '/\b(?:vram|graphics|video|gpu|geforce|rtx|gtx|radeon|ssd|hdd|nvme|emmc|storage|disk|drive|flash|microsd|sd)\b|\b(?:gddr|hbm)/';
+
+    /** How far around a size its describing words are looked for, in characters. */
+    private const MEMORY_CONTEXT_WINDOW = 16;
+
     public function supports(ProductDraft $draft, string $sourceUrl): bool
     {
         if ($sourceUrl === '') {
@@ -214,29 +232,82 @@ class ProductIdentityMatcher
             ->filter(fn (mixed $item): bool => is_array($item))
             ->filter(function (array $item): bool {
                 $key = Str::lower((string) ($item['key'] ?? '').' '.($item['name'] ?? ''));
+                $value = Str::lower((string) ($item['value'] ?? ''));
 
+                // A ceiling is not a configuration. "max_memory_capacity",
+                // "memory slots, expandable to 64 GB" and a value reading "up
+                // to 64 GB" all say what the machine could take; reading any of
+                // them as installed memory would let a 64 GB listing illustrate
+                // a 32 GB card, which is the exact mistake this gate exists to
+                // stop.
                 return (str_contains($key, 'ram') || str_contains($key, 'memor') || str_contains($key, 'память'))
-                    && ! str_contains($key, 'maximum')
+                    && preg_match(self::MEMORY_CEILING_KEY, $key) !== 1
                     && ! str_contains($key, 'video')
-                    && ! str_contains($key, 'graphic');
+                    && ! str_contains($key, 'graphic')
+                    && preg_match(self::MEMORY_CEILING_VALUE, $value) !== 1;
             })
             ->map(fn (array $item): string => (string) ($item['value'] ?? ''))
             ->implode(' ');
     }
 
-    /** @return array<int, int> */
+    /**
+     * A size only counts as installed memory when its own neighbourhood does
+     * not name a different kind of memory. "8 GB GDDR6" on a graphics line and
+     * "256 GB SSD" on a storage line are both plausible-looking powers of two,
+     * and reading them as system memory would invent conflicts that do not
+     * exist - or, worse, mask a real one. Each window stops at the neighbouring
+     * size token, so one figure can never be described by the next figure's
+     * words ("16 GB, 256 GB SSD" keeps the 16).
+     *
+     * @return array<int, int>
+     */
     private function memorySizes(string $evidence): array
     {
-        preg_match_all('/(?<!\d)(\d{1,3})\s*[-_ ]?\s*gb\b/i', str_replace(['-', '_'], ' ', Str::lower($evidence)), $matches);
+        $text = str_replace(['-', '_'], ' ', Str::lower(Str::ascii(urldecode($evidence))));
+        $found = preg_match_all('/(?<!\d)(\d{1,4})\s*(gb|tb)\b/', $text, $matches, PREG_OFFSET_CAPTURE);
 
-        return collect($matches[1] ?? [])
-            ->map(fn (string $size): int => (int) $size)
-            // Sizes outside plausible installed memory are something else on the
-            // page - a disk, a bundled card, a promotion.
-            ->filter(fn (int $size): bool => $size >= 2 && $size <= 256 && ($size & ($size - 1)) === 0)
-            ->unique()
-            ->values()
-            ->all();
+        if (! $found) {
+            return [];
+        }
+
+        $sizes = [];
+
+        foreach ($matches[0] as $position => [$token, $offset]) {
+            $size = (int) $matches[1][$position][0];
+
+            // Terabyte tokens are only ever boundaries; sizes outside plausible
+            // installed memory are something else on the page - a disk, a
+            // bundled card, a promotion.
+            if ($matches[2][$position][0] !== 'gb'
+                || $size < 2 || $size > 256 || ($size & ($size - 1)) !== 0) {
+                continue;
+            }
+
+            $end = $offset + strlen($token);
+            $previous = $matches[0][$position - 1] ?? null;
+            $previousEnd = $previous === null ? 0 : $previous[1] + strlen($previous[0]);
+            $beforeStart = max($previousEnd, $offset - self::MEMORY_CONTEXT_WINDOW);
+            $before = substr($text, $beforeStart, $offset - $beforeStart);
+            $after = substr($text, $end, max(0, min(
+                $matches[0][$position + 1][1] ?? strlen($text),
+                $end + self::MEMORY_CONTEXT_WINDOW,
+            ) - $end));
+
+            if (preg_match(self::INSTALLED_MEMORY_CONTEXT, $after) === 1) {
+                $sizes[] = $size;
+
+                continue;
+            }
+
+            if (preg_match(self::OTHER_MEMORY_CONTEXT, $after) === 1
+                || preg_match(self::OTHER_MEMORY_CONTEXT, $before) === 1) {
+                continue;
+            }
+
+            $sizes[] = $size;
+        }
+
+        return array_values(array_unique($sizes));
     }
 
     private function sourceEvidence(array $source): string
