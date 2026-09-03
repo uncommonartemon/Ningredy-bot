@@ -45,3 +45,6 @@ Thumbs.db
 # Transient language-server scratch files (PHP Intelephense/phpactor) some
 # editors drop under storage/framework - never project code.
 /storage/framework/lsp-*.php
+
+# Held open by the launcher window for as long as the bot runs - see start-ningredy.bat.
+.ningredy-running.lock
