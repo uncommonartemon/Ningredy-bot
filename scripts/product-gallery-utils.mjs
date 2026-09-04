@@ -481,3 +481,118 @@ export const recipeActionShouldStop = ({ kind, clicked, changed, matchCount }) =
 // Where browser-server.mjs advertises the shared browser, and where extraction
 // looks for it. One definition so the two can never disagree about the path.
 export const browserServerEndpointFile = (projectRoot) => `${projectRoot}/storage/app/browser-server.json`;
+
+/**
+ * Consent walls, region pickers and newsletter popups sit on top of the page,
+ * so the DOM handed to the agent is whatever the overlay left visible - and the
+ * agent then spends a paid round writing a click for a cookie banner instead of
+ * reading the gallery. Two site-specific dismissals used to live here (an
+ * Amazon element id and an English "Continue shopping" label), which only ever
+ * covered the two shops someone had hit.
+ *
+ * This finds blockers by what they do rather than by who wrote them: fixed or
+ * sticky, actually covering the middle of the viewport, and containing no
+ * product image - a gallery viewer is itself a dialog, and closing it would
+ * throw away the very thing we came for. The affirmative control is matched by
+ * label across the languages these shops actually serve.
+ *
+ * Whatever is dismissed, and whatever refuses to go, is reported to the agent,
+ * so it never has to guess whether it is looking at the real page.
+ */
+export const OVERLAY_ACCEPT_LABELS = [
+    'accept', 'agree', 'allow', 'ok', 'got it', 'understood', 'continue', 'close', 'dismiss', 'no thanks',
+    'принять', 'согласен', 'соглашаюсь', 'хорошо', 'закрыть', 'продолжить',
+    'souhlas', 'rozumím', 'přijmout', 'zavřít',
+    'akzeptieren', 'zustimmen', 'einverstanden', 'schließen',
+    'aceptar', 'acepto', 'cerrar',
+    'accepter', 'j\'accepte', 'fermer',
+    'accetta', 'akkoord', 'accepteren', 'godkänn', 'zaakceptuj', 'zgadzam',
+];
+
+export const clearBlockingOverlays = async (target) => {
+    const dismissed = [];
+
+    for (let pass = 0; pass < 3; pass++) {
+        const found = await target.evaluate((labels) => {
+            const visible = (element) => {
+                const style = getComputedStyle(element);
+                const box = element.getBoundingClientRect();
+
+                return style.visibility !== 'hidden'
+                    && style.display !== 'none'
+                    && Number.parseFloat(style.opacity || '1') > 0.05
+                    && box.width > 40 && box.height > 30;
+            };
+            const centre = { x: innerWidth / 2, y: innerHeight / 2 };
+
+            for (const element of document.querySelectorAll('div,section,aside,dialog,[role=dialog],[aria-modal=true]')) {
+                if (element.dataset.ningredyOverlay || !visible(element)) {
+                    continue;
+                }
+
+                const style = getComputedStyle(element);
+                const box = element.getBoundingClientRect();
+                const pinned = ['fixed', 'sticky'].includes(style.position)
+                    || element.matches('dialog[open],[role=dialog],[aria-modal=true]');
+                const coversCentre = box.left <= centre.x && box.right >= centre.x
+                    && box.top <= centre.y && box.bottom >= centre.y;
+                const coversMuch = (box.width * box.height) >= (innerWidth * innerHeight) * 0.2;
+
+                // The gallery viewer is a dialog too. Anything holding a real
+                // product image is the content, never the obstacle.
+                if (!pinned || !(coversCentre || coversMuch) || element.querySelector('img,picture,source')) {
+                    continue;
+                }
+
+                const controls = [...element.querySelectorAll('button,a[role=button],a,input[type=button],input[type=submit],[role=button]')];
+                const control = controls.find((candidate) => {
+                    const text = `${candidate.innerText || ''} ${candidate.value || ''} ${candidate.getAttribute('aria-label') || ''}`
+                        .trim().toLowerCase();
+
+                    return text !== '' && text.length <= 60 && labels.some((label) => text.includes(label));
+                }) || controls.find((candidate) => /close|dismiss|✕|×/i.test(
+                    `${candidate.className || ''} ${candidate.getAttribute('aria-label') || ''}`,
+                ));
+
+                if (!control) {
+                    // Still report it: an overlay nobody can close is exactly
+                    // what the agent needs told, not hidden from.
+                    element.dataset.ningredyOverlay = 'stuck';
+
+                    continue;
+                }
+
+                control.dataset.ningredyOverlayControl = '1';
+                element.dataset.ningredyOverlay = 'clearing';
+
+                return {
+                    label: (control.innerText || control.getAttribute('aria-label') || '').trim().slice(0, 60),
+                    overlay: (element.id ? `#${element.id}` : element.className.toString().split(/\s+/)[0] || 'overlay').slice(0, 60),
+                };
+            }
+
+            return null;
+        }, OVERLAY_ACCEPT_LABELS).catch(() => null);
+
+        if (!found) {
+            break;
+        }
+
+        const control = target.locator('[data-ningredy-overlay-control="1"]').first();
+        // A real click, not a synthetic one: consent frameworks routinely
+        // listen for trusted events and ignore anything else.
+        await control.click({ timeout: 2_000 }).catch(() => {});
+        await target.evaluate(() => {
+            document.querySelectorAll('[data-ningredy-overlay-control]')
+                .forEach((element) => element.removeAttribute('data-ningredy-overlay-control'));
+        }).catch(() => {});
+        await target.waitForLoadState('domcontentloaded', { timeout: 8_000 }).catch(() => {});
+        dismissed.push(found);
+    }
+
+    const stuck = await target.evaluate(() => [...document.querySelectorAll('[data-ningredy-overlay="stuck"]')]
+        .map((element) => (element.id ? `#${element.id}` : element.className.toString().split(/\s+/)[0] || 'overlay').slice(0, 60))
+        .slice(0, 3)).catch(() => []);
+
+    return { dismissed, still_blocking: stuck };
+};

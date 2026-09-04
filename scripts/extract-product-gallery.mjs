@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path';
 import { chromium } from 'playwright-core';
 import {
     browserServerEndpointFile,
+    clearBlockingOverlays,
     EXCLUDED_GALLERY_CONTEXT_PATTERN_SOURCE,
     galleryCollectionTarget,
     imageAssetKey,
@@ -267,6 +268,7 @@ let scout = {};
 let postInteractionScout = {};
 const actionTrace = [];
 let navigationStatus = null;
+let dismissedOverlays = { dismissed: [], still_blocking: [] };
 let galleryReadiness = {};
 
 // A gallery click can trigger a real page navigation instead of an in-page
@@ -1612,27 +1614,11 @@ try {
     navigationStatus = navigation?.status() ?? null;
     await page.waitForLoadState('load', { timeout: 5_000 }).catch(() => {});
 
-    for (let attempt = 0; attempt < 2; attempt++) {
-        const continueShopping = page.locator([
-            'button:has-text("Continue shopping")',
-            'a:has-text("Continue shopping")',
-            'input[value*="Continue shopping" i]',
-        ].join(',')).first();
-
-        if (!await continueShopping.count()) {
-            break;
-        }
-
-        await continueShopping.click({ force: true, timeout: 2_000 }).catch(() => {});
-        await page.waitForLoadState('domcontentloaded', { timeout: 10_000 }).catch(() => {});
-        await page.waitForLoadState('load', { timeout: 5_000 }).catch(() => {});
-    }
+    dismissedOverlays = await clearBlockingOverlays(page);
 
     // Use the browser's final product URL after redirects/interstitials as the
     // logical root for later same-product Gallery/Media navigation checks.
     productPageUrl = page.url();
-
-    await page.locator('#sp-cc-accept').click({ timeout: 500 }).catch(() => {});
 
     for (const selector of preClickSelectors) {
         if (leftProductPage) {
@@ -1672,6 +1658,11 @@ try {
     scout.gallery_readiness = galleryReadiness;
     scout.observed_gallery_count = galleryReadiness.observed_count || 0;
     scout.expected_count_evidence = galleryReadiness.evidence || [];
+    // What was in the way, and what still is. Without this the agent cannot
+    // tell a page that never had a gallery from one it is looking at through a
+    // consent wall - and would plan a recipe for the wrong document.
+    scout.dismissed_overlays = dismissedOverlays.dismissed || [];
+    scout.blocking_overlays = dismissedOverlays.still_blocking || [];
 
     await collect();
 
