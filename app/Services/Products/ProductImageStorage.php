@@ -20,6 +20,14 @@ use Throwable;
 
 class ProductImageStorage
 {
+    /**
+     * How many fallback rounds in a row may find nothing downloadable before
+     * the search accepts that this product has been searched out. Counts only
+     * consecutive empty rounds and resets on any round that downloads a photo,
+     * so a slow but productive search is never cut short.
+     */
+    private const MAX_BARREN_FALLBACK_ROUNDS = 3;
+
     public function __construct(
         private readonly ProductImageResolver $resolver,
         private readonly ProductImageCandidateDiscovery $candidateDiscovery,
@@ -862,6 +870,7 @@ class ProductImageStorage
             // round-count safety cap instead of relying purely on the time
             // limit for hours of paid discovery calls.
             $safetyRounds = max(1, (int) config('product-images.fallback_search_rounds', 3));
+            $barrenRounds = 0;
 
             while (true) {
                 // Re-evaluate measurability after every discovery call. A
@@ -931,14 +940,34 @@ class ProductImageStorage
                         ->values()
                         ->implode(', ');
                     $details = $rejectionSummary !== '' ? " Причины: {$rejectionSummary}." : '';
-                    $progress?->__invoke("Раунд резервного поиска {$fallbackRound} не дал загружаемых фото; исключаю проверенные источники и продолжаю поиск.{$details}");
+                    $barrenRounds++;
 
                     if ($this->candidateDiscovery->hasTerminalFailure()) {
                         break;
                     }
 
+                    // The round cap only guards a search whose money cannot be
+                    // measured, so a measurable one used to run until the clock
+                    // or the wallet ran out - fifteen rounds and twenty-five
+                    // minutes for one photo, the log repeating "no downloadable
+                    // photos" every time. Rounds that keep finding nothing are
+                    // the signal that this product has been searched out; the
+                    // count resets the moment a round downloads something, so a
+                    // slow but productive search is not cut short.
+                    if ($barrenRounds >= self::MAX_BARREN_FALLBACK_ROUNDS) {
+                        $progress?->__invoke(
+                            "Резервный поиск {$barrenRounds} раунда подряд не дал ни одного пригодного фото; "
+                                ."дальнейшие раунды ищут в том же исчерпанном пространстве, останавливаюсь.{$details}",
+                        );
+                        break;
+                    }
+
+                    $progress?->__invoke("Раунд резервного поиска {$fallbackRound} не дал загружаемых фото; исключаю проверенные источники и продолжаю поиск.{$details}");
+
                     continue;
                 }
+
+                $barrenRounds = 0;
                 $candidateGroups = collect($discoveredCandidates)
                     ->groupBy(function (array $candidate): string {
                         $pageUrl = $candidate['page_source_url'] ?? null;

@@ -278,6 +278,19 @@ class ProductImageCandidateDiscovery
             return false;
         }
 
+        // An asset proxy hides its real target inside a base64 path segment, so
+        // the extension test above sees nothing: prod.isg.bruneau.media/asset/
+        // <base64>/ decodes to icecat.biz/rest/product-pdf, and the search only
+        // learned it was a PDF after downloading it. Decoding is general - it
+        // costs nothing, names no host, and catches every proxy shaped this way.
+        // Base64 is case-sensitive, so this reads the path as written rather
+        // than the lower-cased copy the checks below use.
+        foreach ($this->proxiedTargets((string) parse_url($url, PHP_URL_PATH)) as $target) {
+            if (preg_match('#(?:^|[/\-_.])(?:pdf|docx?|xlsx?)(?:$|[/\-_.?])#i', $target) === 1) {
+                return false;
+            }
+        }
+
         if (str_contains($host, 'psref.lenovo.com')
             || str_contains($host, 'energystar.gov')
             || str_contains($host, 'support.lenovo.com')
@@ -292,6 +305,36 @@ class ProductImageCandidateDiscovery
             && ! str_contains($lower, 'spec.pdf')
             && ! str_contains($lower, 'datasheet')
             && ! str_contains($lower, 'certificate');
+    }
+
+    /**
+     * URLs a proxy path carries inside base64 segments. Only a segment that
+     * decodes to printable text naming an address is returned - random ids and
+     * hashes decode to binary and are ignored.
+     *
+     * @return array<int, string>
+     */
+    private function proxiedTargets(string $path): array
+    {
+        $targets = [];
+
+        foreach (explode('/', trim($path, '/')) as $segment) {
+            if (strlen($segment) < 16) {
+                continue;
+            }
+
+            $decoded = base64_decode(strtr($segment, '-_', '+/'), true);
+
+            if ($decoded === false || preg_match('#^[\x20-\x7e]+$#', $decoded) !== 1) {
+                continue;
+            }
+
+            if (str_contains($decoded, 'http') || str_contains($decoded, '/')) {
+                $targets[] = $decoded;
+            }
+        }
+
+        return $targets;
     }
 
     private function looksLikeCatalogImage(string $url): bool
