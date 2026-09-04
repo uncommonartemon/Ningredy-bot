@@ -486,6 +486,15 @@ class BrowserProductGalleryExtractor
             $this->transfers->remember($result['transferred_images'] ?? [], $transferDirectory);
             unset($result['transferred_images']);
 
+            // Read before the transfer directory is deleted below. The bytes
+            // travel with the result rather than as a path, because by the time
+            // the trainer looks at them the directory is long gone.
+            $screenshot = is_string($result['screenshot_path'] ?? null) && is_file($result['screenshot_path'])
+                ? @file_get_contents($result['screenshot_path'])
+                : false;
+            $result['screenshot'] = is_string($screenshot) && $screenshot !== '' ? $screenshot : null;
+            unset($result['screenshot_path']);
+
             $result['images'] = collect($result['images'] ?? [])
                 ->filter(fn (mixed $image): bool => is_string($image)
                     && filter_var($image, FILTER_VALIDATE_URL) !== false

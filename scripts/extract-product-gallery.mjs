@@ -268,6 +268,7 @@ let scout = {};
 let postInteractionScout = {};
 const actionTrace = [];
 let navigationStatus = null;
+let screenshotPath = null;
 let dismissedOverlays = { dismissed: [], still_blocking: [] };
 let galleryReadiness = {};
 
@@ -2153,6 +2154,21 @@ const transferFailures = [];
 // Reuse the same BrowserContext (cookies, referer and anti-bot session) that
 // opened the gallery. PHP may be unable to download these protected CDN URLs
 // independently, so validated bytes are handed off through private temp files.
+// A picture of the page costs a fraction of the DOM text describing it, and
+// answers what the text cannot: whether the gallery is a strip or a grid,
+// whether a click actually opened a viewer, whether something is still sitting
+// on top of the page. The agent has been reasoning about a layout it could
+// never see - which is a strange handicap for work that is entirely visual.
+if (transferDirectory !== '') {
+    try {
+        const path = join(transferDirectory, 'page.png');
+        await page.screenshot({ path, timeout: 5_000 });
+        screenshotPath = path;
+    } catch {
+        // A screenshot is evidence, never a requirement.
+    }
+}
+
 if (!scoutOnly && transferDirectory !== '') {
     const selected = [...bestImages.values()].slice(0, limit);
 
@@ -2205,6 +2221,7 @@ if (sharedBrowser) {
 process.stdout.write(JSON.stringify({
     images,
     transferred_images: transferredImages,
+    screenshot_path: screenshotPath,
     scout,
     post_interaction_scout: postInteractionScout,
     action_trace: actionTrace,

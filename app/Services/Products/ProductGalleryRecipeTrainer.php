@@ -18,6 +18,7 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Validation\ValidationException;
+use Laravel\Ai\Files\Image;
 use RuntimeException;
 use Throwable;
 
@@ -132,6 +133,12 @@ class ProductGalleryRecipeTrainer
             $debug?->__invoke('step', "AI-тренер: Playwright собирает DOM, интерактивные элементы и сетевые изображения {$host}.");
             $scout = $this->browser->scout($url, $debug, $telegramUpdateId, $context);
             $pageScout = is_array($scout['scout'] ?? null) ? $scout['scout'] : [];
+            // The work is visual, and until now the agent did it blind: it read
+            // a description of a layout it had never seen. One picture costs a
+            // fraction of the text describing it and answers what the text
+            // cannot - whether the thumbnails are a strip or a grid, whether
+            // anything is still sitting on top of the page.
+            $pageImage = is_string($scout['screenshot'] ?? null) ? $scout['screenshot'] : null;
             $layoutFingerprint = app(ProductPageLayoutFingerprint::class)->make($pageScout);
             // Persist even a rejected scout: an empty fragment list can still
             // contain the exact Gallery/Media control needed to diagnose the
@@ -511,6 +518,7 @@ class ProductGalleryRecipeTrainer
                             visionImageUrls: $this->observedImageUrls($pageScout, $feedback),
                         )->prompt(
                             $prompt ?: '{}',
+                            attachments: $pageImage === null ? [] : [Image::fromBase64(base64_encode($pageImage))],
                             provider: $provider,
                             model: $model,
                             timeout: $recipeTimeout,

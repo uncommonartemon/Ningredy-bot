@@ -140,6 +140,14 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
             recent round, to avoid retrying a selector combination that already failed and to build on a
             combination that partially worked.
 
+            When an attachment is present it is a screenshot of this exact page, taken after any consent wall
+            was closed and before any recipe action ran. Read it for what the DOM cannot tell you: where the
+            gallery sits, whether thumbnails are a strip or a grid, whether a zoom or expand control is
+            visible, whether anything still covers the page. It shows the viewport only, so absence from the
+            picture is not absence from the page. Selectors must still come from action_candidates and
+            image_candidates - never invent one from what you see - but use the picture to decide which of
+            them is the gallery and in what order to press them.
+
             The page lists are ranked, and on a round that is making progress you are given their head rather
             than all of them; a field such as image_candidates_omitted says how many were left out. Nothing is
             hidden from you deliberately - a round that ends with the same outcome as the one before it is
