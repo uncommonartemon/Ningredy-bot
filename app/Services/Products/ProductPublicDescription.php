@@ -7,7 +7,7 @@ use Illuminate\Support\Str;
 class ProductPublicDescription
 {
     /**
-     * @param array<string, mixed> $data
+     * @param  array<string, mixed>  $data
      * @return array{description: string, research_notes: ?string}
      */
     public function normalize(array $data): array

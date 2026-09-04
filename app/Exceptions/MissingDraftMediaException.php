@@ -4,6 +4,4 @@ namespace App\Exceptions;
 
 use RuntimeException;
 
-class MissingDraftMediaException extends RuntimeException
-{
-}
+class MissingDraftMediaException extends RuntimeException {}

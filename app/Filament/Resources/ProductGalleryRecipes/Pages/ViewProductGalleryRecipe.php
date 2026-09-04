@@ -6,6 +6,7 @@ use App\Filament\Resources\ProductGalleryRecipes\ProductGalleryRecipeResource;
 use App\Filament\Resources\ProductGalleryRecipeVersions\ProductGalleryRecipeVersionResource;
 use App\Jobs\TrainProductGalleryRecipe;
 use App\Models\ProductGalleryRecipe;
+use App\Services\Products\ProductGalleryRecipeRouter;
 use Filament\Actions\Action;
 use Filament\Actions\EditAction;
 use Filament\Forms\Components\Textarea;
@@ -49,13 +50,18 @@ class ViewProductGalleryRecipe extends ViewRecord
                         ->rows(3),
                 ])
                 ->action(function (array $data) use ($record): void {
-                    $record->update([
-                        'source_blocked' => ! $record->source_blocked,
-                        'source_block_reason' => $record->source_blocked ? null : ($data['reason'] ?? null),
-                        'source_blocked_at' => $record->source_blocked ? null : now(),
-                    ]);
+                    $router = app(ProductGalleryRecipeRouter::class);
+                    $blocking = ! $record->source_blocked;
+
+                    // Через общий писатель, а не по текущей строке: этот рецепт
+                    // почти всегда описывает один path, и раньше кнопка с
+                    // обещанием "ни для одного товара" гасила только его.
+                    $blocking
+                        ? $router->blockDomain($record->domain, trim((string) ($data['reason'] ?? '')) ?: 'Заблокировано вручную оператором в панели.')
+                        : $router->unblockDomain($record->domain);
+                    $record->refresh();
                     Notification::make()
-                        ->title($record->source_blocked ? 'Домен заблокирован' : 'Домен разблокирован')
+                        ->title($blocking ? 'Домен заблокирован' : 'Домен разблокирован')
                         ->success()
                         ->send();
                 }),

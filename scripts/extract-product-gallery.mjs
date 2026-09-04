@@ -1710,6 +1710,14 @@ try {
             const matched = await locator.count().catch(() => 0);
 
             if (matched < 1) {
+                // A step declared if_present describes an obstacle the page
+                // raises only sometimes - a consent wall a returning visitor no
+                // longer sees, a region or age gate. Absent means there was
+                // nothing to clear, which is a pass, not a broken recipe. It is
+                // still traced, so the agent and the operator see which of the
+                // two states this run met.
+                const optional = action.when === 'if_present';
+
                 actionTrace.push({
                     action: action.kind,
                     phase: 'ai_action',
@@ -1718,7 +1726,8 @@ try {
                     purpose: action.purpose,
                     clicked: false,
                     changed: false,
-                    selector_missing: true,
+                    selector_missing: !optional,
+                    optional_absent: optional,
                     selector_match_count: 0,
                 });
                 continue;

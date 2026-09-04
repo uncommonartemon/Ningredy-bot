@@ -311,6 +311,12 @@ export const normalizeRecipeActions = (actions) => (Array.isArray(actions) ? act
             limit: Math.max(1, Math.min(20, Number.parseInt(action.limit || '1', 10) || 1)),
             wait_after_ms: Math.max(50, Math.min(1500, Number.parseInt(action.wait_after_ms || '250', 10) || 250)),
             purpose: typeof action.purpose === 'string' ? action.purpose.slice(0, 200) : '',
+            // The second whitelist the plan passes through, and the reason the
+            // first one losing a field is so easy to miss: both have to know
+            // about it or the browser is handed a step with the condition
+            // stripped off, and treats a gate that is simply not up today as a
+            // broken selector. Default always, so a legacy recipe is unchanged.
+            when: action.when === 'if_present' ? 'if_present' : 'always',
         };
         // A plain click carries a follow-up too. The opening click is what puts
         // the first frame on screen, and with the zoom control attachable only
@@ -358,6 +364,22 @@ export const recipeActionPlanStatus = ({ actions, actionTrace }) => {
         let requiredClicks = 1;
         let complete = false;
         let completion = 'not_executed';
+
+        // The gate this step clears is not up on this visit. Reported as its own
+        // outcome rather than as a completed click, so the agent reading the
+        // trace can tell "nothing to clear" from "cleared it".
+        if (traces.some((item) => item.optional_absent === true)) {
+            return {
+                action_index: actionIndex,
+                kind: action.kind,
+                selector: action.selector,
+                required_clicks: 0,
+                completed_clicks: 0,
+                selector_match_count: 0,
+                complete: true,
+                completion: 'absent_not_required',
+            };
+        }
 
         // Whether every declared follow-up actually ran, by the same rule the
         // server-side validator applies - a control that stopped changing or

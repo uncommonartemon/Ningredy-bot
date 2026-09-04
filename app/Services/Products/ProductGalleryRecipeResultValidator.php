@@ -197,6 +197,20 @@ class ProductGalleryRecipeResultValidator
             $kind = (string) ($action['kind'] ?? '');
             $actionTrace = collect($trace)
                 ->filter(fn (mixed $item): bool => is_array($item)
+                    && (int) ($item['action_index'] ?? -1) === $actionIndex)
+                ->values();
+
+            // An if_present step is a gate that may or may not be up on this
+            // visit. The runner reports it absent; nothing was owed and nothing
+            // was skipped by mistake. A step that did match is held to every
+            // rule below, so marking the gallery opener if_present buys nothing.
+            if (($action['when'] ?? 'always') === 'if_present'
+                && $actionTrace->contains(fn (array $item): bool => ($item['optional_absent'] ?? false) === true)) {
+                continue;
+            }
+
+            $actionTrace = collect($trace)
+                ->filter(fn (mixed $item): bool => is_array($item)
                     && (int) ($item['action_index'] ?? -1) === $actionIndex
                     && ($item['action'] ?? null) === $kind)
                 ->values();

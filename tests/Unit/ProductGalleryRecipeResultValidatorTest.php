@@ -51,6 +51,85 @@ class ProductGalleryRecipeResultValidatorTest extends TestCase
         $this->assertSame(3, $result['expected']);
     }
 
+    public function test_an_absent_if_present_gate_does_not_fail_the_recipe(): void
+    {
+        // The consent wall was up when this recipe was trained and is not up
+        // now - the browser keeps the site's own cookies between runs, and any
+        // returning visitor sees the same thing. Nothing was owed, so nothing
+        // was skipped: the photographs are all there and the recipe holds.
+        $result = app(ProductGalleryRecipeResultValidator::class)->validate(
+            [
+                'gallery_present' => true,
+                'content_confirmed_product' => true,
+                'expected_image_count' => 4,
+                'actions' => [
+                    ['kind' => 'click', 'when' => 'if_present', 'selector' => '#consent .accept', 'purpose' => 'accept cookies'],
+                    ['kind' => 'click', 'when' => 'always', 'selector' => '.gallery-open', 'purpose' => 'open the media viewer'],
+                ],
+            ],
+            [
+                'images' => $this->images(4),
+                'action_trace' => [
+                    ['action' => 'click', 'action_index' => 0, 'clicked' => false, 'optional_absent' => true, 'selector_match_count' => 0],
+                    ['action' => 'click', 'action_index' => 1, 'clicked' => true, 'changed' => true],
+                ],
+            ],
+        );
+
+        $this->assertTrue($result['passed'], $result['reason']);
+    }
+
+    public function test_an_if_present_gate_that_did_appear_is_still_held_to_every_rule(): void
+    {
+        // Present and not clicked is a broken step, not an absent one. The
+        // escape is only for the state the page never put up.
+        $result = app(ProductGalleryRecipeResultValidator::class)->validate(
+            [
+                'gallery_present' => true,
+                'content_confirmed_product' => true,
+                'expected_image_count' => 4,
+                'actions' => [
+                    ['kind' => 'click', 'when' => 'if_present', 'selector' => '#consent .accept', 'purpose' => 'accept cookies'],
+                ],
+            ],
+            [
+                'images' => $this->images(4),
+                'action_trace' => [
+                    ['action' => 'click', 'action_index' => 0, 'clicked' => false, 'selector_match_count' => 1],
+                ],
+            ],
+        );
+
+        $this->assertFalse($result['passed']);
+        $this->assertStringContainsString('required click was not executed', $result['reason']);
+    }
+
+    public function test_marking_the_gallery_opener_optional_buys_nothing(): void
+    {
+        // The one abuse worth naming: if the step that reveals the gallery is
+        // skipped, no photographs are collected and the recipe fails on the
+        // count instead - the escape cannot launder an unusable recipe.
+        $result = app(ProductGalleryRecipeResultValidator::class)->validate(
+            [
+                'gallery_present' => true,
+                'content_confirmed_product' => true,
+                'expected_image_count' => 8,
+                'actions' => [
+                    ['kind' => 'click', 'when' => 'if_present', 'selector' => '.gallery-open', 'purpose' => 'open the media viewer'],
+                ],
+            ],
+            [
+                'images' => [],
+                'diagnostics' => ['distinct_dom_assets' => 8],
+                'action_trace' => [
+                    ['action' => 'click', 'action_index' => 0, 'clicked' => false, 'optional_absent' => true, 'selector_match_count' => 0],
+                ],
+            ],
+        );
+
+        $this->assertFalse($result['passed']);
+    }
+
     public function test_modal_thumbnail_count_cannot_hide_an_incomplete_click_each_traversal(): void
     {
         $result = app(ProductGalleryRecipeResultValidator::class)->validate(

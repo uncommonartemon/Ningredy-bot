@@ -323,11 +323,20 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
             The runner collects image URLs after every action and returns an exact action trace. If actions is
             non-empty, it replaces the legacy pre-click/thumbnail/open/next click order. The legacy selector
             lists remain required for backward compatibility and should still describe the gallery structure.
-            Every returned action is mandatory: the runner executes the complete ordered plan and validation
-            rejects the recipe when any selector is missing, unsafe, not clicked, an opener does not reveal its
-            gallery layer, click_each leaves matched controls unvisited, or click_until_no_change stops without
-            reaching no-change or its declared limit. Omit speculative or optional actions rather than returning
-            steps that are not required to collect the complete highest-resolution gallery.
+            Every action carries when: always or if_present. An always step is mandatory - the runner executes
+            the complete ordered plan and validation rejects the recipe when its selector is missing, unsafe,
+            not clicked, an opener does not reveal its gallery layer, click_each leaves matched controls
+            unvisited, or click_until_no_change stops without reaching no-change or its declared limit.
+            An if_present step whose selector matches nothing is skipped and the recipe still passes.
+            Use if_present for an obstacle the page raises only sometimes: a consent wall that a returning
+            visitor no longer sees, a region or age gate, a newsletter or app-install modal, a "continue to
+            site" interstitial. The browser keeps each site's own cookies between rounds, so a gate you had to
+            click through in an earlier round can be absent in this one and present again for a first-time
+            visitor months later - keep it in the plan as if_present rather than dropping it. The runner also
+            dismisses obvious blocking overlays on its own before the plan runs; add a step only for a gate
+            that survived that. Never mark a step that opens or traverses the gallery as if_present: skipping
+            it collects no photographs and the recipe fails anyway, with the cause hidden. Omit speculative
+            steps entirely rather than marking them if_present.
             Keep the plan short. Never click buy/cart/account/share/review controls or submit a form.
 
             With an empty actions plan the runner uses the legacy sequence: click optional pre-click controls,
@@ -385,6 +394,7 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
             'kind' => $schema->string()->enum([
                 'click', 'click_each', 'click_until_no_change',
             ])->required(),
+            'when' => $schema->string()->enum(['always', 'if_present'])->required(),
             'selector' => $schema->string()->max(300)->required(),
             'index' => $schema->integer()->min(0)->max(20)->required(),
             'limit' => $schema->integer()->min(1)->max(20)->required(),

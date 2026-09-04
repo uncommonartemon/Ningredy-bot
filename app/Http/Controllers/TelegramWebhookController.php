@@ -17,10 +17,10 @@ use App\Models\AppSetting;
 use App\Models\Product;
 use App\Models\ProductDraft;
 use App\Models\ProductDraftMedia;
-use App\Models\ProductGalleryRecipe;
 use App\Models\TelegramChatState;
 use App\Models\TelegramUpdate;
 use App\Services\Products\ProductDraftWorkflow;
+use App\Services\Products\ProductGalleryRecipeRouter;
 use App\Services\Products\ProductSourcePriority;
 use App\Services\Telegram\DraftTelegramPresenter;
 use App\Services\Telegram\TelegramClient;
@@ -879,15 +879,12 @@ class TelegramWebhookController extends Controller
             return;
         }
 
-        ProductGalleryRecipe::query()->updateOrCreate(
-            ['domain' => $host, 'path_pattern' => '*'],
-            [
-                'status' => 'disabled',
-                'source_blocked' => true,
-                'source_block_reason' => "Заблокировано вручную оператором в Telegram (черновик #{$draft->id}).",
-                'source_blocked_at' => now(),
-                'retry_after' => null,
-            ],
+        // Через тот же писатель, что и кнопка в панели: два оператора, одна
+        // блокировка. Раньше здесь и в Filament были две разные записи, и
+        // домен считался заблокированным только по одной из них.
+        app(ProductGalleryRecipeRouter::class)->blockDomain(
+            $host,
+            "Заблокировано вручную оператором в Telegram (черновик #{$draft->id}).",
         );
         $this->telegram->answerCallbackQuery($callbackId, "Источник {$host} забанен.");
         $this->draftPresenter->clearControls($this->telegram, $draft, $chatId);

@@ -88,7 +88,12 @@ class DraftTelegramPresenter
             'replace' => 'заменить',
             'delete' => 'удалить',
         ];
-        $verb = $labels[$action] ?? $labels['enhance'];
+        // The fallback has to move the action itself, not just its label: the
+        // callback_data below carries $action into a button, and only these
+        // three have a handler. An unknown verb used to draw a menu labelled
+        // "улучшить" whose every button did nothing when pressed.
+        $action = isset($labels[$action]) ? $action : 'enhance';
+        $verb = $labels[$action];
         $buttons = $draft->media()
             ->orderByDesc('is_primary')
             ->orderBy('sort_order')

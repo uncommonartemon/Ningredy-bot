@@ -1622,14 +1622,40 @@ class ProductGalleryRecipeTrainer
             ->filter(fn (mixed $action): bool => is_array($action)
                 && is_string($action['selector'] ?? null)
                 && $this->safeSelector($action['selector']))
-            ->map(fn (array $action): array => [
-                'kind' => $action['kind'],
-                'selector' => trim($action['selector']),
-                'index' => (int) $action['index'],
-                'limit' => (int) $action['limit'],
-                'wait_after_ms' => (int) $action['wait_after_ms'],
-                'purpose' => trim($action['purpose']),
-            ])
+            ->map(function (array $action): array {
+                // Whitelisted rather than passed through, so an invented field
+                // can never reach the runner - which means every field the
+                // contract does support has to be listed here. after_each_*
+                // was not, and was silently dropped between validation and
+                // execution: the agent was asked for the zoom control to press
+                // after each thumbnail, the rules accepted it and the validator
+                // checked it, while the browser never received one.
+                $afterEach = is_string($action['after_each_selector'] ?? null)
+                    && $this->safeSelector($action['after_each_selector'])
+                    ? trim($action['after_each_selector'])
+                    : null;
+
+                return [
+                    'kind' => $action['kind'],
+                    'selector' => trim($action['selector']),
+                    'index' => (int) $action['index'],
+                    'limit' => (int) $action['limit'],
+                    'wait_after_ms' => (int) $action['wait_after_ms'],
+                    'purpose' => trim($action['purpose']),
+                    // A step the page only sometimes puts up - a consent wall a
+                    // returning visitor no longer sees, a region or age gate, a
+                    // newsletter modal. Absent means skipped, not failed, so one
+                    // recipe holds for both a first visit and every later one.
+                    'when' => ($action['when'] ?? null) === 'if_present' ? 'if_present' : 'always',
+                    'after_each_selector' => $afterEach,
+                    'after_each_limit' => $afterEach === null
+                        ? null
+                        : $this->clampInt($action['after_each_limit'] ?? null, 1, 20, 3),
+                    'after_each_wait_after_ms' => $afterEach === null
+                        ? null
+                        : $this->clampInt($action['after_each_wait_after_ms'] ?? null, 50, 1500, 200),
+                ];
+            })
             ->values()
             ->all();
 
@@ -1662,6 +1688,7 @@ class ProductGalleryRecipeTrainer
             'actions.*.index' => ['required', 'integer', 'between:0,20'],
             'actions.*.limit' => ['required', 'integer', 'between:1,20'],
             'actions.*.wait_after_ms' => ['required', 'integer', 'between:50,1500'],
+            'actions.*.when' => ['nullable', 'in:always,if_present'],
             'actions.*.after_each_selector' => ['nullable', 'string', 'max:300'],
             'actions.*.after_each_limit' => ['nullable', 'integer', 'between:1,20'],
             'actions.*.after_each_wait_after_ms' => ['nullable', 'integer', 'between:50,1500'],

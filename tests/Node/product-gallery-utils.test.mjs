@@ -531,6 +531,7 @@ test('normalizes the safe ordered AI action plan and rejects executable selector
             limit: 1,
             wait_after_ms: 1500,
             purpose: 'Open the gallery',
+            when: 'always',
         },
         {
             kind: 'click_each',
@@ -538,10 +539,11 @@ test('normalizes the safe ordered AI action plan and rejects executable selector
             index: 0,
             limit: 8,
             wait_after_ms: 150,
+            purpose: 'Visit each photo',
+            when: 'always',
             after_each_selector: 'button[data-zoom-plus]',
             after_each_limit: 20,
             after_each_wait_after_ms: 50,
-            purpose: 'Visit each photo',
         },
     ]);
 });

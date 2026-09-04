@@ -3,10 +3,10 @@
 namespace App\Ai\Tools;
 
 use App\Models\AiRun;
-use App\Services\Ai\AiUsageReporter;
 use App\Models\AppSetting;
 use App\Models\Product;
 use App\Models\ProductDraft;
+use App\Services\Ai\AiUsageReporter;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
 use Illuminate\Support\Facades\DB;
 use Laravel\Ai\Contracts\Tool;

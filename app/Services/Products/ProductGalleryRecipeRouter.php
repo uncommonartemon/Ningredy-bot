@@ -82,6 +82,63 @@ class ProductGalleryRecipeRouter
     }
 
     /**
+     * The one way an operator blocks or unblocks a whole shop, wherever the
+     * button lives. Both operator paths used to write their own version: the
+     * Telegram one created the domain-scoped row that every check understands,
+     * while the Filament one flipped whichever recipe row happened to be open -
+     * usually a single path - and its own confirmation still said the domain
+     * would not be used for any product. Blocking marks every existing row too,
+     * so nothing already trained slips through a check that reads only one.
+     */
+    public function blockDomain(string $domain, ?string $reason = null): void
+    {
+        $domain = $this->domainForUrl('https://'.$domain) ?: strtolower(trim($domain));
+
+        if ($domain === '') {
+            return;
+        }
+
+        ProductGalleryRecipe::query()->updateOrCreate(
+            ['domain' => $domain, 'path_pattern' => '*'],
+            [
+                'status' => 'disabled',
+                'source_blocked' => true,
+                'source_block_reason' => $reason,
+                'source_blocked_at' => now(),
+                'retry_after' => null,
+            ],
+        );
+        ProductGalleryRecipe::query()
+            ->where('domain', $domain)
+            ->where('path_pattern', '!=', '*')
+            ->update([
+                'source_blocked' => true,
+                'source_block_reason' => $reason,
+                'source_blocked_at' => now(),
+            ]);
+    }
+
+    public function unblockDomain(string $domain): void
+    {
+        $domain = $this->domainForUrl('https://'.$domain) ?: strtolower(trim($domain));
+
+        if ($domain === '') {
+            return;
+        }
+
+        // Unblocking releases the paths but leaves the recipes disabled: a shop
+        // is worth trying again, an individual recipe that failed its way into
+        // this state has to earn its status back through training.
+        ProductGalleryRecipe::query()
+            ->where('domain', $domain)
+            ->update([
+                'source_blocked' => false,
+                'source_block_reason' => null,
+                'source_blocked_at' => null,
+            ]);
+    }
+
+    /**
      * Exact path scope wins. The old domain-wide * row remains a
      * compatibility fallback until that path has its own recipe.
      */
@@ -203,6 +260,20 @@ class ProductGalleryRecipeRouter
 
         if (ProductGalleryRecipe::query()->where('domain', $domain)->where('source_blocked', true)->count()
             >= self::DOMAIN_BLOCK_THRESHOLD) {
+            return true;
+        }
+
+        // A row scoped to the whole domain is an operator saying "this shop, no
+        // товар at all", and it has to outrank every path. recipeForUrl() falls
+        // back to that row only when no exact recipe exists, so asking it alone
+        // let the block be bypassed on precisely the pages the bot visits most:
+        // the ones already trained. The Telegram confirmation promised the shop
+        // would never be used again while every trained path kept using it.
+        if (ProductGalleryRecipe::query()
+            ->where('domain', $domain)
+            ->where('path_pattern', '*')
+            ->where('source_blocked', true)
+            ->exists()) {
             return true;
         }
 

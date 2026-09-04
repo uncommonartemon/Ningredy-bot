@@ -244,6 +244,92 @@ class ProductGalleryRecipeTrainerTest extends TestCase
     }
 
     /** @return array<string, mixed> */
+    public function test_the_browser_receives_the_conditional_and_follow_up_fields_the_agent_returned(): void
+    {
+        // The action plan is whitelisted field by field on its way out, so a
+        // field the contract supports but the whitelist forgets is deleted
+        // between validation and execution - silently, with the prompt still
+        // asking for it and the validator still checking it. after_each_* was
+        // in exactly that state: the agent was told to name the zoom control to
+        // press after each thumbnail, and the browser never received one.
+        $executed = null;
+        ProductGalleryRecipeTrainerAgent::fake(function (): array {
+            return array_merge($this->workingRecipe(), [
+                'actions' => [
+                    [
+                        'kind' => 'click',
+                        'when' => 'if_present',
+                        'selector' => '#consent button.accept',
+                        'index' => 0,
+                        'limit' => 1,
+                        'wait_after_ms' => 200,
+                        'after_each_selector' => null,
+                        'after_each_limit' => null,
+                        'after_each_wait_after_ms' => null,
+                        'purpose' => 'accept the consent wall when it is up',
+                    ],
+                    [
+                        'kind' => 'click_each',
+                        'when' => 'always',
+                        'selector' => '.gallery .thumb',
+                        'index' => 0,
+                        'limit' => 3,
+                        'wait_after_ms' => 200,
+                        'after_each_selector' => '.viewer .zoom',
+                        'after_each_limit' => 2,
+                        'after_each_wait_after_ms' => 300,
+                        'purpose' => 'walk the thumbnails and enlarge each frame',
+                    ],
+                ],
+            ]);
+        })->preventStrayPrompts();
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock) use (&$executed): void {
+            $mock->shouldReceive('scout')->once()->andReturn([
+                'scout' => [
+                    'title' => 'MSI Katana 17 HX',
+                    'fragments' => [],
+                    'interactive_controls' => ['<a href="/Gallery">GALLERY</a>'],
+                    'network_image_samples' => [],
+                    'access_gate' => false,
+                    'rate_limited' => false,
+                ],
+                'diagnostics' => [],
+            ]);
+            // Not restricted to one call: an incomplete traversal sends the
+            // round back, and this test is about what crosses the boundary,
+            // not about how many rounds the plan takes to converge.
+            $mock->shouldReceive('executeRecipe')
+                ->andReturnUsing(function (string $url, array $recipe) use (&$executed): array {
+                    $executed ??= $recipe;
+
+                    return [
+                        'images' => [
+                            'https://storage.example/one.webp',
+                            'https://storage.example/two.webp',
+                            'https://storage.example/three.webp',
+                        ],
+                        'action_trace' => [
+                            ['action' => 'click', 'action_index' => 0, 'clicked' => false, 'optional_absent' => true, 'selector_match_count' => 0],
+                            ['action' => 'click_each', 'action_index' => 1, 'clicked' => true, 'changed' => true, 'selector_match_count' => 3],
+                        ],
+                    ];
+                });
+        });
+
+        app(ProductGalleryRecipeTrainer::class)->train(
+            'https://us.msi.com/Laptop/Katana-17-HX-B14WX/Specification',
+            force: true,
+        );
+
+        $this->assertNotNull($executed);
+        $this->assertSame('if_present', $executed['actions'][0]['when']);
+        $this->assertSame('always', $executed['actions'][1]['when']);
+        $this->assertSame('.viewer .zoom', $executed['actions'][1]['after_each_selector']);
+        $this->assertSame(2, $executed['actions'][1]['after_each_limit']);
+        $this->assertSame(300, $executed['actions'][1]['after_each_wait_after_ms']);
+        $this->assertNull($executed['actions'][0]['after_each_selector']);
+    }
+
     private function workingRecipe(): array
     {
         return [

@@ -69,6 +69,7 @@ class InspectGalleryImages implements Tool
 
             if (! is_array($download)) {
                 $downloadErrors[] = ['url' => $url, 'reason' => $failureReason ?? 'download_failed'];
+
                 continue;
             }
 

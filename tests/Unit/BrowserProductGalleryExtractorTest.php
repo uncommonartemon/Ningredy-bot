@@ -5,8 +5,8 @@ namespace Tests\Unit;
 use App\Models\ProductGalleryRecipe;
 use App\Services\Ai\AiSettings;
 use App\Services\Ai\ProductSearchTimeBudget;
-use App\Services\Products\BrowserProductImageTransferStore;
 use App\Services\Products\BrowserProductGalleryExtractor;
+use App\Services\Products\BrowserProductImageTransferStore;
 use App\Services\Products\ProductGalleryRecipeResultValidator;
 use App\Services\Products\ProductGalleryRecipeRouter;
 use App\Services\Products\ProductGalleryRecipeTrainer;
@@ -245,15 +245,7 @@ class BrowserProductGalleryExtractorTest extends TestCase
 
     private function extractorReturning(array $result): BrowserProductGalleryExtractor
     {
-        return new class(
-            app(AiSettings::class),
-            app(ProductSearchTimeBudget::class),
-            app(ProductGalleryRecipeResultValidator::class),
-            app(ProductSourceAttemptRecorder::class),
-            app(BrowserProductImageTransferStore::class),
-            app(ProductGalleryRecipeRouter::class),
-            $result,
-        ) extends BrowserProductGalleryExtractor
+        return new class(app(AiSettings::class), app(ProductSearchTimeBudget::class), app(ProductGalleryRecipeResultValidator::class), app(ProductSourceAttemptRecorder::class), app(BrowserProductImageTransferStore::class), app(ProductGalleryRecipeRouter::class), $result) extends BrowserProductGalleryExtractor
         {
             public function __construct(
                 AiSettings $settings,
