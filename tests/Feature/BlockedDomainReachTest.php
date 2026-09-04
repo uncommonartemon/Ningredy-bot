@@ -34,13 +34,22 @@ class BlockedDomainReachTest extends TestCase
         $this->assertContains('shop.example', app(ProductSourcePriority::class)->blockedDomains());
     }
 
-    public function test_both_operator_buttons_write_the_same_block(): void
+    public function test_a_ban_is_one_row_and_lifting_it_leaves_the_paths_as_they_were(): void
     {
-        // One shop, two buttons, one meaning. Filament used to flip the row it
-        // was showing while Telegram created the domain-wide one, so which
-        // button the operator reached for decided whether the block held.
+        // Marking every path row as well reads as thorough and destroys state:
+        // a path blocked earlier for its own failures loses its own reason, and
+        // lifting the shop's ban later would silently release it too. The
+        // domain-scoped row is the whole fact, and every check reads it.
         $router = app(ProductGalleryRecipeRouter::class);
-        ProductGalleryRecipe::query()->create([
+        $failedOnItsOwn = ProductGalleryRecipe::query()->create([
+            'domain' => 'shop.example',
+            'path_pattern' => '/clearance/*',
+            'status' => 'active',
+            'recipe' => [],
+            'source_blocked' => true,
+            'source_block_reason' => 'Recipe failed twice on this path.',
+        ]);
+        $working = ProductGalleryRecipe::query()->create([
             'domain' => 'shop.example',
             'path_pattern' => '/p/*',
             'status' => 'active',
@@ -50,18 +59,39 @@ class BlockedDomainReachTest extends TestCase
 
         $router->blockDomain('shop.example', 'operator');
 
-        $this->assertSame(
-            2,
-            ProductGalleryRecipe::query()->where('domain', 'shop.example')->where('source_blocked', true)->count(),
-            'Every row of the domain carries the block, including the wildcard one.',
-        );
+        $this->assertTrue($router->domainIsBlocked('https://shop.example/p/laptop'));
+        $this->assertSame('Recipe failed twice on this path.', $failedOnItsOwn->fresh()->source_block_reason);
+        $this->assertFalse($working->fresh()->source_blocked);
 
         $router->unblockDomain('shop.example');
 
-        $this->assertSame(
-            0,
-            ProductGalleryRecipe::query()->where('domain', 'shop.example')->where('source_blocked', true)->count(),
+        $this->assertFalse($router->domainIsBlocked('https://shop.example/p/laptop'));
+        $this->assertTrue(
+            $failedOnItsOwn->fresh()->source_blocked,
+            'Lifting the shop ban is not a verdict on a path that blocked itself.',
         );
+    }
+
+    public function test_a_working_wildcard_recipe_survives_a_temporary_ban(): void
+    {
+        // A domain-wide recipe is a real trained recipe, and the ban used to
+        // disable it on the way in and never restore it on the way out - a
+        // temporary ban permanently cost a working recipe.
+        $router = app(ProductGalleryRecipeRouter::class);
+        $wildcard = ProductGalleryRecipe::query()->create([
+            'domain' => 'shop.example',
+            'path_pattern' => '*',
+            'status' => 'active',
+            'recipe' => ['collect_selectors' => ['.gallery img']],
+            'source_blocked' => false,
+            'success_count' => 5,
+        ]);
+
+        $router->blockDomain('shop.example', 'operator');
+        $router->unblockDomain('shop.example');
+
+        $this->assertSame('active', $wildcard->fresh()->status);
+        $this->assertSame(['collect_selectors' => ['.gallery img']], $wildcard->fresh()->recipe);
         $this->assertFalse($router->domainIsBlocked('https://shop.example/p/laptop'));
     }
 

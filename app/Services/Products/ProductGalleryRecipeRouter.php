@@ -98,24 +98,37 @@ class ProductGalleryRecipeRouter
             return;
         }
 
+        $wildcard = ProductGalleryRecipe::query()
+            ->where('domain', $domain)
+            ->where('path_pattern', '*')
+            ->first();
+
+        // Only the domain-scoped row is written. Marking every path row as well
+        // reads as thorough and destroys state: a path blocked earlier for its
+        // own failures loses its own reason, and unblocking the shop later
+        // would silently release it too. Every check that matters already reads
+        // this row - domainIsBlocked() and ProductSourcePriority both treat a
+        // blocked '*' as the whole shop - so one row is both sufficient and
+        // reversible.
+        //
+        // status is left alone on a row that already exists: a working recipe
+        // may live at '*', and a temporary ban that disables it permanently -
+        // unblocking never restored the status - costs a trained recipe.
+        $attributes = [
+            'source_blocked' => true,
+            'source_block_reason' => $reason,
+            'source_blocked_at' => now(),
+            'retry_after' => null,
+        ];
+
+        if (! $wildcard) {
+            $attributes['status'] = 'disabled';
+        }
+
         ProductGalleryRecipe::query()->updateOrCreate(
             ['domain' => $domain, 'path_pattern' => '*'],
-            [
-                'status' => 'disabled',
-                'source_blocked' => true,
-                'source_block_reason' => $reason,
-                'source_blocked_at' => now(),
-                'retry_after' => null,
-            ],
+            $attributes,
         );
-        ProductGalleryRecipe::query()
-            ->where('domain', $domain)
-            ->where('path_pattern', '!=', '*')
-            ->update([
-                'source_blocked' => true,
-                'source_block_reason' => $reason,
-                'source_blocked_at' => now(),
-            ]);
     }
 
     public function unblockDomain(string $domain): void
@@ -126,11 +139,14 @@ class ProductGalleryRecipeRouter
             return;
         }
 
-        // Unblocking releases the paths but leaves the recipes disabled: a shop
-        // is worth trying again, an individual recipe that failed its way into
-        // this state has to earn its status back through training.
+        // The mirror of blockDomain(): the domain-scoped row is released and
+        // nothing else is touched. A path that blocked itself stays blocked -
+        // lifting the shop's ban is not a verdict on a recipe that failed on
+        // its own, and re-blocking a path is not something an operator can do
+        // from here.
         ProductGalleryRecipe::query()
             ->where('domain', $domain)
+            ->where('path_pattern', '*')
             ->update([
                 'source_blocked' => false,
                 'source_block_reason' => null,

@@ -94,7 +94,13 @@ class ProcessTelegramMessage implements ShouldQueue
         // duplicate increments the counter without any attempt having run, and
         // would collect a fresh budget here for a worker that never died - a
         // budget PROJECT_STRATEGY reserves for the explicit "continue" press.
-        if ($this->attempts() > 1) {
+        // ...and only a worker that died leaves an AI run still marked running:
+        // every path that ends inside handle() finalises its own run, and the
+        // failed hook finalises the rest. A retry after a caught provider error
+        // is an ordinary re-delivery whose predecessor did real work on this
+        // clock, and it keeps that clock; a fresh one is the "continue" press's
+        // privilege. What is left running belonged to a process that is gone.
+        if ($this->attempts() > 1 && $update->aiRuns()->where('status', 'running')->exists()) {
             app(ProductSearchTimeBudget::class)->restartSession($this->telegramUpdateId);
         }
 

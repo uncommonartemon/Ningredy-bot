@@ -17,6 +17,7 @@ use App\Models\ProductVariant;
 use App\Models\TelegramChatState;
 use App\Models\TelegramUpdate;
 use App\Services\Ai\AiErrorPresenter;
+use App\Services\Ai\ProductSearchTimeBudget;
 use App\Services\Products\ProductIdentityKey;
 use App\Services\Products\ProductImageResolver;
 use App\Services\Products\ProductImageStorage;
@@ -612,6 +613,50 @@ class ProcessTelegramMessageTest extends TestCase
                 "Queue connection [{$name}] re-delivers a job before its overlap lock expires.",
             );
         }
+    }
+
+    public function test_only_a_worker_that_died_hands_the_retry_a_fresh_clock(): void
+    {
+        // attempts() > 1 alone is not the dead worker it was read as: an
+        // ordinary retry after a caught provider error is a re-delivery whose
+        // predecessor did real work on this clock, and a fresh budget is the
+        // explicit "continue" press's privilege. Only a process that never came
+        // back leaves its AI run marked running.
+        $update = $this->update();
+        AiRun::query()->create([
+            'telegram_update_id' => $update->id,
+            'provider' => 'openai',
+            'model' => 'gpt-test',
+            'status' => 'failed',
+            'prompt' => 'the attempt that failed and said so',
+            'started_at' => now()->subMinutes(20),
+            'completed_at' => now()->subMinutes(19),
+        ]);
+        $budget = app(ProductSearchTimeBudget::class);
+
+        $this->assertFalse(
+            $update->aiRuns()->where('status', 'running')->exists(),
+            'A finalised run is not evidence of a dead worker.',
+        );
+
+        AiRun::query()->create([
+            'telegram_update_id' => $update->id,
+            'provider' => 'openai',
+            'model' => 'gpt-test',
+            'status' => 'running',
+            'prompt' => 'the attempt whose process is gone',
+            'started_at' => now()->subMinutes(10),
+        ]);
+
+        $this->assertTrue($update->aiRuns()->where('status', 'running')->exists());
+
+        $budget->restartSession($update->id);
+
+        $this->assertGreaterThan(
+            0,
+            $budget->remainingWorkingSeconds($update->id),
+            'The resumed attempt measures itself from its own start, not from the dead one.',
+        );
     }
 
     public function test_failed_hook_sends_one_final_notification_after_hidden_attempts(): void

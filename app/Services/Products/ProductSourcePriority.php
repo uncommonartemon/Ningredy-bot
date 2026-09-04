@@ -153,6 +153,10 @@ class ProductSourcePriority
     public function provenDomains(int $limit = 25): array
     {
         try {
+            // A banned shop with one still-unblocked path recipe was being
+            // handed to research as a proven domain to go and look at.
+            $blocked = $this->blockedDomains();
+
             return ProductGalleryRecipe::query()
                 ->where('status', 'active')
                 ->where('success_count', '>', 0)
@@ -162,6 +166,7 @@ class ProductSourcePriority
                 ->pluck('domain')
                 ->filter(fn (mixed $domain): bool => is_string($domain) && $domain !== '')
                 ->map(fn (string $domain): string => self::host('https://'.$domain))
+                ->reject(fn (string $domain): bool => in_array($domain, $blocked, true))
                 ->unique()
                 ->take($limit)
                 ->values()
@@ -217,12 +222,16 @@ class ProductSourcePriority
     private function extractionScore(string $url): int
     {
         try {
+            // Asking the matching recipe alone let a shop banned by the
+            // operator keep its ranking on every path that had a recipe of its
+            // own - and those are the paths the search actually reaches.
+            $domainBlocked = $this->recipeRouter->domainIsBlocked($url);
             $matchingRecipe = $this->recipeRouter->recipeForUrl($url);
         } catch (Throwable) {
             return $this->metrics->score($url);
         }
 
-        if ($matchingRecipe?->source_blocked || $matchingRecipe?->status === 'disabled') {
+        if ($domainBlocked || $matchingRecipe?->source_blocked || $matchingRecipe?->status === 'disabled') {
             return -1_000_000;
         }
 

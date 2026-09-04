@@ -402,7 +402,7 @@ class ProductGalleryRecipeTrainer
             $emptyRounds = 0;
             $identicalFailures = 0;
             $lastFailureSignature = null;
-            $photoOutcome = $this->previousPhotoOutcome($host);
+            $photoOutcome = $this->previousPhotoOutcome($host, $url);
             $stalled = false;
             $stuckOnValidation = false;
             $agentAbandoned = false;
@@ -583,6 +583,13 @@ class ProductGalleryRecipeTrainer
                         'usage' => $response->usage->toArray(),
                         'completed_at' => now(),
                     ]);
+                    // A call that got through settles the question the counter
+                    // was asking. Left standing, one transient provider error
+                    // took the screenshot away for the rest of the training and
+                    // brought the breaker one round closer for reasons that had
+                    // already stopped being true.
+                    $identicalFailures = 0;
+                    $lastFailureSignature = null;
                 } catch (Throwable $exception) {
                     $run?->update([
                         'status' => 'failed',
@@ -1986,18 +1993,32 @@ class ProductGalleryRecipeTrainer
      *
      * @return array<string, mixed>|null
      */
-    private function previousPhotoOutcome(string $domain): ?array
+    private function previousPhotoOutcome(string $domain, string $url = ''): ?array
     {
         if ($domain === '') {
             return null;
         }
 
-        $download = ProductSourceAttempt::query()
+        // Narrowed to the page family this training is for when the domain has
+        // one. A shop's product cards and its accessory pages are different
+        // recipes with different galleries, and telling the agent that the last
+        // photographs from somewhere on this domain were all too small is
+        // advice about a page it is not looking at.
+        $pathPattern = $url === '' ? null : $this->recipeRouter->pathPatternForUrl($url);
+        $downloadsHere = fn () => ProductSourceAttempt::query()
             ->where('domain', $domain)
             ->whereIn('action', ['download_candidates', 'download_discovered_candidates'])
             ->whereNotNull('output')
-            ->latest('id')
-            ->first();
+            ->latest('id');
+        $download = $pathPattern === null ? null : $downloadsHere()
+            ->limit(40)
+            ->get(['id', 'product_url', 'output', 'created_at'])
+            ->first(fn (ProductSourceAttempt $attempt): bool => is_string($attempt->product_url)
+                && $this->recipeRouter->pathPatternForUrl($attempt->product_url) === $pathPattern);
+        // Nothing from this page family yet: the domain's own last outcome is
+        // still worth more than silence, and the agent is told which it is.
+        $sameFamily = $download !== null;
+        $download ??= $downloadsHere()->first();
 
         if (! $download) {
             return null;
@@ -2025,11 +2046,13 @@ class ProductGalleryRecipeTrainer
 
         return [
             'when' => $download->created_at?->toDateString(),
+            'from' => $sameFamily ? 'this_page_family' : 'elsewhere_on_this_domain',
             'downloaded' => (int) ($output['downloaded_images'] ?? 0),
             'kept_after_technical_checks' => (int) ($output['unique_images'] ?? 0),
             'rejected_by_reason' => $rejections,
             'reached_the_catalog' => $published,
-            'instruction' => 'This is what became of the photographs the last recipe here produced. A recipe that '
+            'instruction' => 'This is what became of the photographs the last recipe here produced - read "from" for '
+                .'whether it was this page family or only somewhere else on the domain. A recipe that '
                 .'collects thumbnails or size variants extracts a healthy-looking count and then loses all of it to '
                 .'the size check, so prefer the selectors and controls that reveal full-size frames even when a '
                 .'smaller set is easier to reach.',
