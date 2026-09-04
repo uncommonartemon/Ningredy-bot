@@ -2065,9 +2065,13 @@ class ProductImageStorageTest extends TestCase
         ]);
     }
 
-    public function test_a_gallery_left_below_the_minimum_by_foreign_text_is_not_published(): void
+    public function test_frames_surviving_the_language_rule_are_kept_as_a_partial_result(): void
     {
-        // Publishing the leftovers would turn a rejection into a worse card.
+        // The first version of this test asserted zero photographs, which
+        // pinned the wrong behaviour: PROJECT_STRATEGY keeps what survives the
+        // language rule as a partial result and moves to the next source. The
+        // clean frame is a real photograph of this product, and destroying it
+        // because its neighbours carried German copy helps nobody.
         GalleryTextLanguageAgent::fake(fn (): array => [
             'foreign_text_frames' => [1, 2, 3, 4],
             'reason' => 'Почти все кадры с иностранным текстом.',
@@ -2077,11 +2081,52 @@ class ProductImageStorageTest extends TestCase
 
         app(ProductImageStorage::class)->stage($draft->fresh());
 
-        $this->assertSame(0, $draft->fresh()->media()->count());
+        $this->assertSame(1, $draft->fresh()->media()->count());
         $this->assertDatabaseHas('product_source_attempts', [
             'action' => 'check_frame_text_language',
-            'decision' => 'reject_gallery_over_foreign_text',
+            'decision' => 'keep_partial_after_foreign_text',
         ]);
+    }
+
+    public function test_a_language_check_that_could_not_run_is_not_treated_as_approval(): void
+    {
+        // A timeout must never read as "Vision cleared it" - the strategy's
+        // base rule is that a technical failure is not a semantic verdict. The
+        // frames survive; the confirmation does not.
+        GalleryTextLanguageAgent::fake(function (): array {
+            throw new RuntimeException('vision timed out');
+        });
+
+        $draft = $this->confirmedGalleryDraft();
+
+        app(ProductImageStorage::class)->stage($draft->fresh());
+
+        $this->assertDatabaseHas('product_source_attempts', [
+            'action' => 'check_frame_text_language',
+            'status' => 'interrupted',
+            'decision' => 'language_check_unavailable',
+        ]);
+        $this->assertGreaterThan(0, $draft->fresh()->media()->count());
+    }
+
+    public function test_the_maximum_is_applied_after_the_language_rule_not_before(): void
+    {
+        // Cutting to the maximum first and removing frames afterwards threw
+        // away the good frames that would have taken their place.
+        config()->set('product-images.max_images_by_type.laptop', 3);
+        GalleryTextLanguageAgent::fake(fn (): array => [
+            'foreign_text_frames' => [1, 2],
+            'reason' => 'Два кадра с иностранным текстом.',
+        ]);
+
+        $draft = $this->confirmedGalleryDraft();
+        config()->set('product-images.max_images_by_type.laptop', 3);
+
+        app(ProductImageStorage::class)->stage($draft->fresh());
+
+        // Five frames, two removed, three allowed: the replacements exist only
+        // because the whole gallery was examined first.
+        $this->assertSame(3, $draft->fresh()->media()->count());
     }
 
     public function test_agent_confirmed_carousel_remains_atomic_even_when_structural_mode_is_ambiguous(): void

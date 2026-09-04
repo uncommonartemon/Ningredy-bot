@@ -538,19 +538,21 @@ class ProductImageVisionVerifier
      * galleries most likely to be published. This asks that single question
      * about the whole set in one call, and drops what fails.
      *
-     * Every failure mode keeps the frames: a broken response, a timeout, a
-     * model that names frames that do not exist. Dropping photographs on a
-     * malfunction would be the worse mistake, and the operator still sees the
-     * card before it goes live.
+     * Null means the question could not be answered - a timeout, a malformed
+     * reply, an exception. PROJECT_STRATEGY forbids a technical failure from
+     * being dressed as a semantic verdict, and returning the frames unchanged
+     * would do exactly that: the gallery would be published as though Vision
+     * had cleared it. The caller keeps the frames but must not treat them as
+     * confirmed.
      *
      * @param  array<int, array<string, mixed>>  $candidates
-     * @return array<int, array<string, mixed>>
+     * @return array<int, array<string, mixed>>|null
      */
     public function withoutForeignTextFrames(
         array $candidates,
         ProductDraft $draft,
         ?int $telegramUpdateId = null,
-    ): array {
+    ): ?array {
         if ($candidates === []) {
             return $candidates;
         }
@@ -623,7 +625,7 @@ class ProductImageVisionVerifier
             report($exception);
             $run->update(['status' => 'failed', 'error' => $exception->getMessage(), 'completed_at' => now()]);
 
-            return $candidates;
+            return null;
         }
     }
 

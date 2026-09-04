@@ -745,19 +745,36 @@ class ProductImageStorage
             // reviewed on its own, so a card could publish photographs covered
             // in marketing copy this catalog does not publish. One question,
             // once, about the whole set.
-            $verifiedGallery = collect($this->languageCheckedFrames(
-                $verifiedGallery->take($target)->all(),
+            // Checked before the maximum is applied: taking ten first and then
+            // removing two would throw away the eleventh and twelfth frames,
+            // which were fine and are now gone.
+            $languageChecked = $this->languageCheckedFrames(
+                $verifiedGallery->all(),
                 $draft,
                 $telegramUpdateId,
                 $minimumCompleteGallerySize,
                 $progress,
-            ));
+            );
 
-            if ($verifiedGallery->count() < $minimumCompleteGallerySize) {
-                $this->destroy($allCandidates);
+            if ($languageChecked === null || count($languageChecked) < $minimumCompleteGallerySize) {
+                // Not a complete gallery any more, but the surviving frames are
+                // real photographs of this product - kept as the partial result
+                // while the search moves on, never destroyed.
+                $survivors = $languageChecked ?? $verifiedGallery->all();
+
+                if (count($survivors) > count($partialSelected)) {
+                    $this->destroy($partialSelected);
+                    $partialSelected = $survivors;
+                    $partialSource = [...$source, 'url' => $productPageUrl];
+                    $partialMethod = 'playwright';
+                }
+
+                $this->destroyUnselected($allCandidates, $survivors);
 
                 continue;
             }
+
+            $verifiedGallery = collect($languageChecked);
 
             $selected = $verifiedGallery
                 ->take($target)
@@ -1051,17 +1068,19 @@ class ProductImageStorage
                     ) {
                         // Same gate as the main loop: a gallery accepted as a
                         // set still owes the one question about its pixels.
-                        $confirmedGroup = collect($this->languageCheckedFrames(
-                            $confirmedGroup->take($target)->all(),
+                        $languageChecked = $this->languageCheckedFrames(
+                            $confirmedGroup->all(),
                             $draft,
                             $telegramUpdateId,
                             $minimumCompleteGallerySize,
                             $progress,
-                        ));
+                        );
 
-                        if ($confirmedGroup->count() < $minimumCompleteGallerySize) {
+                        if ($languageChecked === null || count($languageChecked) < $minimumCompleteGallerySize) {
                             continue;
                         }
+
+                        $confirmedGroup = collect($languageChecked);
 
                         $selected = $confirmedGroup
                             ->take($target)
@@ -1425,8 +1444,11 @@ class ProductImageStorage
      * removal is recorded, because "the card came back with four photos instead
      * of seven" is otherwise an unexplainable difference.
      *
+     * Null means the question went unanswered, which is not the same as an
+     * answer of "nothing found".
+     *
      * @param  array<int, array<string, mixed>>  $candidates
-     * @return array<int, array<string, mixed>>
+     * @return array<int, array<string, mixed>>|null
      */
     private function languageCheckedFrames(
         array $candidates,
@@ -1434,30 +1456,60 @@ class ProductImageStorage
         ?int $telegramUpdateId,
         int $minimumImages,
         ?callable $progress,
-    ): array {
+    ): ?array {
         $kept = $this->visionVerifier->withoutForeignTextFrames($candidates, $draft, $telegramUpdateId);
-        $removed = count($candidates) - count($kept);
 
-        if ($removed <= 0) {
-            return $kept;
+        if ($kept === null) {
+            // Accepting the gallery anyway would turn a timeout into "Vision
+            // cleared it" - PROJECT_STRATEGY forbids a technical failure from
+            // becoming a semantic verdict. The frames survive as a partial
+            // result; what they do not get is confirmation.
+            $this->attempts->record([
+                'telegram_update_id' => $telegramUpdateId,
+                'product_draft_id' => $draft->id,
+                'actor' => 'vision',
+                'phase' => 'image_verification',
+                'action' => 'check_frame_text_language',
+                'status' => 'interrupted',
+                'decision' => 'language_check_unavailable',
+                'input' => ['frames' => count($candidates)],
+            ]);
+            $progress?->__invoke('Языковая проверка кадров недоступна; галерею целиком не принимаю, сохраняю как частичный результат.');
+
+            return null;
         }
 
-        $this->destroyUnselected($candidates, $kept);
+        $removed = count($candidates) - count($kept);
+
+        $enough = count($kept) >= $minimumImages;
+        // Recorded on every outcome, the clean one included: "Vision looked and
+        // allowed everything" is what an audit is most often asked for, and it
+        // used to leave no trace at all.
         $this->attempts->record([
             'telegram_update_id' => $telegramUpdateId,
             'product_draft_id' => $draft->id,
             'actor' => 'vision',
             'phase' => 'image_verification',
             'action' => 'check_frame_text_language',
-            'status' => count($kept) >= $minimumImages ? 'completed' : 'failed',
-            'decision' => count($kept) >= $minimumImages
-                ? 'drop_frames_with_foreign_text'
-                : 'reject_gallery_over_foreign_text',
+            'status' => $enough ? 'completed' : 'failed',
+            'decision' => match (true) {
+                $removed === 0 => 'accept_all_frames',
+                $enough => 'drop_frames_with_foreign_text',
+                default => 'keep_partial_after_foreign_text',
+            },
             'output' => ['removed' => $removed, 'kept' => count($kept)],
         ]);
-        $progress?->__invoke(count($kept) >= $minimumImages
-            ? "Vision убрал {$removed} кадр(а/ов) с текстом на неподдерживаемом языке; остаётся ".count($kept).'.'
-            : "Vision забраковал {$removed} кадр(а/ов) с иностранным текстом, полной галереи не осталось; иду дальше.");
+
+        if ($removed > 0) {
+            // The rejected frames go; the clean ones stay, because
+            // PROJECT_STRATEGY keeps what survives the language rule as a
+            // partial result rather than discarding it with the gallery.
+            $this->destroyUnselected($candidates, $kept);
+            $progress?->__invoke($enough
+                ? "Vision убрал {$removed} кадр(а/ов) с текстом на неподдерживаемом языке; остаётся ".count($kept).'.'
+                : "Vision убрал {$removed} кадр(а/ов) с иностранным текстом; полной галереи не осталось, сохраняю "
+                    .count($kept).' как частичный результат и проверяю следующий источник.');
+        }
 
         return $kept;
     }

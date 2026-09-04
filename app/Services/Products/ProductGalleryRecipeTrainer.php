@@ -1816,9 +1816,14 @@ class ProductGalleryRecipeTrainer
         // not the same as saying nothing at all - only the absent value falls
         // back to the global setting. Treating both as "unset" would impose a
         // 700px floor on a category that had deliberately removed one.
-        $minimumWidth = ($context['minimum_image_width'] ?? null) === null
-            ? $this->settings->imageMinimumWidth()
-            : max(0, (int) $context['minimum_image_width']);
+        // Only height may be switched off with a zero - Category clamps its own
+        // width to at least 100, so a zero there is not a category saying
+        // "unrestricted", it is a value that cannot come from one. Treating it
+        // as unrestricted would let the measurement pass images the downloader
+        // is about to reject.
+        $minimumWidth = (int) ($context['minimum_image_width'] ?? 0) > 0
+            ? (int) $context['minimum_image_width']
+            : $this->settings->imageMinimumWidth();
 
         // Height is checked on the same terms the downloader will apply it,
         // including its "0 means unlimited" rule - measuring width alone let a

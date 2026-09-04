@@ -35,7 +35,12 @@ class ProductGalleryRecipeRouter
         $dynamicTail = $last;
 
         foreach ($segments as $index => $segment) {
-            if ($index < $last && $this->looksDynamic($segment)) {
+            // Being followed by the last segment is not proof of anything - a
+            // collection page ends in a word too. Only an actual id counts.
+            $followedByProductId = $index + 1 <= $last && $this->looksDynamic($segments[$index + 1]);
+
+            if ($index < $last && ($this->looksDynamic($segment)
+                || ($followedByProductId && $this->looksLikeProductName($segment)))) {
                 $dynamicTail = min($dynamicTail, $index);
                 break;
             }
@@ -237,8 +242,7 @@ class ProductGalleryRecipeRouter
         return preg_match('/^\d{4,}(?:[-_.][A-Za-z0-9]+)*$/', $segment) === 1
             || preg_match('/^(?=[A-Z0-9]*\d)[A-Z0-9]{8,}$/', $segment) === 1
             || preg_match('/^[0-9a-f]{16,}$/i', $segment) === 1
-            || preg_match('/^[0-9a-f]{8}-[0-9a-f-]{27,}$/i', $segment) === 1
-            || $this->looksLikeProductName($segment);
+            || preg_match('/^[0-9a-f]{8}-[0-9a-f-]{27,}$/i', $segment) === 1;
     }
 
     /**
@@ -253,15 +257,20 @@ class ProductGalleryRecipeRouter
      * "xps-13-laptop"). Collapsing those would merge genuinely different page
      * layouts onto one recipe, which is what path scoping exists to prevent.
      */
+    /**
+     * Length and word count alone were not enough:
+     * "computer-components-and-accessories" is a department, and wildcarding it
+     * merged every page under /store onto one recipe. Requiring a digit fixed
+     * that and broke the opposite case, because a product can be named without
+     * one - /product/apple-macbook-air-midnight/8500067 went back to a recipe
+     * per laptop.
+     *
+     * Position settles what the words cannot: the caller only asks about a
+     * segment that is immediately followed by the product's id. A department
+     * is followed by another department, never by an id.
+     */
     private function looksLikeProductName(string $segment): bool
     {
-        // Length and word count alone were not enough:
-        // "computer-components-and-accessories" is a category and was being
-        // wildcarded, merging a whole department onto one recipe. A product
-        // name in a URL carries its configuration - a size, a generation, a
-        // part number - so a digit is what separates the two.
-        return mb_strlen($segment) >= 20
-            && substr_count($segment, '-') >= 3
-            && preg_match('/\d/', $segment) === 1;
+        return mb_strlen($segment) >= 20 && substr_count($segment, '-') >= 3;
     }
 }
