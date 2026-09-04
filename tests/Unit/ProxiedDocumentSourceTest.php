@@ -3,7 +3,6 @@
 namespace Tests\Unit;
 
 use App\Services\Products\ProductImageCandidateDiscovery;
-use ReflectionMethod;
 use Tests\TestCase;
 
 class ProxiedDocumentSourceTest extends TestCase
@@ -42,10 +41,21 @@ class ProxiedDocumentSourceTest extends TestCase
         ));
     }
 
+    public function test_the_documents_research_returns_are_filtered_too(): void
+    {
+        // The test existed but ran only on fallback-discovered sources, while
+        // research produces the list a search opens first. Two searches in one
+        // day led with a PDF brochure and a datasheet, each spending a fetch to
+        // be told it was not HTML - and one led with a driver download page.
+        $this->assertFalse($this->looksLikeHtml('https://gzhls.at/blob/ldb/8/5/b/2/4b999d851321d815c7c13f00d27560b63394.pdf'));
+        $this->assertFalse($this->looksLikeHtml('https://www.acerid.com/content/uploads/2026/04/Acer-Predator-Catalogue.pdf'));
+        $this->assertFalse($this->looksLikeHtml('https://www.acer.com/us-en/support/product-support/Predator_PH18-73/downloads'));
+
+        $this->assertTrue($this->looksLikeHtml('https://www.coolblue.nl/en/product/966028/acer-predator-helios-18-ai.html'));
+    }
+
     private function looksLikeHtml(string $url): bool
     {
-        $discovery = app(ProductImageCandidateDiscovery::class);
-
-        return (new ReflectionMethod($discovery, 'isLikelyHtmlImageSource'))->invoke($discovery, $url);
+        return app(ProductImageCandidateDiscovery::class)->looksLikeHtmlProductPage($url);
     }
 }

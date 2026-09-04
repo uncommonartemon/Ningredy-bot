@@ -257,6 +257,12 @@ class ProductImageStorage
             ->filter(fn (mixed $source): bool => is_array($source)
                 && is_string($source['url'] ?? null)
                 && in_array($source['type'] ?? null, ['retailer', 'marketplace', 'manufacturer'], true)
+                // The same document test the fallback search has always applied.
+                // Research produces this list, and nothing filtered it: a search
+                // opened with a PDF catalogue as source #1 twice in one day
+                // (acerid.com's brochure, gzhls.at's datasheet), each time
+                // spending a fetch to be told it was not HTML.
+                && $this->candidateDiscovery->looksLikeHtmlProductPage($source['url'])
                 && ! $this->sourceExcludedForDraft($source['url'], $draft)
                 && ! $this->sourceExcludedByUrls($source['url'], $cycleExcludedSourceUrls))
             ->values();

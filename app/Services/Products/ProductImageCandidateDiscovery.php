@@ -263,12 +263,12 @@ class ProductImageCandidateDiscovery
     private function imageSources(array $sources): array
     {
         return collect($sources)
-            ->filter(fn (array $source): bool => $this->isLikelyHtmlImageSource((string) ($source['url'] ?? '')))
+            ->filter(fn (array $source): bool => $this->looksLikeHtmlProductPage((string) ($source['url'] ?? '')))
             ->values()
             ->all();
     }
 
-    private function isLikelyHtmlImageSource(string $url): bool
+    public function looksLikeHtmlProductPage(string $url): bool
     {
         $lower = strtolower(urldecode($url));
         $host = strtolower((string) parse_url($url, PHP_URL_HOST));
