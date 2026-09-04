@@ -88,8 +88,15 @@ class TranscribeTelegramVoice implements ShouldQueue
             $telegram->sendMessage($update->chat_id, 'Не удалось распознать голосовое. '.$presented['message']);
             $update->update(['processed_at' => now()]);
         } finally {
+            // Suppressed deliberately: on Windows a file another handle still
+            // holds raises a warning, Laravel turns that warning into an
+            // exception, and it would be thrown from this finally - after the
+            // transcription succeeded, after the user was told, and after the
+            // search was dispatched. The job would then retry, pay for the
+            // transcription a second time and dispatch the search again. A
+            // leftover temporary file is the smaller problem.
             if (is_file($path)) {
-                unlink($path);
+                @unlink($path);
             }
         }
     }

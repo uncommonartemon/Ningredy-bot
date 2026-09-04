@@ -35,6 +35,9 @@ class ProcessTelegramMessage implements ShouldQueue
     // ever gets a chance to wrap up gracefully.
     public int $timeout = 2100;
 
+    /** Held for one update while it is processed; see middleware() for the two bounds. */
+    public const LOCK_SECONDS = 2160;
+
     public array $backoff = [30, 180];
 
     public function __construct(public int $telegramUpdateId)
@@ -44,10 +47,29 @@ class ProcessTelegramMessage implements ShouldQueue
 
     public function middleware(): array
     {
-        // expireAfter must stay >= $timeout - a shorter lock can expire while
-        // the job is still legitimately running, letting a duplicate job
-        // start processing the same update concurrently.
-        return [(new WithoutOverlapping('telegram-update:'.$this->telegramUpdateId))->releaseAfter(30)->expireAfter(2160)];
+        // The lock key is one Telegram update, and this is the only job that
+        // takes it - so losing the race never means "wait your turn", it means
+        // this delivery is a duplicate of work already under way (the voice and
+        // photo transcribers dispatch after their own retryable steps, and any
+        // retried transcription dispatches again). Releasing such a duplicate
+        // made it burn the retry allowance on contention alone and then fail
+        // for real: failed() would mark the live AiRun failed, close the
+        // update, and tell the user the automatic attempts were exhausted
+        // while the actual search was still running and about to answer.
+        // Discarding it instead costs nothing - when the live delivery lands,
+        // processed_at is set and there is nothing left for a second one to do.
+        //
+        // expireAfter must sit between two bounds: at least $timeout, or the
+        // lock could expire under a job that is still legitimately running and
+        // let a duplicate work the same update concurrently; and strictly below
+        // the queue's retry_after, or a crashed attempt's own re-delivery would
+        // find its dead predecessor's lock still held and now be discarded
+        // silently. assertQueueOverlapWindowIsSane() in the tests holds both.
+        return [
+            (new WithoutOverlapping('telegram-update:'.$this->telegramUpdateId))
+                ->dontRelease()
+                ->expireAfter(self::LOCK_SECONDS),
+        ];
     }
 
     public function handle(TelegramClient $telegram, AiErrorPresenter $errors, ?ProductCardPresenter $productCards = null): void
@@ -59,13 +81,19 @@ class ProcessTelegramMessage implements ShouldQueue
             return;
         }
 
-        // A second delivery means the first worker died mid-search and the job
-        // was released. Without this, the retry measures its time against the
-        // original attempt's first AI call and gives up immediately: seen live,
-        // a search resumed after a restart announced "time reserve reached"
-        // nine seconds in and closed the draft with nothing. Only a real
-        // re-delivery resets it - a fresh budget is otherwise the explicit
-        // "continue" button's privilege.
+        // A second delivery means the first attempt entered this method and
+        // never came back out - a dead worker, or a retryable failure that
+        // starts the whole search again from nothing. Either way the new
+        // attempt needs its own clock: without this it measures itself against
+        // the original attempt's first AI call and gives up immediately - seen
+        // live, a search resumed after a restart announced "time reserve
+        // reached" nine seconds in and closed the draft with nothing.
+        //
+        // This reads attempts() as proof of that, which it only is because
+        // middleware() discards a duplicate instead of releasing it. A released
+        // duplicate increments the counter without any attempt having run, and
+        // would collect a fresh budget here for a worker that never died - a
+        // budget PROJECT_STRATEGY reserves for the explicit "continue" press.
         if ($this->attempts() > 1) {
             app(ProductSearchTimeBudget::class)->restartSession($this->telegramUpdateId);
         }

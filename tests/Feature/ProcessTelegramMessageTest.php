@@ -26,10 +26,12 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request as HttpRequest;
 use Illuminate\Http\Client\RequestException;
 use Illuminate\Http\Client\Response as HttpClientResponse;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Storage;
 use Laravel\Ai\Tools\Request;
+use Mockery;
 use Tests\TestCase;
 
 class ProcessTelegramMessageTest extends TestCase
@@ -540,6 +542,76 @@ class ProcessTelegramMessageTest extends TestCase
         Http::assertSent(fn (HttpRequest $request): bool => str_ends_with($request->url(), '/sendMessage')
             && str_contains((string) ($request['text'] ?? ''), '🔄 Частота экрана: 180 Hz')
             && ! str_contains((string) ($request['text'] ?? ''), '180 Hz Hz'));
+    }
+
+    public function test_a_duplicate_delivery_for_an_update_already_being_processed_is_discarded(): void
+    {
+        // A duplicate is not a job waiting its turn: the lock key is one
+        // Telegram update and this is the only job that takes it, so whoever
+        // holds it is already doing the exact work this delivery carries.
+        // Releasing it spent the retry allowance on contention alone and then
+        // failed for real - failed() would mark the live AiRun failed, close
+        // the update and tell the user the attempts were exhausted while the
+        // search was still running. It is discarded now: no release, no
+        // handle(), no failure.
+        $job = Mockery::mock(ProcessTelegramMessage::class.'[release,fail]', [7])->shouldIgnoreMissing();
+        $job->shouldNotReceive('release');
+        $job->shouldNotReceive('fail');
+        $middleware = (new ProcessTelegramMessage(7))->middleware()[0];
+        $held = Cache::lock($middleware->getLockKey($job), 60);
+        $this->assertTrue($held->get());
+        $handled = false;
+
+        $middleware->handle($job, function () use (&$handled): void {
+            $handled = true;
+        });
+
+        $this->assertFalse($handled);
+        $this->assertNull($middleware->releaseAfter);
+        $held->release();
+    }
+
+    public function test_an_uncontested_delivery_still_runs_and_frees_the_lock_afterwards(): void
+    {
+        $job = new ProcessTelegramMessage(8);
+        $middleware = $job->middleware()[0];
+        $handled = false;
+
+        $middleware->handle($job, function () use (&$handled): void {
+            $handled = true;
+        });
+
+        $this->assertTrue($handled);
+        $free = Cache::lock($middleware->getLockKey($job), 60);
+        $this->assertTrue($free->get(), 'The lock must be free again once the job returns.');
+        $free->release();
+    }
+
+    public function test_the_overlap_lock_outlives_a_running_job_but_expires_before_its_own_retry(): void
+    {
+        // Both bounds are load-bearing and neither is visible from the other
+        // file that sets them. Below the timeout, the lock expires under a job
+        // that is still legitimately running and a duplicate starts working the
+        // same update concurrently. At or above the queue's retry_after, a
+        // crashed attempt's re-delivery finds its dead predecessor's lock still
+        // held - and since a contested delivery is now discarded rather than
+        // released, that search would vanish without a word to anyone.
+        // Checked against every connection that can defer work rather than the
+        // one this test run happens to use (sync, which defers nothing): the
+        // bound has to hold for whichever driver production is pointed at.
+        $deferring = collect(config('queue.connections'))
+            ->filter(fn (array $connection): bool => is_numeric($connection['retry_after'] ?? null));
+
+        $this->assertGreaterThanOrEqual((new ProcessTelegramMessage(9))->timeout, ProcessTelegramMessage::LOCK_SECONDS);
+        $this->assertNotEmpty($deferring);
+
+        foreach ($deferring as $name => $connection) {
+            $this->assertLessThan(
+                (int) $connection['retry_after'],
+                ProcessTelegramMessage::LOCK_SECONDS,
+                "Queue connection [{$name}] re-delivers a job before its overlap lock expires.",
+            );
+        }
     }
 
     public function test_failed_hook_sends_one_final_notification_after_hidden_attempts(): void
