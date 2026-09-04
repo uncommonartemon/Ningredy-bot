@@ -1622,40 +1622,7 @@ class ProductGalleryRecipeTrainer
             ->filter(fn (mixed $action): bool => is_array($action)
                 && is_string($action['selector'] ?? null)
                 && $this->safeSelector($action['selector']))
-            ->map(function (array $action): array {
-                // Whitelisted rather than passed through, so an invented field
-                // can never reach the runner - which means every field the
-                // contract does support has to be listed here. after_each_*
-                // was not, and was silently dropped between validation and
-                // execution: the agent was asked for the zoom control to press
-                // after each thumbnail, the rules accepted it and the validator
-                // checked it, while the browser never received one.
-                $afterEach = is_string($action['after_each_selector'] ?? null)
-                    && $this->safeSelector($action['after_each_selector'])
-                    ? trim($action['after_each_selector'])
-                    : null;
-
-                return [
-                    'kind' => $action['kind'],
-                    'selector' => trim($action['selector']),
-                    'index' => (int) $action['index'],
-                    'limit' => (int) $action['limit'],
-                    'wait_after_ms' => (int) $action['wait_after_ms'],
-                    'purpose' => trim($action['purpose']),
-                    // A step the page only sometimes puts up - a consent wall a
-                    // returning visitor no longer sees, a region or age gate, a
-                    // newsletter modal. Absent means skipped, not failed, so one
-                    // recipe holds for both a first visit and every later one.
-                    'when' => ($action['when'] ?? null) === 'if_present' ? 'if_present' : 'always',
-                    'after_each_selector' => $afterEach,
-                    'after_each_limit' => $afterEach === null
-                        ? null
-                        : $this->clampInt($action['after_each_limit'] ?? null, 1, 20, 3),
-                    'after_each_wait_after_ms' => $afterEach === null
-                        ? null
-                        : $this->clampInt($action['after_each_wait_after_ms'] ?? null, 50, 1500, 200),
-                ];
-            })
+            ->map(fn (array $action): array => $this->sanitizedAction($action))
             ->values()
             ->all();
 
@@ -1668,6 +1635,64 @@ class ProductGalleryRecipeTrainer
         }
 
         return $data;
+    }
+
+    /**
+     * Every field of one action, and nothing else, on its way to the browser.
+     *
+     * The set is read off the validation rules rather than written out a second
+     * time. A hand-kept copy is how after_each_selector came to be asked for in
+     * the prompt, accepted by the rules and checked by the validator while the
+     * browser never once received it: the field was added to the contract and
+     * to everything that reads it, and the one list that had to repeat it was
+     * missed. Whatever the rules admit now passes; anything invented still does
+     * not, which is the only reason this list exists.
+     *
+     * @param  array<string, mixed>  $action
+     * @return array<string, mixed>
+     */
+    private function sanitizedAction(array $action): array
+    {
+        $sanitized = [];
+
+        foreach ($this->recipeActionFields() as $field) {
+            $value = $action[$field] ?? null;
+            $sanitized[$field] = is_string($value) ? trim($value) : $value;
+        }
+
+        // A step the page only sometimes puts up - a consent wall a returning
+        // visitor no longer sees, a region or age gate. Absent means skipped,
+        // not failed, so one recipe holds for a first visit and for every later
+        // one. Anything else, including a missing value, stays mandatory.
+        if (array_key_exists('when', $sanitized)) {
+            $sanitized['when'] = $sanitized['when'] === 'if_present' ? 'if_present' : 'always';
+        }
+
+        // The one check the rules cannot make: a selector may be well-formed and
+        // still unsafe. An unsafe follow-up drops with its own settings, never
+        // leaving a limit pointing at a selector that will not run.
+        if (array_key_exists('after_each_selector', $sanitized)
+            && ! (is_string($sanitized['after_each_selector']) && $this->safeSelector($sanitized['after_each_selector']))) {
+            $sanitized['after_each_selector'] = null;
+            $sanitized['after_each_limit'] = null;
+            $sanitized['after_each_wait_after_ms'] = null;
+        }
+
+        return $sanitized;
+    }
+
+    /**
+     * The action fields the contract admits, in declaration order.
+     *
+     * @return array<int, string>
+     */
+    public function recipeActionFields(): array
+    {
+        return collect(array_keys($this->recipeValidationRules()))
+            ->filter(fn (string $rule): bool => str_starts_with($rule, 'actions.*.'))
+            ->map(fn (string $rule): string => substr($rule, strlen('actions.*.')))
+            ->values()
+            ->all();
     }
 
     /** @return array<string, array<int, string>> */

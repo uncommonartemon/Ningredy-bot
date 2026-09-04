@@ -1,0 +1,15 @@
+{
+    "_why": "One action of a gallery recipe crosses two independent whitelists - PHP on its way out of validation, JavaScript on its way into the browser - and neither can read the other. This file is what they agree on. Adding a field to the contract fails the PHP test until the validation rules declare it and the JS test until the runner keeps it, so a field can no longer be asked for in the prompt, accepted by the rules and silently dropped before the browser ever sees it.",
+    "fields": [
+        "kind",
+        "selector",
+        "index",
+        "limit",
+        "wait_after_ms",
+        "when",
+        "after_each_selector",
+        "after_each_limit",
+        "after_each_wait_after_ms",
+        "purpose"
+    ]
+}
