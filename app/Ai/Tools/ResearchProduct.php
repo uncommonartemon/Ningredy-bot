@@ -18,6 +18,7 @@ use App\Services\Ai\ProductSearchTimeBudget;
 use App\Services\Ai\StreamingProductResearch;
 use App\Services\Products\ProductCategoryResolver;
 use App\Services\Products\ProductIdentityKey;
+use App\Services\Products\ProductImageCandidateDiscovery;
 use App\Services\Products\ProductImageResolver;
 use App\Services\Products\ProductImageStorage;
 use App\Services\Products\ProductPublicDescription;
@@ -371,9 +372,18 @@ class ResearchProduct implements Tool
                     'primary_source_url' => ['required', 'url:http,https'],
                 ])->validate();
 
-                $primarySource = collect($data['sources'])->first(
-                    fn (array $source): bool => in_array($source['type'] ?? null, ['manufacturer', 'retailer', 'marketplace'], true),
-                );
+                // A shop's PDF datasheet is typed "manufacturer" like any other
+                // page, so it could become the card's headline source: draft #98
+                // shipped to review with a gzhls.at blob as its "Источник" and
+                // no photographs. The same test the search uses to decide what
+                // it may open decides what the card may claim.
+                $discovery = app(ProductImageCandidateDiscovery::class);
+                $primarySource = collect($data['sources'])
+                    ->filter(fn (array $source): bool => in_array($source['type'] ?? null, ['manufacturer', 'retailer', 'marketplace'], true))
+                    ->first(fn (array $source): bool => $discovery->looksLikeHtmlProductPage((string) ($source['url'] ?? '')))
+                    ?? collect($data['sources'])->first(
+                        fn (array $source): bool => in_array($source['type'] ?? null, ['manufacturer', 'retailer', 'marketplace'], true),
+                    );
 
                 Validator::make(['primary_source' => $primarySource], [
                     'primary_source' => ['required', 'array'],
