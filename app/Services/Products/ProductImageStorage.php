@@ -739,6 +739,26 @@ class ProductImageStorage
                 continue;
             }
 
+            // Accepting a slider as a set is what makes it affordable, and it is
+            // also why the one rule about pixels rather than structure stopped
+            // applying here: no frame of a wholesale-accepted gallery is ever
+            // reviewed on its own, so a card could publish photographs covered
+            // in marketing copy this catalog does not publish. One question,
+            // once, about the whole set.
+            $verifiedGallery = collect($this->languageCheckedFrames(
+                $verifiedGallery->take($target)->all(),
+                $draft,
+                $telegramUpdateId,
+                $minimumCompleteGallerySize,
+                $progress,
+            ));
+
+            if ($verifiedGallery->count() < $minimumCompleteGallerySize) {
+                $this->destroy($allCandidates);
+
+                continue;
+            }
+
             $selected = $verifiedGallery
                 ->take($target)
                 ->map(fn (array $candidate): array => [
@@ -1029,6 +1049,20 @@ class ProductImageStorage
                         && $confirmedGroup->count() >= $minimumCompleteGallerySize
                         && $groupPageUrl
                     ) {
+                        // Same gate as the main loop: a gallery accepted as a
+                        // set still owes the one question about its pixels.
+                        $confirmedGroup = collect($this->languageCheckedFrames(
+                            $confirmedGroup->take($target)->all(),
+                            $draft,
+                            $telegramUpdateId,
+                            $minimumCompleteGallerySize,
+                            $progress,
+                        ));
+
+                        if ($confirmedGroup->count() < $minimumCompleteGallerySize) {
+                            continue;
+                        }
+
                         $selected = $confirmedGroup
                             ->take($target)
                             ->map(fn (array $candidate): array => [
@@ -1383,6 +1417,51 @@ class ProductImageStorage
      * @param  Collection<int, array<string, mixed>>  $candidates
      * @return array{mode: string, candidates: Collection<int, array<string, mixed>>, cached: bool}
      */
+    /**
+     * The language gate for a gallery about to be accepted whole, plus the
+     * bookkeeping that keeps its verdict visible.
+     *
+     * Frames it removes are destroyed here rather than left on disk, and the
+     * removal is recorded, because "the card came back with four photos instead
+     * of seven" is otherwise an unexplainable difference.
+     *
+     * @param  array<int, array<string, mixed>>  $candidates
+     * @return array<int, array<string, mixed>>
+     */
+    private function languageCheckedFrames(
+        array $candidates,
+        ProductDraft $draft,
+        ?int $telegramUpdateId,
+        int $minimumImages,
+        ?callable $progress,
+    ): array {
+        $kept = $this->visionVerifier->withoutForeignTextFrames($candidates, $draft, $telegramUpdateId);
+        $removed = count($candidates) - count($kept);
+
+        if ($removed <= 0) {
+            return $kept;
+        }
+
+        $this->destroyUnselected($candidates, $kept);
+        $this->attempts->record([
+            'telegram_update_id' => $telegramUpdateId,
+            'product_draft_id' => $draft->id,
+            'actor' => 'vision',
+            'phase' => 'image_verification',
+            'action' => 'check_frame_text_language',
+            'status' => count($kept) >= $minimumImages ? 'completed' : 'failed',
+            'decision' => count($kept) >= $minimumImages
+                ? 'drop_frames_with_foreign_text'
+                : 'reject_gallery_over_foreign_text',
+            'output' => ['removed' => $removed, 'kept' => count($kept)],
+        ]);
+        $progress?->__invoke(count($kept) >= $minimumImages
+            ? "Vision убрал {$removed} кадр(а/ов) с текстом на неподдерживаемом языке; остаётся ".count($kept).'.'
+            : "Vision забраковал {$removed} кадр(а/ов) с иностранным текстом, полной галереи не осталось; иду дальше.");
+
+        return $kept;
+    }
+
     private function verifyConfirmedGallerySafely(
         string $productPageUrl,
         Collection $candidates,

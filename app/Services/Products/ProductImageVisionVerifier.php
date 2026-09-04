@@ -2,6 +2,7 @@
 
 namespace App\Services\Products;
 
+use App\Ai\Agents\GalleryTextLanguageAgent;
 use App\Ai\Agents\ProductImageVisionAgent;
 use App\Models\AiRun;
 use App\Models\Category;
@@ -526,6 +527,104 @@ class ProductImageVisionVerifier
             Candidate URLs and decoded resolutions:
             {$candidateSources}
             PROMPT;
+    }
+
+    /**
+     * The one pixel rule a wholesale-accepted gallery still owes.
+     *
+     * A complete, structurally confirmed slider from an exact product page is
+     * taken as a set, so no frame of it is reviewed individually - which is the
+     * point, and also why the language rule stopped applying to exactly the
+     * galleries most likely to be published. This asks that single question
+     * about the whole set in one call, and drops what fails.
+     *
+     * Every failure mode keeps the frames: a broken response, a timeout, a
+     * model that names frames that do not exist. Dropping photographs on a
+     * malfunction would be the worse mistake, and the operator still sees the
+     * card before it goes live.
+     *
+     * @param  array<int, array<string, mixed>>  $candidates
+     * @return array<int, array<string, mixed>>
+     */
+    public function withoutForeignTextFrames(
+        array $candidates,
+        ProductDraft $draft,
+        ?int $telegramUpdateId = null,
+    ): array {
+        if ($candidates === []) {
+            return $candidates;
+        }
+
+        $settings = app(AiSettings::class);
+        $provider = $settings->providerFor('product_image_vision');
+        $model = $settings->modelFor('product_image_vision');
+        $timeout = app(ProductSearchTimeBudget::class)->timeoutFor(
+            $telegramUpdateId ?? $draft->telegram_update_id,
+            $settings->imageVisionTimeoutSeconds(),
+        );
+        $frames = array_slice(array_values($candidates), 0, 40);
+        $prompt = json_encode([
+            'product' => trim((string) $draft->title),
+            'frames' => count($frames),
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        $run = AiRun::query()->create([
+            'telegram_update_id' => $telegramUpdateId ?? $draft->telegram_update_id,
+            'provider' => $provider,
+            'model' => $model,
+            'status' => 'running',
+            'prompt' => $prompt,
+            'started_at' => now(),
+        ]);
+
+        try {
+            $attachments = array_map(
+                fn (array $candidate, int $index) => Image::fromBase64(
+                    base64_encode($this->thumbnail($candidate['image'])),
+                    'image/webp',
+                )->as('frame-'.($index + 1).'.webp')
+                    ->withProviderOptions(['detail' => (string) config('product-images.vision_detail', 'low')]),
+                $frames,
+                array_keys($frames),
+            );
+            $response = app(OpenAiHeavyOperationGate::class)->run(
+                $provider,
+                $timeout,
+                fn () => GalleryTextLanguageAgent::make()->prompt(
+                    $prompt,
+                    attachments: $attachments,
+                    provider: $provider,
+                    model: $model,
+                    timeout: $timeout,
+                ),
+            );
+            $data = $response->toArray();
+            $rejected = collect($data['foreign_text_frames'] ?? [])
+                ->filter(fn (mixed $index): bool => is_int($index) || ctype_digit((string) $index))
+                ->map(fn (mixed $index): int => (int) $index - 1)
+                ->filter(fn (int $index): bool => $index >= 0 && $index < count($frames))
+                ->unique();
+            $run->update([
+                'invocation_id' => $response->invocationId,
+                'status' => 'completed',
+                'response' => $data,
+                'usage' => $response->usage->toArray(),
+                'completed_at' => now(),
+            ]);
+
+            if ($rejected->isEmpty()) {
+                return $candidates;
+            }
+
+            return collect($frames)
+                ->reject(fn (array $candidate, int $index): bool => $rejected->contains($index))
+                ->values()
+                ->all();
+        } catch (Throwable $exception) {
+            report($exception);
+            $run->update(['status' => 'failed', 'error' => $exception->getMessage(), 'completed_at' => now()]);
+
+            return $candidates;
+        }
     }
 
     private function thumbnail(GdImage $image): string

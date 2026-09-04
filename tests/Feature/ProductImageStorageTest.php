@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Ai\Agents\GalleryTextLanguageAgent;
 use App\Ai\Agents\ProductImageDiscoveryAgent;
 use App\Ai\Agents\ProductImageVisionAgent;
 use App\Jobs\StoreProductImages;
@@ -1951,8 +1952,136 @@ class ProductImageStorageTest extends TestCase
         $stored = app(ProductImageStorage::class)->stage($draft->fresh());
 
         $this->assertSame(5, $stored);
+        // No frame is judged on its own - that is what makes accepting a
+        // confirmed slider as a set affordable.
         $this->assertSame(0, $visionCalls);
-        $this->assertSame(0, AiRun::query()->where('model', 'gpt-5.4-mini')->count());
+        // It does owe exactly one question about its pixels, though: the
+        // language rule is the only one structure cannot answer, and skipping
+        // it here meant the galleries most likely to be published were the
+        // least checked. One call for the whole gallery, not one per frame.
+        $this->assertSame(1, AiRun::query()->where('model', 'gpt-5.4-mini')->count());
+    }
+
+    /**
+     * The shape this gate exists for: a structurally perfect five-frame slider
+     * from the exact product page, which is accepted as a set and therefore
+     * never has a single frame judged on its own.
+     */
+    private function confirmedGalleryDraft(): ProductDraft
+    {
+        Storage::fake('public');
+        AppSetting::put('ai.fallback_sources_enabled', '0');
+        config()->set('product-images.max_images_by_type.laptop', 10);
+        ProductImageVisionAgent::fake(fn ($prompt, $attachments): array => [
+            'images' => $attachments->keys()->map(fn (int $index): array => [
+                'index' => $index + 1,
+                'exact_match' => true,
+                'color_match' => true,
+                'publishable' => true,
+                'kind' => 'product',
+                'view' => 'front',
+                'gallery_rank' => 1,
+                'score' => 95,
+                'reason' => 'Genuine product photo.',
+            ])->all(),
+        ]);
+        Http::fake(function (Request $request) {
+            if (! str_contains($request->url(), '/gallery-')) {
+                return Http::response('<html><body><h1>ASUS ROG Strix Scar 15 G533QS-DS76</h1></body></html>', 200, [
+                    'Content-Type' => 'text/html',
+                ]);
+            }
+
+            preg_match('/gallery-(\d+)/', $request->url(), $matches);
+
+            return Http::response($this->jpeg((int) ($matches[1] ?? 1)), 200, ['Content-Type' => 'image/jpeg']);
+        });
+        $gallery = collect(range(1, 5))
+            ->map(fn (int $index): string => 'https://93.184.216.36/gallery-'.$index.'.jpg')
+            ->all();
+        $browser = $this->mock(BrowserProductGalleryExtractor::class);
+        $browser->shouldReceive('extract')->once()->andReturn($gallery);
+        $browser->shouldReceive('isConfirmedGalleryImage')
+            ->andReturnUsing(fn (string $url): bool => str_contains($url, '/gallery-'));
+        $browser->shouldReceive('isPartialGalleryImage')->andReturn(false);
+        $recipe = ProductGalleryRecipe::query()->create([
+            'domain' => '93.184.216.36',
+            'path_pattern' => '*',
+            'status' => 'active',
+            'recipe' => ['content_confirmed_product' => true],
+        ]);
+        $recipe->versions()->create([
+            'domain' => '93.184.216.36',
+            'product_url' => 'https://93.184.216.36/products/g533qs-ds76',
+            'trigger' => 'test',
+            'status' => 'active',
+            'provider' => 'fake',
+            'model' => 'fake',
+            'result' => [
+                'action_trace' => [[
+                    'phase' => 'open_expanded_gallery',
+                    'clicked' => true,
+                    'expanded_gallery_visible_after' => true,
+                ]],
+            ],
+        ]);
+        [, , $draft] = $this->records();
+        $draft->update([
+            'title' => 'ASUS ROG Strix Scar 15 G533QS-DS76',
+            'brand' => 'ASUS',
+            'model' => 'G533QS-DS76',
+            'product_type' => 'laptop',
+            'primary_source_url' => 'https://93.184.216.36/products/g533qs-ds76',
+            'image_urls' => [],
+            'sources' => [[
+                'title' => 'ASUS ROG Strix Scar 15 G533QS-DS76',
+                'url' => 'https://93.184.216.36/products/g533qs-ds76',
+                'type' => 'retailer',
+                'image_urls' => [],
+            ]],
+        ]);
+
+        return $draft;
+    }
+
+    public function test_a_confirmed_gallery_loses_the_frames_whose_text_is_in_another_language(): void
+    {
+        // A Czech-and-English catalog must not publish a card covered in
+        // German marketing copy just because the slider was structurally
+        // perfect and came from the exact product page.
+        GalleryTextLanguageAgent::fake(fn (): array => [
+            'foreign_text_frames' => [2, 4],
+            'reason' => 'Немецкий маркетинговый текст на двух кадрах.',
+        ]);
+
+        $draft = $this->confirmedGalleryDraft();
+
+        app(ProductImageStorage::class)->stage($draft->fresh());
+
+        $this->assertSame(3, $draft->fresh()->media()->count());
+        $this->assertDatabaseHas('product_source_attempts', [
+            'action' => 'check_frame_text_language',
+            'decision' => 'drop_frames_with_foreign_text',
+        ]);
+    }
+
+    public function test_a_gallery_left_below_the_minimum_by_foreign_text_is_not_published(): void
+    {
+        // Publishing the leftovers would turn a rejection into a worse card.
+        GalleryTextLanguageAgent::fake(fn (): array => [
+            'foreign_text_frames' => [1, 2, 3, 4],
+            'reason' => 'Почти все кадры с иностранным текстом.',
+        ]);
+
+        $draft = $this->confirmedGalleryDraft();
+
+        app(ProductImageStorage::class)->stage($draft->fresh());
+
+        $this->assertSame(0, $draft->fresh()->media()->count());
+        $this->assertDatabaseHas('product_source_attempts', [
+            'action' => 'check_frame_text_language',
+            'decision' => 'reject_gallery_over_foreign_text',
+        ]);
     }
 
     public function test_agent_confirmed_carousel_remains_atomic_even_when_structural_mode_is_ambiguous(): void
