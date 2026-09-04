@@ -152,6 +152,54 @@ class ProductGalleryRecipeTrainerTest extends TestCase
         $this->assertSame([], $trainer->train('https://blocked.example/product-two'));
     }
 
+    public function test_the_agent_is_told_what_budget_is_left_and_what_became_of_its_photos(): void
+    {
+        // Nothing in this system may decide when the agent has had enough
+        // without telling it what "enough" means: it has the tool to end a
+        // page, and it cannot weigh a thorough plan against a cheap one while
+        // blind to the rounds, seconds and money left. The photo outcome is the
+        // other half - training ends before the download checks run, so this is
+        // the only way it ever learns that its last recipe here produced frames
+        // that were all thrown away.
+        $seenPrompt = null;
+        ProductGalleryRecipeTrainerAgent::fake(function (string $prompt) use (&$seenPrompt): array {
+            $seenPrompt = json_decode($prompt, true);
+
+            return $this->workingRecipe();
+        })->preventStrayPrompts();
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('scout')->once()->andReturn([
+                'scout' => [
+                    'title' => 'MSI Katana 17 HX',
+                    'fragments' => [],
+                    'interactive_controls' => ['<a href="/Gallery">GALLERY</a>'],
+                    'network_image_samples' => [],
+                    'access_gate' => false,
+                    'rate_limited' => false,
+                ],
+                'diagnostics' => [],
+            ]);
+            $mock->shouldReceive('executeRecipe')->once()->andReturn([
+                'images' => [
+                    'https://storage.example/one.webp',
+                    'https://storage.example/two.webp',
+                    'https://storage.example/three.webp',
+                ],
+            ]);
+        });
+
+        app(ProductGalleryRecipeTrainer::class)->train(
+            'https://us.msi.com/Laptop/Katana-17-HX-B14WX/Specification',
+            force: true,
+        );
+
+        $this->assertArrayHasKey('remaining_budget', $seenPrompt);
+        $this->assertArrayHasKey('rounds_left', $seenPrompt['remaining_budget']);
+        $this->assertArrayHasKey('seconds_left', $seenPrompt['remaining_budget']);
+        $this->assertArrayHasKey('money_spent_fraction', $seenPrompt['remaining_budget']);
+        $this->assertArrayHasKey('previous_photo_outcome', $seenPrompt);
+    }
+
     public function test_the_page_screenshot_is_attached_with_a_media_type(): void
     {
         // The media type is not decoration. Without it the data URL is

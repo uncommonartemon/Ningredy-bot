@@ -140,6 +140,12 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
             recent round, to avoid retrying a selector combination that already failed and to build on a
             combination that partially worked.
 
+            remaining_budget tells you what is left: rounds, seconds and the fraction of the money already spent.
+            Nothing else in this system decides when you have had enough - you do, and you have the tool to end
+            a page yourself. With most of the budget gone, prefer the smallest plan that could work over the
+            thorough one, and end the page when the evidence says it cannot succeed: a round spent here is a
+            round the next shop does not get. With plenty left, take the careful route.
+
             previous_photo_outcome, when present, is what became of the photographs the last recipe for this shop
             actually produced: how many were downloaded, how many survived the technical checks, why the rest were
             rejected, and whether any reached the catalog. Training ends before those checks run, so this is the

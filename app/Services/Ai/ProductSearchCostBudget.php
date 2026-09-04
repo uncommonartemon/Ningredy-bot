@@ -53,6 +53,20 @@ class ProductSearchCostBudget
         return $this->limit() > 0 && $this->spent($telegramUpdateId) === null;
     }
 
+    /**
+     * How much of the search's money is already gone, 0.0 to 1.0, or null when
+     * there is no measurable limit. Shown to the training agent so the decision
+     * to stop can be its own rather than a counter's - it cannot weigh a
+     * thorough plan against a cheap one without knowing what is left.
+     */
+    public function spentFraction(?int $telegramUpdateId): ?float
+    {
+        $limit = $this->limit();
+        $spent = $this->spent($telegramUpdateId);
+
+        return $limit > 0 && $spent !== null ? round(min(1.0, $spent / $limit), 2) : null;
+    }
+
     public function reachedFraction(?int $telegramUpdateId, float $fraction): bool
     {
         $limit = $this->limit();

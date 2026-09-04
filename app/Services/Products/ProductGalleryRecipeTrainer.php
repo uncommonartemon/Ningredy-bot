@@ -495,6 +495,20 @@ class ProductGalleryRecipeTrainer
                     // a mistake nobody tells it about. Costs a few dozen tokens
                     // against the twenty-four thousand the page markup costs.
                     'previous_photo_outcome' => $photoOutcome,
+                    // What is left to spend. Without it the agent cannot tell a
+                    // first round from a last one - it would keep proposing
+                    // careful multi-step plans with seconds remaining, and the
+                    // decision to stop was always taken for it by a counter in
+                    // this file. It has the tool to abandon a page; this is the
+                    // information that makes that its decision rather than ours.
+                    'remaining_budget' => [
+                        'rounds_left' => $safetyLimited ? max(0, $safetyRounds - $attempt) : null,
+                        'seconds_left' => $this->timeBudget->remainingWorkingSeconds($telegramUpdateId),
+                        'money_spent_fraction' => $this->costBudget->spentFraction($telegramUpdateId),
+                        'instruction' => 'When little is left, prefer the smallest plan that could work over the '
+                            .'thorough one, and abandon the page yourself if the evidence says it cannot succeed - '
+                            .'a round spent here is a round the next source does not get.',
+                    ],
                     // --- everything below changes every round ---
                     'attempt' => $attempt,
                     'attempt_history' => $attempts,
@@ -549,7 +563,12 @@ class ProductGalleryRecipeTrainer
                             // the whole request with a 400 - which it did, on
                             // every round of every training, the moment the
                             // screenshot was added. The runner writes a PNG.
-                            attachments: $pageImage === null
+                            // Dropped after a technical failure so the next call
+                            // can get through: a rejected request never reaches
+                            // the model, so the agent is left with silence
+                            // instead of the error it could have reasoned about.
+                            // The picture is an aid; being heard is not.
+                            attachments: $pageImage === null || $identicalFailures > 0
                                 ? []
                                 : [Image::fromBase64(base64_encode($pageImage), 'image/png')->as('page.png')],
                             provider: $provider,
