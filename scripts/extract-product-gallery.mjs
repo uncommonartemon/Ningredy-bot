@@ -182,7 +182,16 @@ let launchedChannel = null;
 // round instead. A shared browser must never be closed by whoever borrowed it.
 let sharedBrowser = false;
 
+// Off unless asked for. Measured on 2026-09-04: with the shared browser every
+// extraction ran past the 120s process timeout - five sources in one search,
+// all of them - while the same page took 34 seconds on a private browser. The
+// cause is not understood yet, and an unexplained total outage of Playwright is
+// not something to leave switched on while it is investigated.
 try {
+    if (process.env.PRODUCT_IMAGE_SHARED_BROWSER !== 'true') {
+        throw new Error('shared browser disabled');
+    }
+
     const endpoint = JSON.parse(await readFile(browserServerEndpointFile(process.cwd()), 'utf8'));
 
     if (typeof endpoint.ws_endpoint === 'string' && endpoint.ws_endpoint !== '') {
