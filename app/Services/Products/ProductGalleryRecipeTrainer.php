@@ -205,12 +205,27 @@ class ProductGalleryRecipeTrainer
                     (float) config('product-images.source_exploration_budget_fraction', 0.70),
                 );
 
+                $measuredStatic = $this->usableStaticGallerySize($pageScout, $context);
+                $requiredImages = max(1, (int) ($context['minimum_verified_images'] ?? 3));
+
                 if (
                     $preflightDecision === 'static_sufficient'
                     && ($preflight['gallery_likely'] ?? false)
                     && $this->settings->galleryPreferPlaywrightFirst()
                 ) {
-                    if ($canAffordToDisbelieve) {
+                    if ($measuredStatic >= $requiredImages) {
+                        // The distrust below is aimed at the agent's *count*,
+                        // which markup inflates. This is not that count: it is
+                        // the browser's own intrinsic width for each image the
+                        // page loaded, inside the media area, deduplicated by
+                        // asset key so renditions of one photo count once - the
+                        // exact failure the distrust was written for. Measured
+                        // evidence beats an estimate, in both directions.
+                        $debug?->__invoke(
+                            'step',
+                            "Замер подтвердил предфильтр: {$measuredStatic} разных фото уже нужного размера, обучение не требуется: ".$url,
+                        );
+                    } elseif ($canAffordToDisbelieve) {
                         $debug?->__invoke(
                             'step',
                             'Предфильтр сказал "статики достаточно", но найдена настоящая галерея - обучаю Playwright-рецепт вместо доверия оценке количества фото: '.$url,
@@ -1778,6 +1793,40 @@ class ProductGalleryRecipeTrainer
      * @param  array<string, mixed>  $pageScout
      * @return array<string, mixed>
      */
+    /**
+     * How many distinct, large-enough product photographs the page already
+     * showed without anyone clicking anything.
+     *
+     * This is not the agent's expected_image_count - that one is read off the
+     * markup and inflated by thumbnails and size variants, which is exactly why
+     * the pipeline learned to disbelieve it (a page promised eight, Vision
+     * confirmed three). This counts the browser's own intrinsic width for each
+     * image the page actually loaded, keeps only those inside the media area
+     * and at or above the size the catalog will accept, and collapses
+     * renditions of one photo through the same asset key the downloader uses.
+     * A thumbnail strip cannot survive it, and neither can one photo served at
+     * four sizes.
+     *
+     * @param  array<string, mixed>  $pageScout
+     * @param  array<string, mixed>  $context
+     */
+    private function usableStaticGallerySize(array $pageScout, array $context): int
+    {
+        $minimumWidth = (int) ($context['minimum_image_width'] ?? 0) > 0
+            ? (int) $context['minimum_image_width']
+            : $this->settings->imageMinimumWidth();
+
+        return collect($pageScout['image_candidates'] ?? [])
+            ->filter(fn (mixed $candidate): bool => is_array($candidate)
+                && ($candidate['within_media'] ?? false) === true
+                && (int) ($candidate['natural_width'] ?? 0) >= $minimumWidth)
+            ->map(fn (array $candidate): string => trim((string) ($candidate['current_src'] ?? $candidate['src'] ?? '')))
+            ->filter(fn (string $url): bool => $url !== '' && filter_var($url, FILTER_VALIDATE_URL) !== false)
+            ->map(fn (string $url): string => ProductImageStorage::imageAssetKey($url))
+            ->unique()
+            ->count();
+    }
+
     private function scoutForAgent(array $pageScout, bool $complete): array
     {
         if ($complete) {
