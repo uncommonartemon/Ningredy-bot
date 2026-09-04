@@ -35,30 +35,23 @@ title Ningredy
 
 rem A second window is one double-click away, and two bots on one database
 rem fight over the same queue - this machine has already ended up with three
-rem schedulers running at once. Handle 9 stays open for as long as this window
-rem lives, so a second instance cannot take it and stops here instead of
-rem clearing the running bot's work below.
-set "NINGREDY_LOCKED="
-2>nul (
-    9>"%~dp0.ningredy-running.lock" (
-        set "NINGREDY_LOCKED=1"
-        call :run
-    )
-)
-if not defined NINGREDY_LOCKED (
-    echo Ningredy is already running in another window.
-    echo Close that window first, or use it instead of this one.
+rem schedulers running at once.
+rem
+rem This used to hold an exclusive file handle for the life of the window, which
+rem deadlocked: cmd's redirection is inherited by every child, so an orphaned
+rem worker from a closed window kept the lock held, and the next start was
+rem refused by exactly the leftovers it was about to clean up. What we actually
+rem want to prevent is a second launcher window, and that is directly
+rem observable - count them instead of locking a file.
+rem Both the check and the cleanup live in the script: the same logic written
+rem inline here is a quoting trap that fails silently. It exits 2 when another
+rem launcher window is open, and otherwise ends the leftovers of a previous run.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\clear-leftover-processes.ps1"
+
+if errorlevel 2 (
     pause
     exit /b 1
 )
-exit /b 0
-
-:run
-
-rem Reaching this line means the lock above was taken, so no other legitimate
-rem instance is running and anything still alive is an orphan of a previous
-rem start - see the script for why they survive a closed window.
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\clear-leftover-processes.ps1"
 
 rem Everything still queued belongs to the previous run: this window is the only
 rem way the bot is stopped, so those jobs were killed rather than finished, and

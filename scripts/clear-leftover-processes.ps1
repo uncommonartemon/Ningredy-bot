@@ -9,6 +9,24 @@
 # Processes are matched on their command line rather than on "php.exe", so an
 # unrelated PHP process on this machine is not caught in it.
 
+# Two bots on one database fight over the same queue, so a second launcher
+# window has to stop before it touches anything.
+#
+# This replaced an exclusive file lock held for the life of the window, which
+# deadlocked: cmd's redirection is inherited by every child process, so an
+# orphaned worker from a closed window kept holding the lock, and the next start
+# was refused by exactly the leftovers it was about to clean up. A launcher
+# window is directly observable, so it is counted instead - and this window is
+# one of them.
+$windows = @(Get-CimInstance Win32_Process -Filter "Name='cmd.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -like '*start-ningredy*' })
+
+if ($windows.Count -gt 1) {
+    Write-Host 'Ningredy is already running in another window.'
+    Write-Host 'Close that window first, or use it instead of this one.'
+    exit 2
+}
+
 $pattern = 'artisan\s+(schedule:work|queue:work|telegram:sync-ngrok|serve)|browser-server\.mjs'
 
 # node.exe is included for the shared browser server, which holds a Chromium
