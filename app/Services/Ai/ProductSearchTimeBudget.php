@@ -4,17 +4,12 @@ namespace App\Services\Ai;
 
 use App\Models\AiRun;
 use Carbon\CarbonImmutable;
+use Illuminate\Support\Facades\Cache;
 
 class ProductSearchTimeBudget
 {
-    /**
-     * Silence longer than this between one AI call finishing and the next
-     * starting means the search was interrupted rather than merely slow, and
-     * whatever follows is a new session with its own clock. Comfortably above
-     * the pause between calls of a search that is actually running, and far
-     * below the hour a released job typically waits.
-     */
-    private const RESUME_AFTER_IDLE_SECONDS = 600;
+    /** Where a re-delivered job records that its clock starts over. */
+    private const RESTART_KEY = 'product-search-clock-restarted:';
 
     /** @var array<int, CarbonImmutable> */
     private array $startedAt = [];
@@ -52,51 +47,50 @@ class ProductSearchTimeBudget
     }
 
     /**
-     * When the current working session began - not when this request was first
-     * ever touched.
+     * A crashed worker's job is released and run again, and that attempt needs
+     * its own clock.
      *
-     * A worker that dies mid-search leaves its job to be released and picked up
-     * again later. Measuring from the very first AI call meant such a job
-     * resumed with a budget spent hours ago: seen live on 2026-09-04, a search
-     * interrupted at 14:00 resumed after a restart, announced "time reserve
-     * reached" nine seconds in, and closed the draft with no photographs at all.
-     * Work that resumes an hour later is a new session and gets its own clock.
+     * Seen live on 2026-09-04: a search interrupted at 14:00 resumed after a
+     * restart, measured itself against its first AI call from before lunch,
+     * announced "time reserve reached" nine seconds in, and closed the draft
+     * with no photographs and nothing attempted.
      *
-     * The gap is measured from when the previous call finished, so a single
-     * legitimately long call - research can run for minutes - never looks like
-     * an interruption.
+     * Only a genuine re-delivery calls this. PROJECT_STRATEGY reserves a fresh
+     * budget for an explicit "continue" press, so a search must never talk
+     * itself into one by being slow - an earlier version of this granted a new
+     * clock after ten minutes of silence, which would have handed every
+     * automatic continuation the button's privilege.
      */
+    public function restartSession(?int $telegramUpdateId): void
+    {
+        if (! $telegramUpdateId) {
+            return;
+        }
+
+        unset($this->startedAt[$telegramUpdateId]);
+        Cache::put(self::RESTART_KEY.$telegramUpdateId, now()->toIso8601String(), now()->addDay());
+    }
+
     private function startedAt(int $telegramUpdateId): CarbonImmutable
     {
         if (isset($this->startedAt[$telegramUpdateId])) {
             return $this->startedAt[$telegramUpdateId];
         }
 
-        $runs = AiRun::query()
-            ->where('telegram_update_id', $telegramUpdateId)
-            ->whereNotNull('started_at')
-            ->orderBy('started_at')
-            ->get(['started_at', 'completed_at']);
+        $restartedAt = Cache::get(self::RESTART_KEY.$telegramUpdateId);
 
-        $sessionStart = null;
-        $previousEnd = null;
-
-        foreach ($runs as $run) {
-            $startedAt = CarbonImmutable::parse($run->started_at);
-
-            // Explicit subtraction rather than diffInSeconds(): the latter is
-            // signed by argument order, and getting that backwards silently
-            // compares a negative number against the threshold, which is never
-            // greater - the guard would exist and never fire.
-            $idleSeconds = $previousEnd === null ? 0 : $startedAt->getTimestamp() - $previousEnd->getTimestamp();
-
-            if ($previousEnd === null || $idleSeconds > self::RESUME_AFTER_IDLE_SECONDS) {
-                $sessionStart = $startedAt;
-            }
-
-            $previousEnd = $run->completed_at ? CarbonImmutable::parse($run->completed_at) : $startedAt;
+        if (is_string($restartedAt)) {
+            return $this->startedAt[$telegramUpdateId] = CarbonImmutable::parse($restartedAt);
         }
 
-        return $this->startedAt[$telegramUpdateId] = $sessionStart ?? CarbonImmutable::now();
+        $startedAt = AiRun::query()
+            ->where('telegram_update_id', $telegramUpdateId)
+            ->whereNotNull('started_at')
+            ->oldest('started_at')
+            ->value('started_at');
+
+        return $this->startedAt[$telegramUpdateId] = $startedAt
+            ? CarbonImmutable::parse($startedAt)
+            : CarbonImmutable::now();
     }
 }

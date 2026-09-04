@@ -79,6 +79,22 @@ class ProductGalleryRecipeRouterTest extends TestCase
         ));
     }
 
+    public function test_a_long_category_name_is_not_mistaken_for_a_product_name(): void
+    {
+        $router = app(ProductGalleryRecipeRouter::class);
+
+        // Length and word count alone were not enough - this department is
+        // thirty-five characters of hyphenated words, and collapsing it would
+        // seat every page under /store on one recipe. A product name in a URL
+        // carries its configuration, so a digit is what separates the two.
+        $this->assertSame('/store/computer-components-and-accessories/cases/*', $router->pathPatternForUrl(
+            'https://shop.example/store/computer-components-and-accessories/cases/case-123',
+        ));
+        $this->assertSame('/collections/gaming-laptops-and-desktops/*', $router->pathPatternForUrl(
+            'https://shop.example/collections/gaming-laptops-and-desktops/predator',
+        ));
+    }
+
     public function test_a_readable_path_word_is_not_mistaken_for_an_id(): void
     {
         $router = app(ProductGalleryRecipeRouter::class);

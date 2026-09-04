@@ -2,6 +2,7 @@
 
 namespace Tests\Unit;
 
+use App\Services\Ai\AiSettings;
 use App\Services\Products\ProductGalleryRecipeTrainer;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use ReflectionMethod;
@@ -89,6 +90,20 @@ class StaticGalleryMeasurementTest extends TestCase
         // Zero keeps its meaning: height unrestricted, exactly as the downloader
         // reads it.
         $this->assertSame(2, $this->measure($page, ['minimum_image_width' => 700, 'minimum_image_height' => 0]));
+    }
+
+    public function test_a_category_that_removed_its_height_limit_is_obeyed(): void
+    {
+        // Zero means "do not restrict this", which is not the same as saying
+        // nothing at all. Treating both as unset imposed the global floor on a
+        // category that had deliberately removed one.
+        app(AiSettings::class)->saveImageMinimumHeight(700);
+        $page = ['image_candidates' => [
+            ['src' => 'https://shop.example/wide.jpg', 'natural_width' => 1600, 'natural_height' => 200, 'within_media' => true],
+        ]];
+
+        $this->assertSame(0, $this->measure($page, ['minimum_image_width' => 700]));
+        $this->assertSame(1, $this->measure($page, ['minimum_image_width' => 700, 'minimum_image_height' => 0]));
     }
 
     /**

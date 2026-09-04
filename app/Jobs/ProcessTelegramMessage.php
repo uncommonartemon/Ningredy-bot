@@ -12,6 +12,7 @@ use App\Models\User;
 use App\Services\Ai\AiErrorPresenter;
 use App\Services\Ai\AiSettings;
 use App\Services\Ai\AiUsageReporter;
+use App\Services\Ai\ProductSearchTimeBudget;
 use App\Services\Telegram\DraftTelegramPresenter;
 use App\Services\Telegram\ProductCardPresenter;
 use App\Services\Telegram\TelegramClient;
@@ -56,6 +57,17 @@ class ProcessTelegramMessage implements ShouldQueue
 
         if ($update->processed_at) {
             return;
+        }
+
+        // A second delivery means the first worker died mid-search and the job
+        // was released. Without this, the retry measures its time against the
+        // original attempt's first AI call and gives up immediately: seen live,
+        // a search resumed after a restart announced "time reserve reached"
+        // nine seconds in and closed the draft with nothing. Only a real
+        // re-delivery resets it - a fresh budget is otherwise the explicit
+        // "continue" button's privilege.
+        if ($this->attempts() > 1) {
+            app(ProductSearchTimeBudget::class)->restartSession($this->telegramUpdateId);
         }
 
         $aiSettings = app(AiSettings::class);

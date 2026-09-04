@@ -1812,17 +1812,21 @@ class ProductGalleryRecipeTrainer
      */
     private function usableStaticGallerySize(array $pageScout, array $context): int
     {
-        $minimumWidth = (int) ($context['minimum_image_width'] ?? 0) > 0
-            ? (int) $context['minimum_image_width']
-            : $this->settings->imageMinimumWidth();
+        // A category that says zero is saying "do not restrict this", which is
+        // not the same as saying nothing at all - only the absent value falls
+        // back to the global setting. Treating both as "unset" would impose a
+        // 700px floor on a category that had deliberately removed one.
+        $minimumWidth = ($context['minimum_image_width'] ?? null) === null
+            ? $this->settings->imageMinimumWidth()
+            : max(0, (int) $context['minimum_image_width']);
 
         // Height is checked on the same terms the downloader will apply it,
         // including its "0 means unlimited" rule - measuring width alone let a
         // wide, short banner count as a photograph the downloader would then
         // throw away, and the search would have skipped training for nothing.
-        $minimumHeight = (int) ($context['minimum_image_height'] ?? 0) > 0
-            ? (int) $context['minimum_image_height']
-            : $this->settings->imageMinimumHeight();
+        $minimumHeight = ($context['minimum_image_height'] ?? null) === null
+            ? $this->settings->imageMinimumHeight()
+            : max(0, (int) $context['minimum_image_height']);
 
         return collect($pageScout['image_candidates'] ?? [])
             ->filter(fn (mixed $candidate): bool => is_array($candidate)

@@ -12,35 +12,34 @@ class ResumedSearchBudgetTest extends TestCase
 {
     use RefreshDatabase;
 
-    public function test_a_search_resumed_after_a_dead_worker_gets_its_own_clock(): void
+    public function test_a_job_delivered_a_second_time_starts_its_clock_over(): void
     {
         // Live case (2026-09-04): a search started at 13:40, its worker died,
         // the health check released the job, and after a restart it resumed
         // measuring against 13:40 - announced "time reserve reached" nine
         // seconds in and closed the draft with no photographs.
         $update = $this->update();
-        $this->aiRun($update, '-90 minutes', '-88 minutes');
-        $this->aiRun($update, '-1 minute', null);
+        $this->aiRun($update, '-90 minutes');
+        $budget = app(ProductSearchTimeBudget::class);
 
-        $this->assertGreaterThan(
-            60 * 20,
-            (int) app(ProductSearchTimeBudget::class)->remainingWorkingSeconds($update->id),
-        );
+        $this->assertSame(0, $budget->remainingWorkingSeconds($update->id));
+
+        $budget->restartSession($update->id);
+
+        $this->assertGreaterThan(60 * 20, (int) $budget->remainingWorkingSeconds($update->id));
     }
 
-    public function test_a_search_that_is_merely_slow_keeps_spending_its_budget(): void
+    public function test_a_slow_search_never_grants_itself_a_new_budget(): void
     {
-        // The other direction matters more: research can occupy a single call
-        // for minutes, and that must not look like an interruption or the limit
-        // would reset itself forever.
+        // The rule that matters more: PROJECT_STRATEGY reserves a fresh budget
+        // for an explicit "continue" press. An earlier version of this handed
+        // one out after ten minutes of silence, which would have let every slow
+        // search - and every automatic continuation - take the button's
+        // privilege for itself.
         $update = $this->update();
-        $this->aiRun($update, '-40 minutes', '-25 minutes');
-        $this->aiRun($update, '-24 minutes', '-23 minutes');
+        $this->aiRun($update, '-90 minutes');
 
-        $this->assertLessThan(
-            60 * 5,
-            (int) app(ProductSearchTimeBudget::class)->remainingWorkingSeconds($update->id),
-        );
+        $this->assertSame(0, app(ProductSearchTimeBudget::class)->remainingWorkingSeconds($update->id));
     }
 
     private function update(): TelegramUpdate
@@ -54,16 +53,16 @@ class ResumedSearchBudgetTest extends TestCase
         ]);
     }
 
-    private function aiRun(TelegramUpdate $update, string $startedAt, ?string $completedAt): void
+    private function aiRun(TelegramUpdate $update, string $startedAt): void
     {
         AiRun::query()->create([
             'telegram_update_id' => $update->id,
             'provider' => 'openai',
             'model' => 'gpt-5-mini',
-            'status' => $completedAt ? 'completed' : 'running',
+            'status' => 'completed',
             'prompt' => 'search',
             'started_at' => now()->modify($startedAt),
-            'completed_at' => $completedAt ? now()->modify($completedAt) : null,
+            'completed_at' => now()->modify($startedAt),
         ]);
     }
 }

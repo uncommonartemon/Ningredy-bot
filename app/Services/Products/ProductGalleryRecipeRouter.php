@@ -255,6 +255,13 @@ class ProductGalleryRecipeRouter
      */
     private function looksLikeProductName(string $segment): bool
     {
-        return mb_strlen($segment) >= 20 && substr_count($segment, '-') >= 3;
+        // Length and word count alone were not enough:
+        // "computer-components-and-accessories" is a category and was being
+        // wildcarded, merging a whole department onto one recipe. A product
+        // name in a URL carries its configuration - a size, a generation, a
+        // part number - so a digit is what separates the two.
+        return mb_strlen($segment) >= 20
+            && substr_count($segment, '-') >= 3
+            && preg_match('/\d/', $segment) === 1;
     }
 }

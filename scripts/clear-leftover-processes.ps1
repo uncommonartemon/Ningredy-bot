@@ -27,12 +27,18 @@ if ($windows.Count -gt 1) {
     exit 2
 }
 
-# Every pattern here names something this launcher itself starts, and nothing
-# broader. An earlier version ended any ngrok.exe on the machine and any PHP
-# running "artisan queue:work" - which on a developer's machine is somebody
-# else's project. ngrok is now matched by the port this bot tunnels, the queues
-# by the names this bot uses, and the scheduler and webhook watcher by commands
-# that only this project runs.
+# These patterns name what this launcher starts. An earlier version ended any
+# ngrok.exe on the machine and any PHP running "artisan queue:work", which on a
+# developer's machine is somebody else's project; ngrok is matched by the port
+# this bot tunnels and the queues by the names it uses.
+#
+# Some of them are still not unique to this project, and saying otherwise would
+# be a promise this cannot keep: another Laravel application running "artisan
+# schedule:work", or a second checkout of this same project, would be ended too.
+# Windows does not expose a process's working directory, and every command here
+# is started by relative path, so there is nothing left to tell two checkouts
+# apart - matching the browser server by absolute path was tried and matched
+# nothing, because npm starts it as "node scripts/browser-server.mjs".
 #
 # node.exe is included for the shared browser server, which holds a Chromium
 # window open for as long as the bot runs - an orphaned one keeps that window
