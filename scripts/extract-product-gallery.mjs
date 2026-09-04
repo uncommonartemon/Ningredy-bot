@@ -1,9 +1,11 @@
 import dns from 'node:dns/promises';
 import net from 'node:net';
-import { writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { existsSync } from 'node:fs';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { chromium } from 'playwright-core';
 import {
+    browserServerEndpointFile,
     EXCLUDED_GALLERY_CONTEXT_PATTERN_SOURCE,
     galleryCollectionTarget,
     imageAssetKey,
@@ -172,8 +174,26 @@ if (!await publicHttpUrl(sourceUrl)) {
 let browser;
 
 let launchedChannel = null;
+// One browser for the whole bot, kept alive by browser-server.mjs. Launching a
+// fresh one per page meant a shop saw four or five first-time visitors on the
+// same URL within a couple of minutes during training - a bot's signature, and
+// the reason challenges appeared. Connecting keeps one window open across every
+// round instead. A shared browser must never be closed by whoever borrowed it.
+let sharedBrowser = false;
 
-for (const channel of [process.env.PRODUCT_IMAGE_BROWSER_CHANNEL || 'msedge', 'chrome', null]) {
+try {
+    const endpoint = JSON.parse(await readFile(browserServerEndpointFile(process.cwd()), 'utf8'));
+
+    if (typeof endpoint.ws_endpoint === 'string' && endpoint.ws_endpoint !== '') {
+        browser = await chromium.connect(endpoint.ws_endpoint, { timeout: 5000 });
+        sharedBrowser = true;
+    }
+} catch {
+    // Not running, or gone: fall through and launch a private one below, so
+    // nothing here depends on the shared browser being up.
+}
+
+for (const channel of browser ? [] : [process.env.PRODUCT_IMAGE_BROWSER_CHANNEL || 'msedge', 'chrome', null]) {
     try {
         browser = await chromium.launch({
             // Headless is detectable at the browser level regardless of what the
@@ -205,12 +225,31 @@ const overrideUserAgent = process.env.PRODUCT_IMAGE_BROWSER_USER_AGENT
     || (launchedChannel === null
         ? 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36'
         : null);
+// Every extraction ran in a browser the world had never seen: no cookies, no
+// history, arriving straight on a product page and leaving. Training repeats
+// that four or five times on one page within a couple of minutes, so a shop saw
+// five separate first-time visitors hammering the same URL - which is what a
+// bot looks like, and why the challenges started. Keeping the session on disk
+// per host makes the second visit a returning visitor instead of another
+// stranger, exactly as an ordinary browser behaves. It stores nothing but what
+// the site itself set.
+const sessionFile = (() => {
+    try {
+        const host = new URL(sourceUrl).hostname.replace(/[^a-z0-9.-]/gi, '');
+
+        return host ? join(process.cwd(), 'storage', 'app', 'browser-sessions', `${host}.json`) : null;
+    } catch {
+        return null;
+    }
+})();
+const savedSession = sessionFile && existsSync(sessionFile) ? sessionFile : undefined;
 const context = await browser.newContext({
     viewport: { width: 1440, height: 1100 },
     locale: 'en-US',
     // A locale without a matching timezone is its own small inconsistency.
     timezoneId: process.env.PRODUCT_IMAGE_BROWSER_TIMEZONE || 'America/New_York',
     ...(overrideUserAgent ? { userAgent: overrideUserAgent } : {}),
+    ...(savedSession ? { storageState: savedSession } : {}),
 });
 await context.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
@@ -2153,7 +2192,24 @@ if (!scoutOnly && transferDirectory !== '') {
         transferredImages.push(...results.filter(Boolean));
     }
 }
-await browser.close();
+// Saved before closing, and never allowed to fail the run: a session that
+// cannot be written only costs the next visit its continuity.
+if (sessionFile) {
+    try {
+        await mkdir(dirname(sessionFile), { recursive: true });
+        await context.storageState({ path: sessionFile });
+    } catch {
+        // Continuity is an optimisation, not a requirement.
+    }
+}
+
+// Closing a browser that belongs to the whole bot would take the window down
+// for everyone; only the borrowed context is released.
+if (sharedBrowser) {
+    await context.close().catch(() => {});
+} else {
+    await browser.close();
+}
 
 process.stdout.write(JSON.stringify({
     images,

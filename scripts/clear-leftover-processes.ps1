@@ -9,9 +9,12 @@
 # Processes are matched on their command line rather than on "php.exe", so an
 # unrelated PHP process on this machine is not caught in it.
 
-$pattern = 'artisan\s+(schedule:work|queue:work|telegram:sync-ngrok|serve)'
+$pattern = 'artisan\s+(schedule:work|queue:work|telegram:sync-ngrok|serve)|browser-server\.mjs'
 
-$leftovers = Get-CimInstance Win32_Process -Filter "Name='php.exe' OR Name='ngrok.exe'" -ErrorAction SilentlyContinue |
+# node.exe is included for the shared browser server, which holds a Chromium
+# window open for as long as the bot runs - an orphaned one keeps that window
+# alive and keeps advertising an endpoint the next start would connect to.
+$leftovers = Get-CimInstance Win32_Process -Filter "Name='php.exe' OR Name='ngrok.exe' OR Name='node.exe'" -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -eq 'ngrok.exe' -or $_.CommandLine -match $pattern }
 
 if (-not $leftovers) {

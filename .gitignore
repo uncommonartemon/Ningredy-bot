@@ -48,3 +48,6 @@ Thumbs.db
 
 # Held open by the launcher window for as long as the bot runs - see start-ningredy.bat.
 .ningredy-running.lock
+
+# Browser sessions kept per host so a second visit is not another stranger.
+storage/app/browser-sessions/

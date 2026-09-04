@@ -477,3 +477,7 @@ export const recipeActionShouldStop = ({ kind, clicked, changed, matchCount }) =
 
     return kind === 'click_each' && matchCount === 1 && changed !== true;
 };
+
+// Where browser-server.mjs advertises the shared browser, and where extraction
+// looks for it. One definition so the two can never disagree about the path.
+export const browserServerEndpointFile = (projectRoot) => `${projectRoot}/storage/app/browser-server.json`;

@@ -67,6 +67,12 @@ class ProductGalleryPreflightAgent implements Agent, HasStructuredOutput
             Always write "reason" and every "evidence" entry in Russian, regardless of what language the
             inspected page, its selectors, or its labels are in - this text is shown directly to a
             Russian-speaking operator in Telegram. Selector names, attribute names, and URLs may stay as-is.
+
+            Keep "reason" to one sentence of at most 200 characters: the verdict and the single fact that
+            decided it, nothing else. It is read on a phone, in a live log, between dozens of other lines.
+            Never restate the evidence list there, never recount what you inspected, never explain what you
+            did not choose - the evidence entries already carry the detail, and they are read only when the
+            one sentence raises a question.
             PROMPT;
     }
 
@@ -89,7 +95,12 @@ class ProductGalleryPreflightAgent implements Agent, HasStructuredOutput
             'evidence' => $schema->array()->max(12)
                 ->items($schema->string()->max(500))->required(),
             'confidence' => $schema->number()->min(0)->max(1)->required(),
-            'reason' => $schema->string()->max(1200)->required(),
+            // 1200 characters was an invitation, and the agent accepted it:
+            // verdicts arrived as paragraphs and buried the rest of the live
+            // log. The bound is documentation - structured output does not
+            // enforce string length - so the instruction above is what actually
+            // asks for one sentence, and this says what one sentence means.
+            'reason' => $schema->string()->max(300)->required(),
         ];
     }
 }

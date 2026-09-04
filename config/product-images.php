@@ -129,6 +129,11 @@ return [
         'gallery_limit' => 10,
         'dom_wait_ms' => (int) env('PRODUCT_IMAGE_BROWSER_DOM_WAIT_MS', 12000),
         'image_probe_timeout_ms' => (int) env('PRODUCT_IMAGE_BROWSER_PROBE_TIMEOUT_MS', 5000),
+
+        // Minimum gap between two browser visits to the same host. Training
+        // opens one page once per round, so without this a shop receives four
+        // or five visits inside a couple of minutes.
+        'host_visit_spacing_seconds' => (float) env('PRODUCT_IMAGE_BROWSER_HOST_SPACING_SECONDS', 4),
         'training_max_rounds' => (int) env('PRODUCT_IMAGE_GALLERY_TRAINING_MAX_ROUNDS', 3),
         'timeout' => 45,
         'scout_timeout' => 60,

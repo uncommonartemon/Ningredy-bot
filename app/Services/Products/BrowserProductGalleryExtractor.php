@@ -4,6 +4,7 @@ namespace App\Services\Products;
 
 use App\Services\Ai\AiSettings;
 use App\Services\Ai\ProductSearchTimeBudget;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
@@ -250,6 +251,35 @@ class BrowserProductGalleryExtractor
      * @param  null|callable(string, string): void  $debug
      * @return array{passed: bool, images: array<int, string>}
      */
+    /**
+     * Training opens the same page once per round, so a shop could receive four
+     * or five browser visits inside a couple of minutes - from its side,
+     * indistinguishable from someone hammering it, and the reason the
+     * challenges appeared. Spacing visits to one host is the honest fix: it
+     * makes us a lighter guest rather than a harder-to-recognise one. The wait
+     * is small enough to be invisible against a browser run that takes tens of
+     * seconds anyway.
+     */
+    private function pauseBetweenVisits(string $url): void
+    {
+        $host = strtolower((string) parse_url($url, PHP_URL_HOST));
+
+        if ($host === '') {
+            return;
+        }
+
+        $spacing = max(0.0, (float) config('product-images.browser_fallback.host_visit_spacing_seconds', 4));
+        $key = 'gallery-browser-last-visit:'.$host;
+        $previous = (float) (Cache::get($key) ?? 0);
+        $wait = $spacing - (microtime(true) - $previous);
+
+        if ($previous > 0 && $wait > 0) {
+            usleep((int) round(min($spacing, $wait) * 1_000_000));
+        }
+
+        Cache::put($key, microtime(true), now()->addMinutes(30));
+    }
+
     private function tryCompatibleDomainRecipes(
         string $url,
         int $limit,
@@ -402,6 +432,7 @@ class BrowserProductGalleryExtractor
 
         $script = base_path((string) config('product-images.browser_fallback.script', 'scripts/extract-product-gallery.mjs'));
         $transferDirectory = storage_path('framework/product-gallery-browser/'.Str::uuid());
+        $this->pauseBetweenVisits($url);
 
         try {
             File::ensureDirectoryExists($transferDirectory);
