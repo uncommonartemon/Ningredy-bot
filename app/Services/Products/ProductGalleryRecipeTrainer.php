@@ -8,6 +8,7 @@ use App\Exceptions\InvalidGalleryRecipeException;
 use App\Models\AiRun;
 use App\Models\ProductGalleryRecipe;
 use App\Models\ProductGalleryRecipeVersion;
+use App\Models\ProductSourceAttempt;
 use App\Models\ProductSourceDomain;
 use App\Models\TelegramUpdate;
 use App\Services\Ai\AiSettings;
@@ -399,6 +400,9 @@ class ProductGalleryRecipeTrainer
             $previousProgressSignature = null;
             $stagnantRounds = 0;
             $emptyRounds = 0;
+            $identicalFailures = 0;
+            $lastFailureSignature = null;
+            $photoOutcome = $this->previousPhotoOutcome($host);
             $stalled = false;
             $stuckOnValidation = false;
             $agentAbandoned = false;
@@ -484,6 +488,13 @@ class ProductGalleryRecipeTrainer
                         'post_interaction_dom_is_diagnostic_only' => true,
                         'required_behavior' => 'Replay every successful prerequisite action before using controls revealed by it.',
                     ],
+                    // What became of the photographs the last recipe for this
+                    // shop actually produced. Without it the agent optimises
+                    // "extract N images" and never learns that all twenty were
+                    // 370px and were thrown away on arrival - it cannot correct
+                    // a mistake nobody tells it about. Costs a few dozen tokens
+                    // against the twenty-four thousand the page markup costs.
+                    'previous_photo_outcome' => $photoOutcome,
                     // --- everything below changes every round ---
                     'attempt' => $attempt,
                     'attempt_history' => $attempts,
@@ -533,7 +544,14 @@ class ProductGalleryRecipeTrainer
                             visionImageUrls: $this->observedImageUrls($pageScout, $feedback),
                         )->prompt(
                             $prompt ?: '{}',
-                            attachments: $pageImage === null ? [] : [Image::fromBase64(base64_encode($pageImage))],
+                            // The media type is not optional: without it the
+                            // data URL is malformed and the provider rejects
+                            // the whole request with a 400 - which it did, on
+                            // every round of every training, the moment the
+                            // screenshot was added. The runner writes a PNG.
+                            attachments: $pageImage === null
+                                ? []
+                                : [Image::fromBase64(base64_encode($pageImage), 'image/png')->as('page.png')],
                             provider: $provider,
                             model: $model,
                             timeout: $recipeTimeout,
@@ -553,9 +571,32 @@ class ProductGalleryRecipeTrainer
                         'completed_at' => now(),
                     ]);
                     $failureKind = $this->failureKindForException($exception);
-                    $debug?->__invoke('warning', "AI-тренер: раунд {$roundLabel} не удался ({$exception->getMessage()}), пробую следующий раунд.");
                     $attempts[] = ['attempt' => $attempt, 'error' => 'ai_call_failed: '.$exception->getMessage()];
                     $feedback = ['error' => 'The previous attempt failed to produce a response: '.mb_substr($exception->getMessage(), 0, 300)];
+
+                    // A round is retried because the next one might go
+                    // differently. The same call failing the same way is not
+                    // that: a malformed request stays malformed, and retrying
+                    // it only spends rounds. Seen live - a missing media type
+                    // on an attachment made the provider answer 400, and the
+                    // loop asked thirty-five more times in twenty seconds.
+                    $failureSignature = $this->technicalFailureSignature($exception);
+                    $identicalFailures = $failureSignature === $lastFailureSignature
+                        ? $identicalFailures + 1
+                        : 1;
+                    $lastFailureSignature = $failureSignature;
+
+                    if ($identicalFailures >= self::MAX_IDENTICAL_TECHNICAL_FAILURES) {
+                        $debug?->__invoke(
+                            'warning',
+                            "AI-тренер: раунд {$roundLabel} не удался с той же ошибкой {$identicalFailures} раза подряд "
+                                ."({$exception->getMessage()}); это не лечится повтором, прекращаю обучение на этом URL.",
+                        );
+
+                        break;
+                    }
+
+                    $debug?->__invoke('warning', "AI-тренер: раунд {$roundLabel} не удался ({$exception->getMessage()}), пробую следующий раунд.");
 
                     continue;
                 }
@@ -1156,6 +1197,15 @@ class ProductGalleryRecipeTrainer
     // safety net, not a real per-training-session cap), so without this a
     // stuck loop can consume the whole search's time/cost budget alone.
     private const MAX_IDENTICAL_VALIDATION_FAILURES = 3;
+
+    /**
+     * How many times the same technical failure may repeat before the URL is
+     * given up on. A round is retried because the next one might go
+     * differently; a malformed request, a revoked key or a missing model will
+     * fail identically forever, and the agent never even sees it - the call
+     * does not reach the model, so there is nobody to reason about it.
+     */
+    private const MAX_IDENTICAL_TECHNICAL_FAILURES = 3;
 
     /**
      * Rounds that execute their clicks yet collect no image whatsoever. Two
@@ -1843,6 +1893,81 @@ class ProductGalleryRecipeTrainer
             ->map(fn (string $url): string => ProductImageStorage::imageAssetKey($url))
             ->unique()
             ->count();
+    }
+
+    /**
+     * What makes two failures "the same one again".
+     *
+     * Digits are stripped so that timestamps, request ids and durations inside
+     * a provider's message do not disguise one recurring fault as a series of
+     * different ones - which is exactly how thirty-five identical 400s looked
+     * like thirty-five separate rounds worth trying.
+     */
+    /**
+     * What happened to the photographs this shop's last recipe produced.
+     *
+     * Training ends before the download and Vision stages run, so the outcome
+     * does not exist yet when a round finishes - it only appears later, in
+     * another layer. The result was an agent optimising the wrong thing: it
+     * knew it had extracted twelve images and never that ten of them were
+     * 370px and were rejected on arrival. This is that missing half, read back
+     * from the attempts the pipeline already records.
+     *
+     * @return array<string, mixed>|null
+     */
+    private function previousPhotoOutcome(string $domain): ?array
+    {
+        if ($domain === '') {
+            return null;
+        }
+
+        $download = ProductSourceAttempt::query()
+            ->where('domain', $domain)
+            ->whereIn('action', ['download_candidates', 'download_discovered_candidates'])
+            ->whereNotNull('output')
+            ->latest('id')
+            ->first();
+
+        if (! $download) {
+            return null;
+        }
+
+        $output = is_array($download->output) ? $download->output : [];
+        $rejections = collect($output['rejected_candidates'] ?? [])
+            ->map(fn (mixed $rejection): string => is_array($rejection)
+                ? (string) ($rejection['reason'] ?? 'unknown')
+                : 'unknown')
+            ->countBy()
+            ->sortDesc()
+            ->take(4)
+            ->all();
+
+        if (($output['downloaded_images'] ?? null) === null && $rejections === []) {
+            return null;
+        }
+
+        $published = ProductSourceAttempt::query()
+            ->where('domain', $domain)
+            ->where('id', '>=', $download->id)
+            ->whereIn('decision', ['accept_agent_confirmed_atomic_gallery', 'accept_agent_confirmed_gallery'])
+            ->exists();
+
+        return [
+            'when' => $download->created_at?->toDateString(),
+            'downloaded' => (int) ($output['downloaded_images'] ?? 0),
+            'kept_after_technical_checks' => (int) ($output['unique_images'] ?? 0),
+            'rejected_by_reason' => $rejections,
+            'reached_the_catalog' => $published,
+            'instruction' => 'This is what became of the photographs the last recipe here produced. A recipe that '
+                .'collects thumbnails or size variants extracts a healthy-looking count and then loses all of it to '
+                .'the size check, so prefer the selectors and controls that reveal full-size frames even when a '
+                .'smaller set is easier to reach.',
+        ];
+    }
+
+    private function technicalFailureSignature(Throwable $exception): string
+    {
+        return $exception::class.'|'.preg_replace('/\d+/', '#', mb_substr($exception->getMessage(), 0, 200));
     }
 
     private function scoutForAgent(array $pageScout, bool $complete): array

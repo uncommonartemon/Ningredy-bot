@@ -140,6 +140,14 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
             recent round, to avoid retrying a selector combination that already failed and to build on a
             combination that partially worked.
 
+            previous_photo_outcome, when present, is what became of the photographs the last recipe for this shop
+            actually produced: how many were downloaded, how many survived the technical checks, why the rest were
+            rejected, and whether any reached the catalog. Training ends before those checks run, so this is the
+            only way you ever learn it. Read it as the score of your last attempt here. A recipe that collects
+            thumbnails or size variants extracts a healthy-looking count and then loses all of it to the size
+            check, so when it says the frames were rejected as too small, the correction is to reach the
+            full-size viewer rather than to collect more of the same.
+
             When an attachment is present it is a screenshot of this exact page, taken after any consent wall
             was closed and before any recipe action ran. Read it for what the DOM cannot tell you: where the
             gallery sits, whether thumbnails are a strip or a grid, whether a zoom or expand control is

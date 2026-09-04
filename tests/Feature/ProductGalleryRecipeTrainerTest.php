@@ -152,6 +152,71 @@ class ProductGalleryRecipeTrainerTest extends TestCase
         $this->assertSame([], $trainer->train('https://blocked.example/product-two'));
     }
 
+    public function test_the_page_screenshot_is_attached_with_a_media_type(): void
+    {
+        // The media type is not decoration. Without it the data URL is
+        // malformed and the provider rejects the entire request with a 400 -
+        // which is what happened on 2026-09-04, on every round of every
+        // training, from the moment the screenshot was added.
+        $seenAttachments = null;
+        ProductGalleryRecipeTrainerAgent::fake(function (string $prompt, $attachments) use (&$seenAttachments): array {
+            $seenAttachments = $attachments;
+
+            return $this->workingRecipe();
+        })->preventStrayPrompts();
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('scout')->once()->andReturn([
+                'scout' => [
+                    'title' => 'MSI Katana 17 HX',
+                    'fragments' => [],
+                    'interactive_controls' => ['<a href="/Gallery">GALLERY</a>'],
+                    'network_image_samples' => [],
+                    'access_gate' => false,
+                    'rate_limited' => false,
+                ],
+                'diagnostics' => [],
+                'screenshot' => 'fake-png-bytes',
+            ]);
+            $mock->shouldReceive('executeRecipe')->once()->andReturn([
+                'images' => [
+                    'https://storage.example/one.webp',
+                    'https://storage.example/two.webp',
+                    'https://storage.example/three.webp',
+                ],
+            ]);
+        });
+
+        app(ProductGalleryRecipeTrainer::class)->train(
+            'https://us.msi.com/Laptop/Katana-17-HX-B14WX/Specification',
+            force: true,
+        );
+
+        $this->assertCount(1, $seenAttachments);
+        $this->assertSame('image/png', $seenAttachments->first()->mimeType());
+    }
+
+    /** @return array<string, mixed> */
+    private function workingRecipe(): array
+    {
+        return [
+            'gallery_present' => true,
+            'content_confirmed_product' => true,
+            'expected_image_count' => 3,
+            'expected_count_evidence' => 'The same-product Gallery tab exposes three photos.',
+            'pre_click_selectors' => ['a[href*="/Gallery"]'],
+            'collect_selectors' => ['.gallery img'],
+            'thumbnail_selectors' => [],
+            'open_selectors' => [],
+            'next_selectors' => [],
+            'attributes' => ['src', 'data-src'],
+            'max_thumbnail_clicks' => 0,
+            'max_next_clicks' => 0,
+            'wait_after_click_ms' => 200,
+            'confidence' => 0.95,
+            'reason' => 'Open the internal Gallery tab, then collect its images.',
+        ];
+    }
+
     public function test_gallery_control_without_fragments_reaches_recipe_training(): void
     {
         $seenPrompt = null;
