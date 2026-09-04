@@ -29,6 +29,37 @@ class ProductIdentityMatcherTest extends TestCase
         ));
     }
 
+    public function test_one_letter_separates_the_helios_line_from_the_helios_neo_line(): void
+    {
+        // Live case (draft #96): a shop listed "Acer Predator Helios 18 AI
+        // PHN18-73" while the request was PH18-73. Its own words said Helios,
+        // its own code said Neo - and PHN is what our catalog calls the Neo
+        // line (draft #88 was "Predator Helios Neo 16 AI (PHN16-73)"). The code
+        // is the identifier, so this page is another machine and 22 photographs
+        // of it must not become this card's gallery.
+        $draft = new ProductDraft([
+            'title' => 'Acer Predator Helios 18 AI (PH18-73-90M0)',
+            'brand' => 'Acer',
+            'model' => 'PH18-73',
+        ]);
+        $draft->setRelation('telegramUpdate', new TelegramUpdate([
+            'text' => 'Acer Predator Helios 18 AI (PH18-73) ищи',
+        ]));
+
+        $matcher = new ProductIdentityMatcher;
+
+        $this->assertTrue($matcher->conflictsSource($draft, [
+            'url' => 'https://www.scan.co.uk/products/18-acer-predator-helios-18-ai-250hz-intel-core-ultra-9-275hx-32gb-ddr5-1tb-ssd',
+            '_preflight_identity_evidence' => 'Acer Predator Helios 18 AI PHN18-73 18" WQXGA IPS 250Hz Core Ultra 9 RTX 5080 Gaming Laptop',
+        ]));
+
+        // The requested machine on the same shop is still welcome.
+        $this->assertFalse($matcher->conflictsSource($draft, [
+            'url' => 'https://www.scan.co.uk/products/18-acer-predator-helios-18-ai-250hz-core-ultra-9',
+            '_preflight_identity_evidence' => 'Acer Predator Helios 18 AI PH18-73 18" WQXGA IPS 250Hz Gaming Laptop',
+        ]));
+    }
+
     public function test_it_accepts_a_url_containing_the_exact_alphanumeric_model_code(): void
     {
         $draft = new ProductDraft([

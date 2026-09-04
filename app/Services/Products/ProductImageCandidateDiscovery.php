@@ -475,6 +475,50 @@ class ProductImageCandidateDiscovery
             $source['_minimum_image_width'] = $category?->minimumImageWidth();
             $source['_minimum_image_height'] = $category?->minimumImageHeight();
 
+            // Read the page's own model code before spending anything on it.
+            // resolve() below is where Playwright training happens, and the
+            // identity check used to sit after it - so a page could be trained
+            // for minutes and only then rejected for being a different machine.
+            // Live case (draft #96): a shop's listing said PHN18-73 while the
+            // request was PH18-73 - one letter, but PHN is the Helios Neo line.
+            // Only a contradiction rejects here; a page that merely fails to
+            // confirm is still opened, because opaque or numeric product URLs
+            // are common and the richer runtime evidence below decides those.
+            // The main source loop has always worked this way; this brings the
+            // fallback path in line with it.
+            $preflightEvidence = $this->preflightEvidence($source, $telegramUpdateId);
+            $conflict = $preflightEvidence === null
+                ? null
+                : $this->identityMatcher->conflictingIdentifierInSource($draft, $preflightEvidence);
+
+            if ($conflict !== null) {
+                $this->attempts->record([
+                    'telegram_update_id' => $telegramUpdateId,
+                    'product_draft_id' => $draft->id,
+                    'product_url' => $pageUrl,
+                    'actor' => 'identity_validator',
+                    'phase' => 'source_selection',
+                    'action' => 'validate_discovery_page_identity',
+                    'status' => 'failed',
+                    'decision' => 'reject_conflicting_identifier_before_browser',
+                    'output' => [
+                        'requested_identifier' => $conflict['requested'],
+                        'found_identifier' => $conflict['found'],
+                        'identity_evidence' => mb_substr(
+                            (string) ($preflightEvidence['_preflight_identity_evidence'] ?? ''), 0, 400,
+                        ),
+                    ],
+                ]);
+                $progress?->__invoke(sprintf(
+                    'Страница пропущена до запуска браузера: на ней %s, а запрошено %s · %s',
+                    mb_strtoupper($conflict['found']),
+                    mb_strtoupper($conflict['requested']),
+                    $pageUrl,
+                ));
+
+                continue;
+            }
+
             $pageImages = $progress
                 ? $this->resolver->resolve(
                     [$source],
@@ -544,6 +588,35 @@ class ProductImageCandidateDiscovery
      * @param  array<int, string>  $urls
      * @return array<int, string>
      */
+    /**
+     * One cheap HTTP fetch of the page's own markup, for the model code it
+     * prints about itself. Returns null when the page could not be read at all
+     * - silence must not reject anything, only a contradiction may.
+     *
+     * @param  array<string, mixed>  $source
+     * @return array<string, mixed>|null
+     */
+    private function preflightEvidence(array $source, ?int $telegramUpdateId): ?array
+    {
+        try {
+            $preflight = $this->resolver->preflightSource($source, $telegramUpdateId);
+        } catch (Throwable) {
+            return null;
+        }
+
+        $evidence = trim((string) ($preflight['identity_evidence'] ?? ''));
+
+        if ($evidence === '') {
+            return null;
+        }
+
+        return [
+            ...$source,
+            'url' => (string) ($preflight['final_url'] ?? $source['url']),
+            '_preflight_identity_evidence' => $evidence,
+        ];
+    }
+
     private function limitCandidateUrlsBySource(array $urls): array
     {
         $globalLimit = max(1, (int) config('product-images.ai_result_limit', 20));

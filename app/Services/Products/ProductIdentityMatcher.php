@@ -138,10 +138,31 @@ class ProductIdentityMatcher
      */
     public function conflicts(ProductDraft $draft, string $evidence): bool
     {
+        return $this->conflictingIdentifier($draft, $evidence) !== null;
+    }
+
+    /** @param array<string, mixed> $source */
+    public function conflictingIdentifierInSource(ProductDraft $draft, array $source): ?array
+    {
+        return $this->conflictingIdentifier($draft, $this->sourceEvidence($source));
+    }
+
+    /**
+     * The same rule as conflicts(), but it says which two codes disagreed. The
+     * operator was told only "the page does not confirm the exact model/SKU"
+     * and had to open the shop themselves to find out that its listing said
+     * PHN18-73 while the request said PH18-73 - a single letter, and the letter
+     * that separates the Helios line from Helios Neo. The code knows both
+     * values at the moment it refuses; there is no reason to keep them.
+     *
+     * @return array{requested: string, found: string}|null
+     */
+    public function conflictingIdentifier(ProductDraft $draft, string $evidence): ?array
+    {
         $requested = $this->requestedIdentifiers($draft);
 
         if ($evidence === '' || $requested === []) {
-            return false;
+            return null;
         }
 
         $compactEvidence = $this->compact($evidence);
@@ -185,12 +206,12 @@ class ProductIdentityMatcher
 
                 if (substr($candidate, 0, $prefixLength) === substr($identifier, 0, $prefixLength)
                     && levenshtein($candidate, $identifier) <= $distanceLimit) {
-                    return true;
+                    return ['requested' => $identifier, 'found' => $candidate];
                 }
             }
         }
 
-        return false;
+        return null;
     }
 
     /** @param array<string, mixed> $source */
