@@ -1816,10 +1816,19 @@ class ProductGalleryRecipeTrainer
             ? (int) $context['minimum_image_width']
             : $this->settings->imageMinimumWidth();
 
+        // Height is checked on the same terms the downloader will apply it,
+        // including its "0 means unlimited" rule - measuring width alone let a
+        // wide, short banner count as a photograph the downloader would then
+        // throw away, and the search would have skipped training for nothing.
+        $minimumHeight = (int) ($context['minimum_image_height'] ?? 0) > 0
+            ? (int) $context['minimum_image_height']
+            : $this->settings->imageMinimumHeight();
+
         return collect($pageScout['image_candidates'] ?? [])
             ->filter(fn (mixed $candidate): bool => is_array($candidate)
                 && ($candidate['within_media'] ?? false) === true
-                && (int) ($candidate['natural_width'] ?? 0) >= $minimumWidth)
+                && (int) ($candidate['natural_width'] ?? 0) >= $minimumWidth
+                && (int) ($candidate['natural_height'] ?? 0) >= $minimumHeight)
             ->map(fn (array $candidate): string => trim((string) ($candidate['current_src'] ?? $candidate['src'] ?? '')))
             ->filter(fn (string $url): bool => $url !== '' && filter_var($url, FILTER_VALIDATE_URL) !== false)
             ->map(fn (string $url): string => ProductImageStorage::imageAssetKey($url))

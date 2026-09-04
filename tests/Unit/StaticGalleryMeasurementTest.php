@@ -76,6 +76,21 @@ class StaticGalleryMeasurementTest extends TestCase
         $this->assertSame(1, $this->measure($page, ['minimum_image_width' => 1000]));
     }
 
+    public function test_a_wide_short_banner_is_not_a_photograph(): void
+    {
+        // Width alone let a banner count as a product photo, and the downloader
+        // would have rejected it afterwards - skipping training for nothing.
+        $page = ['image_candidates' => [
+            ['src' => 'https://shop.example/banner.jpg', 'natural_width' => 1600, 'natural_height' => 200, 'within_media' => true],
+            ['src' => 'https://shop.example/photo.jpg', 'natural_width' => 1600, 'natural_height' => 1600, 'within_media' => true],
+        ]];
+
+        $this->assertSame(1, $this->measure($page, ['minimum_image_width' => 700, 'minimum_image_height' => 700]));
+        // Zero keeps its meaning: height unrestricted, exactly as the downloader
+        // reads it.
+        $this->assertSame(2, $this->measure($page, ['minimum_image_width' => 700, 'minimum_image_height' => 0]));
+    }
+
     /**
      * @param  array<string, mixed>  $page
      * @param  array<string, mixed>  $context

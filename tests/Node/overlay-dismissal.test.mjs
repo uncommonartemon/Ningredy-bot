@@ -97,3 +97,25 @@ test('ordinary page furniture is left alone', async () => {
         assert.deepEqual(result.still_blocking, []);
     });
 });
+
+test('a cookie wall carrying a brand logo is still dismissed', async () => {
+    // Requiring no image at all was too strict: every consent banner has a
+    // logo, and one 32px image made the whole wall untouchable.
+    await withPage(overlay('<img src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" width="32" height="32">'
+        + '<p>We use cookies</p><button>Accept all</button>'), async (page) => {
+        const result = await clearBlockingOverlays(page);
+
+        assert.equal(result.dismissed.length, 1);
+    });
+});
+
+test('a settings button is not mistaken for an accept button', async () => {
+    // "Cookie settings" contains "ok", so substring matching clicked the button
+    // that opens preferences instead of the one that closes the wall.
+    await withPage(overlay('<p>Cookies</p><button id="prefs">Cookie settings</button>'), async (page) => {
+        const result = await clearBlockingOverlays(page);
+
+        assert.deepEqual(result.dismissed, []);
+        assert.equal(result.still_blocking.length, 1);
+    });
+});

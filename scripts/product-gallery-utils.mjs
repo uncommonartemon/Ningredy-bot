@@ -540,7 +540,17 @@ export const clearBlockingOverlays = async (target) => {
 
                 // The gallery viewer is a dialog too. Anything holding a real
                 // product image is the content, never the obstacle.
-                if (!pinned || !(coversCentre || coversMuch) || element.querySelector('img,picture,source')) {
+                // Any image at all was too strict: consent banners carry a brand
+                // logo, and one 32px logo made the whole wall untouchable. What
+                // must never be closed is an overlay holding a photograph, so
+                // the test is size - a product shot is large, a logo is not.
+                const holdsPhotograph = [...element.querySelectorAll('img,picture,source')].some((media) => {
+                    const bounds = media.getBoundingClientRect?.() || { width: 0, height: 0 };
+
+                    return Math.min(bounds.width, bounds.height) >= 180;
+                });
+
+                if (!pinned || !(coversCentre || coversMuch) || holdsPhotograph) {
                     continue;
                 }
 
@@ -549,7 +559,14 @@ export const clearBlockingOverlays = async (target) => {
                     const text = `${candidate.innerText || ''} ${candidate.value || ''} ${candidate.getAttribute('aria-label') || ''}`
                         .trim().toLowerCase();
 
-                    return text !== '' && text.length <= 60 && labels.some((label) => text.includes(label));
+                    // Substring matching turned "Cookie settings" into a match
+                    // for "ok" and clicked the wrong button - the one that opens
+                    // preferences instead of closing the wall. Labels have to
+                    // match whole words.
+                    return text !== '' && text.length <= 60 && labels.some((label) => new RegExp(
+                        `(?:^|[^\\p{L}])${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:[^\\p{L}]|$)`,
+                        'u',
+                    ).test(text));
                 }) || controls.find((candidate) => /close|dismiss|✕|×/i.test(
                     `${candidate.className || ''} ${candidate.getAttribute('aria-label') || ''}`,
                 ));

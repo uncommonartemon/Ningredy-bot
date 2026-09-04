@@ -27,13 +27,24 @@ if ($windows.Count -gt 1) {
     exit 2
 }
 
-$pattern = 'artisan\s+(schedule:work|queue:work|telegram:sync-ngrok|serve)|browser-server\.mjs'
-
+# Every pattern here names something this launcher itself starts, and nothing
+# broader. An earlier version ended any ngrok.exe on the machine and any PHP
+# running "artisan queue:work" - which on a developer's machine is somebody
+# else's project. ngrok is now matched by the port this bot tunnels, the queues
+# by the names this bot uses, and the scheduler and webhook watcher by commands
+# that only this project runs.
+#
 # node.exe is included for the shared browser server, which holds a Chromium
 # window open for as long as the bot runs - an orphaned one keeps that window
 # alive and keeps advertising an endpoint the next start would connect to.
+$pattern = 'artisan\s+(?:schedule:work|telegram:sync-ngrok)' +
+    '|artisan\s+queue:work\s+--queue=(?:assistant|voice|media|default)' +
+    '|artisan\s+serve\s+--host=127\.0\.0\.1\s+--port=8000' +
+    '|browser-server\.mjs' +
+    '|ngrok(?:\.exe)?["'']?\s+http\s+8000'
+
 $leftovers = Get-CimInstance Win32_Process -Filter "Name='php.exe' OR Name='ngrok.exe' OR Name='node.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -eq 'ngrok.exe' -or $_.CommandLine -match $pattern }
+    Where-Object { $_.CommandLine -match $pattern }
 
 if (-not $leftovers) {
     Write-Host 'No leftover processes from previous runs.'

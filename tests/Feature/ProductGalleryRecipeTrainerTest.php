@@ -102,11 +102,24 @@ class ProductGalleryRecipeTrainerTest extends TestCase
             $instructions,
         );
         $this->assertStringContainsString(
-            'Every candidate recipe is executed in a brand-new browser process',
+            'Every candidate recipe is executed from a fresh page load at the original URL',
             $instructions,
         );
         $this->assertStringContainsString(
             'Treat that observation only as diagnostic evidence',
+            $instructions,
+        );
+        // The contract used to promise that no cookies survived a round, which
+        // stopped being true the moment sessions were kept per host so shops
+        // would stop answering with a challenge. An agent told the wrong thing
+        // writes the wrong recipe - one that depends on dismissing a consent
+        // wall that will not be there next time.
+        $this->assertStringContainsString(
+            "The site's own cookies are the one exception",
+            $instructions,
+        );
+        $this->assertStringContainsString(
+            'never make the recipe depend on dismissing one',
             $instructions,
         );
     }

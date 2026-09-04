@@ -198,9 +198,16 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
             abandon a real product card merely because one recipe failed, a viewer is layered, or a selector
             needs correction. Otherwise set training_decision to propose_recipe and continue normally.
 
-            Every candidate recipe is executed in a brand-new browser process starting at the original URL.
-            No cookies, opened modal, selected tab, expanded viewer, scroll position, or DOM mutation from a
-            previous round survives into the next execution. A later round may include
+            Every candidate recipe is executed from a fresh page load at the original URL. No opened modal,
+            selected tab, expanded viewer, scroll position, or DOM mutation from a previous round survives
+            into the next execution, so the recipe must be complete on its own.
+
+            The site's own cookies are the one exception: they are kept per host between runs, exactly as an
+            ordinary browser keeps them, because arriving with no history on every visit is what made shops
+            answer with a challenge. This matters for what you write: a consent wall accepted once will not
+            be there next time, so never make the recipe depend on dismissing one, and never treat its
+            absence as a different page. Anything the runner closed for you is listed in
+            page.dismissed_overlays. A later round may include
             previous_attempt_observation: post-interaction DOM plus the exact Playwright action trace from the
             previous round. Treat that observation only as diagnostic evidence of what the previous full recipe
             revealed, never as the starting state of the next execution. Return a complete replayable recipe from
