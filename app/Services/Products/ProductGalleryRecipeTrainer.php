@@ -452,7 +452,10 @@ class ProductGalleryRecipeTrainer
                     // This is always the original, freshly loaded page. Every
                     // recipe execution starts from this state in a new browser
                     // process; post-interaction DOM is diagnostic feedback only.
-                    'page' => $pageScout,
+                    // A round that repeats the previous round's outcome gets the
+                    // whole page back: the short version is an economy, and an
+                    // economy must never be the reason the agent is stuck.
+                    'page' => $this->scoutForAgent($pageScout, $stagnantRounds > 0),
                     'execution_contract' => [
                         'browser_state' => 'fresh_page_load_for_every_recipe_execution',
                         'recipe_must_be_self_contained' => true,
@@ -1141,6 +1144,19 @@ class ProductGalleryRecipeTrainer
      */
     private const MAX_EMPTY_COLLECTION_ROUNDS = 3;
 
+    /**
+     * How many entries of each ranked page list reach the agent on a round that
+     * is still making progress. The counts an omitted-tail marker reports back,
+     * so the agent knows it is looking at a head and can ask the round to widen
+     * by failing to progress - see scoutForAgent().
+     */
+    private const AGENT_PAGE_LIST_LIMITS = [
+        'image_candidates' => 20,
+        'action_candidates' => 24,
+        'fragments' => 16,
+        'network_image_samples' => 12,
+    ];
+
     private const DOWNLOAD_FAILURE_KIND = 'download_unreachable';
 
     // A single blip (transient network hiccup) must not force a retrain -
@@ -1734,6 +1750,42 @@ class ProductGalleryRecipeTrainer
      * the model. Trying three different selectors against the same unchanged
      * page is still a stalled training session.
      */
+    /**
+     * How much of the page the agent is shown.
+     *
+     * Measured on a real training call: the payload was 109,000 characters, and
+     * three fields carried 72% of it - 50 image candidates, 54 clickable
+     * candidates, 32 DOM fragments. Across the catalog the expensive model's
+     * input outweighed its output 46 to 1, so the bill is almost entirely what
+     * we hand over rather than what it thinks about. A recipe has to recognise
+     * the shape of a gallery, and that shape is already visible in the first
+     * few of each - the fiftieth image candidate has never been what decided a
+     * selector.
+     *
+     * Every list here arrives ranked by the runner, so trimming takes the tail,
+     * not a sample. And it steps aside entirely the moment it might be the
+     * problem: see the caller, where a round that made no progress is given the
+     * whole page back before it tries again.
+     *
+     * @param  array<string, mixed>  $pageScout
+     * @return array<string, mixed>
+     */
+    private function scoutForAgent(array $pageScout, bool $complete): array
+    {
+        if ($complete) {
+            return $pageScout;
+        }
+
+        foreach (self::AGENT_PAGE_LIST_LIMITS as $key => $keep) {
+            if (is_array($pageScout[$key] ?? null) && count($pageScout[$key]) > $keep) {
+                $pageScout[$key.'_omitted'] = count($pageScout[$key]) - $keep;
+                $pageScout[$key] = array_slice($pageScout[$key], 0, $keep);
+            }
+        }
+
+        return $pageScout;
+    }
+
     private function trainingProgressSignature(array $result): string
     {
         $images = collect(is_array($result['images'] ?? null) ? $result['images'] : [])

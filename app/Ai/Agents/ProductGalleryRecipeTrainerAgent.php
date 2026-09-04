@@ -140,6 +140,18 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
             recent round, to avoid retrying a selector combination that already failed and to build on a
             combination that partially worked.
 
+            The page lists are ranked, and on a round that is making progress you are given their head rather
+            than all of them; a field such as image_candidates_omitted says how many were left out. Nothing is
+            hidden from you deliberately - a round that ends with the same outcome as the one before it is
+            given the whole page back automatically, so if the head is genuinely not enough to explain the
+            gallery, saying so through an honest failed round is what widens it.
+
+            page.dismissed_overlays lists consent walls and popups the runner closed before reading the DOM,
+            and page.blocking_overlays lists any that would not close. A blocking overlay means the DOM you
+            are reading is partly covered, so plan a click for it rather than concluding the page has no
+            gallery. Never write a recipe step to close something already listed as dismissed: it will not be
+            there on the next run.
+
             You have read-only tools for cases where the supplied context is not enough to explain a failure:
             GetSourceAttemptHistory (this search's own recorded decisions for this URL or domain),
             GetCandidateRejectionDetail (the real, already-computed reason a specific candidate image URL was
