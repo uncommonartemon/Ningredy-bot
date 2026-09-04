@@ -107,7 +107,21 @@ class ResearchProduct implements Tool
         $model = $settings->modelFor('product_research');
         $sourcePriority = $this->sourcePriority ?? app(ProductSourcePriority::class);
         $blockedDomains = $sourcePriority->blockedDomains();
-        $researchPrompt = $query.($blockedDomains === [] ? '' : PHP_EOL.'Never search or return these blocked domains: '.implode(', ', $blockedDomains));
+        // The agent was told what to avoid and nothing about what already
+        // works, so every search went shopping somewhere new and paid to learn
+        // that shop from scratch: 111 recipes trained across this catalog, and
+        // exactly two of them ever used a second time. These are the shops the
+        // pipeline can already open. It is a preference, not a restriction -
+        // the exact product still outranks a familiar address, and a search
+        // that only ever revisited the same shops would never grow the list.
+        $provenDomains = $sourcePriority->provenDomains();
+        $researchPrompt = $query
+            .($blockedDomains === [] ? '' : PHP_EOL.'Never search or return these blocked domains: '.implode(', ', $blockedDomains))
+            .($provenDomains === [] ? '' : PHP_EOL.'This catalog already knows how to read product pages on these shops: '
+                .implode(', ', $provenDomains)
+                .'. When one of them genuinely sells the exact requested product, include its product page among the sources.'
+                .' Never return a page from them for a different model, and never let this list narrow the search:'
+                .' an exact match anywhere else is always worth more than a familiar domain.');
         $run = AiRun::query()->create([
             'telegram_update_id' => $this->update->id,
             'provider' => $provider,

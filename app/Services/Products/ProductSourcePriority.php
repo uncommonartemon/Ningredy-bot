@@ -138,6 +138,40 @@ class ProductSourcePriority
     }
 
     /**
+     * Shops this catalog has already learned to open, newest success first.
+     *
+     * Training a recipe is the most expensive thing a search does, and it only
+     * pays back when the same shop comes up again. It almost never did: 111
+     * recipes trained, 22 successes between them, and exactly two recipes ever
+     * used a second time. The reason is upstream - the research agent is told
+     * which domains are blocked and nothing about the ones we can already open,
+     * so every search goes shopping somewhere new and pays full price again.
+     * This is that missing half of the picture.
+     *
+     * @return array<int, string>
+     */
+    public function provenDomains(int $limit = 25): array
+    {
+        try {
+            return ProductGalleryRecipe::query()
+                ->where('status', 'active')
+                ->where('success_count', '>', 0)
+                ->where(fn ($query) => $query->whereNull('source_blocked')->orWhere('source_blocked', false))
+                ->orderByDesc('success_count')
+                ->orderByDesc('last_success_at')
+                ->pluck('domain')
+                ->filter(fn (mixed $domain): bool => is_string($domain) && $domain !== '')
+                ->map(fn (string $domain): string => self::host('https://'.$domain))
+                ->unique()
+                ->take($limit)
+                ->values()
+                ->all();
+        } catch (Throwable) {
+            return [];
+        }
+    }
+
+    /**
      * One blocked path is not a blocked domain. The router draws that line at
      * DOMAIN_BLOCK_THRESHOLD and lets a single blocked path stop only itself -
      * but this list was built from any single row with source_blocked=true and
