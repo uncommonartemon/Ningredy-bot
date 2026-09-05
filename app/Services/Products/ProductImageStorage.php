@@ -335,9 +335,17 @@ class ProductImageStorage
         $selected = [];
         $chosenSource = null;
         $chosenMethod = null;
+        // What the winning source's verification actually concluded. Carried
+        // from the place that decided it to the place that records it, because
+        // re-deriving it at the end from the method and a per-frame structural
+        // flag is what let a partial result - and a set whose check had timed
+        // out - both introduce themselves as complete.
+        $outcome = null;
         $partialSelected = [];
         $partialSource = null;
         $partialMethod = null;
+        $partialOutcome = null;
+        $reserve = null;
         $partialFromDiscovery = false;
         $deferredVisionSets = [];
 
@@ -748,42 +756,38 @@ class ProductImageStorage
             // Checked before the maximum is applied: taking ten first and then
             // removing two would throw away the eleventh and twelfth frames,
             // which were fine and are now gone.
-            $languageChecked = $this->languageCheckedFrames(
+            $result = $this->confirmedGalleryResult(
                 $verifiedGallery->all(),
                 $draft,
                 $telegramUpdateId,
                 $minimumCompleteGallerySize,
+                $target,
+                [...$source, 'url' => $productPageUrl],
+                'playwright',
+                'Exact product source and coherent complete Playwright gallery confirmed by the gallery agent; Vision is advisory only.',
                 $progress,
             );
 
-            if ($languageChecked === null || count($languageChecked) < $minimumCompleteGallerySize) {
+            if (! $result->isComplete()) {
                 // Not a complete gallery any more, but the surviving frames are
-                // real photographs of this product - kept as the partial result
-                // while the search moves on, never destroyed.
-                $survivors = $languageChecked ?? $verifiedGallery->all();
-
-                if (count($survivors) > count($partialSelected)) {
+                // real photographs of this product - kept as the reserve while
+                // the search moves on, never destroyed.
+                if ($result->isBetterReserveThan($reserve)) {
                     $this->destroy($partialSelected);
-                    $partialSelected = $survivors;
-                    $partialSource = [...$source, 'url' => $productPageUrl];
-                    $partialMethod = 'playwright';
+                    $reserve = $result;
+                    $partialSelected = $result->candidates;
+                    $partialSource = $result->source;
+                    $partialMethod = $result->method;
+                    $partialOutcome = $result->outcome;
                 }
 
-                $this->destroyUnselected($allCandidates, $survivors);
+                $this->destroyUnselected($allCandidates, $result->candidates);
 
                 continue;
             }
 
-            $verifiedGallery = collect($languageChecked);
-
-            $selected = $verifiedGallery
-                ->take($target)
-                ->map(fn (array $candidate): array => [
-                    ...$candidate,
-                    'verification_status' => 'source_verified',
-                    'verification_notes' => 'Exact product source and coherent complete Playwright gallery confirmed by the gallery agent; Vision is advisory only.',
-                ])
-                ->all();
+            $selected = $result->candidates;
+            $outcome = $result->outcome;
             $progress?->__invoke('Playwright и gallery-агент подтвердили точную монолитную галерею: принимаю все '.count($selected).' фото и прекращаю обход источников.');
             $this->attempts->record([
                 'telegram_update_id' => $telegramUpdateId,
@@ -858,6 +862,8 @@ class ProductImageStorage
                     $this->destroy($partialSelected);
                     $partialSelected = [];
                     $selected = $verified;
+                    $outcome = GalleryOutcome::Complete;
+                    $reserve = null;
                     $chosenSource = $source;
                     $chosenMethod = 'static';
 
@@ -873,6 +879,7 @@ class ProductImageStorage
                     $partialSelected = $verified;
                     $partialSource = $source;
                     $partialMethod = 'static';
+                    $partialOutcome = GalleryOutcome::Partial;
                     $partialFromDiscovery = false;
                 } else {
                     $this->destroy($verified);
@@ -1066,33 +1073,44 @@ class ProductImageStorage
                         && $confirmedGroup->count() >= $minimumCompleteGallerySize
                         && $groupPageUrl
                     ) {
-                        // Same gate as the main loop: a gallery accepted as a
-                        // set still owes the one question about its pixels.
-                        $languageChecked = $this->languageCheckedFrames(
-                            $confirmedGroup->all(),
+                        // The same gate as the main loop, and now literally the
+                        // same code: this branch used to answer the identical
+                        // question with a bare `continue`, so a gallery the
+                        // language rule had thinned survived one search and was
+                        // thrown away by the other.
+                        $result = $this->confirmedGalleryResult(
+                            $confirmedGroup->map(fn (array $candidate): array => [
+                                ...$candidate,
+                                'source_identity_confirmed' => true,
+                            ])->all(),
                             $draft,
                             $telegramUpdateId,
                             $minimumCompleteGallerySize,
+                            $target,
+                            $groupSource,
+                            'fallback_playwright',
+                            'Exact product source and coherent complete Playwright gallery confirmed by the gallery agent during fallback search.',
                             $progress,
                         );
 
-                        if ($languageChecked === null || count($languageChecked) < $minimumCompleteGallerySize) {
+                        if (! $result->isComplete()) {
+                            if ($result->isBetterReserveThan($reserve)) {
+                                $this->destroy($partialSelected);
+                                $reserve = $result;
+                                $partialSelected = $result->candidates;
+                                $partialSource = $result->source;
+                                $partialMethod = $result->method;
+                                $partialOutcome = $result->outcome;
+                            }
+
                             continue;
                         }
 
-                        $confirmedGroup = collect($languageChecked);
-
-                        $selected = $confirmedGroup
-                            ->take($target)
-                            ->map(fn (array $candidate): array => [
-                                ...$candidate,
-                                'source_identity_confirmed' => true,
-                                'verification_status' => 'source_verified',
-                                'verification_notes' => 'Exact product source and coherent complete Playwright gallery confirmed by the gallery agent during fallback search.',
-                            ])
-                            ->all();
+                        $selected = $result->candidates;
+                        $outcome = $result->outcome;
                         $this->destroy($partialSelected);
                         $partialSelected = [];
+                        $reserve = null;
                         $chosenSource = $groupSource;
                         $chosenMethod = 'fallback_playwright';
                         $this->attempts->record([
@@ -1163,6 +1181,7 @@ class ProductImageStorage
                                 $partialSelected = $selected;
                                 $partialSource = $groupPageUrl ? ['url' => $groupPageUrl] : null;
                                 $partialMethod = 'fallback_discovery';
+                                $partialOutcome = GalleryOutcome::Partial;
                                 $partialFromDiscovery = true;
                             }
                             $selected = [];
@@ -1172,6 +1191,8 @@ class ProductImageStorage
 
                         $this->destroy($partialSelected);
                         $partialSelected = [];
+                        $reserve = null;
+                        $outcome = GalleryOutcome::Complete;
                         $chosenSource = $groupPageUrl ? ['url' => $groupPageUrl] : null;
                         $chosenMethod = 'fallback_discovery';
                         break;
@@ -1192,6 +1213,7 @@ class ProductImageStorage
                 $selected = $partialSelected;
                 $chosenSource = $partialSource;
                 $chosenMethod = $partialMethod;
+                $outcome = $partialOutcome ?? GalleryOutcome::Partial;
             }
         } elseif ($selected === [] && $progress) {
             $reason = $this->costBudget->exceeded($telegramUpdateId)
@@ -1209,6 +1231,7 @@ class ProductImageStorage
             $selected = $partialSelected;
             $chosenSource = $partialSource;
             $chosenMethod = $partialMethod;
+            $outcome = $partialOutcome ?? GalleryOutcome::Partial;
         }
 
         // Last resort only: every normal source and round produced nothing
@@ -1232,12 +1255,19 @@ class ProductImageStorage
             }
         }
 
-        $playwrightConfirmedComplete = in_array($chosenMethod, ['playwright', 'playwright_vision', 'fallback_playwright', 'fallback_playwright_vision'], true)
-            && collect($selected)->every(fn (array $candidate): bool => (bool) ($candidate['confirmed_gallery'] ?? false));
-        $galleryIsPartial = $selected !== [] && ! $playwrightConfirmedComplete && (
-            count($selected) < $minimumCompleteGallerySize
-            || collect($selected)->every(fn (array $candidate): bool => (bool) ($candidate['partial_gallery'] ?? false))
-        );
+        // Read, not re-derived. This used to ask the method that produced the
+        // frames and a structural flag the browser had set on each of them -
+        // and confirmed_gallery=true survives on the one frame the language
+        // rule left behind, so a partial result reported itself complete. A
+        // verification that never ran did the same. Paths that predate the
+        // explicit outcome fall back to the old shape of the question, minus
+        // the flag that was answering it wrongly.
+        $galleryIsPartial = $selected !== [] && match ($outcome) {
+            GalleryOutcome::Complete => false,
+            null => count($selected) < $minimumCompleteGallerySize
+                || collect($selected)->every(fn (array $candidate): bool => (bool) ($candidate['partial_gallery'] ?? false)),
+            default => true,
+        };
         $roles = ['primary', 'secondary', 'detail'];
         $stored = 0;
         $checksums = [];
@@ -1450,6 +1480,39 @@ class ProductImageStorage
      * @param  array<int, array<string, mixed>>  $candidates
      * @return array<int, array<string, mixed>>|null
      */
+    /**
+     * A confirmed gallery becomes a verdict here, and only here.
+     *
+     * Both searches - the ranked sources and the fallback discovery - used to
+     * ask this question with their own copy of the code, and the copies had
+     * drifted: one kept the frames the language rule left behind, the other
+     * dropped them with a bare `continue`. The same set therefore produced a
+     * photograph in one search and nothing in the other.
+     *
+     * @param  array<int, array<string, mixed>>  $frames
+     */
+    private function confirmedGalleryResult(
+        array $frames,
+        ProductDraft $draft,
+        ?int $telegramUpdateId,
+        int $minimum,
+        int $target,
+        ?array $source,
+        string $method,
+        string $notes,
+        ?callable $progress,
+    ): GallerySourceResult {
+        return GallerySourceResult::fromVerifiedGallery(
+            $this->languageCheckedFrames($frames, $draft, $telegramUpdateId, $minimum, $progress),
+            $frames,
+            $minimum,
+            $target,
+            $source,
+            $method,
+            $notes,
+        );
+    }
+
     private function languageCheckedFrames(
         array $candidates,
         ProductDraft $draft,

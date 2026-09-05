@@ -34,6 +34,7 @@ use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Storage;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 class ProductImageStorageTest extends TestCase
@@ -1967,10 +1968,11 @@ class ProductImageStorageTest extends TestCase
      * from the exact product page, which is accepted as a set and therefore
      * never has a single frame judged on its own.
      */
-    private function confirmedGalleryDraft(): ProductDraft
+    private function confirmedGalleryDraft(bool $fallback = false): ProductDraft
     {
         Storage::fake('public');
-        AppSetting::put('ai.fallback_sources_enabled', '0');
+        AppSetting::put('ai.fallback_sources_enabled', $fallback ? '1' : '0');
+        config()->set('product-images.fallback_search_rounds', 1);
         config()->set('product-images.max_images_by_type.laptop', 10);
         ProductImageVisionAgent::fake(fn ($prompt, $attachments): array => [
             'images' => $attachments->keys()->map(fn (int $index): array => [
@@ -2000,7 +2002,7 @@ class ProductImageStorageTest extends TestCase
             ->map(fn (int $index): string => 'https://93.184.216.36/gallery-'.$index.'.jpg')
             ->all();
         $browser = $this->mock(BrowserProductGalleryExtractor::class);
-        $browser->shouldReceive('extract')->once()->andReturn($gallery);
+        $browser->shouldReceive('extract')->times($fallback ? 0 : 1)->andReturn($gallery);
         $browser->shouldReceive('isConfirmedGalleryImage')
             ->andReturnUsing(fn (string $url): bool => str_contains($url, '/gallery-'));
         $browser->shouldReceive('isPartialGalleryImage')->andReturn(false);
@@ -2041,7 +2043,21 @@ class ProductImageStorageTest extends TestCase
             ]],
         ]);
 
+        if ($fallback) {
+            $discovery = $this->mock(ProductImageCandidateDiscovery::class);
+            $discovery->shouldReceive('find')->once()->andReturn($gallery);
+            $discovery->shouldReceive('sourcePageForImage')->andReturn($draft->primary_source_url);
+            $discovery->shouldReceive('sourceContextForImage')->andReturn(null);
+            $discovery->shouldReceive('hasTerminalFailure')->andReturn(false);
+            $draft->update(['sources' => [], 'primary_source_url' => null]);
+        }
+
         return $draft;
+    }
+
+    public static function galleryOrigins(): array
+    {
+        return ['known source' => [false], 'fallback source' => [true]];
     }
 
     public function test_a_confirmed_gallery_loses_the_frames_whose_text_is_in_another_language(): void
@@ -2065,7 +2081,8 @@ class ProductImageStorageTest extends TestCase
         ]);
     }
 
-    public function test_frames_surviving_the_language_rule_are_kept_as_a_partial_result(): void
+    #[DataProvider('galleryOrigins')]
+    public function test_frames_surviving_the_language_rule_are_kept_as_a_partial_result(bool $fallback): void
     {
         // The first version of this test asserted zero photographs, which
         // pinned the wrong behaviour: PROJECT_STRATEGY keeps what survives the
@@ -2077,18 +2094,21 @@ class ProductImageStorageTest extends TestCase
             'reason' => 'Почти все кадры с иностранным текстом.',
         ]);
 
-        $draft = $this->confirmedGalleryDraft();
+        $draft = $this->confirmedGalleryDraft($fallback);
 
         app(ProductImageStorage::class)->stage($draft->fresh());
 
         $this->assertSame(1, $draft->fresh()->media()->count());
+        $this->assertSame('partial', $draft->fresh()->gallery_status);
+        $this->assertSame('exhausted', $draft->fresh()->gallery_search_stop_reason);
         $this->assertDatabaseHas('product_source_attempts', [
             'action' => 'check_frame_text_language',
             'decision' => 'keep_partial_after_foreign_text',
         ]);
     }
 
-    public function test_a_language_check_that_could_not_run_is_not_treated_as_approval(): void
+    #[DataProvider('galleryOrigins')]
+    public function test_a_language_check_that_could_not_run_is_not_treated_as_approval(bool $fallback): void
     {
         // A timeout must never read as "Vision cleared it" - the strategy's
         // base rule is that a technical failure is not a semantic verdict. The
@@ -2097,7 +2117,7 @@ class ProductImageStorageTest extends TestCase
             throw new RuntimeException('vision timed out');
         });
 
-        $draft = $this->confirmedGalleryDraft();
+        $draft = $this->confirmedGalleryDraft($fallback);
 
         app(ProductImageStorage::class)->stage($draft->fresh());
 
@@ -2107,6 +2127,9 @@ class ProductImageStorageTest extends TestCase
             'decision' => 'language_check_unavailable',
         ]);
         $this->assertGreaterThan(0, $draft->fresh()->media()->count());
+        $this->assertSame('partial', $draft->fresh()->gallery_status);
+        $this->assertSame('exhausted', $draft->fresh()->gallery_search_stop_reason);
+        $this->assertTrue($draft->fresh()->media->every(fn ($media): bool => $media->verification_status === 'pending'));
     }
 
     public function test_the_maximum_is_applied_after_the_language_rule_not_before(): void

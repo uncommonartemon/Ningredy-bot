@@ -824,26 +824,20 @@ class ProductGalleryRecipeTrainer
                     break;
                 }
 
-                // Collecting literally nothing is a different failure from
-                // collecting too few: the clicks worked and the DOM moved, yet
-                // no image was reachable by any selector at all. That is what a
-                // canvas-rendered viewer looks like from here, and no amount of
-                // selector correction fixes it - live case 2026-09-03, where
-                // acer.com's Scene7 viewer took seven rounds to produce zero
-                // frames every time. The stagnation rule above cannot catch it
-                // because each round moves the DOM differently, so its progress
-                // signature keeps changing.
+                // Counted for the round report, and for nothing else.
+                //
+                // This used to end the page after three of them. It was written
+                // for a canvas-rendered viewer that no selector can ever reach -
+                // a real case - but the evidence it acted on was "no image yet",
+                // which is also what the first rounds of an ordinary hard page
+                // look like. Reaching a genuinely new DOM state and collecting
+                // nothing from it is progress towards a recipe, not proof there
+                // is nothing to find, and a fourth round did produce the gallery
+                // where this rule had already given up. What bounds a page that
+                // truly cannot be scraped is the stagnation rule above - three
+                // rounds with no new state at all - plus the round cap, the time
+                // and money budgets, and the agent's own tool for abandoning it.
                 $emptyRounds = count($candidateImages) === 0 ? $emptyRounds + 1 : 0;
-
-                if ($emptyRounds >= self::MAX_EMPTY_COLLECTION_ROUNDS) {
-                    $stalled = true;
-                    $debug?->__invoke(
-                        'warning',
-                        'AI-тренер: '.$emptyRounds.' раунда подряд не собрали ни одного кадра - на странице, похоже, нет извлекаемых селектором изображений; прекращаю этот URL.',
-                    );
-
-                    break;
-                }
 
                 $postInteractionScout = $candidateResult['post_interaction_scout'] ?? [];
                 $postInteractionScoutUsable = is_array($postInteractionScout)
@@ -1241,16 +1235,6 @@ class ProductGalleryRecipeTrainer
      * does not reach the model, so there is nobody to reason about it.
      */
     private const MAX_IDENTICAL_TECHNICAL_FAILURES = 3;
-
-    /**
-     * Rounds that execute their clicks yet collect no image whatsoever. Two
-     * empty rounds followed by a correct one is a real, tested path (a wrong
-     * selector, then the modal's own selector once the viewer DOM is visible),
-     * so the cut has to sit above it. Beyond that the evidence says nothing on
-     * the page is reachable by a selector at all - a canvas-rendered viewer -
-     * and every further round is a paid guess that cannot succeed.
-     */
-    private const MAX_EMPTY_COLLECTION_ROUNDS = 3;
 
     /**
      * How many entries of each ranked page list reach the agent on a round that
@@ -2154,6 +2138,14 @@ class ProductGalleryRecipeTrainer
             'transitions' => $transitions,
             'observed_gallery_count' => (int) data_get($result, 'diagnostics.observed_gallery_count', 0),
             'validated_candidates' => (int) data_get($result, 'diagnostics.validated_candidates', 0),
+            // How many distinct image assets the DOM held after this round.
+            // The layout fingerprint above is built from selectors, so a page
+            // whose markup keeps the same controls while genuinely filling with
+            // assets - a viewer loading its frames in, a lazy list growing -
+            // signed identically round after round and read as stagnant. The
+            // strategy calls a new DOM state progress, and this is the
+            // observation that carries it.
+            'distinct_dom_assets' => (int) data_get($result, 'diagnostics.distinct_dom_assets', 0),
         ], JSON_UNESCAPED_SLASHES) ?: '{}');
     }
 

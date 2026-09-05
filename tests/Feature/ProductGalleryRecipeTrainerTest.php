@@ -1815,7 +1815,7 @@ class ProductGalleryRecipeTrainerTest extends TestCase
         $this->assertSame('page_stalled', $version->result['failure_kind']);
     }
 
-    public function test_rounds_that_keep_collecting_nothing_stop_even_when_the_dom_keeps_moving(): void
+    public function test_empty_collections_with_new_dom_can_reach_the_gallery_in_a_later_round(): void
     {
         // Live case 2026-09-03: acer.com renders its gallery into a Scene7
         // canvas, so no selector can ever reach an image. Every round clicked
@@ -1824,7 +1824,7 @@ class ProductGalleryRecipeTrainerTest extends TestCase
         // page that cannot be scraped by selector at all.
         AppSetting::put('ai.gallery_training_max_rounds', '10');
         $round = 0;
-        ProductGalleryRecipeTrainerAgent::fake(fn (): array => $this->validRecipeResponse())->preventStrayPrompts();
+        ProductGalleryRecipeTrainerAgent::fake(fn (): array => $this->validRecipeResponse(['actions' => []]))->preventStrayPrompts();
         $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock) use (&$round): void {
             $mock->shouldReceive('scout')->once()->andReturn([
                 'scout' => [
@@ -1839,11 +1839,11 @@ class ProductGalleryRecipeTrainerTest extends TestCase
             ]);
             // Never any image, but a different DOM state every time - exactly
             // what defeats the stagnation rule.
-            $mock->shouldReceive('executeRecipe')->times(3)->andReturnUsing(function () use (&$round): array {
+            $mock->shouldReceive('executeRecipe')->times(4)->andReturnUsing(function () use (&$round): array {
                 $round++;
 
                 return [
-                    'images' => [],
+                    'images' => $round === 4 ? ['https://cdn.example/a.jpg', 'https://cdn.example/b.jpg', 'https://cdn.example/c.jpg'] : [],
                     'diagnostics' => ['distinct_dom_assets' => $round],
                     'action_trace' => [['action' => 'click', 'clicked' => true, 'changed' => true, 'round' => $round]],
                     'post_interaction_scout' => ['fragments' => ['<canvas data-round="'.$round.'"></canvas>']],
@@ -1851,17 +1851,17 @@ class ProductGalleryRecipeTrainerTest extends TestCase
             });
         });
 
-        $this->assertSame([], app(ProductGalleryRecipeTrainer::class)->train(
+        $this->assertCount(3, app(ProductGalleryRecipeTrainer::class)->train(
             'https://canvas-viewer.example/product',
             force: true,
         ));
-        $version = ProductGalleryRecipe::query()
-            ->where('domain', 'canvas-viewer.example')
-            ->firstOrFail()
-            ->versions()
-            ->latest('id')
-            ->firstOrFail();
-        $this->assertSame('page_stalled', $version->result['failure_kind']);
+        // Two different vocabularies, and the recipe's is the one that says
+        // the page can be opened again tomorrow: a version is promoted,
+        // partial or rejected, while the recipe it belongs to is active.
+        $recipe = ProductGalleryRecipe::query()->where('domain', 'canvas-viewer.example')->firstOrFail();
+
+        $this->assertSame('promoted', $recipe->versions()->latest('id')->firstOrFail()->status);
+        $this->assertSame('active', $recipe->status);
     }
 
     /** @return array<string, mixed> */
