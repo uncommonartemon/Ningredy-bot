@@ -4,6 +4,7 @@ namespace App\Services\Products;
 
 use App\Exceptions\LowResolutionDraftMediaException;
 use App\Exceptions\MissingDraftMediaException;
+use App\Exceptions\UnverifiedDraftMediaException;
 use App\Jobs\StoreProductImages;
 use App\Models\AttributeDefinition;
 use App\Models\Brand;
@@ -44,6 +45,18 @@ class ProductDraftWorkflow
             $media->isEmpty(),
             MissingDraftMediaException::class,
             'Черновик не содержит проверенных фотографий и не может быть опубликован.',
+        );
+        // The frames of a check that could not run are kept - they are real
+        // photographs - but they are marked pending, and this button is the
+        // last place that distinction can still be honoured. Publishing them
+        // would let a Vision timeout finish as an approval, which is the one
+        // thing the strategy forbids outright. The button already selected
+        // verification_status and had never once looked at it.
+        $unverifiedMedia = $media->first(fn ($media): bool => $media->verification_status === 'pending');
+        throw_if(
+            $unverifiedMedia !== null,
+            UnverifiedDraftMediaException::class,
+            'Фотографии черновика не прошли проверку — она не состоялась технически. Публиковать непроверенные кадры нельзя.',
         );
         $lowResolutionMedia = $media
             ->first(function ($media) use ($minimumWidth, $minimumHeight): bool {

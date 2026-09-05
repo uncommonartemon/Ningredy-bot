@@ -114,6 +114,86 @@ class LowResolutionDraftApprovalTest extends TestCase
             && str_contains((string) $request['text'], 'Автоматически ищу замену'));
     }
 
+    public function test_a_frame_whose_verification_never_ran_cannot_be_published_by_the_button(): void
+    {
+        // The last place the distinction still exists. The search keeps the
+        // frames of a check that could not run - they are real photographs -
+        // and marks them pending; approving them anyway would let a Vision
+        // timeout finish as an approval. The button already read
+        // verification_status and had never once looked at it.
+        $sourceUpdate = TelegramUpdate::query()->create([
+            'update_id' => 3290,
+            'telegram_user_id' => '12345',
+            'chat_id' => '98765',
+            'message_id' => 290,
+            'text' => 'Find exact laptop with an interrupted check',
+            'payload' => ['update_id' => 3290],
+            'status' => 'completed',
+        ]);
+        $run = AiRun::query()->create([
+            'telegram_update_id' => $sourceUpdate->id,
+            'provider' => 'openai',
+            'model' => 'gpt-5.4',
+            'status' => 'completed',
+            'prompt' => 'Find exact laptop with an interrupted check',
+            'started_at' => now(),
+            'completed_at' => now(),
+        ]);
+        $draft = ProductDraft::query()->create([
+            'telegram_update_id' => $sourceUpdate->id,
+            'ai_run_id' => $run->id,
+            'requested_by_telegram_user_id' => '12345',
+            'title' => 'Unverified Laptop',
+            'brand' => 'Example',
+            'model' => 'EX-2',
+            'description' => 'Exact laptop description.',
+            'specifications' => [],
+            'sources' => [['title' => 'Store', 'url' => 'https://example.com/product', 'type' => 'retailer']],
+            'image_urls' => [],
+            'confidence' => 0.95,
+            'gallery_status' => 'partial',
+        ]);
+        // Large enough to clear every other gate: the only thing wrong with
+        // this photograph is that nothing has confirmed it.
+        $draft->media()->create([
+            'disk' => 'public',
+            'path' => "drafts/{$draft->id}/large.webp",
+            'source_url' => 'https://example.com/large.webp',
+            'role' => 'primary',
+            'mime_type' => 'image/webp',
+            'width' => 1600,
+            'height' => 1200,
+            'file_size' => 100,
+            'checksum' => hash('sha256', 'large'),
+            'verification_status' => 'pending',
+            'sort_order' => 0,
+            'is_primary' => true,
+        ]);
+
+        $this->postJson('/api/telegram/webhook', [
+            'update_id' => 3291,
+            'callback_query' => [
+                'id' => 'callback-unverified',
+                'from' => ['id' => 12345, 'username' => 'admin'],
+                'data' => "draft:add:{$draft->id}",
+                'message' => [
+                    'message_id' => 291,
+                    'chat' => ['id' => 98765],
+                ],
+            ],
+        ], ['X-Telegram-Bot-Api-Secret-Token' => 'test-secret'])->assertOk();
+
+        $this->assertSame('pending_review', $draft->fresh()->status);
+        $this->assertDatabaseMissing('products', ['title' => 'Unverified Laptop']);
+        Queue::assertNotPushed(StoreProductImages::class);
+        // Not a quality problem, and the operator is told the difference: the
+        // check itself did not run, so the search continues rather than
+        // hunting for replacements for a photograph nothing is wrong with.
+        Queue::assertPushed(RestageDraftGalleryPhotos::class);
+        Http::assertSent(fn (ClientRequest $request): bool => str_ends_with($request->url(), '/sendMessage')
+            && str_contains((string) $request['text'], 'Проверка фотографий не состоялась'));
+    }
+
     public function test_approval_automatically_queues_restage_when_the_draft_has_no_photos(): void
     {
         $sourceUpdate = TelegramUpdate::query()->create([

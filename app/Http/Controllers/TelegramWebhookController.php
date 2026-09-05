@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Exceptions\LowResolutionDraftMediaException;
 use App\Exceptions\MissingDraftMediaException;
+use App\Exceptions\UnverifiedDraftMediaException;
 use App\Jobs\ContinueDraftGallerySearch;
 use App\Jobs\ProcessDraftPhotoActions;
 use App\Jobs\ProcessTelegramMessage;
@@ -456,15 +457,19 @@ class TelegramWebhookController extends Controller
             $product = $approved
                 ? $this->draftWorkflow->approve($draft, telegramReviewerId: $update->telegram_user_id)
                 : null;
-        } catch (LowResolutionDraftMediaException|MissingDraftMediaException $exception) {
+        } catch (LowResolutionDraftMediaException|MissingDraftMediaException|UnverifiedDraftMediaException $exception) {
             $queuedKey = "draft-gallery-restage:{$draft->id}:queued";
 
             if (Cache::add($queuedKey, true, now()->addMinutes(35))) {
                 $this->draftPresenter->clearControls($this->telegram, $draft, $chatId);
                 RestageDraftGalleryPhotos::dispatch($draft->id, $chatId, $update->id, $draft->telegram_update_id);
-                $message = $exception instanceof MissingDraftMediaException
-                    ? 'В черновике нет фотографий. Автоматически продолжаю поиск через источники категории, Playwright и Vision; после поиска пришлю обновлённый черновик для проверки.'
-                    : 'Фото черновика не проходят текущий порог качества. Автоматически ищу замену через резервные источники и Vision; после поиска пришлю обновлённый черновик для проверки.';
+                $message = match (true) {
+                    $exception instanceof MissingDraftMediaException => 'В черновике нет фотографий. Автоматически продолжаю поиск через источники категории, Playwright и Vision; после поиска пришлю обновлённый черновик для проверки.',
+                    // Not a quality problem: the check itself did not run, so
+                    // the same continuation is what these frames are owed.
+                    $exception instanceof UnverifiedDraftMediaException => 'Проверка фотографий не состоялась технически, поэтому публиковать их нельзя. Автоматически продолжаю поиск и проверку; после этого пришлю обновлённый черновик.',
+                    default => 'Фото черновика не проходят текущий порог качества. Автоматически ищу замену через резервные источники и Vision; после поиска пришлю обновлённый черновик для проверки.',
+                };
             } else {
                 $message = 'Замена неподходящих фотографий этого черновика уже выполняется.';
             }
