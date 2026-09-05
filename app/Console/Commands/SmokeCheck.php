@@ -35,7 +35,8 @@ class SmokeCheck extends Command
     protected $signature = 'bot:smoke
         {--url= : Product page to exercise (default: the most successful active recipe)}
         {--skip-ai : Skip the paid provider call}
-        {--skip-browser : Skip everything that needs Chromium}';
+        {--skip-browser : Skip everything that needs Chromium}
+        {--machine : Only the checks about this machine - no shop, no provider, no network beyond the queue}';
 
     protected $description = 'Exercise the real browser, download and AI paths once, and report honestly';
 
@@ -60,6 +61,13 @@ class SmokeCheck extends Command
             : 'Target: '.$url);
 
         $this->environmentChecks();
+
+        // The launcher runs this before starting anything, and a shop being
+        // down must never be the reason the bot refuses to start. --machine
+        // asks only about this computer.
+        if ($this->option('machine')) {
+            return $this->report();
+        }
 
         if ($url !== '') {
             $this->check('https certificate chain', function () use ($url): string {

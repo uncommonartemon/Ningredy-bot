@@ -307,6 +307,18 @@ class TelegramClient
         ]);
     }
 
+    /**
+     * What Telegram itself believes about our webhook: the address it is
+     * delivering to, how many updates are queued because we did not answer, and
+     * the last delivery error with its timestamp. It is the only way to tell
+     * "the bot is running" from "the bot is running and Telegram can reach it",
+     * and those look identical from inside the machine.
+     */
+    public function webhookInfo(): array
+    {
+        return $this->post('getWebhookInfo', [])['result'] ?? [];
+    }
+
     public function setWebhook(string $url, bool $dropPendingUpdates = false): array
     {
         $configuredSecret = (string) config('services.telegram.webhook_secret');
