@@ -3,12 +3,15 @@
 namespace App\Console\Commands;
 
 use App\Ai\Agents\GalleryTextLanguageAgent;
+use App\Models\AppSetting;
 use App\Models\ProductGalleryRecipe;
 use App\Services\Ai\AiSettings;
 use App\Services\Products\BrowserProductGalleryExtractor;
 use App\Services\Products\ProductImageResolver;
 use Illuminate\Console\Command;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Queue;
 use Laravel\Ai\Files\Image;
 use Throwable;
 
@@ -47,39 +50,65 @@ class SmokeCheck extends Command
         $recipe = $this->targetRecipe();
         $url = (string) ($this->option('url') ?: $this->urlFor($recipe));
 
-        if ($url === '') {
-            $this->components->error('No --url given and no trained recipe with a sample path to borrow one from.');
+        // A machine that has never run the bot has no recipe to borrow a
+        // target from, and that is exactly when this command matters most: it
+        // is the last step of an install, answering "can this box run it at
+        // all". Everything that needs a shop reports as skipped instead of
+        // dragging the whole run down with it.
+        $this->components->info($url === ''
+            ? 'No trained recipe yet - checking the machine only. Pass --url to exercise a real page.'
+            : 'Target: '.$url);
 
-            return self::FAILURE;
+        $this->environmentChecks();
+
+        if ($url !== '') {
+            $this->check('https certificate chain', function () use ($url): string {
+                $response = Http::timeout(30)->withOptions(['allow_redirects' => true])->get($url);
+
+                // Verification is on by default; the point of the check is that
+                // a real TLS handshake completes at all. A shop answering 403
+                // has still proved the chain - the refusal came from the server.
+                return 'HTTP '.$response->status().($response->status() === 403 ? ' (shop refused us, TLS fine)' : '');
+            });
         }
-
-        $this->components->info('Target: '.$url);
-
-        $this->check('https certificate chain', function () use ($url): string {
-            $response = Http::timeout(30)->withOptions(['allow_redirects' => true])->get($url);
-
-            // Verification is on by default; the point of the check is that a
-            // real TLS handshake completes at all. A shop answering 403 has
-            // still proved the chain - the refusal came from the server.
-            return 'HTTP '.$response->status().($response->status() === 403 ? ' (shop refused us, TLS fine)' : '');
-        });
 
         $images = [];
 
         if (! $this->option('skip-browser')) {
-            $scout = null;
+            // Launching is its own question, and on a fresh machine it is the
+            // one that fails: node missing, Chromium never downloaded, the
+            // script unable to write its transfer directory. about:blank asks
+            // it without needing a shop to be reachable or trained.
+            $this->check('chromium launches', function () use ($browser, $url): string {
+                $started = microtime(true);
+                $result = $browser->scout($url ?: 'about:blank');
 
-            $this->check('chromium launches and scouts the page', function () use ($browser, $url, &$scout): string {
-                $scout = $browser->scout($url);
-                $title = (string) data_get($scout, 'scout.title', '');
-                $candidates = count((array) data_get($scout, 'scout.image_candidates', []));
-
-                if ($title === '' && $candidates === 0) {
-                    throw new \RuntimeException('The browser returned nothing: no title and no image candidates.');
+                if (! is_array($result) || ! array_key_exists('scout', $result)) {
+                    throw new \RuntimeException('The browser process returned nothing usable.');
                 }
 
-                return $candidates.' image candidates, title "'.mb_substr($title, 0, 60).'"';
+                return 'the browser process answered in '.round(microtime(true) - $started, 1).'s';
             });
+
+            if ($url === '') {
+                $this->skip('a real page is read', 'no trained recipe and no --url');
+            } else {
+                $this->check('a real page is read', function () use ($browser, $url): string {
+                    $scout = $browser->scout($url);
+                    $title = (string) data_get($scout, 'scout.title', '');
+                    $candidates = count((array) data_get($scout, 'scout.image_candidates', []));
+
+                    if ($title === '' && $candidates === 0) {
+                        throw new \RuntimeException('The browser returned nothing: no title and no image candidates.');
+                    }
+
+                    return $candidates.' image candidates, title "'.mb_substr($title, 0, 60).'"';
+                });
+            }
+
+            if (! $recipe || ! is_array($recipe->recipe) || $recipe->recipe === []) {
+                $this->skip('a stored recipe still collects photographs', 'nothing trained yet');
+            }
 
             if ($recipe && is_array($recipe->recipe) && $recipe->recipe !== []) {
                 $this->check('a stored recipe still collects photographs', function () use ($browser, $recipe, $url, &$images): string {
@@ -116,6 +145,10 @@ class SmokeCheck extends Command
 
         $downloaded = null;
 
+        if ($images === []) {
+            $this->skip('an image downloads and decodes', 'no image to download');
+        }
+
         if ($images !== []) {
             $this->check('an image downloads and decodes', function () use ($resolver, $images, $url, &$downloaded): string {
                 $failure = null;
@@ -131,7 +164,7 @@ class SmokeCheck extends Command
         }
 
         if (! $this->option('skip-ai')) {
-            $this->check('the provider accepts a call with an image attached', function () use ($settings, $downloaded): string {
+            $this->check('the provider answers', function () use ($settings, $downloaded): string {
                 $provider = $settings->providerFor('product_image_vision');
                 $model = $settings->modelFor('product_image_vision');
                 $attachments = [];
@@ -170,6 +203,128 @@ class SmokeCheck extends Command
         return $this->report();
     }
 
+    /**
+     * Everything that has to be true before the bot can do anything at all.
+     * These are the questions a fresh machine fails, and failing them in a
+     * search log at two in the morning is a much worse way to find out.
+     */
+    private function environmentChecks(): void
+    {
+        $this->check('php has the extensions the pipeline uses', function (): string {
+            // gd decodes and measures every downloaded photograph, curl carries
+            // every request, fileinfo names the media type an attachment needs.
+            $missing = collect(['curl', 'gd', 'mbstring', 'fileinfo', 'openssl'])
+                ->reject(fn (string $extension): bool => extension_loaded($extension));
+
+            if ($missing->isNotEmpty()) {
+                throw new \RuntimeException('Missing PHP extension(s): '.$missing->implode(', '));
+            }
+
+            return 'curl, gd, mbstring, fileinfo, openssl';
+        });
+
+        $this->check('the settings the bot cannot start without are set', function (): string {
+            $required = [
+                'TELEGRAM_BOT_TOKEN' => config('services.telegram.bot_token'),
+                'TELEGRAM_WEBHOOK_SECRET' => config('services.telegram.webhook_secret'),
+                'APP_KEY' => config('app.key'),
+            ];
+            $missing = collect($required)
+                ->filter(fn (mixed $value): bool => ! is_string($value) || trim($value) === '')
+                ->keys();
+
+            // The AI key may live in Filament instead of the environment, so an
+            // empty env var is not by itself wrong - only both being empty is.
+            if (! $this->aiKeyIsConfigured()) {
+                $missing->push('OPENAI_API_KEY (env or Filament)');
+            }
+
+            if ($missing->isNotEmpty()) {
+                throw new \RuntimeException('Not configured: '.$missing->implode(', '));
+            }
+
+            $allowed = count((array) config('services.telegram.allowed_user_ids', []));
+
+            return 'token, webhook secret, app key, AI key'
+                .($allowed === 0 ? ' - note: no allowed Telegram user ids, the bot will answer nobody' : '');
+        });
+
+        $this->check('the database is reachable and fully migrated', function (): string {
+            DB::connection()->getPdo();
+            $pending = collect(app('migrator')->getMigrationFiles(app('migrator')->paths() ?: [database_path('migrations')]))
+                ->keys()
+                ->diff(app('migrator')->getRepository()->getRan());
+
+            if ($pending->isNotEmpty()) {
+                throw new \RuntimeException($pending->count().' migration(s) have not been run. Run: php artisan migrate');
+            }
+
+            return DB::connection()->getDriverName().', no pending migrations';
+        });
+
+        $this->check('the queue is wired and nothing is stuck in it', function (): string {
+            $connection = (string) config('queue.default');
+            $size = Queue::connection($connection)->size('assistant');
+
+            // A backlog is not a failure by itself - it is only a failure if
+            // nothing is draining it, which is what an old job at the head of
+            // the queue means. This is the shape of "they forgot to start the
+            // worker", the single most common way a handover looks broken.
+            if ($connection === 'database') {
+                $oldest = DB::table('jobs')->where('queue', 'assistant')->min('created_at');
+
+                if ($oldest !== null && (time() - (int) $oldest) > 600) {
+                    throw new \RuntimeException(
+                        'The oldest job on the assistant queue has been waiting over 10 minutes. '
+                        .'Is a queue worker running? Start it with: php artisan queue:work --queue=assistant,default',
+                    );
+                }
+            }
+
+            return $connection.' driver, '.$size.' job(s) waiting on the assistant queue';
+        });
+
+        $this->check('the browser stack is installed', function (): string {
+            $node = trim((string) shell_exec('node --version 2>&1'));
+
+            if (! str_starts_with($node, 'v')) {
+                throw new \RuntimeException('node is not on PATH: '.($node ?: 'no output').'. Install Node, then run: npm ci');
+            }
+
+            if (! is_file(base_path('node_modules/playwright-core/package.json'))) {
+                throw new \RuntimeException('playwright-core is missing. Run: npm ci');
+            }
+
+            $writable = collect([storage_path('framework'), storage_path('app'), storage_path('logs')])
+                ->reject(fn (string $path): bool => is_dir($path) && is_writable($path));
+
+            if ($writable->isNotEmpty()) {
+                throw new \RuntimeException('Not writable: '.$writable->implode(', '));
+            }
+
+            return 'node '.$node.', playwright-core present, storage writable';
+        });
+    }
+
+    private function aiKeyIsConfigured(): bool
+    {
+        if (is_string(config('ai.providers.openai.key')) && trim((string) config('ai.providers.openai.key')) !== '') {
+            return true;
+        }
+
+        try {
+            return AppSetting::query()->where('key', 'like', '%openai%')->exists();
+        } catch (Throwable) {
+            return false;
+        }
+    }
+
+    private function skip(string $name, string $why): void
+    {
+        $this->results[] = ['name' => $name, 'ok' => true, 'detail' => 'skipped: '.$why];
+        $this->components->twoColumnDetail('<fg=yellow>SKIP</> '.$name, '<fg=gray>'.$why.'</>');
+    }
+
     private function check(string $name, callable $probe): void
     {
         $started = microtime(true);
@@ -195,8 +350,12 @@ class SmokeCheck extends Command
         $failed = collect($this->results)->reject(fn (array $result): bool => $result['ok']);
         $this->newLine();
 
+        $skipped = collect($this->results)->filter(fn (array $result): bool => str_starts_with($result['detail'], 'skipped: '));
+
         if ($failed->isEmpty()) {
-            $this->components->info(count($this->results).' checks passed against the real browser, network and provider.');
+            $ran = count($this->results) - $skipped->count();
+            $this->components->info($ran.' checks passed'
+                .($skipped->isEmpty() ? '.' : ', '.$skipped->count().' skipped - this run did not prove everything.'));
 
             return self::SUCCESS;
         }
