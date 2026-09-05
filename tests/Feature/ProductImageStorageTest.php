@@ -22,12 +22,14 @@ use App\Services\Products\BrowserProductGalleryExtractor;
 use App\Services\Products\ConfirmedProductGalleryVerifier;
 use App\Services\Products\ProductIdentityMatcher;
 use App\Services\Products\ProductImageCandidateDiscovery;
+use App\Services\Products\ProductImageEncoder;
 use App\Services\Products\ProductImageResolver;
 use App\Services\Products\ProductImageStorage;
 use App\Services\Products\ProductImageVisionVerifier;
 use App\Services\Products\ProductPhotoManager;
 use App\Services\Products\ProductSourceIdentityJudge;
 use App\Services\Products\WikimediaImageSearch;
+use GdImage;
 use Illuminate\Filesystem\FilesystemAdapter;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
@@ -2130,6 +2132,81 @@ class ProductImageStorageTest extends TestCase
         $this->assertSame('partial', $draft->fresh()->gallery_status);
         $this->assertSame('exhausted', $draft->fresh()->gallery_search_stop_reason);
         $this->assertTrue($draft->fresh()->media->every(fn ($media): bool => $media->verification_status === 'pending'));
+    }
+
+    public function test_frames_awaiting_a_verdict_do_not_become_a_finished_gallery_on_the_next_pass(): void
+    {
+        // The masking arriving one pass later. A pass that stores nothing new
+        // judged what was already there by counting it, so five frames kept
+        // from a check that never ran cleared a minimum of three and ended the
+        // search as a success - without anything having verified them.
+        GalleryTextLanguageAgent::fake(function (): array {
+            throw new RuntimeException('vision timed out');
+        });
+
+        $draft = $this->confirmedGalleryDraft();
+        app(ProductImageStorage::class)->stage($draft->fresh());
+
+        $pending = $draft->fresh()->media;
+        $this->assertGreaterThanOrEqual(3, $pending->count());
+        $this->assertTrue($pending->every(fn ($media): bool => $media->verification_status === 'pending'));
+        $this->assertSame('partial', $draft->fresh()->gallery_status);
+
+        // Second pass: nothing new is found, and the frames from the first are
+        // still waiting for the verdict that never came.
+        $draft->update(['sources' => [], 'primary_source_url' => null]);
+        $discovery = $this->mock(ProductImageCandidateDiscovery::class);
+        $discovery->shouldReceive('find')->andReturn([]);
+        $discovery->shouldReceive('sourcePageForImage')->andReturn(null);
+        $discovery->shouldReceive('sourceContextForImage')->andReturn(null);
+        $discovery->shouldReceive('hasTerminalFailure')->andReturn(false);
+        $discovery->shouldReceive('looksLikeHtmlProductPage')->andReturn(true);
+
+        app(ProductImageStorage::class)->stage($draft->fresh());
+
+        $this->assertSame('partial', $draft->fresh()->gallery_status);
+        $this->assertNotNull(
+            $draft->fresh()->gallery_search_stop_reason,
+            'A gallery still waiting on a verdict is not a finished search, so it keeps a resumable stop reason.',
+        );
+    }
+
+    public function test_a_gallery_that_only_half_saved_is_not_reported_complete(): void
+    {
+        // The count that decides the status used to be the number of frames
+        // chosen, taken before a single file existed. A conversion or a write
+        // that fails per frame then left the draft calling a half-written
+        // gallery complete.
+        // The language check runs between the downloads and the writes, so it
+        // marks the moment the store loop begins: conversions before it are the
+        // pipeline measuring frames, conversions after it are the files being
+        // written. Only the latter are made to fail, and only after the first.
+        $storing = false;
+        GalleryTextLanguageAgent::fake(function () use (&$storing): array {
+            $storing = true;
+
+            return ['foreign_text_frames' => [], 'reason' => 'Чисто.'];
+        });
+        $draft = $this->confirmedGalleryDraft();
+        $real = new ProductImageEncoder;
+        $written = 0;
+        $encoder = $this->partialMock(ProductImageEncoder::class);
+        $encoder->shouldReceive('toWebp')->andReturnUsing(
+            function (GdImage $image) use ($real, &$storing, &$written): array {
+                throw_if($storing && ++$written > 1, RuntimeException::class, 'webp conversion failed');
+
+                return $real->toWebp($image);
+            },
+        );
+
+        app(ProductImageStorage::class)->stage($draft->fresh());
+
+        $this->assertSame(1, $draft->fresh()->media()->count());
+        $this->assertSame(
+            'partial',
+            $draft->fresh()->gallery_status,
+            'One frame on disk out of five chosen is not a complete gallery, whatever the choice said.',
+        );
     }
 
     public function test_the_maximum_is_applied_after_the_language_rule_not_before(): void

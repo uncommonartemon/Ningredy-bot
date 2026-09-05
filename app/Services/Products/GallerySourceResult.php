@@ -82,6 +82,38 @@ final readonly class GallerySourceResult
         );
     }
 
+    /**
+     * The other way a source can end well: frames a per-frame check cleared,
+     * as the deferred static sets and the fallback discovery groups produce.
+     * It is a second entry point and still not an assignment - the outcome is
+     * derived from what came back, never handed in by the caller.
+     *
+     * @param  array<int, array<string, mixed>>  $frames
+     */
+    public static function fromVerifiedFrames(
+        array $frames,
+        int $minimum,
+        int $maximum,
+        ?array $source,
+        string $method,
+        string $notes = '',
+    ): self {
+        if ($frames === []) {
+            return self::rejected();
+        }
+
+        $kept = array_slice(array_values($frames), 0, max(1, $maximum));
+        $complete = count($kept) >= $minimum;
+
+        return new self(
+            $complete ? GalleryOutcome::Complete : GalleryOutcome::Partial,
+            $notes === '' ? $kept : self::annotated($kept, 'verified', $notes),
+            $source,
+            $method,
+            $complete ? 'verified_frames' : 'verified_below_minimum',
+        );
+    }
+
     public static function interrupted(array $candidates, int $maximum, ?array $source, string $method): self
     {
         return new self(

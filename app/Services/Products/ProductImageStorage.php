@@ -341,12 +341,12 @@ class ProductImageStorage
         // flag is what let a partial result - and a set whose check had timed
         // out - both introduce themselves as complete.
         $outcome = null;
-        $partialSelected = [];
-        $partialSource = null;
-        $partialMethod = null;
-        $partialOutcome = null;
+        // One object holds everything known about the best set that has not
+        // won: its frames, its page, how it was produced and what its
+        // verification concluded. These used to be five variables updated
+        // together by hand in four places, which is how one of them came to
+        // disagree with the others.
         $reserve = null;
-        $partialFromDiscovery = false;
         $deferredVisionSets = [];
 
         foreach ($sourceQueue as $sourceIndex => $source) {
@@ -772,16 +772,8 @@ class ProductImageStorage
                 // Not a complete gallery any more, but the surviving frames are
                 // real photographs of this product - kept as the reserve while
                 // the search moves on, never destroyed.
-                if ($result->isBetterReserveThan($reserve)) {
-                    $this->destroy($partialSelected);
-                    $reserve = $result;
-                    $partialSelected = $result->candidates;
-                    $partialSource = $result->source;
-                    $partialMethod = $result->method;
-                    $partialOutcome = $result->outcome;
-                }
-
-                $this->destroyUnselected($allCandidates, $result->candidates);
+                $reserve = $this->keepBestReserve($reserve, $result);
+                $this->destroyUnselected($allCandidates, $reserve?->candidates ?? []);
 
                 continue;
             }
@@ -806,8 +798,8 @@ class ProductImageStorage
             ]);
             $this->destroyUnselected($allCandidates, $selected);
 
-            $this->destroy($partialSelected);
-            $partialSelected = [];
+            $this->destroy($reserve?->candidates ?? []);
+            $reserve = null;
             $chosenSource = [...$source, 'url' => $productPageUrl];
             $chosenMethod = 'playwright';
             break;
@@ -858,14 +850,21 @@ class ProductImageStorage
                     ],
                 ]);
 
-                if (count($verified) >= $minimumCompleteGallerySize) {
-                    $this->destroy($partialSelected);
-                    $partialSelected = [];
-                    $selected = $verified;
-                    $outcome = GalleryOutcome::Complete;
+                $result = GallerySourceResult::fromVerifiedFrames(
+                    $verified,
+                    $minimumCompleteGallerySize,
+                    $target,
+                    $source,
+                    'static',
+                );
+
+                if ($result->isComplete()) {
+                    $this->destroy($reserve?->candidates ?? []);
                     $reserve = null;
-                    $chosenSource = $source;
-                    $chosenMethod = 'static';
+                    $selected = $result->candidates;
+                    $outcome = $result->outcome;
+                    $chosenSource = $result->source;
+                    $chosenMethod = $result->method;
 
                     foreach (array_slice($deferredVisionSets, $setIndex + 1) as $unusedSet) {
                         $this->destroy($unusedSet['candidates']);
@@ -874,16 +873,7 @@ class ProductImageStorage
                     break;
                 }
 
-                if (count($verified) > count($partialSelected)) {
-                    $this->destroy($partialSelected);
-                    $partialSelected = $verified;
-                    $partialSource = $source;
-                    $partialMethod = 'static';
-                    $partialOutcome = GalleryOutcome::Partial;
-                    $partialFromDiscovery = false;
-                } else {
-                    $this->destroy($verified);
-                }
+                $reserve = $this->keepBestReserve($reserve, $result);
             }
 
             $deferredVisionSets = [];
@@ -1094,22 +1084,14 @@ class ProductImageStorage
                         );
 
                         if (! $result->isComplete()) {
-                            if ($result->isBetterReserveThan($reserve)) {
-                                $this->destroy($partialSelected);
-                                $reserve = $result;
-                                $partialSelected = $result->candidates;
-                                $partialSource = $result->source;
-                                $partialMethod = $result->method;
-                                $partialOutcome = $result->outcome;
-                            }
+                            $reserve = $this->keepBestReserve($reserve, $result);
 
                             continue;
                         }
 
                         $selected = $result->candidates;
                         $outcome = $result->outcome;
-                        $this->destroy($partialSelected);
-                        $partialSelected = [];
+                        $this->destroy($reserve?->candidates ?? []);
                         $reserve = null;
                         $chosenSource = $groupSource;
                         $chosenMethod = 'fallback_playwright';
@@ -1173,35 +1155,37 @@ class ProductImageStorage
                     }
 
                     if ($selected !== []) {
-                        if (count($selected) < $minimumCompleteGallerySize) {
-                            if (count($selected) > count($partialSelected)) {
-                                if (! $partialFromDiscovery) {
-                                    $this->destroy($partialSelected);
-                                }
-                                $partialSelected = $selected;
-                                $partialSource = $groupPageUrl ? ['url' => $groupPageUrl] : null;
-                                $partialMethod = 'fallback_discovery';
-                                $partialOutcome = GalleryOutcome::Partial;
-                                $partialFromDiscovery = true;
-                            }
+                        // The same construction decides both branches, so
+                        // "enough frames to win" is answered once instead of by
+                        // a count here and a constructor there.
+                        $result = GallerySourceResult::fromVerifiedFrames(
+                            $selected,
+                            $minimumCompleteGallerySize,
+                            $target,
+                            $groupPageUrl ? ['url' => $groupPageUrl] : null,
+                            'fallback_discovery',
+                        );
+
+                        if (! $result->isComplete()) {
+                            $reserve = $this->keepBestReserve($reserve, $result);
                             $selected = [];
 
                             continue;
                         }
 
-                        $this->destroy($partialSelected);
-                        $partialSelected = [];
+                        $this->destroy($reserve?->candidates ?? []);
                         $reserve = null;
-                        $outcome = GalleryOutcome::Complete;
-                        $chosenSource = $groupPageUrl ? ['url' => $groupPageUrl] : null;
-                        $chosenMethod = 'fallback_discovery';
+                        $selected = $result->candidates;
+                        $outcome = $result->outcome;
+                        $chosenSource = $result->source;
+                        $chosenMethod = $result->method;
                         break;
                     }
                 }
 
                 $roundKeep = $selected !== []
                     ? $selected
-                    : ($partialFromDiscovery ? $partialSelected : []);
+                    : ($reserve?->method === 'fallback_discovery' ? $reserve->candidates : []);
                 $this->destroyUnselected($discoveredCandidates, $roundKeep);
 
                 if ($selected !== []) {
@@ -1209,11 +1193,11 @@ class ProductImageStorage
                 }
             }
 
-            if ($selected === [] && $partialSelected !== []) {
-                $selected = $partialSelected;
-                $chosenSource = $partialSource;
-                $chosenMethod = $partialMethod;
-                $outcome = $partialOutcome ?? GalleryOutcome::Partial;
+            if ($selected === [] && $reserve?->hasFrames()) {
+                $selected = $reserve->candidates;
+                $chosenSource = $reserve->source;
+                $chosenMethod = $reserve->method;
+                $outcome = $reserve->outcome;
             }
         } elseif ($selected === [] && $progress) {
             $reason = $this->costBudget->exceeded($telegramUpdateId)
@@ -1227,11 +1211,11 @@ class ProductImageStorage
             $progress($reason);
         }
 
-        if ($selected === [] && $partialSelected !== []) {
-            $selected = $partialSelected;
-            $chosenSource = $partialSource;
-            $chosenMethod = $partialMethod;
-            $outcome = $partialOutcome ?? GalleryOutcome::Partial;
+        if ($selected === [] && $reserve?->hasFrames()) {
+            $selected = $reserve->candidates;
+            $chosenSource = $reserve->source;
+            $chosenMethod = $reserve->method;
+            $outcome = $reserve->outcome;
         }
 
         // Last resort only: every normal source and round produced nothing
@@ -1365,9 +1349,21 @@ class ProductImageStorage
         // confirmed complete (draft->gallery_status, read here before this
         // call's own update() below overwrites it) or one that already
         // reached the category minimum has genuinely nothing left to find.
+        // Counted after the files are on disk, not before. A conversion or a
+        // write can fail per frame, and declaring the gallery complete from the
+        // number of frames chosen would call a half-written set finished.
+        $galleryIsPartial = $galleryIsPartial || ($stored > 0 && $stored < $minimumCompleteGallerySize);
+        // Frames kept from a check that never ran are photographs waiting for a
+        // verdict, not a finished gallery. Without this, five pending frames
+        // and a category minimum of three ended the next pass as a success by
+        // arithmetic alone - the very masking the pending status exists to
+        // prevent, arriving one pass later.
+        $previousAwaitingVerification = $previousMedia->contains(
+            fn ($media): bool => $media->verification_status === 'pending',
+        );
         $searchIncomplete = match (true) {
             $stored > 0 => $galleryIsPartial,
-            $previousMedia->isEmpty() => true,
+            $previousMedia->isEmpty(), $previousAwaitingVerification => true,
             default => $draft->gallery_status !== 'complete' && $previousMedia->count() < $minimumCompleteGallerySize,
         };
         $stopReason = $searchIncomplete
@@ -1480,6 +1476,31 @@ class ProductImageStorage
      * @param  array<int, array<string, mixed>>  $candidates
      * @return array<int, array<string, mixed>>|null
      */
+    /**
+     * The reserve is whichever set is worth more, and the loser's pixels are
+     * freed here rather than by whoever happens to remember.
+     *
+     * The one exception is a set the fallback discovery round owns: that loop
+     * frees its own round candidates afterwards, and freeing them here too
+     * would destroy the same image twice.
+     */
+    private function keepBestReserve(?GallerySourceResult $reserve, GallerySourceResult $candidate): ?GallerySourceResult
+    {
+        if (! $candidate->isBetterReserveThan($reserve)) {
+            if ($candidate->method !== 'fallback_discovery') {
+                $this->destroy($candidate->candidates);
+            }
+
+            return $reserve;
+        }
+
+        if ($reserve !== null && $reserve->method !== 'fallback_discovery') {
+            $this->destroy($reserve->candidates);
+        }
+
+        return $candidate;
+    }
+
     /**
      * A confirmed gallery becomes a verdict here, and only here.
      *
