@@ -95,6 +95,29 @@ class BlockedDomainReachTest extends TestCase
         $this->assertFalse($router->domainIsBlocked('https://shop.example/p/laptop'));
     }
 
+    public function test_lifting_a_ban_puts_the_domain_back_where_it_was(): void
+    {
+        // The ban created an empty wildcard row and created it disabled.
+        // Clearing the flag and leaving that row behind released the shop on
+        // paper only: recipeForUrl() falls back to it for any path without its
+        // own recipe, and extractionScore() reads a disabled recipe as a domain
+        // worth -1,000,000 - unblocked, and still effectively excluded.
+        $router = app(ProductGalleryRecipeRouter::class);
+        $url = 'https://shop.example/p/laptop';
+        $other = 'https://another.example/p/laptop';
+        $orderBefore = app(ProductSourcePriority::class)->sortUrls([$url, $other], null);
+
+        $router->blockDomain('shop.example', 'operator');
+        $router->unblockDomain('shop.example');
+
+        $this->assertNull(
+            ProductGalleryRecipe::query()->where('domain', 'shop.example')->where('path_pattern', '*')->first(),
+            'A row that exists only to hold a ban has no reason to outlive it.',
+        );
+        $this->assertFalse($router->domainIsBlocked($url));
+        $this->assertSame($orderBefore, app(ProductSourcePriority::class)->sortUrls([$url, $other], null));
+    }
+
     public function test_one_blocked_path_still_does_not_take_the_shop_down_with_it(): void
     {
         // The other half of the rule, unchanged: an automatic failure on a

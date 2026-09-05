@@ -330,6 +330,39 @@ class ProductGalleryRecipeTrainerTest extends TestCase
         $this->assertNull($executed['actions'][0]['after_each_selector']);
     }
 
+    public function test_a_rate_limit_does_not_take_the_screenshot_away(): void
+    {
+        // The screenshot is dropped so a request the provider refused to read
+        // can get through on the retry. A 429 was read as one, and one busy
+        // moment cost the agent its view of the page for the rest of the
+        // training over a fault that had nothing to do with the attachment.
+        $trainer = app(ProductGalleryRecipeTrainer::class);
+        $method = new \ReflectionMethod($trainer, 'looksLikeRejectedRequest');
+
+        $this->assertFalse($method->invoke($trainer, new \RuntimeException('HTTP 429 Too Many Requests')));
+        $this->assertFalse($method->invoke($trainer, new \RuntimeException('Request timed out after 90s')));
+        $this->assertFalse($method->invoke($trainer, new \RuntimeException('connection reset by peer')));
+        $this->assertTrue($method->invoke($trainer, new \RuntimeException('HTTP 400 invalid_request_error: image url is malformed')));
+    }
+
+    public function test_two_different_provider_errors_are_not_the_same_failure(): void
+    {
+        // Erasing every digit made a 400 and a 429 share one signature, so three
+        // unrelated failures tripped a breaker built for one failure repeating.
+        $trainer = app(ProductGalleryRecipeTrainer::class);
+        $method = new \ReflectionMethod($trainer, 'technicalFailureSignature');
+
+        $this->assertNotSame(
+            $method->invoke($trainer, new \RuntimeException('HTTP 400 bad request')),
+            $method->invoke($trainer, new \RuntimeException('HTTP 429 bad request')),
+        );
+        // Ids and timestamps still must not make one fault look like two.
+        $this->assertSame(
+            $method->invoke($trainer, new \RuntimeException('run 173829911 failed: HTTP 400')),
+            $method->invoke($trainer, new \RuntimeException('run 173829977 failed: HTTP 400')),
+        );
+    }
+
     private function workingRecipe(): array
     {
         return [

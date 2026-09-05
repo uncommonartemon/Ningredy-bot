@@ -402,6 +402,7 @@ class ProductGalleryRecipeTrainer
             $emptyRounds = 0;
             $identicalFailures = 0;
             $lastFailureSignature = null;
+            $requestWasRejected = false;
             $photoOutcome = $this->previousPhotoOutcome($host, $url);
             $stalled = false;
             $stuckOnValidation = false;
@@ -568,7 +569,7 @@ class ProductGalleryRecipeTrainer
                             // the model, so the agent is left with silence
                             // instead of the error it could have reasoned about.
                             // The picture is an aid; being heard is not.
-                            attachments: $pageImage === null || $identicalFailures > 0
+                            attachments: $pageImage === null || $requestWasRejected
                                 ? []
                                 : [Image::fromBase64(base64_encode($pageImage), 'image/png')->as('page.png')],
                             provider: $provider,
@@ -590,6 +591,7 @@ class ProductGalleryRecipeTrainer
                     // already stopped being true.
                     $identicalFailures = 0;
                     $lastFailureSignature = null;
+                    $requestWasRejected = false;
                 } catch (Throwable $exception) {
                     $run?->update([
                         'status' => 'failed',
@@ -611,6 +613,13 @@ class ProductGalleryRecipeTrainer
                         ? $identicalFailures + 1
                         : 1;
                     $lastFailureSignature = $failureSignature;
+                    // Only a request the provider refused to read is a reason to
+                    // send the next one without its picture. A timeout, a rate
+                    // limit or a dropped connection says nothing about the
+                    // attachment, and dropping it there cost the agent its view
+                    // of the page for the rest of the training over a fault that
+                    // had nothing to do with it.
+                    $requestWasRejected = $requestWasRejected || $this->looksLikeRejectedRequest($exception);
 
                     if ($identicalFailures >= self::MAX_IDENTICAL_TECHNICAL_FAILURES) {
                         $debug?->__invoke(
@@ -1499,6 +1508,25 @@ class ProductGalleryRecipeTrainer
         }
     }
 
+    /**
+     * The provider refused to read the request at all - a malformed payload, a
+     * rejected attachment - as opposed to failing to answer one it understood.
+     * Only the first kind is worth retrying without the picture.
+     */
+    private function looksLikeRejectedRequest(Throwable $exception): bool
+    {
+        $message = strtolower($exception->getMessage());
+
+        if (str_contains($message, '429') || str_contains($message, 'rate limit')) {
+            return false;
+        }
+
+        return preg_match('/\b4\d{2}\b/', $message) === 1
+            || str_contains($message, 'invalid_request')
+            || str_contains($message, 'unsupported')
+            || str_contains($message, 'malformed');
+    }
+
     private function failureKindForException(Throwable $exception): string
     {
         $message = strtolower($exception->getMessage());
@@ -2038,11 +2066,19 @@ class ProductGalleryRecipeTrainer
             return null;
         }
 
-        $published = ProductSourceAttempt::query()
-            ->where('domain', $domain)
-            ->where('id', '>=', $download->id)
-            ->whereIn('decision', ['accept_agent_confirmed_atomic_gallery', 'accept_agent_confirmed_gallery'])
-            ->exists();
+        // Tied to the search these photographs belong to, not to the domain.
+        // "Anything on this domain succeeded afterwards" answered yes for a
+        // different path, a different product, or a parallel search running at
+        // the same time - and told the agent its last recipe had reached the
+        // catalog when every frame it produced had in fact been thrown away.
+        // Without a draft to scope by there is no honest answer, so it says so.
+        $published = $download->product_draft_id === null
+            ? null
+            : ProductSourceAttempt::query()
+                ->where('product_draft_id', $download->product_draft_id)
+                ->where('id', '>=', $download->id)
+                ->whereIn('decision', ['accept_agent_confirmed_atomic_gallery', 'accept_agent_confirmed_gallery'])
+                ->exists();
 
         return [
             'when' => $download->created_at?->toDateString(),
@@ -2050,7 +2086,7 @@ class ProductGalleryRecipeTrainer
             'downloaded' => (int) ($output['downloaded_images'] ?? 0),
             'kept_after_technical_checks' => (int) ($output['unique_images'] ?? 0),
             'rejected_by_reason' => $rejections,
-            'reached_the_catalog' => $published,
+            'reached_the_catalog' => $published ?? 'unknown',
             'instruction' => 'This is what became of the photographs the last recipe here produced - read "from" for '
                 .'whether it was this page family or only somewhere else on the domain. A recipe that '
                 .'collects thumbnails or size variants extracts a healthy-looking count and then loses all of it to '
@@ -2061,7 +2097,13 @@ class ProductGalleryRecipeTrainer
 
     private function technicalFailureSignature(Throwable $exception): string
     {
-        return $exception::class.'|'.preg_replace('/\d+/', '#', mb_substr($exception->getMessage(), 0, 200));
+        // Numbers are flattened so that ids, byte counts and timestamps do not
+        // make two occurrences of the same fault look different - but a status
+        // code is the fault, not noise in it. Erasing every digit made a 400
+        // and a 429 share one signature, so three unrelated failures could trip
+        // a breaker built for one failure repeating. Short runs stay; only runs
+        // of four digits or more, which no status code is, are collapsed.
+        return $exception::class.'|'.preg_replace('/\d{4,}/', '#', mb_substr($exception->getMessage(), 0, 200));
     }
 
     private function scoutForAgent(array $pageScout, bool $complete): array

@@ -242,7 +242,10 @@ const overrideUserAgent = process.env.PRODUCT_IMAGE_BROWSER_USER_AGENT
 // bot looks like, and why the challenges started. Keeping the session on disk
 // per host makes the second visit a returning visitor instead of another
 // stranger, exactly as an ordinary browser behaves. It stores nothing but what
-// the site itself set.
+// the site itself set - though that is the whole storageState, cookies and the
+// origin's localStorage alike, which is deliberate: a consent choice a shop
+// keeps in localStorage is exactly the one worth not asking about twice. One
+// file per host, never shared between domains.
 const sessionFile = (() => {
     try {
         const host = new URL(sourceUrl).hostname.replace(/[^a-z0-9.-]/gi, '');

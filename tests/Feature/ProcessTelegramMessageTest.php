@@ -23,6 +23,7 @@ use App\Services\Products\ProductImageResolver;
 use App\Services\Products\ProductImageStorage;
 use App\Services\Telegram\TelegramClient;
 use GuzzleHttp\Psr7\Response as Psr7Response;
+use Illuminate\Contracts\Queue\Job as QueueJob;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request as HttpRequest;
 use Illuminate\Http\Client\RequestException;
@@ -33,6 +34,7 @@ use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Storage;
 use Laravel\Ai\Tools\Request;
 use Mockery;
+use Mockery\MockInterface;
 use Tests\TestCase;
 
 class ProcessTelegramMessageTest extends TestCase
@@ -615,13 +617,13 @@ class ProcessTelegramMessageTest extends TestCase
         }
     }
 
-    public function test_only_a_worker_that_died_hands_the_retry_a_fresh_clock(): void
+    public function test_a_retry_after_a_failure_that_finalised_itself_keeps_its_clock(): void
     {
-        // attempts() > 1 alone is not the dead worker it was read as: an
-        // ordinary retry after a caught provider error is a re-delivery whose
-        // predecessor did real work on this clock, and a fresh budget is the
-        // explicit "continue" press's privilege. Only a process that never came
-        // back leaves its AI run marked running.
+        // attempts() > 1 alone is not the dead worker it was once read as. A
+        // retry after a caught provider error is an ordinary re-delivery whose
+        // predecessor did real work on this clock, and PROJECT_STRATEGY
+        // reserves a fresh budget for the explicit "continue" press.
+        $budget = $this->spyOnTimeBudget();
         $update = $this->update();
         AiRun::query()->create([
             'telegram_update_id' => $update->id,
@@ -632,31 +634,70 @@ class ProcessTelegramMessageTest extends TestCase
             'started_at' => now()->subMinutes(20),
             'completed_at' => now()->subMinutes(19),
         ]);
-        $budget = app(ProductSearchTimeBudget::class);
+        $budget->shouldNotReceive('restartSession');
 
-        $this->assertFalse(
-            $update->aiRuns()->where('status', 'running')->exists(),
-            'A finalised run is not evidence of a dead worker.',
-        );
+        $this->runDelivery($update, attempts: 2);
 
+        $this->assertDatabaseHas('telegram_updates', ['id' => $update->id, 'status' => 'completed']);
+    }
+
+    public function test_a_retry_after_a_worker_that_never_came_back_gets_a_fresh_clock(): void
+    {
+        // Only a process that is gone leaves its run marked running: every path
+        // that ends inside handle() finalises its own, and the failed hook
+        // finalises the rest.
+        $budget = $this->spyOnTimeBudget();
+        $update = $this->update();
         AiRun::query()->create([
             'telegram_update_id' => $update->id,
             'provider' => 'openai',
             'model' => 'gpt-test',
             'status' => 'running',
             'prompt' => 'the attempt whose process is gone',
-            'started_at' => now()->subMinutes(10),
+            'started_at' => now()->subMinutes(20),
         ]);
+        $budget->shouldReceive('restartSession')->once()->with($update->id);
 
-        $this->assertTrue($update->aiRuns()->where('status', 'running')->exists());
+        $this->runDelivery($update, attempts: 2);
+    }
 
-        $budget->restartSession($update->id);
+    public function test_a_first_delivery_never_restarts_the_clock(): void
+    {
+        $budget = $this->spyOnTimeBudget();
+        $update = $this->update();
+        $budget->shouldNotReceive('restartSession');
 
-        $this->assertGreaterThan(
-            0,
-            $budget->remainingWorkingSeconds($update->id),
-            'The resumed attempt measures itself from its own start, not from the dead one.',
-        );
+        $this->runDelivery($update, attempts: 1);
+    }
+
+    private function spyOnTimeBudget(): MockInterface
+    {
+        return $this->partialMock(ProductSearchTimeBudget::class);
+    }
+
+    private function runDelivery(TelegramUpdate $update, int $attempts): void
+    {
+        config(['services.telegram.bot_token' => 'test-token']);
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []])]);
+        ServerAssistantAgent::fake([[
+            'response_type' => 'answer',
+            'message' => 'Готово.',
+            'draft_id' => null,
+            'product_ids' => [],
+            'operation_ids' => [],
+        ]]);
+
+        // The queue job the worker would hand to this delivery. attempts() is
+        // the branch under test and cannot be reached any other way.
+        $queueJob = Mockery::mock(QueueJob::class);
+        $queueJob->shouldReceive('attempts')->andReturn($attempts);
+        $queueJob->shouldReceive('getJobId')->andReturn('smoke-'.$attempts);
+        $queueJob->shouldReceive('resolveName')->andReturn(ProcessTelegramMessage::class);
+        $queueJob->shouldIgnoreMissing();
+
+        $job = new ProcessTelegramMessage($update->id);
+        $job->setJob($queueJob);
+        $job->handle(app(TelegramClient::class), app(AiErrorPresenter::class));
     }
 
     public function test_failed_hook_sends_one_final_notification_after_hidden_attempts(): void

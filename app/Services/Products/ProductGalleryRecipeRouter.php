@@ -144,14 +144,33 @@ class ProductGalleryRecipeRouter
         // lifting the shop's ban is not a verdict on a recipe that failed on
         // its own, and re-blocking a path is not something an operator can do
         // from here.
-        ProductGalleryRecipe::query()
+        $wildcard = ProductGalleryRecipe::query()
             ->where('domain', $domain)
             ->where('path_pattern', '*')
-            ->update([
-                'source_blocked' => false,
-                'source_block_reason' => null,
-                'source_blocked_at' => null,
-            ]);
+            ->first();
+
+        if (! $wildcard) {
+            return;
+        }
+
+        // A row the ban itself created carries no recipe and no history: it
+        // exists only to hold the block, and it was created disabled. Clearing
+        // the flag and leaving it behind released the shop on paper only - the
+        // empty disabled row is what recipeForUrl() falls back to when a path
+        // has no recipe of its own, and extractionScore() reads a disabled
+        // recipe as a domain worth -1,000,000. Lifting the ban puts the domain
+        // back exactly where it was, which means this placeholder goes.
+        if (($wildcard->recipe ?? []) === [] && (int) $wildcard->success_count === 0) {
+            $wildcard->delete();
+
+            return;
+        }
+
+        $wildcard->update([
+            'source_blocked' => false,
+            'source_block_reason' => null,
+            'source_blocked_at' => null,
+        ]);
     }
 
     /**
