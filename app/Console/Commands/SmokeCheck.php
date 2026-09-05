@@ -56,9 +56,18 @@ class SmokeCheck extends Command
         // is the last step of an install, answering "can this box run it at
         // all". Everything that needs a shop reports as skipped instead of
         // dragging the whole run down with it.
-        $this->components->info($url === ''
-            ? 'No trained recipe yet - checking the machine only. Pass --url to exercise a real page.'
-            : 'Target: '.$url);
+        //
+        // In machine mode no page is opened at all, so naming one is worse than
+        // saying nothing: the launcher printed a shop's address on every start
+        // and read as a URL frozen into the code. It is not - it is whichever
+        // recipe this catalog has had the most success with.
+        if ($this->option('machine')) {
+            $this->components->info('Проверяю только этот компьютер: сайты и AI не затрагиваются.');
+        } else {
+            $this->components->info($url === ''
+                ? 'No trained recipe yet - checking the machine only. Pass --url to exercise a real page.'
+                : 'Target: '.$url.' (лучший обученный рецепт из базы, не зашитый адрес)');
+        }
 
         $this->environmentChecks();
 

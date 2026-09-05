@@ -1349,6 +1349,133 @@ class ProductImageStorageTest extends TestCase
         $this->assertSame(3, $retried, 'A fresh update id must get its own full time budget instead of inheriting the expired one.');
     }
 
+    public function test_two_incomplete_sources_are_never_merged_into_one_gallery(): void
+    {
+        // Photographs of one product from two different shops are two galleries
+        // of the same thing, shot differently, cropped differently and lit
+        // differently. Adding them together reaches the category minimum on
+        // paper and produces a card that looks assembled from parts.
+        Storage::fake('public');
+        config()->set('product-images.max_images_by_type.laptop', 6);
+        $this->acceptEverythingVision();
+        Http::fake(function (Request $request) {
+            if (str_contains($request->url(), '.jpg')) {
+                return Http::response($this->jpeg(2), 200, ['Content-Type' => 'image/jpeg']);
+            }
+
+            return Http::response('<html></html>', 200, ['Content-Type' => 'text/html']);
+        });
+        [, , $draft] = $this->records();
+        $draft->update([
+            'product_type' => 'laptop',
+            'brand' => 'Lenovo',
+            'model' => 'Test',
+            'color' => 'Black',
+            'primary_source_url' => 'https://93.184.216.34/first-shop',
+            'image_urls' => [],
+            'sources' => [
+                [
+                    'title' => 'First shop',
+                    'url' => 'https://93.184.216.34/first-shop',
+                    'type' => 'retailer',
+                    'image_urls' => [
+                        'https://93.184.216.34/first-a.jpg',
+                        'https://93.184.216.34/first-b.jpg',
+                    ],
+                ],
+                [
+                    'title' => 'Second shop',
+                    'url' => 'https://93.184.216.34/second-shop',
+                    'type' => 'retailer',
+                    'image_urls' => [
+                        'https://93.184.216.34/second-a.jpg',
+                        'https://93.184.216.34/second-b.jpg',
+                    ],
+                ],
+            ],
+        ]);
+
+        app(ProductImageStorage::class)->stage($draft->fresh());
+
+        $stored = $draft->fresh()->media;
+        $shops = $stored
+            ->map(fn ($media): string => str_contains((string) $media->source_url, '/first-') ? 'first' : 'second')
+            ->unique();
+
+        $this->assertLessThanOrEqual(1, $shops->count(), 'A gallery must come from one shop, never from two added together.');
+    }
+
+    public function test_a_reserve_survives_a_later_source_that_finds_nothing(): void
+    {
+        // The reserve is freed by whoever replaces it, and a source that
+        // produces nothing replaces nothing. Losing the earlier photographs
+        // here would turn a partial result into an empty draft for no reason
+        // other than the order the sources happened to be tried in.
+        Storage::fake('public');
+        config()->set('product-images.max_images_by_type.laptop', 6);
+        $this->acceptEverythingVision();
+        Http::fake(function (Request $request) {
+            if (str_contains($request->url(), '.jpg')) {
+                return Http::response($this->jpeg(2), 200, ['Content-Type' => 'image/jpeg']);
+            }
+
+            return Http::response('<html><body>No product photos</body></html>', 200, ['Content-Type' => 'text/html']);
+        });
+        [, , $draft] = $this->records();
+        $draft->update([
+            'product_type' => 'laptop',
+            'brand' => 'Lenovo',
+            'model' => 'Test',
+            'color' => 'Black',
+            'primary_source_url' => 'https://93.184.216.34/has-two-photos',
+            'image_urls' => [],
+            'sources' => [
+                [
+                    'title' => 'Shop with two photos',
+                    'url' => 'https://93.184.216.34/has-two-photos',
+                    'type' => 'retailer',
+                    'image_urls' => [
+                        'https://93.184.216.34/kept-a.jpg',
+                        'https://93.184.216.34/kept-b.jpg',
+                    ],
+                ],
+                [
+                    'title' => 'Shop with nothing',
+                    'url' => 'https://93.184.216.34/has-nothing',
+                    'type' => 'retailer',
+                    'image_urls' => [],
+                ],
+            ],
+        ]);
+
+        app(ProductImageStorage::class)->stage($draft->fresh());
+
+        $stored = $draft->fresh()->media;
+
+        $this->assertGreaterThan(0, $stored->count(), 'The first source produced photographs and nothing replaced them.');
+        $this->assertTrue(
+            $stored->every(fn ($media): bool => str_contains((string) $media->source_url, '/kept-')),
+            'The surviving photographs are the ones the first source found.',
+        );
+    }
+
+    private function acceptEverythingVision(): void
+    {
+        ProductImageVisionAgent::fake(fn (string $prompt, $attachments): array => [
+            'images' => $attachments->keys()->map(fn (int $index): array => [
+                'index' => $index + 1,
+                'exact_match' => true,
+                'color_match' => true,
+                'publishable' => true,
+                'kind' => 'product',
+                'view' => 'front',
+                'gallery_rank' => 1,
+                'score' => 98,
+                'reason' => 'Exact product and selected color.',
+            ])->all(),
+        ])->preventStrayPrompts();
+    }
+
     public function test_staging_skips_a_source_without_photos_and_uses_the_next_complete_card_source(): void
     {
         Storage::fake('public');
