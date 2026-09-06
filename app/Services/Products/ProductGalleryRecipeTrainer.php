@@ -511,7 +511,19 @@ class ProductGalleryRecipeTrainer
                 $oldImages = $oldResult['images'] ?? [];
             }
 
-            $attempts = [];
+            // Rounds that were paid for and then thrown away.
+            //
+            // A training stopped by the per-source budget share used to write
+            // nothing but "deferred" - no candidate, no round history, no
+            // reason any of them was rejected - so the next search started this
+            // domain at round one again. cdw.com was trained three times on
+            // three days, four rounds each, every round returning a real
+            // gallery, and arrived at the fourth search knowing nothing.
+            //
+            // A share of the budget is the right way to stop one domain eating
+            // a whole search. Losing the work when it triggers is not.
+            $resumed = $repairFrom === [] ? $this->interruptedTrainingProgress($recipe) : [];
+            $attempts = $resumed['attempts'] ?? [];
             // A stored recipe that stopped working is not a blank page. It
             // opened this site correctly a dozen times, and what changed is
             // knowable: the selector that matched nothing, the traversal that
@@ -534,6 +546,14 @@ class ProductGalleryRecipeTrainer
                     .'still executed correctly - a replacement that only fits this page breaks the pages the '
                     .'recipe already opens.',
             ];
+
+            if ($feedback === null && ($resumed['feedback'] ?? null) !== null) {
+                $feedback = $resumed['feedback'];
+                $debug?->__invoke(
+                    'step',
+                    'Продолжаю прерванное обучение: раундов из прошлой сессии — '.count($attempts).'.',
+                );
+            }
             $candidate = [];
             $candidateResult = [];
             $candidateImages = [];
@@ -583,6 +603,7 @@ class ProductGalleryRecipeTrainer
             $requestWasRejected = false;
             $photoOutcome = $this->previousPhotoOutcome($host, $url);
             $stalled = false;
+            $budgetDeferred = false;
             $stuckOnValidation = false;
             $agentAbandoned = false;
             $agentAbandonReason = null;
@@ -621,14 +642,17 @@ class ProductGalleryRecipeTrainer
                 if (! $safetyLimited && $this->costBudget->exceededForSource($telegramUpdateId, $costAtTrainingStart, $sourceCostShare)) {
                     $debug?->__invoke(
                         'warning',
-                        "AI-тренер: {$host} израсходовал свою долю бюджета этого поиска после {$attempt} раунд(а/ов); оставляю бюджет другим источникам.",
+                        "AI-тренер: {$host} израсходовал свою долю бюджета этого поиска после {$attempt} раунд(а/ов); "
+                            .'работу сохраняю, следующий поиск продолжит с этого места.',
                     );
-                    $version->update([
-                        'status' => 'deferred',
-                        'error' => 'Обучение отложено: этот источник израсходовал свою долю денежного бюджета текущего поиска.',
-                    ]);
+                    // Breaks rather than returns, so the ordinary finalization
+                    // below writes the candidate and the whole round history to
+                    // the version - the same record a training that ran out of
+                    // rounds leaves. It returned here once, and everything the
+                    // rounds had learned went with it.
+                    $budgetDeferred = true;
 
-                    return $bestPartialImages !== [] ? $bestPartialImages : $oldImages;
+                    break;
                 }
 
                 // Field order matters for OpenAI's automatic prompt caching,
@@ -1094,7 +1118,15 @@ class ProductGalleryRecipeTrainer
             $hasPartial = ! $promote && count($bestPartialImages) > 0;
             $score = $this->score($promote ? $candidateResult : $bestPartialResult);
             $version->update([
-                'status' => $promote ? 'promoted' : ($hasPartial ? 'partial' : 'rejected'),
+                'status' => match (true) {
+                    $promote => 'promoted',
+                    // Not a verdict on the recipe: the session was rationed, not
+                    // judged. The row keeps the candidate and the round history
+                    // so the next search resumes from it.
+                    $budgetDeferred => 'deferred',
+                    $hasPartial => 'partial',
+                    default => 'rejected',
+                },
                 'recipe' => $candidate,
                 'result' => [
                     'candidate_count' => count($candidateImages),
@@ -1117,6 +1149,7 @@ class ProductGalleryRecipeTrainer
                 'promoted_at' => $promote ? now() : null,
                 'error' => match (true) {
                     $promote => null,
+                    $budgetDeferred => 'Обучение отложено: этот источник израсходовал свою долю денежного бюджета текущего поиска. Кандидат и история раундов сохранены.',
                     $stalled => 'Обучение остановлено: три последовательных раунда не дали материального прогресса.',
                     $agentAbandoned => 'Обучение остановлено по решению AI-агента: '.($agentAbandonReason ?? ''),
                     $stuckOnValidation => 'Обучение остановлено: '.self::MAX_IDENTICAL_VALIDATION_FAILURES.' раунда подряд одна и та же ошибка валидации ('.implode(', ', $lastValidationSignature ?? []).').',
@@ -1124,7 +1157,7 @@ class ProductGalleryRecipeTrainer
                 },
             ]);
 
-            if (! $promote) {
+            if (! $promote && ! $budgetDeferred) {
                 $failureKind = $agentAbandoned ? $failureKind : 'recipe_mismatch';
                 $this->recordFailure(
                     $recipe,
@@ -1220,6 +1253,56 @@ class ProductGalleryRecipeTrainer
         } finally {
             $lock->release();
         }
+    }
+
+    /**
+     * What an interrupted training session already learned about this domain.
+     *
+     * A session stopped by the per-source budget share is rationed, not judged:
+     * its rounds ran, cost money and produced real candidates. cdw.com was
+     * trained on three separate days, four rounds each, every round returning a
+     * gallery - and each new search began at round one, because the stop wrote
+     * nothing but the word "deferred".
+     *
+     * The stored history is handed back as round one's feedback, so the next
+     * session continues the argument instead of restarting it. Only the last
+     * few rounds, and only the parts an agent can act on: the whole history
+     * carries page diagnostics measured in hundreds of kilobytes.
+     *
+     * @return array{attempts: array<int, mixed>, feedback: array<string, mixed>|null}
+     */
+    private function interruptedTrainingProgress(ProductGalleryRecipe $recipe): array
+    {
+        $version = ProductGalleryRecipeVersion::query()
+            ->where('product_gallery_recipe_id', $recipe->id)
+            ->where('status', 'deferred')
+            ->where('created_at', '>=', now()->subDays(7))
+            ->latest('id')
+            ->first();
+
+        $attempts = is_array($version?->result['attempts'] ?? null) ? $version->result['attempts'] : [];
+
+        if ($attempts === []) {
+            return ['attempts' => [], 'feedback' => null];
+        }
+
+        $attempts = array_slice($attempts, -3);
+        $last = end($attempts);
+
+        return [
+            'attempts' => $attempts,
+            'feedback' => [
+                'rejected_recipe' => $last['selectors_tried'] ?? null,
+                'candidate_count' => (int) ($last['candidate_count'] ?? 0),
+                'downloaded_frames' => $last['download_probe'] ?? null,
+                'error' => 'A previous training session on this domain was stopped part-way because it had spent '
+                    .'its share of that search\'s budget - not because these recipes were wrong. Its last rounds '
+                    .'are in attempt_history.',
+                'instruction' => 'Continue that work rather than starting over: the selectors and actions already '
+                    .'tried are in attempt_history with the reason each was rejected. Correct the step that failed, '
+                    .'keep the steps that worked, and do not re-propose a recipe that history already shows failing.',
+            ],
+        ];
     }
 
     private function regionForUrl(string $url): ?string
