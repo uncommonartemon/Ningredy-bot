@@ -1202,7 +1202,7 @@ class ProductGalleryRecipeTrainer
             }
 
             $recipe->update([
-                'recipe' => $candidate,
+                'recipe' => $this->withoutTrainingCounts($candidate),
                 'status' => 'active',
                 'region' => $this->regionForUrl($url),
                 'sample_path' => mb_substr((string) (parse_url($url, PHP_URL_PATH) ?: '/'), 0, 1024),
@@ -1415,6 +1415,34 @@ class ProductGalleryRecipeTrainer
                 }
             }
         }
+    }
+
+    /**
+     * The recipe as it leaves training, with what it counted left behind.
+     *
+     * expected_image_count is the agent saying "this page shows seven photos".
+     * That is true, useful, and checked - on the page it was learned on. It is
+     * meaningless on the next product, and the validator has to be told so
+     * through a boolean at every call site. It was told wrong once already, and
+     * a recipe that carries a number is a recipe someone will read the number
+     * from.
+     *
+     * So the domain's stored recipe does not carry it at all. The version row
+     * still does - that is the audit trail of what the agent believed while it
+     * was learning, and it is not what later products are opened with.
+     *
+     * The traversal bounds stay. They are ceilings rather than targets - see
+     * traversalCeiling() in the browser runner - and zero among them is a
+     * structural statement ("this gallery has no carousel") that must survive.
+     *
+     * @param  array<string, mixed>  $candidate
+     * @return array<string, mixed>
+     */
+    private function withoutTrainingCounts(array $candidate): array
+    {
+        unset($candidate['expected_image_count']);
+
+        return $candidate;
     }
 
     private function regionForUrl(string $url): ?string
