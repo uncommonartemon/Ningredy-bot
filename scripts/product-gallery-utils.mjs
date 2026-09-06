@@ -533,6 +533,32 @@ export const browserServerEndpointFile = (projectRoot) => `${projectRoot}/storag
  * Whatever is dismissed, and whatever refuses to go, is reported to the agent,
  * so it never has to guess whether it is looking at the real page.
  */
+/**
+ * Spend a couple of seconds on the page the way a person would.
+ *
+ * Arriving, reading the entire DOM in forty milliseconds and leaving is a
+ * behaviour no visitor has, and behaviour is what a shop watches once the
+ * headers all look right - it is the signal no fingerprint work can hide.
+ *
+ * It also does the one thing a gallery needs anyway: frames below the fold are
+ * lazy-loaded, and nothing loads them but scrolling past. The page is returned
+ * to the top so everything after this sees the document it expected.
+ *
+ * Bounded and cheap by construction - three or four short steps, never more
+ * than about two and a half seconds of a forty-five second budget.
+ */
+export const settleLikeAReader = async (page) => {
+    const steps = 2 + Math.floor(Math.random() * 2);
+
+    for (let step = 0; step < steps; step += 1) {
+        await page.mouse.wheel(0, 320 + Math.floor(Math.random() * 520)).catch(() => {});
+        await page.waitForTimeout(240 + Math.floor(Math.random() * 380));
+    }
+
+    await page.evaluate(() => window.scrollTo({ top: 0 })).catch(() => {});
+    await page.waitForTimeout(120);
+};
+
 export const OVERLAY_ACCEPT_LABELS = [
     'accept', 'agree', 'allow', 'ok', 'got it', 'understood', 'continue', 'close', 'dismiss', 'no thanks',
     'принять', 'согласен', 'соглашаюсь', 'хорошо', 'закрыть', 'продолжить',

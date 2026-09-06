@@ -1689,7 +1689,7 @@ class ProductGalleryRecipeTrainer
             // a soft challenge turns into a real IP ban.
             $kind === 'access_gate' => now()->addMinutes(min(1440, 30 * (4 ** max(0, $hardBlockCount - 1)))),
             $kind === 'rate_limited' => now()->addMinutes(30),
-            in_array($kind, ['browser_timeout', 'browser_protocol'], true) => now()->addMinutes(min(60, 2 ** min(5, $failureCount))),
+            in_array($kind, ['browser_timeout', 'browser_protocol', 'host_unreachable'], true) => now()->addMinutes(min(60, 2 ** min(5, $failureCount))),
             in_array($kind, ['browser_unavailable', 'browser_process'], true) => now()->addMinutes(15),
             in_array($kind, ['ai_timeout', 'ai_rate_limited'], true) => now()->addMinutes(15),
             in_array($kind, ['recipe_mismatch', 'dom_unusable', 'agent_abandoned'], true) => now()->addMinutes(10),

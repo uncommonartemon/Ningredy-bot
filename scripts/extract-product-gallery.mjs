@@ -18,6 +18,7 @@ import {
     recipeActionPlanStatus,
     recipeActionShouldStop,
     recipeActionTraversesGallery,
+    settleLikeAReader,
     urlQualityScore,
     TRAVERSAL_CEILING,
     TRAVERSAL_PATIENCE,
@@ -231,14 +232,22 @@ const pruneOldBrowserProfiles = async (root, keepDirectory) => {
 // not at all, so the three flags after the position are not optional.
 // PRODUCT_IMAGE_BROWSER_OFFSCREEN=false brings it back on screen when you want
 // to watch what it does.
-const offscreenArgs = process.env.PRODUCT_IMAGE_BROWSER_OFFSCREEN === 'false'
-    ? []
-    : [
-        '--window-position=-2400,-2400',
-        '--disable-backgrounding-occluded-windows',
-        '--disable-renderer-backgrounding',
-        '--disable-background-timer-throttling',
-    ];
+// Chromium pauses rendering in a window it thinks nobody is looking at, and a
+// throttled page loads its gallery slowly or not at all, so these three are not
+// optional. None of them is visible from inside the page.
+//
+// The window position is a different matter and used to be here. A window at
+// -2400,-2400 reports window.screenX === -2400, and no person's window is two
+// thousand pixels to the left of their screen - it is a one-line check, and we
+// were handing it over to hide a window the operator had already said they did
+// not mind seeing. PRODUCT_IMAGE_BROWSER_OFFSCREEN=true brings it back for
+// anyone who would rather be hidden from themselves than from the shop.
+const offscreenArgs = [
+    '--disable-backgrounding-occluded-windows',
+    '--disable-renderer-backgrounding',
+    '--disable-background-timer-throttling',
+    ...(process.env.PRODUCT_IMAGE_BROWSER_OFFSCREEN === 'true' ? ['--window-position=-2400,-2400'] : []),
+];
 // Off unless asked for. Measured on 2026-09-04: with the shared browser every
 // extraction ran past the 120s process timeout - five sources in one search,
 // all of them - while the same page took 34 seconds on a private browser. The
@@ -357,6 +366,9 @@ const profileDirectory = (() => {
     }
 })();
 let context = null;
+// Asked before the directory is created, because creating it is what makes the
+// answer no. A host we have never opened is one we have to arrive at somehow.
+const firstEverVisitToHost = profileDirectory ? !existsSync(profileDirectory) : true;
 
 if (profileDirectory && !sharedBrowser && process.env.PRODUCT_IMAGE_BROWSER_PROFILE !== 'false') {
     try {
@@ -386,9 +398,12 @@ context ??= await browser.newContext({
     ...contextOptions,
     ...(savedSession ? { storageState: savedSession } : {}),
 });
-await context.addInitScript(() => {
-    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-});
+// There was an init script here that redefined navigator.webdriver to
+// undefined. It made things worse. A real Chrome reports false, and
+// --disable-blink-features=AutomationControlled above already produces exactly
+// that - so the override replaced an ordinary value with one no browser has,
+// and left an own-property descriptor on navigator where a native getter
+// belongs. Both are cheaper to detect than the flag it was hiding.
 const page = await context.newPage();
 const networkImages = [];
 const payloadImages = [];
@@ -1757,11 +1772,39 @@ const captureInteractionScout = async (scopeToMedia = false) => page.evaluate(({
 }, { excludedContextPatternSource: EXCLUDED_GALLERY_CONTEXT_PATTERN_SOURCE, scopeToMedia });
 
 try {
-    const navigation = await page.goto(sourceUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 });
+    // Every visit used to begin on a deep product URL with an empty Referer, in
+    // a browser with no history - a shopper who materialised on page nine of a
+    // catalogue. On the first visit to a host we open its front page first, so
+    // the arrival at the product is a real navigation from a real referrer and
+    // the site's own consent and session cookies are set the way it sets them.
+    // One extra request, once per host, and only while the profile is new.
+    let referer;
+
+    if (firstEverVisitToHost) {
+        try {
+            const origin = new URL(sourceUrl).origin;
+            await page.goto(origin, { waitUntil: 'domcontentloaded', timeout: 12_000 });
+            await settleLikeAReader(page);
+            referer = origin;
+        } catch {
+            // The front page is a courtesy, not a requirement: if it will not
+            // open, go straight to the product as before.
+        }
+    }
+
+    const navigation = await page.goto(sourceUrl, {
+        waitUntil: 'domcontentloaded',
+        timeout: 20_000,
+        ...(referer ? { referer } : {}),
+    });
     navigationStatus = navigation?.status() ?? null;
     await page.waitForLoadState('load', { timeout: 5_000 }).catch(() => {});
 
     dismissedOverlays = await clearBlockingOverlays(page);
+    // Landing, reading the whole DOM in forty milliseconds and leaving is not a
+    // reading pattern. This also does the one thing a gallery needs anyway:
+    // lazy-loaded frames below the fold are fetched by scrolling past them.
+    await settleLikeAReader(page);
 
     // Use the browser's final product URL after redirects/interstitials as the
     // logical root for later same-product Gallery/Media navigation checks.

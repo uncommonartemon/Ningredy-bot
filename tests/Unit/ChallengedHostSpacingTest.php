@@ -3,6 +3,7 @@
 namespace Tests\Unit;
 
 use App\Services\Products\BrowserProductGalleryExtractor;
+use App\Services\Products\HostReputation;
 use Illuminate\Support\Facades\Cache;
 use ReflectionMethod;
 use Tests\TestCase;
@@ -12,8 +13,9 @@ use Tests\TestCase;
  *
  * One training makes five to eight visits to the same host, so spacing every
  * shop at twenty-five seconds would spend minutes waiting on domains that
- * never objected to anything. A host that has actually shown a robot check is
- * a different matter - there the wait buys something.
+ * never objected to anything. A host that has actually pushed back - a robot
+ * check, a 403, or a connection it accepts and never answers - is a different
+ * matter: there the wait buys something.
  */
 class ChallengedHostSpacingTest extends TestCase
 {
@@ -21,30 +23,48 @@ class ChallengedHostSpacingTest extends TestCase
     {
         $this->remember('https://shop.example/p/1', ['access_gate' => true, 'access_gate_reason' => 'captcha']);
 
-        $this->assertSame('captcha', Cache::get('gallery-browser-challenged:shop.example'));
-        $this->assertNull(Cache::get('gallery-browser-challenged:other.example'));
+        $reputation = app(HostReputation::class);
+
+        $this->assertTrue($reputation->isChallenged('https://shop.example/p/1'));
+        $this->assertSame('captcha', $reputation->refusal('https://shop.example/p/1')['reason']);
+        $this->assertFalse($reputation->isChallenged('https://other.example/p/1'));
     }
 
-    public function test_a_page_that_loaded_normally_is_not_remembered(): void
+    public function test_a_page_that_loaded_normally_clears_the_record(): void
     {
-        $this->remember('https://shop.example/p/1', ['access_gate' => false]);
-        $this->remember('https://shop.example/p/2', []);
+        $this->remember('https://shop.example/p/1', ['access_gate' => true, 'access_gate_reason' => 'captcha']);
+        $this->remember('https://shop.example/p/2', ['access_gate' => false]);
 
-        $this->assertNull(Cache::get('gallery-browser-challenged:shop.example'));
+        $this->assertFalse(app(HostReputation::class)->isChallenged('https://shop.example/p/3'));
     }
 
     public function test_an_ordinary_host_keeps_the_ordinary_pace(): void
     {
-        config(['product-images.browser_fallback.host_visit_spacing_seconds' => 4]);
+        config(['product-images.browser_fallback.host_visit_spacing_seconds' => 1]);
         Cache::put('gallery-browser-last-visit:calm.example', microtime(true));
 
         $waited = $this->timePause('https://calm.example/p/1');
 
-        // Four seconds plus up to four of jitter; the point is that it is not
-        // the twenty-five a challenged host would get.
+        // One second plus up to four of jitter; the point is that it is not the
+        // twenty-five a host that pushed back would get.
         $this->assertLessThan(9.0, $waited);
     }
 
+    public function test_a_host_that_pushed_back_waits_longer_than_an_ordinary_one(): void
+    {
+        config([
+            'product-images.browser_fallback.host_visit_spacing_seconds' => 0,
+            'product-images.browser_fallback.challenged_host_spacing_seconds' => 3,
+        ]);
+        app(HostReputation::class)->noteRefusal('https://cross.example/p/1', HostReputation::REFUSAL_SILENCE);
+        Cache::put('gallery-browser-last-visit:cross.example', microtime(true));
+
+        $waited = $this->timePause('https://cross.example/p/2');
+
+        $this->assertGreaterThanOrEqual(2.5, $waited);
+    }
+
+    /** @param array<string, mixed> $scout */
     private function remember(string $url, array $scout): void
     {
         $method = new ReflectionMethod(BrowserProductGalleryExtractor::class, 'rememberAccessChallenge');

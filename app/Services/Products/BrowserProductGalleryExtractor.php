@@ -29,6 +29,7 @@ class BrowserProductGalleryExtractor
         private readonly ProductSourceAttemptRecorder $attempts,
         private readonly BrowserProductImageTransferStore $transfers,
         private readonly ProductGalleryRecipeRouter $recipeRouter,
+        private readonly HostReputation $reputation,
     ) {}
 
     /**
@@ -283,37 +284,44 @@ class BrowserProductGalleryExtractor
      * seconds anyway.
      */
     /**
-     * Where a host is remembered as having pushed back.
+     * What the page the browser was actually served says about our welcome.
      *
-     * Set from the browser's own reading of the page it was served - a robot
-     * check, a security wall, a 403 - and read by pauseBetweenVisits() to slow
-     * down that host alone.
-     */
-    private static function challengedHostKey(string $host): string
-    {
-        return 'gallery-browser-challenged:'.$host;
-    }
-
-    /**
+     * A robot check, a security wall or a 403 is the shop answering; a page
+     * that loaded is the shop accepting. Both are recorded, because a host
+     * that starts answering again should stop being treated as hostile.
+     *
      * @param  array<string, mixed>  $scout
      */
     private function rememberAccessChallenge(string $url, array $scout): void
     {
-        if (($scout['access_gate'] ?? false) !== true) {
+        if (($scout['access_gate'] ?? false) === true) {
+            $this->reputation->noteRefusal(
+                $url,
+                (string) ($scout['access_gate_reason'] ?? HostReputation::REFUSAL_ACCESS_GATE),
+            );
+
             return;
         }
 
-        $host = strtolower((string) parse_url($url, PHP_URL_HOST));
+        $this->reputation->noteAcceptance($url);
+    }
 
-        if ($host === '') {
-            return;
-        }
+    /**
+     * Whether the browser was left waiting on a connection that was accepted
+     * and then never answered.
+     *
+     * This is not a crash and not a broken protocol: the handshake completes
+     * in milliseconds and nothing follows. Measured on 2026-09-06 against a
+     * host that had refused us all day - 0.07s to connect, then twenty seconds
+     * of silence, identically over HTTP/2 and HTTP/1.1. Retrying the other
+     * protocol cannot help, and only the timeout is paid.
+     */
+    private function looksLikeSilentHost(string $signal): bool
+    {
+        $signal = mb_strtolower($signal);
 
-        Cache::put(
-            self::challengedHostKey($host),
-            (string) ($scout['access_gate_reason'] ?? 'access_gate'),
-            now()->addHours((int) config('product-images.browser_fallback.challenged_host_memory_hours', 6)),
-        );
+        return str_contains($signal, 'page.goto')
+            && (str_contains($signal, 'timeout') || str_contains($signal, 'err_connection_timed_out'));
     }
 
     private function pauseBetweenVisits(string $url): void
@@ -332,9 +340,9 @@ class BrowserProductGalleryExtractor
         // So the pace is ordinary until a host actually objects. Once one has
         // shown a robot check, a WAF or a 403, visits to it are spaced out for
         // the next few hours - that is where the cost buys something.
-        $spacing = max(0.0, (float) config('product-images.browser_fallback.host_visit_spacing_seconds', 4));
+        $spacing = max(0.0, (float) config('product-images.browser_fallback.host_visit_spacing_seconds', 10));
 
-        if (Cache::get(self::challengedHostKey($host))) {
+        if ($this->reputation->isChallenged($url)) {
             $spacing = max($spacing, (float) config('product-images.browser_fallback.challenged_host_spacing_seconds', 25));
         }
 
@@ -536,6 +544,32 @@ class BrowserProductGalleryExtractor
             return [];
         }
 
+        // A shop that has refused twice is answering, not failing. Visiting it
+        // a third time cannot produce a gallery and does produce another entry
+        // in whatever counted the first two - which is how a temporary block
+        // becomes a permanent one.
+        if ($this->reputation->isRefusing($url)) {
+            $refusal = $this->reputation->refusal($url) ?? [];
+            $host = strtolower((string) parse_url($url, PHP_URL_HOST));
+            $debug?->__invoke('warning', sprintf(
+                '%s отказал %d раз подряд (%s); остальные его страницы в этом поиске пропускаю, чтобы не усиливать блокировку.',
+                $host,
+                (int) ($refusal['count'] ?? 0),
+                (string) ($refusal['reason'] ?? 'отказ'),
+            ));
+
+            return [
+                'images' => [],
+                'error' => 'Host refused '.(int) ($refusal['count'] ?? 0).' times in a row.',
+                'failure_kind' => 'host_refusing',
+            ];
+        }
+
+        // Rediscovering a server's broken HTTP/2 stack on every visit costs a
+        // failed navigation each time. Once seen, start where the retry would
+        // have ended up.
+        $withoutHttp2 = $withoutHttp2 || $this->reputation->prefersHttp11($url);
+
         $script = base_path((string) config('product-images.browser_fallback.script', 'scripts/extract-product-gallery.mjs'));
         $transferDirectory = storage_path('framework/product-gallery-browser/'.Str::uuid());
         $this->pauseBetweenVisits($url);
@@ -584,10 +618,13 @@ class BrowserProductGalleryExtractor
                 ]);
 
                 if (! $withoutHttp2 && $this->looksLikeHttp2Failure(null, $error)) {
-                    $debug?->__invoke('warning', 'Сайт разорвал соединение по HTTP/2; повторяю один раз по HTTP/1.1.');
                     File::deleteDirectory($transferDirectory);
 
-                    return $this->runScript($url, $recipe, $limit, $scoutOnly, $debug, $telegramUpdateId, $context, true);
+                    return $this->retryOverHttp11($url, $recipe, $limit, $scoutOnly, $debug, $telegramUpdateId, $context);
+                }
+
+                if ($this->looksLikeSilentHost($error)) {
+                    return $this->recordSilentHost($url, $error, $debug);
                 }
 
                 return ['images' => [], 'error' => $error, 'failure_kind' => 'browser_process'];
@@ -601,10 +638,17 @@ class BrowserProductGalleryExtractor
             // three, having never loaded. The same site serves over HTTP/1.1,
             // so the one thing worth trying is the other protocol, once.
             if (! $withoutHttp2 && $this->looksLikeHttp2Failure($result, $process->getErrorOutput())) {
-                $debug?->__invoke('warning', 'Сайт разорвал соединение по HTTP/2; повторяю один раз по HTTP/1.1.');
                 File::deleteDirectory($transferDirectory);
 
-                return $this->runScript($url, $recipe, $limit, $scoutOnly, $debug, $telegramUpdateId, $context, true);
+                return $this->retryOverHttp11($url, $recipe, $limit, $scoutOnly, $debug, $telegramUpdateId, $context);
+            }
+
+            // A connection accepted and then never answered used to be reported
+            // as a browser crash, which sent the trainer looking for a fault in
+            // the recipe and the operator looking for one in the code. Neither
+            // was there: the shop was refusing us.
+            if (is_array($result) && ($result['images'] ?? []) === [] && $this->looksLikeSilentHost((string) ($result['error'] ?? ''))) {
+                return $this->recordSilentHost($url, (string) $result['error'], $debug);
             }
 
             if (! is_array($result)) {
@@ -647,6 +691,7 @@ class BrowserProductGalleryExtractor
 
             return $result;
         } catch (ProcessTimedOutException $exception) {
+            $this->reputation->noteRefusal($url, HostReputation::REFUSAL_SILENCE);
             $debug?->__invoke('warning', 'Playwright превысил лимит времени; источник можно повторить позже.');
             Log::notice('Browser product gallery extraction timed out.', [
                 'host' => parse_url($url, PHP_URL_HOST),
@@ -673,6 +718,59 @@ class BrowserProductGalleryExtractor
         } finally {
             File::deleteDirectory($transferDirectory);
         }
+    }
+
+    /**
+     * The one navigation failure with a cheap, general remedy.
+     *
+     * The downgrade is remembered against the host, so later visits start on
+     * HTTP/1.1 instead of paying for the broken stream again - and the outcome
+     * is reported, because "retrying over HTTP/1.1" followed by silence read
+     * as though the retry had never happened.
+     *
+     * @param  array<string, mixed>  $recipe
+     * @param  array<string, mixed>  $context
+     * @return array<string, mixed>
+     */
+    private function retryOverHttp11(
+        string $url,
+        array $recipe,
+        int $limit,
+        bool $scoutOnly,
+        ?callable $debug,
+        ?int $telegramUpdateId,
+        array $context,
+    ): array {
+        $this->reputation->noteHttp11Downgrade($url);
+        $debug?->__invoke('warning', 'Сайт разорвал соединение по HTTP/2; повторяю один раз по HTTP/1.1.');
+
+        $result = $this->runScript($url, $recipe, $limit, $scoutOnly, $debug, $telegramUpdateId, $context, true);
+
+        if (trim((string) ($result['error'] ?? '')) !== '') {
+            $debug?->__invoke('warning', 'По HTTP/1.1 сайт ответил так же; дело не в протоколе.');
+        }
+
+        return $result;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function recordSilentHost(string $url, string $error, ?callable $debug): array
+    {
+        $count = $this->reputation->noteRefusal($url, HostReputation::REFUSAL_SILENCE);
+        $host = strtolower((string) parse_url($url, PHP_URL_HOST));
+        $debug?->__invoke('warning', sprintf(
+            '%s принял соединение и не ответил ни байта (отказ %d). Это не сбой браузера и не рецепт - сайт нас не пускает.',
+            $host,
+            $count,
+        ));
+        Log::notice('Product page host accepted the connection and returned nothing.', [
+            'host' => $host,
+            'refusals' => $count,
+        ]);
+
+        return ['images' => [], 'error' => $error, 'failure_kind' => 'host_unreachable'];
     }
 
     private function available(int $limit, ?callable $debug): bool

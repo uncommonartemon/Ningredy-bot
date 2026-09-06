@@ -52,6 +52,12 @@ return [
     // How many source pages one resolve pass may open, how many image URLs a
     // single page may yield, and how wide the resolver search goes overall.
     'max_sources_per_resolve' => 10,
+    // How many pages from one host a single resolve pass may open. Research
+    // routinely returns four links to the same manufacturer's shop; opening
+    // all four is one shop asked four times in three minutes, which is both
+    // what a scraper looks like and four chances that fail together. Breadth
+    // across domains is what actually finds a gallery.
+    'max_sources_per_host' => 2,
     'max_urls_per_page' => 60,
     'resolve_limit' => 16,
     // AI discovery: how many of the suggested page URLs are opened and how
@@ -143,13 +149,35 @@ return [
         // Minimum gap between two browser visits to the same host. Training
         // opens one page once per round, so without this a shop receives four
         // or five visits inside a couple of minutes.
-        'host_visit_spacing_seconds' => (float) env('PRODUCT_IMAGE_BROWSER_HOST_SPACING_SECONDS', 4),
-        // Applied only to a host that has actually shown a robot check, a WAF or
-        // a 403. One training makes five to eight visits to the same host, so
-        // spacing every shop like this would spend minutes waiting on domains
-        // that never objected to anything.
+        //
+        // Four seconds was that pace measured from the shop's side: eight
+        // visits to one host inside three minutes, evenly spaced, each one a
+        // cold arrival straight onto a deep product page. That is what a
+        // scraper looks like, and it is why the 403s started. Ten costs a
+        // search well under a minute and does not.
+        'host_visit_spacing_seconds' => (float) env('PRODUCT_IMAGE_BROWSER_HOST_SPACING_SECONDS', 10),
+        // Applied to a host that has actually pushed back - a robot check, a
+        // WAF, a 403, or a connection it accepts and then never answers. One
+        // training makes five to eight visits to the same host, so spacing
+        // every shop like this would spend minutes waiting on domains that
+        // never objected to anything.
         'challenged_host_spacing_seconds' => (float) env('PRODUCT_IMAGE_BROWSER_CHALLENGED_SPACING_SECONDS', 25),
         'challenged_host_memory_hours' => (int) env('PRODUCT_IMAGE_BROWSER_CHALLENGED_MEMORY_HOURS', 6),
+
+        // How many refusals from one host before its remaining sources in this
+        // search are skipped instead of visited. One is not enough - shops have
+        // bad minutes and a domain written off for a transient failure loses
+        // sources that would have worked. Two is an answer, and it turns eight
+        // visits to a host that returned nothing into two.
+        'refusal_threshold' => (int) env('PRODUCT_IMAGE_BROWSER_REFUSAL_THRESHOLD', 2),
+        // How long that answer stands. Long enough to cover a whole search and
+        // the retry a person makes straight afterwards, short enough that a
+        // shop which blocked us for a minute is not written off for the day.
+        'refusal_memory_minutes' => (int) env('PRODUCT_IMAGE_BROWSER_REFUSAL_MEMORY_MINUTES', 20),
+        // A server's broken HTTP/2 stack is a property of the server, so once
+        // seen it is worth starting on HTTP/1.1 rather than paying for the
+        // broken stream again on every later visit.
+        'http11_memory_hours' => (int) env('PRODUCT_IMAGE_BROWSER_HTTP11_MEMORY_HOURS', 24),
         'training_max_rounds' => (int) env('PRODUCT_IMAGE_GALLERY_TRAINING_MAX_ROUNDS', 3),
         'timeout' => 45,
         'scout_timeout' => 60,

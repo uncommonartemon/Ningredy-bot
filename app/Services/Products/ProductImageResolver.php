@@ -26,6 +26,7 @@ class ProductImageResolver
         private readonly ProductSourcePageRules $pageRules,
         private readonly BrowserProductImageTransferStore $transfers,
         private readonly ProductGalleryRecipeRouter $recipeRouter,
+        private readonly HostReputation $reputation,
     ) {}
 
     /** @var array<int, true> */
@@ -162,6 +163,13 @@ class ProductImageResolver
         bool $activeRecipeOnly = false,
     ): array {
         $images = [];
+        // A research pass routinely returns four links to one manufacturer's
+        // own shop. Opening all four is four visits to one host inside three
+        // minutes, and if the first is refused the other three are refused too
+        // - they were never independent chances, they were one shop asked four
+        // times. Breadth across domains is what actually finds a gallery.
+        $perHost = [];
+        $perHostCap = max(1, (int) config('product-images.max_sources_per_host', 2));
 
         foreach (array_slice($sources, 0, (int) config('product-images.max_sources_per_resolve', 10)) as $source) {
             if (! $this->timeBudget->canStart($telegramUpdateId, 20)) {
@@ -190,6 +198,35 @@ class ProductImageResolver
             if ($this->looksLikeNonHtmlDocumentUrl($sourceUrl)) {
                 $debug?->__invoke('warning', 'Источник пропущен: ссылка ведёт на документ, а не на HTML-карточку товара.');
                 $this->metrics->recordExtraction($sourceUrl, 0, 'non_html');
+
+                continue;
+            }
+
+            $sourceHost = strtolower((string) parse_url($sourceUrl, PHP_URL_HOST));
+
+            // Asking a shop that has just refused twice is not another attempt,
+            // it is the same refusal counted again on their side.
+            if ($this->reputation->isRefusing($sourceUrl)) {
+                $refusal = $this->reputation->refusal($sourceUrl) ?? [];
+                $debug?->__invoke('warning', sprintf(
+                    'Источник пропущен: %s отказал %d раз подряд (%s), даю домену остыть.',
+                    $sourceHost,
+                    (int) ($refusal['count'] ?? 0),
+                    (string) ($refusal['reason'] ?? 'отказ'),
+                ));
+                $this->metrics->recordExtraction($sourceUrl, 0, 'host_refusing');
+
+                continue;
+            }
+
+            $perHost[$sourceHost] = ($perHost[$sourceHost] ?? 0) + 1;
+
+            if ($perHost[$sourceHost] > $perHostCap) {
+                $debug?->__invoke('warning', sprintf(
+                    'Источник пропущен: с %s в этом поиске уже открыто %d страниц, беру другие домены.',
+                    $sourceHost,
+                    $perHostCap,
+                ));
 
                 continue;
             }
@@ -240,7 +277,9 @@ class ProductImageResolver
                     if ($this->looksLikeAccessGate($html)) {
                         $accessGateDetected = true;
                         $failureKind = 'access_gate';
+                        $this->reputation->noteRefusal($sourceUrl, HostReputation::REFUSAL_ACCESS_GATE);
                     } else {
+                        $this->reputation->noteAcceptance($sourceUrl);
                         $identityEvidence = $this->extractPageIdentityEvidence($html, $finalUrl);
                         foreach ($this->extractPageImages($html, $finalUrl) as $imageUrl) {
                             if ($this->isPublicUrl($imageUrl)) {
@@ -259,6 +298,11 @@ class ProductImageResolver
                 }
             } catch (Throwable $exception) {
                 $failureKind = 'http_error';
+                // Seven seconds and zero bytes is not a slow page, it is a host
+                // that took the connection and said nothing. Counting it means
+                // the browser does not go on to spend another thirty seconds
+                // discovering the same thing.
+                $this->reputation->noteRefusal($sourceUrl, HostReputation::REFUSAL_SILENCE);
                 $debug?->__invoke('warning', 'HTML страницы недоступен: '.$exception->getMessage());
                 Log::notice('Product image metadata source was unavailable.', [
                     'host' => parse_url($sourceUrl, PHP_URL_HOST),
