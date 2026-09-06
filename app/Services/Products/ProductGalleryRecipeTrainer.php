@@ -34,7 +34,85 @@ class ProductGalleryRecipeTrainer
         private readonly ProductSourceAttemptRecorder $attempts,
         private readonly ProductSourcePageRules $pageRules,
         private readonly ProductGalleryRecipeRouter $recipeRouter,
+        private readonly ProductImageResolver $resolver,
     ) {}
+
+    /**
+     * What the downloader would make of the frames this round produced.
+     *
+     * Training used to end at "the browser returned these URLs", and the pixels
+     * behind them were only measured afterwards, by a different part of the
+     * search, long after the agent had stopped listening. So a recipe could be
+     * promoted for collecting ten thumbnails - seen live on lenovo.com, where
+     * every URL the gallery exposed was 584px wide against a 700px floor, and
+     * on islandelectricalsupply.com, where eight frames survived the technical
+     * checks and none reached the catalog.
+     *
+     * The frames are fetched here, in the round that produced them, with the
+     * same downloader and the same rules the catalog will apply - so the agent
+     * is told "your selector yields 584x584, find the full-size source" while
+     * it can still act on it.
+     *
+     * @param  array<int, string>  $urls
+     * @param  array<string, mixed>  $context
+     * @return array{measured: int, fetched: int, usable: int, rejected: array<string, int>, samples: array<int, string>}
+     */
+    private function measureDownloadableFrames(array $urls, array $context, string $pageUrl): array
+    {
+        $minimumWidth = (int) ($context['minimum_image_width'] ?? 0) > 0
+            ? (int) $context['minimum_image_width']
+            : $this->settings->imageMinimumWidth();
+        $minimumHeight = ($context['minimum_image_height'] ?? null) === null
+            ? $this->settings->imageMinimumHeight()
+            : max(0, (int) $context['minimum_image_height']);
+        // A sample, not the set: this is diagnosis, and downloading twenty
+        // frames on every round would cost more time than the answer is worth.
+        // Distinct assets only, so five renditions of one photo cannot make a
+        // thumbnail-only recipe look healthy.
+        $sample = collect($urls)
+            ->filter(fn (mixed $url): bool => is_string($url) && filter_var($url, FILTER_VALIDATE_URL) !== false)
+            ->unique(fn (string $url): string => ProductImageStorage::imageAssetKey($url))
+            ->take(self::DOWNLOAD_PROBE_SAMPLE)
+            ->values();
+        $usable = 0;
+        $fetched = 0;
+        $rejected = [];
+        $samples = [];
+
+        foreach ($sample as $url) {
+            $failure = null;
+            $download = $this->resolver->download($url, failureReason: $failure, refererUrl: $pageUrl);
+
+            if ($download === null) {
+                $rejected[$failure ?: 'download_failed'] = ($rejected[$failure ?: 'download_failed'] ?? 0) + 1;
+
+                continue;
+            }
+
+            $fetched++;
+            $width = (int) ($download['width'] ?? 0);
+            $height = (int) ($download['height'] ?? 0);
+            $samples[] = $width.'x'.$height;
+
+            if ($width >= $minimumWidth && ($minimumHeight === 0 || $height >= $minimumHeight)) {
+                $usable++;
+
+                continue;
+            }
+
+            $reason = 'too_small (required width>='.$minimumWidth
+                .($minimumHeight > 0 ? ', height>='.$minimumHeight : ', height=any').')';
+            $rejected[$reason] = ($rejected[$reason] ?? 0) + 1;
+        }
+
+        return [
+            'measured' => $sample->count(),
+            'fetched' => $fetched,
+            'usable' => $usable,
+            'rejected' => $rejected,
+            'samples' => $samples,
+        ];
+    }
 
     public function train(
         string $url,
@@ -790,10 +868,43 @@ class ProductGalleryRecipeTrainer
                     $candidateResult,
                     minimumSuccessCount: $contextMinimum > 0 ? $contextMinimum : null,
                 );
+                // Only worth the bandwidth once the plan itself is sound: a
+                // recipe already going back for structural repair learns
+                // nothing extra from the size of frames it will not keep.
+                $downloadProbe = $validation['passed'] && $candidateImages !== []
+                    ? $this->measureDownloadableFrames($candidateImages, $context, $url)
+                    : null;
+                // A gallery of thumbnails is not a working recipe, however
+                // complete its traversal. Promoting one is how a domain came to
+                // hold a "proven" recipe that had never put a photograph in the
+                // catalog.
+                // Fetched, not merely attempted. A frame that could not be
+                // downloaded at all - DNS, a timeout, a 403 - says nothing about
+                // what the recipe collects, and reading it as "this gallery is
+                // unpublishable" would be exactly the masking of a technical
+                // failure as a verdict that the strategy forbids.
+                $yieldsNothingUsable = $downloadProbe !== null
+                    && $downloadProbe['fetched'] > 0
+                    && $downloadProbe['usable'] === 0;
+
+                if ($yieldsNothingUsable) {
+                    $validation = [
+                        'passed' => false,
+                        'expected' => $validation['expected'],
+                        'extracted' => $validation['extracted'],
+                        'reason' => 'Every measured frame was rejected by the download rules ('
+                            .collect($downloadProbe['rejected'])->map(
+                                fn (int $count, string $reason): string => $reason.' x'.$count,
+                            )->implode('; ').'). Observed sizes: '
+                            .(implode(', ', $downloadProbe['samples']) ?: 'none').'.',
+                    ];
+                }
+
                 $promote = $validation['passed']
                     && (count($oldImages) < 2 || count($candidateImages) >= count($oldImages));
                 $attempts[] = [
                     'attempt' => $attempt,
+                    'download_probe' => $downloadProbe,
                     'selectors_tried' => $candidate,
                     'candidate_count' => count($candidateImages),
                     'validation' => $validation,
@@ -849,6 +960,19 @@ class ProductGalleryRecipeTrainer
                 $feedback = [
                     'rejected_recipe' => $candidate,
                     'candidate_count' => count($candidateImages),
+                    // The pixels behind the URLs this round produced, measured
+                    // by the downloader that decides what the catalog keeps.
+                    // Without it the agent optimised for collecting URLs and
+                    // never learned that a whole gallery of them was too small
+                    // to publish.
+                    'downloaded_frames' => $downloadProbe === null ? null : [
+                        ...$downloadProbe,
+                        'instruction' => $downloadProbe['usable'] === 0 && $downloadProbe['fetched'] > 0
+                            ? 'None of these frames can be published at these sizes. Look for the full-size source '
+                                .'behind the same photographs - a zoom or lightbox control, a data attribute holding '
+                                .'a larger rendition, or a URL parameter the page itself uses for the large view.'
+                            : 'These are the real sizes the downloader measured for the frames you collected.',
+                    ],
                     'previous_working_count' => count($oldImages),
                     'diagnostics' => $candidateResult['diagnostics'] ?? [],
                     'failure_kind' => $stalled ? 'page_stalled' : ($candidateResult['failure_kind'] ?? null),
@@ -1234,6 +1358,13 @@ class ProductGalleryRecipeTrainer
      * fail identically forever, and the agent never even sees it - the call
      * does not reach the model, so there is nobody to reason about it.
      */
+    /**
+     * How many of a round's frames are actually fetched to see what the
+     * downloader makes of them. A sample answers "are these publishable at
+     * all" without paying to download a whole gallery on every round.
+     */
+    private const DOWNLOAD_PROBE_SAMPLE = 4;
+
     private const MAX_IDENTICAL_TECHNICAL_FAILURES = 3;
 
     /**

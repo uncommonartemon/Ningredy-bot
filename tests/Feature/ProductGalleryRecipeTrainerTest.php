@@ -16,6 +16,7 @@ use App\Services\Products\ProductGalleryRecipeTrainer;
 use App\Services\Products\ProductImageResolver;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Http;
 use Laravel\Ai\Responses\Data\ToolCall;
 use Mockery\MockInterface;
 use Tests\TestCase;
@@ -361,6 +362,121 @@ class ProductGalleryRecipeTrainerTest extends TestCase
             $method->invoke($trainer, new \RuntimeException('run 173829911 failed: HTTP 400')),
             $method->invoke($trainer, new \RuntimeException('run 173829977 failed: HTTP 400')),
         );
+    }
+
+    public function test_a_recipe_that_only_yields_thumbnails_is_not_promoted_and_the_agent_is_told_the_sizes(): void
+    {
+        // Live on lenovo.com: the gallery was fully traversable and every URL
+        // it exposed was 584px wide against a 700px floor. Training ended at
+        // "the browser returned these URLs" and the pixels were measured much
+        // later, by a different part of the search, long after the agent had
+        // stopped listening - so a recipe could be promoted for collecting a
+        // gallery of thumbnails that never put a photograph in the catalog.
+        $seen = [];
+        ProductGalleryRecipeTrainerAgent::fake(function (string $prompt) use (&$seen): array {
+            $seen[] = json_decode($prompt, true);
+
+            return $this->workingRecipe();
+        })->preventStrayPrompts();
+        Http::fake([
+            '93.184.216.34/*' => Http::response($this->tinyJpeg(), 200, ['Content-Type' => 'image/jpeg']),
+        ]);
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('scout')->andReturn([
+                'scout' => [
+                    'title' => 'MSI Katana 17 HX',
+                    'fragments' => [],
+                    'interactive_controls' => ['<a href="/Gallery">GALLERY</a>'],
+                    'network_image_samples' => [],
+                    'access_gate' => false,
+                    'rate_limited' => false,
+                ],
+                'diagnostics' => [],
+            ]);
+            // The downloader asks the extractor whether a URL came from a
+            // confirmed gallery; without this the probe fails technically and
+            // proves nothing either way.
+            $mock->shouldReceive('isConfirmedGalleryImage')->andReturn(true);
+            $mock->shouldReceive('isPartialGalleryImage')->andReturn(false);
+            $mock->shouldReceive('executeRecipe')->andReturn([
+                'images' => [
+                    'https://93.184.216.34/one.jpg',
+                    'https://93.184.216.34/two.jpg',
+                    'https://93.184.216.34/three.jpg',
+                ],
+            ]);
+        });
+
+        app(ProductGalleryRecipeTrainer::class)->train(
+            'https://us.msi.com/Laptop/Katana-17-HX-B14WX/Specification',
+            force: true,
+        );
+
+        $recipe = ProductGalleryRecipe::query()->where('domain', 'us.msi.com')->first();
+        $this->assertNotSame(
+            'active',
+            $recipe?->status,
+            'A gallery of thumbnails is not a working recipe, however complete its traversal.',
+        );
+
+        $feedback = collect($seen)->pluck('previous_attempt_feedback')->filter()->values();
+        $this->assertNotEmpty($feedback, 'The next round must be told what the downloader made of these frames.');
+        $measured = $feedback->pluck('downloaded_frames')->filter()->first();
+        $this->assertNotNull($measured);
+        $this->assertSame(0, $measured['usable']);
+        $this->assertGreaterThan(0, $measured['fetched']);
+        $this->assertStringContainsString('full-size source', $measured['instruction']);
+    }
+
+    public function test_frames_that_could_not_be_fetched_at_all_are_not_read_as_a_verdict(): void
+    {
+        // The other half of the rule: DNS, a timeout or a 403 says nothing
+        // about what the recipe collects, and must not become "this gallery is
+        // unpublishable".
+        ProductGalleryRecipeTrainerAgent::fake(fn (): array => $this->workingRecipe())->preventStrayPrompts();
+        Http::fake(['unreachable.example/*' => Http::response('', 403)]);
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('scout')->andReturn([
+                'scout' => [
+                    'title' => 'MSI Katana 17 HX',
+                    'fragments' => [],
+                    'interactive_controls' => ['<a href="/Gallery">GALLERY</a>'],
+                    'network_image_samples' => [],
+                    'access_gate' => false,
+                    'rate_limited' => false,
+                ],
+                'diagnostics' => [],
+            ]);
+            $mock->shouldReceive('executeRecipe')->once()->andReturn([
+                'images' => [
+                    'https://unreachable.example/one.jpg',
+                    'https://unreachable.example/two.jpg',
+                    'https://unreachable.example/three.jpg',
+                ],
+            ]);
+        });
+
+        app(ProductGalleryRecipeTrainer::class)->train(
+            'https://us.msi.com/Laptop/Katana-17-HX-B14WX/Specification',
+            force: true,
+        );
+
+        $this->assertSame(
+            'active',
+            ProductGalleryRecipe::query()->where('domain', 'us.msi.com')->first()?->status,
+        );
+    }
+
+    private function tinyJpeg(): string
+    {
+        // 120x90 - a real photograph, and far under any category floor.
+        $image = imagecreatetruecolor(120, 90);
+        imagefilledrectangle($image, 0, 0, 119, 89, imagecolorallocate($image, 90, 90, 90));
+        ob_start();
+        imagejpeg($image, null, 90);
+        imagedestroy($image);
+
+        return (string) ob_get_clean();
     }
 
     private function workingRecipe(): array
