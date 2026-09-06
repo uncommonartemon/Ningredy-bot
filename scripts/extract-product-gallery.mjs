@@ -19,6 +19,8 @@ import {
     recipeActionShouldStop,
     recipeActionTraversesGallery,
     urlQualityScore,
+    TRAVERSAL_CEILING,
+    TRAVERSAL_PATIENCE,
 } from './product-gallery-utils.mjs';
 
 const sourceUrl = process.argv[2];
@@ -476,7 +478,6 @@ const isTornDownContextError = (error) => /execution context was destroyed|conte
     .test(String(error?.message ?? error ?? ''));
 const readGalleryStateOnce = () => page.evaluate(({
     selectors,
-    expectedFromRecipe,
     excludedContextPatternSource,
 }) => {
     const excludedContextPattern = new RegExp(excludedContextPatternSource.replaceAll('\\\\', '\\'), 'i');
@@ -639,7 +640,10 @@ const readGalleryStateOnce = () => page.evaluate(({
     const observedCount = Math.min(20, Math.max(
         explicitImageCount, thumbnailCount, dataImageCount, declaredImageCount,
     ));
-    const targetCount = Math.min(20, Math.max(observedCount, expectedFromRecipe || 0));
+    // What this page shows, and nothing a recipe remembers about another
+    // product. A stored count raised the bar on a page with fewer photographs
+    // and capped collection on a page with more.
+    const targetCount = Math.min(20, observedCount);
     const signature = JSON.stringify({
         selectorCounts,
         thumbnailCount,
@@ -663,7 +667,6 @@ const readGalleryStateOnce = () => page.evaluate(({
     };
 }, {
     selectors: galleryStateSelectors,
-    expectedFromRecipe: recipeNumber('expected_image_count', 0, 20),
     excludedContextPatternSource: EXCLUDED_GALLERY_CONTEXT_PATTERN_SOURCE,
 });
 const readGalleryState = async () => {
@@ -965,7 +968,18 @@ const collectDomImages = async () => page.evaluate(({
     excludeSelectors: recipeExcludeSelectors,
 });
 
-const collectionTarget = galleryCollectionTarget(limit, recipeNumber('expected_image_count', 0, 20));
+// The only ceiling on collection is the caller's limit. It used to be the
+// smaller of that and the recipe's remembered count, which quietly stopped a
+// twelve-photograph gallery at whatever the training product had.
+// A press that adds no photograph the gallery has not already given is the
+// only honest sign that a slider has been walked to its end.
+const distinctCollectedAssets = () => new Set(
+    gathered
+        .map((url) => normalizeImageCandidate(url, sourceUrl))
+        .filter(Boolean)
+        .map(imageAssetKey),
+).size;
+const collectionTarget = galleryCollectionTarget(limit, 0);
 const enoughCollected = () => new Set(
     gathered
         .map((url) => normalizeImageCandidate(url, sourceUrl))
@@ -1205,7 +1219,7 @@ const attemptExpandedGallery = async (skipExplicitSelectors = false) => {
 
     expandedGalleryAttempted = true;
 
-    if (recipe.gallery_present !== true || recipeNumber('expected_image_count', 0, 20) < 2) {
+    if (recipe.gallery_present !== true) {
         return false;
     }
 
@@ -1746,7 +1760,25 @@ try {
             // already clamps to the last available element, so a multi-element
             // selector still walks its elements while a single control is simply
             // re-pressed.
-            const repetitions = action.kind === 'click' ? 1 : action.limit;
+            // How many controls this page has, asked of this page. A recipe
+            // stores how to open and walk a gallery and nothing about its size:
+            // one laptop has six photographs and the next has twelve, and a
+            // number carried over from training is wrong for every product but
+            // the one it was learned on. It failed both ways - too few and the
+            // gallery was declared broken, too many and the extra photographs
+            // were quietly never collected.
+            //
+            // A strip of thumbnails is walked in full: as many presses as there
+            // are controls. A single control - a next arrow - has no count to
+            // read, so it is re-pressed until it stops yielding anything new,
+            // bounded by the safety ceiling below. limit is that ceiling now,
+            // never a target.
+            const ceiling = Math.max(action.limit, TRAVERSAL_CEILING);
+            let distinctBefore = distinctCollectedAssets();
+            let barrenPresses = 0;
+            const repetitions = action.kind === 'click'
+                ? 1
+                : Math.min(ceiling, matched > 1 ? matched : ceiling);
 
             for (let repetition = 0; repetition < repetitions && !leftProductPage && !outOfTime(); repetition++) {
                 const currentCount = await locator.count().catch(() => 0);
@@ -1863,6 +1895,30 @@ try {
                 await collect();
                 const trace = actionTrace.at(-1) || {};
                 trace.expanded_gallery_visible_after = await expandedGalleryVisible();
+
+                // A single control - a next arrow - has no count to read off the
+                // page, so it is pressed until the gallery stops yielding
+                // photographs it has not already given. That is what ends a
+                // circular slider: one lap round and every frame repeats.
+                //
+                // "Nothing new" cannot be read from the DOM changing, which is
+                // why a trained number was needed before: the active class moves
+                // to the next slide on every press for ever. Distinct collected
+                // assets are the honest signal, and the patience below covers a
+                // slide that legitimately yields nothing - a video, a repeat, a
+                // photograph still loading.
+                if (currentCount <= 1 && action.kind !== 'click') {
+                    const distinctNow = distinctCollectedAssets();
+
+                    if (distinctNow > distinctBefore) {
+                        distinctBefore = distinctNow;
+                        barrenPresses = 0;
+                    } else if (++barrenPresses >= TRAVERSAL_PATIENCE) {
+                        trace.traversal_exhausted = true;
+
+                        break;
+                    }
+                }
 
                 if (clicked && ['click', 'click_each'].includes(action.kind) && action.after_each_selector) {
                     const followupLocator = page.locator(action.after_each_selector);
@@ -2063,12 +2119,10 @@ const requestedImages = networkImages.map(normalize).filter(Boolean).filter(phot
 const embeddedImages = payloadImages.map(normalize).filter(Boolean).filter(photoOnly);
 const allCandidates = [...new Set([...domImages, ...embeddedImages, ...requestedImages])];
 const actionPlanStatus = recipeActionPlanStatus({ actions: recipeActions, actionTrace });
-const expectedGalleryCount = recipeNumber('expected_image_count', 0, 20);
 const distinctDomAssetCount = new Set(domImages.map(imageAssetKey)).size;
 const structurallyCompletedRecipe = strictRecipe
     && recipe.gallery_present === true
-    && expectedGalleryCount >= 2
-    && distinctDomAssetCount >= expectedGalleryCount
+    && distinctDomAssetCount >= 2
     && actionPlanStatus.required === true
     && actionPlanStatus.complete === true;
 const galleryGoalReached = structurallyCompletedRecipe;

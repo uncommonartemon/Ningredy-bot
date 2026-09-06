@@ -44,6 +44,18 @@ export const galleryContextLooksExcluded = (signal) => new RegExp(
 // same way on both sides.
 const AFTER_EACH_LIMIT_CEILING = 20;
 
+// Safety ceilings, never targets. A recipe says how to walk a gallery and
+// nothing about its size, so traversal ends when the gallery stops yielding
+// new photographs; these only stop a page that would otherwise spin for ever.
+// Hitting one means the result is incomplete, not that it is finished.
+export const TRAVERSAL_CEILING = 40;
+
+// Presses in a row that add no photograph before a single control is called
+// exhausted. More than one because a slide can legitimately give nothing: a
+// video, a repeated frame, an image still loading.
+export const TRAVERSAL_PATIENCE = 3;
+
+
 const PRODUCT_SECTION_SEGMENT = /^(?:sp|specification|specifications|specs|overview|details|features|gallery|media|images?|photos?|product-images?|product-media)$/i;
 const GALLERY_SECTION_SEGMENT = /^(?:gallery|media|images?|photos?|product-images?|product-media)$/i;
 

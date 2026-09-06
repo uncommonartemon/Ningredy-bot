@@ -289,15 +289,21 @@ class ProductGalleryRecipeResultValidator
                 // one-click traversal "complete" while the recipe's own declared
                 // frames were still unreached (seen live on a B&H modal recipe:
                 // 4 declared frames, 1 arrow press, validation passed).
-                $requiredClicks = $selectorMatches > 1
-                    ? min($limit, $selectorMatches)
-                    : $limit;
+                // Every control the page shows is owed a press. min($limit, ...)
+                // asked for as many as the recipe was trained with instead: a
+                // strip of twelve thumbnails was walked seven times because the
+                // product it learned on had seven, and the five photographs
+                // behind the rest were never collected - silently, since seven
+                // of seven read as complete.
+                $requiredClicks = $selectorMatches > 1 ? $selectorMatches : $limit;
                 $completedClicks = $completedTrace->count();
                 // The same single control legitimately runs out of frames before
-                // its limit; an unchanged press is that exhaustion, exactly as
+                // its limit; an unchanged press or the runner reporting the
+                // traversal exhausted is that end, exactly as
                 // click_until_no_change treats it below.
                 $exhausted = $selectorMatches <= 1 && $completedTrace->contains(
-                    fn (array $item): bool => ($item['changed'] ?? null) === false,
+                    fn (array $item): bool => ($item['changed'] ?? null) === false
+                        || ($item['traversal_exhausted'] ?? false) === true,
                 );
 
                 if (! $exhausted && $completedClicks < $requiredClicks) {

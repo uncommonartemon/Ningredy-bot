@@ -10,6 +10,85 @@ class ProductGalleryRecipeResultValidatorTest extends TestCase
 {
     use RefreshDatabase;
 
+    public function test_every_thumbnail_this_page_shows_is_owed_a_press(): void
+    {
+        // The silent half of the same bug. A recipe trained where the gallery
+        // had seven thumbnails asked for seven presses on a page showing
+        // twelve, collected seven photographs, and reported a complete
+        // traversal - the five behind the remaining thumbnails were never
+        // reached and nothing said so.
+        $trace = collect(range(0, 6))
+            ->map(fn (int $repetition): array => [
+                'action' => 'click_each',
+                'action_index' => 0,
+                'clicked' => true,
+                'changed' => true,
+                'repetition' => $repetition,
+                'selector_match_count' => 12,
+            ])
+            ->all();
+
+        $result = app(ProductGalleryRecipeResultValidator::class)->validate(
+            [
+                'gallery_present' => true,
+                'content_confirmed_product' => true,
+                'expected_image_count' => 7,
+                'actions' => [[
+                    'kind' => 'click_each',
+                    'when' => 'always',
+                    'selector' => '.gallery .thumb',
+                    'index' => 0,
+                    'limit' => 7,
+                    'purpose' => 'walk the thumbnails',
+                ]],
+            ],
+            [
+                'images' => $this->images(7),
+                'diagnostics' => ['observed_gallery_count' => 12, 'distinct_dom_assets' => 12],
+                'action_trace' => $trace,
+            ],
+            countedOnThisPage: false,
+        );
+
+        $this->assertFalse($result['passed']);
+        $this->assertStringContainsString('7 of 12', $result['reason']);
+    }
+
+    public function test_a_traversal_the_runner_reports_exhausted_is_finished(): void
+    {
+        // A single next arrow has no count to read off the page, so the runner
+        // presses it until the gallery stops giving photographs it has not
+        // already given - one lap of a circular slider. That end is reported,
+        // and it must not read as an unfinished plan.
+        $result = app(ProductGalleryRecipeResultValidator::class)->validate(
+            [
+                'gallery_present' => true,
+                'content_confirmed_product' => true,
+                'actions' => [[
+                    'kind' => 'click_each',
+                    'when' => 'always',
+                    'selector' => '.gallery .next',
+                    'index' => 0,
+                    'limit' => 40,
+                    'purpose' => 'advance to the next photo',
+                ]],
+            ],
+            [
+                'images' => $this->images(5),
+                'diagnostics' => ['observed_gallery_count' => 5, 'distinct_dom_assets' => 5],
+                'action_trace' => [
+                    ['action' => 'click_each', 'action_index' => 0, 'clicked' => true, 'changed' => true, 'selector_match_count' => 1],
+                    ['action' => 'click_each', 'action_index' => 0, 'clicked' => true, 'changed' => true, 'selector_match_count' => 1],
+                    ['action' => 'click_each', 'action_index' => 0, 'clicked' => true, 'changed' => true, 'selector_match_count' => 1],
+                    ['action' => 'click_each', 'action_index' => 0, 'clicked' => true, 'changed' => true, 'selector_match_count' => 1, 'traversal_exhausted' => true],
+                ],
+            ],
+            countedOnThisPage: false,
+        );
+
+        $this->assertTrue($result['passed'], $result['reason']);
+    }
+
     public function test_a_reused_recipe_is_not_held_to_the_photo_count_of_another_product(): void
     {
         // Live, 2026-09-05, cdw.com: the stored recipe opened the page, walked
