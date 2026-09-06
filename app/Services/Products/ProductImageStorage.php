@@ -214,6 +214,17 @@ class ProductImageStorage
 
         $target = $this->targetDraftImageCount($draft);
         $minimumCompleteGallerySize = min($this->minimumVerifiedImages($draft), $target);
+
+        // A source whose content check could not run keeps its photographs and
+        // marks them pending. Continuing the search used to begin that source
+        // again from the top - open the page, run the recipe, download every
+        // frame - to arrive back at the one step that had actually failed. The
+        // frames are already on disk; what is missing is the verdict on them.
+        $resumed = $this->resumeInterruptedVerification($draft, $minimumCompleteGallerySize, $telegramUpdateId, $progress);
+
+        if ($resumed !== null) {
+            return $resumed;
+        }
         $gallerySearchStrategy = $this->gallerySearchStrategy($draft);
         $activeRecipeOnly = $gallerySearchStrategy === Category::GALLERY_SEARCH_VISION_FIRST;
         $progress?->__invoke(match ($gallerySearchStrategy) {
@@ -1540,6 +1551,84 @@ class ProductImageStorage
             $method,
             $notes,
         );
+    }
+
+    /**
+     * Finish a verification that was interrupted rather than repeating the
+     * search that produced it.
+     *
+     * Returns the number of photographs the draft now holds when the check
+     * completed and the gallery is done, and null when there was nothing to
+     * resume or the answer still is not available - in which case the ordinary
+     * search runs exactly as before.
+     */
+    private function resumeInterruptedVerification(
+        ProductDraft $draft,
+        int $minimumCompleteGallerySize,
+        ?int $telegramUpdateId,
+        ?callable $progress,
+    ): ?int {
+        $pending = $draft->media()->where('verification_status', 'pending')->get();
+
+        if ($pending->isEmpty() || $pending->count() < $minimumCompleteGallerySize) {
+            return null;
+        }
+
+        $candidates = [];
+
+        foreach ($pending as $media) {
+            $bytes = rescue(fn (): string|false => Storage::disk($media->disk)->get($media->path), false, false);
+            $image = is_string($bytes) && $bytes !== '' ? @imagecreatefromstring($bytes) : false;
+
+            if (! $image instanceof GdImage) {
+                // A frame whose file is gone cannot be verified from here, and
+                // guessing about the rest of a set is not verification.
+                $this->destroy($candidates);
+
+                return null;
+            }
+
+            $candidates[] = [
+                'image' => $image,
+                'source_url' => $media->source_url,
+                'media_id' => $media->id,
+                'confirmed_gallery' => true,
+            ];
+        }
+
+        $progress?->__invoke('Возобновляю прерванную проверку уже скачанных фото: '.count($candidates).' шт.');
+        $checked = $this->languageCheckedFrames(
+            $candidates,
+            $draft,
+            $telegramUpdateId,
+            $minimumCompleteGallerySize,
+            $progress,
+        );
+        $this->destroy($candidates);
+
+        if ($checked === null || count($checked) < $minimumCompleteGallerySize) {
+            // Still no verdict, or too few frames survived one. Either way the
+            // frames stay pending and the ordinary search carries on - this was
+            // an attempt to save it a lap, not a replacement for it.
+            return null;
+        }
+
+        $keptIds = collect($checked)->pluck('media_id')->filter()->all();
+        $draft->media()->whereIn('id', $keptIds)->update([
+            'verification_status' => 'source_verified',
+            'verification_notes' => 'Проверка содержания завершена при продолжении поиска.',
+        ]);
+        $draft->media()->whereNotIn('id', $keptIds)->where('verification_status', 'pending')->get()
+            ->each(fn ($media) => $media->delete());
+        $stored = $draft->media()->count();
+        $draft->update([
+            'gallery_status' => $stored >= $minimumCompleteGallerySize ? 'complete' : 'partial',
+            'gallery_search_stop_reason' => $stored >= $minimumCompleteGallerySize ? null : 'exhausted',
+            'images_staged_at' => now(),
+        ]);
+        $progress?->__invoke('Проверка завершена без повторного поиска: '.$stored.' фото подтверждено.');
+
+        return $stored;
     }
 
     private function languageCheckedFrames(

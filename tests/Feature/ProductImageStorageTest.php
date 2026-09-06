@@ -2336,6 +2336,41 @@ class ProductImageStorageTest extends TestCase
         );
     }
 
+    public function test_a_continuation_finishes_the_interrupted_check_instead_of_searching_again(): void
+    {
+        // The frames were downloaded, the content check timed out, and they
+        // were kept pending. Continuing used to begin the whole source again -
+        // open the page, run the recipe, download every frame - to arrive back
+        // at the one step that had actually failed. The photographs are already
+        // on disk; what is missing is the verdict on them.
+        GalleryTextLanguageAgent::fake(function (): array {
+            throw new RuntimeException('vision timed out');
+        });
+
+        $draft = $this->confirmedGalleryDraft();
+        app(ProductImageStorage::class)->stage($draft->fresh());
+
+        $pending = $draft->fresh()->media;
+        $this->assertGreaterThanOrEqual(3, $pending->count());
+        $this->assertTrue($pending->every(fn ($media): bool => $media->verification_status === 'pending'));
+
+        // The continuation: the check can run now, and nothing else may be
+        // needed - no browser, no downloads, no sources.
+        GalleryTextLanguageAgent::fake(fn (): array => ['foreign_text_frames' => [], 'reason' => 'Чисто.']);
+        $browser = $this->mock(BrowserProductGalleryExtractor::class);
+        $browser->shouldNotReceive('extract');
+        $browser->shouldNotReceive('executeRecipe');
+
+        $stored = app(ProductImageStorage::class)->stage($draft->fresh());
+
+        $this->assertSame($pending->count(), $stored);
+        $this->assertSame('complete', $draft->fresh()->gallery_status);
+        $this->assertTrue(
+            $draft->fresh()->media->every(fn ($media): bool => $media->verification_status === 'source_verified'),
+            'The frames that were waiting for a verdict now have one.',
+        );
+    }
+
     public function test_the_maximum_is_applied_after_the_language_rule_not_before(): void
     {
         // Cutting to the maximum first and removing frames afterwards threw
