@@ -88,6 +88,23 @@ if ($LASTEXITCODE -eq 2) {
     )
 }
 
+# Everything still queued belongs to the previous run: this window is the only
+# way the bot is stopped, so those jobs were killed rather than finished, and
+# starting fresh workers on them replays yesterday's requests.
+#
+# This runs BEFORE the checks, and the order is the whole point. It used to run
+# after, and the two lines deadlocked the launcher: a job left by the previous
+# run is by definition unattended, the queue check calls an unattended job a
+# failure and says to start a worker, and the launcher refuses to start the
+# worker that would have drained it. The bot could not be started by the one
+# thing that starts it. Clearing first means the check sees the queue the
+# workers are actually about to be given.
+#
+# It is safe here: bot:clear-stale refuses to touch anything if it finds signs
+# of a bot already working, so a wedged worker still reaches the check and is
+# still reported.
+& php artisan bot:clear-stale *> $null
+
 Write-Host '  Проверяю компьютер...' -ForegroundColor DarkGray
 Write-Host ''
 
@@ -100,11 +117,6 @@ if ($LASTEXITCODE -ne 0) {
         'Смотрите строки FAIL выше - в каждой написано, что сделать.'
     )
 }
-
-# Everything still queued belongs to the previous run: this window is the only
-# way the bot is stopped, so those jobs were killed rather than finished, and
-# starting fresh workers on them replays yesterday's requests.
-& php artisan bot:clear-stale *> $null
 
 Write-Host ''
 Write-Host '  ============================================' -ForegroundColor DarkGray

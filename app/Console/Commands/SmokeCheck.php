@@ -287,13 +287,21 @@ class SmokeCheck extends Command
             // nothing is draining it, which is what an old job at the head of
             // the queue means. This is the shape of "they forgot to start the
             // worker", the single most common way a handover looks broken.
+            //
+            // Both remedies are named, because which one applies depends on
+            // something this check cannot see. If the bot is meant to be
+            // running, the worker is missing. If it is not - the window was
+            // closed and this is the wreckage of that run - the job is not
+            // waiting for anything and wants clearing. The launcher takes the
+            // second path itself before it ever gets here.
             if ($connection === 'database') {
                 $oldest = DB::table('jobs')->where('queue', 'assistant')->min('created_at');
 
                 if ($oldest !== null && (time() - (int) $oldest) > 600) {
                     throw new \RuntimeException(
                         'The oldest job on the assistant queue has been waiting over 10 minutes. '
-                        .'Is a queue worker running? Start it with: php artisan queue:work --queue=assistant,default',
+                        .'If the bot is running, its worker is not: php artisan queue:work --queue=assistant,default. '
+                        .'If it is not running, this is left over from the last run: php artisan bot:clear-stale',
                     );
                 }
             }
