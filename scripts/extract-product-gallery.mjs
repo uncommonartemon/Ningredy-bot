@@ -22,6 +22,7 @@ import {
     urlQualityScore,
     TRAVERSAL_CEILING,
     TRAVERSAL_PATIENCE,
+    traversalCeiling,
 } from './product-gallery-utils.mjs';
 
 const sourceUrl = process.argv[2];
@@ -2098,7 +2099,7 @@ try {
 
                 if (clicked && ['click', 'click_each'].includes(action.kind) && action.after_each_selector) {
                     const followupLocator = page.locator(action.after_each_selector);
-                    const followupLimit = Math.max(1, action.after_each_limit || 1);
+                    const followupLimit = Math.max(1, traversalCeiling(action.after_each_limit, 1));
 
                     for (let followupRepetition = 0; followupRepetition < followupLimit && !leftProductPage && !outOfTime(); followupRepetition++) {
                         const followupCount = await followupLocator.count().catch(() => 0);
@@ -2195,7 +2196,7 @@ try {
         await collect();
         const thumbnails = thumbnailSelectors.length ? page.locator(thumbnailSelectors.join(',')) : null;
     const thumbnailCount = thumbnails
-        ? Math.min(await thumbnails.count(), recipeNumber('max_thumbnail_clicks', 20, 20))
+        ? Math.min(await thumbnails.count(), traversalCeiling(recipe.max_thumbnail_clicks, 20))
         : 0;
 
     let thumbnailClicks = 0;
@@ -2215,7 +2216,7 @@ try {
     const seenNextSignatures = new Set([await collectionSignature()]);
 
     if (nextButtons && await nextButtons.count()) {
-        for (let index = 0; index < recipeNumber('max_next_clicks', 15, 15) && !leftProductPage && !outOfTime(); index++) {
+        for (let index = 0; index < traversalCeiling(recipe.max_next_clicks, 15) && !leftProductPage && !outOfTime(); index++) {
             const clicked = await clickAndWaitForGalleryChange(nextButtons.first(), {
                 phase: 'next',
                 selector: nextSelectors.join(','),

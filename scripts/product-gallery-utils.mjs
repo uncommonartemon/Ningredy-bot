@@ -50,6 +50,26 @@ const AFTER_EACH_LIMIT_CEILING = 20;
 // Hitting one means the result is incomplete, not that it is finished.
 export const TRAVERSAL_CEILING = 40;
 
+/**
+ * A number learned during training is a floor for safety, never a target.
+ *
+ * Three of them still worked as targets: a recipe trained on a laptop with
+ * seven photographs capped the next laptop's thirteen-thumbnail strip at seven,
+ * stopped its carousel seven presses in, and cut short a zoom ladder the page
+ * was still climbing - the last of which the runner already noticed and
+ * recorded as after_each_truncated before stopping anyway.
+ *
+ * Zero keeps its meaning: the agent saying a control should not be used at all
+ * is structural, not a count. Anything above zero means "at least this many",
+ * and what stops the walk is running out of controls or the page ceasing to
+ * change.
+ */
+export const traversalCeiling = (declared, fallback = TRAVERSAL_CEILING) => {
+    const value = Number.isInteger(declared) ? declared : fallback;
+
+    return value <= 0 ? 0 : Math.max(value, TRAVERSAL_CEILING);
+};
+
 // Presses in a row that add no photograph before a single control is called
 // exhausted. More than one because a slide can legitimately give nothing: a
 // video, a repeated frame, an image still loading.
