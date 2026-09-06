@@ -54,6 +54,7 @@ class AiSettingsPage extends Page implements HasForms
             'gallery_browser_mode' => $settings->galleryBrowserMode(),
             'fallback_sources_enabled' => $settings->fallbackSourcesEnabled(),
             'gallery_prefer_playwright_first' => $settings->galleryPreferPlaywrightFirst(),
+            'browser_headless' => $settings->browserHeadless(),
             'gallery_agent_write_tools_enabled' => $settings->galleryAgentWriteToolsEnabled(),
             'product_search_country' => $settings->productSearchCountry(),
             'source_identity_agent_enabled' => $settings->sourceIdentityAgentEnabled(),
@@ -149,6 +150,11 @@ class AiSettingsPage extends Page implements HasForms
                                         Toggle::make('gallery_prefer_playwright_first')
                                             ->label('Обучать Playwright даже когда статики "достаточно"')
                                             ->helperText('Оценка предфильтра по количеству фото (например "8") может быть завышена миниатюрами/повторами. Включено (по умолчанию) — при найденной галерее рецепт всё равно обучается и результат проверяется Vision, а не только оценкой. Медленнее и дороже за поиск, зато рецепт сохраняется для повторного использования.')
+                                            ->default(true)
+                                            ->inline(false),
+                                        Toggle::make('browser_headless')
+                                            ->label('Скрытый браузер (без окна)')
+                                            ->helperText('Включено — браузер работает без окна. Быстрее и не мешает, но магазины это видят: у скрытого браузера нет окна, нет плагинов и другой путь отрисовки, и защита читает это со страницы. Выключите, если домен встречает капчей - видимое окно проходит заметно чаще. Окно при этом уводится за пределы экрана и поверх работы не появляется.')
                                             ->default(true)
                                             ->inline(false),
                                         Toggle::make('gallery_agent_write_tools_enabled')
@@ -374,6 +380,7 @@ class AiSettingsPage extends Page implements HasForms
         $settings->saveGalleryBrowserMode($data['gallery_browser_mode'] ?? null);
         $settings->saveFallbackSourcesEnabled((bool) ($data['fallback_sources_enabled'] ?? false));
         $settings->saveGalleryPreferPlaywrightFirst((bool) ($data['gallery_prefer_playwright_first'] ?? false));
+        $settings->saveBrowserHeadless((bool) ($data['browser_headless'] ?? true));
         $settings->saveGalleryAgentWriteToolsEnabled((bool) ($data['gallery_agent_write_tools_enabled'] ?? false));
         $settings->saveProductSearchCountry($data['product_search_country'] ?? null);
         $settings->saveSourceIdentityAgentEnabled((bool) ($data['source_identity_agent_enabled'] ?? false));

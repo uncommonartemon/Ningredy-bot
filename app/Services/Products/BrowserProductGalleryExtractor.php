@@ -282,6 +282,40 @@ class BrowserProductGalleryExtractor
      * is small enough to be invisible against a browser run that takes tens of
      * seconds anyway.
      */
+    /**
+     * Where a host is remembered as having pushed back.
+     *
+     * Set from the browser's own reading of the page it was served - a robot
+     * check, a security wall, a 403 - and read by pauseBetweenVisits() to slow
+     * down that host alone.
+     */
+    private static function challengedHostKey(string $host): string
+    {
+        return 'gallery-browser-challenged:'.$host;
+    }
+
+    /**
+     * @param  array<string, mixed>  $scout
+     */
+    private function rememberAccessChallenge(string $url, array $scout): void
+    {
+        if (($scout['access_gate'] ?? false) !== true) {
+            return;
+        }
+
+        $host = strtolower((string) parse_url($url, PHP_URL_HOST));
+
+        if ($host === '') {
+            return;
+        }
+
+        Cache::put(
+            self::challengedHostKey($host),
+            (string) ($scout['access_gate_reason'] ?? 'access_gate'),
+            now()->addHours((int) config('product-images.browser_fallback.challenged_host_memory_hours', 6)),
+        );
+    }
+
     private function pauseBetweenVisits(string $url): void
     {
         $host = strtolower((string) parse_url($url, PHP_URL_HOST));
@@ -290,7 +324,23 @@ class BrowserProductGalleryExtractor
             return;
         }
 
+        // Slowing every shop down to protect against the few that push back is
+        // the wrong trade: one training makes five to eight visits to the same
+        // host, so a twenty-second spacing would spend two minutes waiting on
+        // every domain, most of which never object to anything.
+        //
+        // So the pace is ordinary until a host actually objects. Once one has
+        // shown a robot check, a WAF or a 403, visits to it are spaced out for
+        // the next few hours - that is where the cost buys something.
         $spacing = max(0.0, (float) config('product-images.browser_fallback.host_visit_spacing_seconds', 4));
+
+        if (Cache::get(self::challengedHostKey($host))) {
+            $spacing = max($spacing, (float) config('product-images.browser_fallback.challenged_host_spacing_seconds', 25));
+        }
+
+        // A visit exactly every four seconds is its own pattern. The jitter is
+        // small and one-sided: it only ever waits longer, never less.
+        $spacing += $spacing > 0 ? random_int(0, 40) / 10 : 0;
         $key = 'gallery-browser-last-visit:'.$host;
         $previous = (float) (Cache::get($key) ?? 0);
         $wait = $spacing - (microtime(true) - $previous);
@@ -519,6 +569,8 @@ class BrowserProductGalleryExtractor
                 'PRODUCT_GALLERY_DEADLINE_MS' => (string) max(10000, ($timeoutSeconds - 12) * 1000),
                 'PRODUCT_GALLERY_TRANSFER_DIR' => $transferDirectory,
                 'PRODUCT_IMAGE_DISABLE_HTTP2' => $withoutHttp2 ? 'true' : 'false',
+                // The panel decides, not the shell the worker happened to start in.
+                'PRODUCT_IMAGE_BROWSER_HEADLESS' => $this->settings->browserHeadless() ? 'true' : 'false',
             ]);
             $process->setTimeout((float) $timeoutSeconds);
             $process->run();
@@ -587,6 +639,11 @@ class BrowserProductGalleryExtractor
                     'Playwright открыл увеличенный viewer и собирает полноразмерные кадры внутри него.',
                 );
             }
+
+            // Read from the page the browser was actually served, so a shop
+            // that showed a robot check is slowed down before the next visit
+            // rather than after the third one draws another.
+            $this->rememberAccessChallenge($url, is_array($result['scout'] ?? null) ? $result['scout'] : []);
 
             return $result;
         } catch (ProcessTimedOutException $exception) {

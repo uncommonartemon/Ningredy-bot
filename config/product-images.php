@@ -24,6 +24,11 @@ return [
     // catalog would have kept. Holding originals instead emptied the budget
     // above three frames into a gallery of large photographs.
     'working_edge' => 1600,
+    // The largest frame worth decoding at all. Frames are shrunk to the edge
+    // above the moment they are decoded, so the full bitmap exists for an
+    // instant rather than for the length of a gallery - which is what makes a
+    // ceiling this high safe. Real shops serve 5000x5000 renders.
+    'decode_pixel_ceiling' => 40_000_000,
     // Width and height are checked independently so useful wide product shots
     // are not reduced to one ambiguous "minimum side" setting.
     'minimum_width' => (int) env('PRODUCT_IMAGE_MINIMUM_WIDTH', 700),
@@ -139,6 +144,12 @@ return [
         // opens one page once per round, so without this a shop receives four
         // or five visits inside a couple of minutes.
         'host_visit_spacing_seconds' => (float) env('PRODUCT_IMAGE_BROWSER_HOST_SPACING_SECONDS', 4),
+        // Applied only to a host that has actually shown a robot check, a WAF or
+        // a 403. One training makes five to eight visits to the same host, so
+        // spacing every shop like this would spend minutes waiting on domains
+        // that never objected to anything.
+        'challenged_host_spacing_seconds' => (float) env('PRODUCT_IMAGE_BROWSER_CHALLENGED_SPACING_SECONDS', 25),
+        'challenged_host_memory_hours' => (int) env('PRODUCT_IMAGE_BROWSER_CHALLENGED_MEMORY_HOURS', 6),
         'training_max_rounds' => (int) env('PRODUCT_IMAGE_GALLERY_TRAINING_MAX_ROUNDS', 3),
         'timeout' => 45,
         'scout_timeout' => 60,

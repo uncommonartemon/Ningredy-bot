@@ -19,9 +19,20 @@ class ProductImageEncoder
      * catalog output is capped at 1600px anyway, so nothing this large is
      * ever needed.
      */
+    /**
+     * Whether a frame can be decoded without putting the process at risk.
+     *
+     * Raised from twenty million once frames stopped being held at their
+     * original size: they are shrunk to the storage edge immediately after
+     * decoding, so the full bitmap exists for a moment rather than for the
+     * length of a gallery. Forty million covers the 5000x5000 renders real
+     * shops serve - Dell turned one away as unsafe while the rest of its
+     * gallery was fine - and still costs about 160 MB at the peak, inside the
+     * 512 MB the worker runs with.
+     */
     public function isSafeToDecode(int $width, int $height): bool
     {
-        return $width * $height <= 20_000_000;
+        return $width * $height <= (int) config('product-images.decode_pixel_ceiling', 40_000_000);
     }
 
     /** @return array{bytes: string, width: int, height: int} */

@@ -266,6 +266,29 @@ class AiSettings
         AppSetting::put('ai.gallery_prefer_playwright_first', $enabled ? '1' : '0');
     }
 
+    /**
+     * Whether the browser runs without a window.
+     *
+     * A visible browser is harder for a shop to detect - headless has no
+     * window, no plugins and a different rendering path, and that is readable
+     * from the page - so this is a real trade rather than a preference. It
+     * lives in the panel because it is the kind of thing an operator wants to
+     * flip while watching a domain misbehave, not something to redeploy for.
+     */
+    public function browserHeadless(): bool
+    {
+        $value = AppSetting::valueFor('ai.browser_headless');
+
+        return $value === null
+            ? true
+            : filter_var($value, FILTER_VALIDATE_BOOLEAN);
+    }
+
+    public function saveBrowserHeadless(bool $headless): void
+    {
+        AppSetting::put('ai.browser_headless', $headless ? '1' : '0');
+    }
+
     public function searchMaxSeconds(): int
     {
         return $this->integerSetting(
