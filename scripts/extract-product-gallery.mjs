@@ -1,7 +1,7 @@
 import dns from 'node:dns/promises';
 import net from 'node:net';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { chromium } from 'playwright-core';
 import {
@@ -183,6 +183,41 @@ let launchedChannel = null;
 // the reason challenges appeared. Connecting keeps one window open across every
 // round instead. A shared browser must never be closed by whoever borrowed it.
 let sharedBrowser = false;
+// Whether this run got a real profile directory rather than a fresh browser
+// handed some cookies. Reported in the result so a session that fell back to a
+// throwaway context is visible rather than assumed.
+let usingProfile = false;
+
+// A profile is a real Chromium directory - around 30 MB with its cache - and a
+// catalog that learns a hundred shops would quietly take three gigabytes. The
+// least recently used ones go: a shop not visited in weeks has a stale cache
+// anyway, and losing it costs one ordinary first visit.
+const PROFILE_LIMIT = 40;
+
+const pruneOldBrowserProfiles = async (root, keepDirectory) => {
+    try {
+        const entries = await readdir(root, { withFileTypes: true });
+        const directories = entries.filter((entry) => entry.isDirectory());
+
+        if (directories.length <= PROFILE_LIMIT) {
+            return;
+        }
+
+        const dated = await Promise.all(directories.map(async (entry) => {
+            const path = join(root, entry.name);
+
+            return { path, at: (await stat(path).catch(() => null))?.mtimeMs || 0 };
+        }));
+
+        await Promise.all(dated
+            .filter((entry) => entry.path !== keepDirectory)
+            .sort((left, right) => left.at - right.at)
+            .slice(0, Math.max(0, dated.length - PROFILE_LIMIT))
+            .map((entry) => rm(entry.path, { recursive: true, force: true }).catch(() => {})));
+    } catch {
+        // Pruning is housekeeping: never let it stop an extraction.
+    }
+};
 
 // Off unless asked for. Measured on 2026-09-04: with the shared browser every
 // extraction ran past the 120s process timeout - five sources in one search,
@@ -208,10 +243,13 @@ try {
 for (const channel of browser ? [] : [process.env.PRODUCT_IMAGE_BROWSER_CHANNEL || 'msedge', 'chrome', null]) {
     try {
         browser = await chromium.launch({
-            // Headless is detectable at the browser level regardless of what the
-            // headers claim, so a machine with a display can trade visibility
-            // for reach on WAF-protected sites.
-            headless: process.env.PRODUCT_IMAGE_BROWSER_HEADLESS !== 'false',
+            // Visible by default. Headless is detectable at the browser level
+            // whatever the headers claim - it has no window, no plugins, a
+            // different WebGL path and a dozen other tells - and the machine
+            // this runs on has a display. A server without one must set
+            // PRODUCT_IMAGE_BROWSER_HEADLESS=true, which is why the variable
+            // stays.
+            headless: process.env.PRODUCT_IMAGE_BROWSER_HEADLESS === 'true',
             // Some servers negotiate HTTP/2 and then break the stream, and
             // Chromium reports ERR_HTTP2_PROTOCOL_ERROR without ever showing a
             // page - a whole manufacturer lost three seconds into training,
@@ -268,12 +306,62 @@ const sessionFile = (() => {
     }
 })();
 const savedSession = sessionFile && existsSync(sessionFile) ? sessionFile : undefined;
-const context = await browser.newContext({
+const contextOptions = {
     viewport: { width: 1440, height: 1100 },
     locale: 'en-US',
     // A locale without a matching timezone is its own small inconsistency.
     timezoneId: process.env.PRODUCT_IMAGE_BROWSER_TIMEZONE || 'America/New_York',
     ...(overrideUserAgent ? { userAgent: overrideUserAgent } : {}),
+};
+
+// A profile directory rather than a fresh browser handed some cookies.
+//
+// The session file made the second visit a returning visitor, but everything
+// else about the browser was still newborn: no cache, no history, no local
+// state, a fresh fingerprint each time. A profile is what an ordinary browser
+// actually has, and it is what a shop looking at behaviour rather than at the
+// address is reading.
+//
+// One profile per host, never shared between domains - the same isolation the
+// session file had. Chromium locks a profile while it is open, so a second
+// extraction on the same host at the same time cannot have it; that falls back
+// to the ordinary context, which is exactly what ran before this existed.
+const profileDirectory = (() => {
+    try {
+        const host = new URL(sourceUrl).hostname.replace(/[^a-z0-9.-]/gi, '');
+
+        return host ? join(process.cwd(), 'storage', 'app', 'browser-profiles', host) : null;
+    } catch {
+        return null;
+    }
+})();
+let context = null;
+
+if (profileDirectory && !sharedBrowser && process.env.PRODUCT_IMAGE_BROWSER_PROFILE !== 'false') {
+    try {
+        await mkdir(profileDirectory, { recursive: true });
+        await pruneOldBrowserProfiles(dirname(profileDirectory), profileDirectory);
+        context = await chromium.launchPersistentContext(profileDirectory, {
+            ...contextOptions,
+            headless: process.env.PRODUCT_IMAGE_BROWSER_HEADLESS === 'true',
+            args: [
+                '--disable-blink-features=AutomationControlled',
+                ...(process.env.PRODUCT_IMAGE_DISABLE_HTTP2 === 'true' ? ['--disable-http2'] : []),
+            ],
+            ...(launchedChannel ? { channel: launchedChannel } : {}),
+        });
+        await browser.close().catch(() => {});
+        browser = context.browser() || browser;
+        usingProfile = true;
+    } catch {
+        // Locked by another extraction, or unusable: the ordinary context below
+        // is the behaviour that shipped before profiles existed.
+        context = null;
+    }
+}
+
+context ??= await browser.newContext({
+    ...contextOptions,
     ...(savedSession ? { storageState: savedSession } : {}),
 });
 await context.addInitScript(() => {
@@ -2286,7 +2374,10 @@ if (!scoutOnly && transferDirectory !== '') {
 }
 // Saved before closing, and never allowed to fail the run: a session that
 // cannot be written only costs the next visit its continuity.
-if (sessionFile) {
+// A profile keeps its own cookies on disk, so the session file is only for the
+// runs that fell back to a throwaway context - writing it from a profile run
+// would keep a second, staler copy of the same state.
+if (sessionFile && !usingProfile) {
     try {
         await mkdir(dirname(sessionFile), { recursive: true });
         await context.storageState({ path: sessionFile });

@@ -49,3 +49,4 @@ Thumbs.db
 
 # Browser sessions kept per host so a second visit is not another stranger.
 storage/app/browser-sessions/
+storage/app/browser-profiles/
