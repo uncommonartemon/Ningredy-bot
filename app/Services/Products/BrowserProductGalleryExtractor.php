@@ -202,12 +202,22 @@ class BrowserProductGalleryExtractor
             }
             $previousRecipeImages = $compatibleAttempt['images'];
 
+            // "This domain has no recipe yet" was printed even when the domain
+            // had several - the line above it says their compatibility was just
+            // being probed. A shop the bot already knows how to open, described
+            // to the operator as one it has never seen, is the kind of report
+            // that makes the whole log untrustworthy.
+            $recipeSituation = $this->recipeSituationLabel(
+                $host,
+                $this->recipeRouter->compatibleCandidatesForUrl($url, null, 25)->count(),
+            );
+
             if ($activeRecipeOnly) {
-                $debug?->__invoke('step', 'Для '.$host.' нет активного рецепта; режим Vision-first продолжает со статичными фотографиями без обучения Playwright. · '.$url);
+                $debug?->__invoke('step', $recipeSituation.'; режим Vision-first продолжает со статичными фотографиями без обучения Playwright. · '.$url);
 
                 return $previousRecipeImages;
             }
-            $debug?->__invoke('step', "Для {$host} ещё нет AI-рецепта; запускаю первичное обучение. · {$url}");
+            $debug?->__invoke('step', $recipeSituation.'; запускаю обучение под этот путь. · '.$url);
         }
 
         $repairFrom ??= [];
@@ -438,6 +448,21 @@ class BrowserProductGalleryExtractor
      *
      * @param  array<string, mixed>|null  $result
      */
+    /**
+     * How the operator is told why training is starting.
+     *
+     * "This domain has no recipe yet" was printed even when the domain had
+     * several and the line above it said their compatibility had just been
+     * probed. A shop the bot already knows how to open, described as one it
+     * has never seen, is what makes a log stop being worth reading.
+     */
+    private function recipeSituationLabel(string $host, int $domainRecipes): string
+    {
+        return $domainRecipes === 0
+            ? "Для {$host} ещё нет AI-рецепта"
+            : "Рецепты {$host} ({$domainRecipes} шт.) этой странице не подошли";
+    }
+
     private function looksLikeHttp2Failure(?array $result, string $stderr): bool
     {
         $signal = mb_strtolower(trim((string) ($result['error'] ?? '').' '.$stderr));

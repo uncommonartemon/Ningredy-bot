@@ -36,7 +36,10 @@ class BrowserProductGalleryExtractorTest extends TestCase
 
         $this->assertSame([], $images);
         $this->assertTrue(collect($events)->contains(
-            fn (array $event): bool => str_contains($event[1], 'нет активного рецепта')
+            // The wording says which of the two situations this is - a domain
+            // with no recipe at all, or one whose recipes did not fit this page -
+            // and either way Vision-first must not train.
+            fn (array $event): bool => str_contains($event[1], 'ещё нет AI-рецепта')
                 && str_contains($event[1], 'без обучения Playwright'),
         ));
     }
