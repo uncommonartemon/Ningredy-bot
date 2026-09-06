@@ -9,6 +9,7 @@ use App\Ai\Tools\FlagDomainRecipeNote;
 use App\Models\AppSetting;
 use App\Models\ProductGalleryRecipe;
 use App\Models\ProductGalleryRecipeVersion;
+use App\Models\ProductSourceAttempt;
 use App\Models\ProductSourceDomain;
 use App\Services\Products\BrowserProductGalleryExtractor;
 use App\Services\Products\GalleryTrainingAbandonSignal;
@@ -540,6 +541,126 @@ class ProductGalleryRecipeTrainerTest extends TestCase
             ProductGalleryRecipe::query()->where('domain', 'us.msi.com')->first()?->status,
             'With the second answer the page trains normally instead of being scraped blind.',
         );
+    }
+
+    public function test_a_recipe_that_stopped_working_is_handed_back_for_repair_not_rediscovery(): void
+    {
+        // A stored recipe that fails on a new page is not a blank page. It
+        // opened this site correctly before, and what changed is knowable -
+        // which selector matched nothing, which step stopped early. Starting
+        // the agent from nothing paid for a full rediscovery of a site we
+        // already knew and produced a second recipe beside the first rather
+        // than a better one.
+        $firstPrompt = null;
+        ProductGalleryRecipeTrainerAgent::fake(function (string $prompt) use (&$firstPrompt): array {
+            $firstPrompt ??= json_decode($prompt, true);
+
+            return $this->workingRecipe();
+        })->preventStrayPrompts();
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('scout')->andReturn([
+                'scout' => [
+                    'title' => 'MSI Katana 17 HX',
+                    'fragments' => [],
+                    'interactive_controls' => ['<a href="/Gallery">GALLERY</a>'],
+                    'network_image_samples' => [],
+                    'access_gate' => false,
+                    'rate_limited' => false,
+                ],
+                'diagnostics' => [],
+            ]);
+            $mock->shouldReceive('isConfirmedGalleryImage')->andReturn(true);
+            $mock->shouldReceive('isPartialGalleryImage')->andReturn(false);
+            $mock->shouldReceive('executeRecipe')->andReturn([
+                'images' => [
+                    'https://storage.example/one.webp',
+                    'https://storage.example/two.webp',
+                    'https://storage.example/three.webp',
+                ],
+            ]);
+        });
+
+        app(ProductGalleryRecipeTrainer::class)->train(
+            'https://us.msi.com/Laptop/Katana-17-HX-B14WX/Specification',
+            force: true,
+            repairFrom: [
+                'recipe' => ['collect_selectors' => ['.old-gallery img'], 'gallery_present' => true],
+                'reason' => 'Gallery traversal incomplete: clicked 0 of 4 required thumbnail controls.',
+                'action_trace' => [['action' => 'click_each', 'clicked' => false, 'selector_missing' => true]],
+                'diagnostics' => ['observed_gallery_count' => 4],
+                'images' => [],
+            ],
+        );
+
+        $feedback = $firstPrompt['previous_attempt_feedback'] ?? null;
+
+        $this->assertNotNull($feedback, 'Round one must open with the broken recipe, not with a blank page.');
+        $this->assertSame(['.old-gallery img'], $feedback['rejected_recipe']['collect_selectors']);
+        $this->assertStringContainsString('clicked 0 of 4', $feedback['error']);
+        $this->assertStringContainsString('Repair the step that failed here', $feedback['instruction']);
+    }
+
+    public function test_a_repair_that_breaks_a_page_the_recipe_already_opened_is_not_promoted(): void
+    {
+        // The fix shaped around the page in front of the agent, which quietly
+        // breaks every other page of the site. Without this the breakage
+        // surfaces days later as a domain that stopped producing photographs.
+        $recipe = ProductGalleryRecipe::query()->create([
+            'domain' => 'us.msi.com',
+            'path_pattern' => '/Laptop/Katana-17-HX-B14WX/*',
+            'status' => 'active',
+            'recipe' => ['collect_selectors' => ['.gallery img'], 'gallery_present' => true, 'content_confirmed_product' => true],
+            'success_count' => 4,
+            'source_blocked' => false,
+        ]);
+        ProductSourceAttempt::query()->create([
+            'domain' => 'us.msi.com',
+            'product_url' => 'https://us.msi.com/Laptop/Another-Model/Specification',
+            'actor' => 'playwright',
+            'phase' => 'active_recipe',
+            'action' => 'extract_gallery',
+            'status' => 'completed',
+            'decision' => 'gallery_extracted',
+        ]);
+        ProductGalleryRecipeTrainerAgent::fake(fn (): array => $this->workingRecipe())->preventStrayPrompts();
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('scout')->andReturn([
+                'scout' => [
+                    'title' => 'MSI Katana 17 HX',
+                    'fragments' => [],
+                    'interactive_controls' => ['<a href="/Gallery">GALLERY</a>'],
+                    'network_image_samples' => [],
+                    'access_gate' => false,
+                    'rate_limited' => false,
+                ],
+                'diagnostics' => [],
+            ]);
+            $mock->shouldReceive('isConfirmedGalleryImage')->andReturn(true);
+            $mock->shouldReceive('isPartialGalleryImage')->andReturn(false);
+            // The page being trained is happy with the new recipe; the page it
+            // used to open gets nothing out of it.
+            $mock->shouldReceive('executeRecipe')->andReturnUsing(
+                fn (string $url): array => str_contains($url, 'Another-Model')
+                    ? ['images' => []]
+                    : ['images' => [
+                        'https://storage.example/one.webp',
+                        'https://storage.example/two.webp',
+                        'https://storage.example/three.webp',
+                    ]],
+            );
+        });
+
+        app(ProductGalleryRecipeTrainer::class)->train(
+            'https://us.msi.com/Laptop/Katana-17-HX-B14WX/Specification',
+            force: true,
+        );
+
+        $this->assertSame(
+            ['.gallery img'],
+            $recipe->fresh()->recipe['collect_selectors'],
+            'The version that still opens the rest of the site stays.',
+        );
+        $this->assertSame('rejected', $recipe->fresh()->versions()->latest('id')->first()?->status);
     }
 
     private function workingRecipe(): array

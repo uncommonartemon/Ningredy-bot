@@ -57,6 +57,66 @@ class ProductGalleryRecipeTrainer
      * @param  array<string, mixed>  $context
      * @return array{measured: int, fetched: int, usable: int, rejected: array<string, int>, samples: array<int, string>}
      */
+    /**
+     * Whether a replacement recipe breaks a page the current one is known to
+     * have opened, returning the reason when it does.
+     *
+     * Only for a recipe that has actually succeeded before: a first version has
+     * nothing to regress, and paying for a browser run to prove that would be
+     * a tax on every new domain. The page is taken from this recipe's own
+     * successful history rather than from a list someone has to maintain, and
+     * the page currently being trained is excluded - it is the one page the new
+     * version is guaranteed to fit.
+     *
+     * @param  array<string, mixed>  $candidate
+     */
+    private function canaryFailure(
+        ProductGalleryRecipe $recipe,
+        array $candidate,
+        string $trainingUrl,
+        ?int $telegramUpdateId,
+        ?callable $debug,
+    ): ?string {
+        if ((int) $recipe->success_count < 1) {
+            return null;
+        }
+
+        $provenUrl = ProductSourceAttempt::query()
+            ->where('domain', $recipe->domain)
+            ->where('phase', 'active_recipe')
+            ->where('status', 'completed')
+            ->whereNotNull('product_url')
+            ->where('product_url', '!=', $trainingUrl)
+            ->latest('id')
+            ->value('product_url');
+
+        if (! is_string($provenUrl) || $provenUrl === '') {
+            return null;
+        }
+
+        // Never at the cost of the search itself: a regression check that eats
+        // the last of the budget turns a working repair into no photographs at
+        // all. Skipping it leaves the old behaviour, which is what happens
+        // today on every promotion.
+        if (! $this->timeBudget->canStart($telegramUpdateId, 40) || $this->costBudget->exceeded($telegramUpdateId)) {
+            return null;
+        }
+
+        $debug?->__invoke('step', 'Проверяю починенный рецепт на прежде рабочей странице: '.$provenUrl);
+
+        try {
+            $result = $this->browser->executeRecipe($provenUrl, $candidate, 20, null, $telegramUpdateId);
+        } catch (Throwable $exception) {
+            // The page itself failing - a timeout, a block - says nothing about
+            // the repair, and must not veto it.
+            return null;
+        }
+
+        $validation = $this->resultValidator->validate($candidate, $result, countedOnThisPage: false);
+
+        return $validation['passed'] ? null : (string) $validation['reason'];
+    }
+
     private function measureDownloadableFrames(array $urls, array $context, string $pageUrl): array
     {
         $minimumWidth = (int) ($context['minimum_image_width'] ?? 0) > 0
@@ -124,6 +184,7 @@ class ProductGalleryRecipeTrainer
         bool $forceInteractive = false,
         ?array $previousRecipeImages = null,
         ?string $userHint = null,
+        array $repairFrom = [],
     ): array {
         $host = strtolower((string) parse_url($url, PHP_URL_HOST));
         $categorySlug = trim((string) ($context['category_slug'] ?? ''));
@@ -451,7 +512,28 @@ class ProductGalleryRecipeTrainer
             }
 
             $attempts = [];
-            $feedback = null;
+            // A stored recipe that stopped working is not a blank page. It
+            // opened this site correctly a dozen times, and what changed is
+            // knowable: the selector that matched nothing, the traversal that
+            // stopped early, the frames that came back too small. Starting the
+            // agent from nothing threw all of that away and paid for a full
+            // rediscovery of a site we already knew - and produced a second
+            // recipe beside the first rather than a better one.
+            //
+            // Seeded as the first round's feedback, so round one is a repair
+            // with evidence rather than a guess.
+            $feedback = $repairFrom === [] ? null : [
+                'rejected_recipe' => $repairFrom['recipe'] ?? null,
+                'error' => 'This stored recipe stopped working on this page: '
+                    .($repairFrom['reason'] ?? 'unknown reason'),
+                'action_trace' => $repairFrom['action_trace'] ?? [],
+                'diagnostics' => $repairFrom['diagnostics'] ?? [],
+                'candidate_count' => count($repairFrom['images'] ?? []),
+                'instruction' => 'This recipe already works on other pages of this site. Repair the step that '
+                    .'failed here rather than describing the gallery from scratch, and keep every step that '
+                    .'still executed correctly - a replacement that only fits this page breaks the pages the '
+                    .'recipe already opens.',
+            ];
             $candidate = [];
             $candidateResult = [];
             $candidateImages = [];
@@ -1058,6 +1140,30 @@ class ProductGalleryRecipeTrainer
                     return $bestPartialImages;
                 }
                 $debug?->__invoke('warning', 'Все раунды рецепта завершены без полной галереи; рабочая версия оставлена без изменений.');
+
+                return $oldImages;
+            }
+
+            // A repaired recipe replaces one that already worked elsewhere on
+            // this site, and nothing ever checked that it still does. A fix
+            // shaped around the page in front of the agent can quietly break
+            // every other page the recipe opened - and the breakage only
+            // surfaces later, as a domain that mysteriously stopped producing
+            // photographs. So it is tried once on a page it is known to have
+            // worked on, and a failure there keeps the version that works.
+            $canary = $this->canaryFailure($recipe, $candidate, $url, $telegramUpdateId, $debug);
+
+            if ($canary !== null) {
+                $version->update([
+                    'status' => 'rejected',
+                    'promoted_at' => null,
+                    'error' => 'Починенный рецепт сломал страницу, где прежний работал: '.$canary,
+                ]);
+                $debug?->__invoke(
+                    'warning',
+                    'Новая версия рецепта не прошла проверку на прежде рабочей странице ('.$canary
+                        .'); оставляю прежнюю версию без изменений.',
+                );
 
                 return $oldImages;
             }

@@ -177,7 +177,16 @@ class BrowserProductGalleryExtractor
                 return $previousRecipeImages ?? $images;
             }
 
-            $debug?->__invoke('warning', 'Сохранённый рецепт перестал давать галерею; запускаю AI-переобучение.');
+            $debug?->__invoke('warning', 'Сохранённый рецепт перестал давать галерею; отправляю его агенту на ремонт.');
+            $repairFrom = [
+                'recipe' => $recipe->recipe ?? [],
+                'reason' => $selectorsMismatched
+                    ? 'None of the recipe selectors matched anything on this page.'
+                    : ($validation['reason'] ?? 'unknown'),
+                'action_trace' => $result['action_trace'] ?? [],
+                'diagnostics' => $result['diagnostics'] ?? [],
+                'images' => $images,
+            ];
         } else {
             $compatibleAttempt = $this->tryCompatibleDomainRecipes(
                 $url,
@@ -201,6 +210,7 @@ class BrowserProductGalleryExtractor
             $debug?->__invoke('step', "Для {$host} ещё нет AI-рецепта; запускаю первичное обучение. · {$url}");
         }
 
+        $repairFrom ??= [];
         $images = app(ProductGalleryRecipeTrainer::class)->train(
             $url,
             $recipe ? 'automatic_failure' : 'initial',
@@ -209,6 +219,7 @@ class BrowserProductGalleryExtractor
             context: $context,
             forceInteractive: $forceInteractive,
             previousRecipeImages: $previousRecipeImages,
+            repairFrom: $repairFrom,
         );
 
         $trainedRecipe = $this->recipeRouter->exactRecipeForUrl($url)
