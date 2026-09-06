@@ -640,7 +640,15 @@ class ProductImageStorage
             ]);
 
             if ($allCandidates === []) {
-                $progress?->__invoke('Не удалось скачать ни одного технически пригодного изображения: '.$source['url']);
+                // Two different endings wore the same sentence. "No suitable
+                // image" reads as "we looked at the photographs and rejected
+                // them", and it was printed just as loudly when the page had
+                // never opened at all - hp.com, where the HTTP fetch timed out
+                // and the browser failed on the protocol, reported it as a
+                // verdict about photographs that were never seen.
+                $progress?->__invoke($urls === []
+                    ? 'Страница не отдала ни одной ссылки на фото (не открылась или защищена): '.$source['url']
+                    : 'Скачано 0 из '.count($urls).' найденных ссылок - ни одна не прошла технические проверки: '.$source['url']);
 
                 continue;
             }

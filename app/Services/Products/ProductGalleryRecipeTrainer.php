@@ -262,6 +262,24 @@ class ProductGalleryRecipeTrainer
 
             if (! $forceInteractive) {
                 $preflight = $this->preflight($url, $pageScout, $scout['diagnostics'] ?? [], $context, $domainHint, $autoDomainHint, $provider, $model, $version, $telegramUpdateId, $debug);
+
+                // An interrupted classification is a call that never reached the
+                // agent, and everything downstream reads it as "the gallery was
+                // not confirmed" - which sends a page with a perfectly good
+                // recipe off to be scraped blind. Seen live on cdw.com: the
+                // stored recipe had already collected all six photographs, the
+                // classification broke technically, and the source ended up
+                // downloading one tracking pixel's worth of nothing.
+                //
+                // One retry, and only while the budget can pay for it. A second
+                // failure is a real answer about the provider, not about the page.
+                if (($preflight['decision'] ?? null) === 'interrupted'
+                    && $this->timeBudget->canStart($telegramUpdateId, 20)
+                    && ! $this->costBudget->exceeded($telegramUpdateId)) {
+                    $debug?->__invoke('warning', 'AI-предфильтр не состоялся технически; повторяю один раз.');
+                    $preflight = $this->preflight($url, $pageScout, $scout['diagnostics'] ?? [], $context, $domainHint, $autoDomainHint, $provider, $model, $version, $telegramUpdateId, $debug);
+                }
+
                 $preflightDecision = (string) ($preflight['decision'] ?? 'no_gallery');
 
                 // static_sufficient is an estimate from raw DOM markup (thumbnails

@@ -479,6 +479,69 @@ class ProductGalleryRecipeTrainerTest extends TestCase
         return (string) ob_get_clean();
     }
 
+    public function test_a_preflight_that_broke_technically_is_asked_again(): void
+    {
+        // Live on cdw.com: the stored recipe had already collected all six
+        // photographs when the classification call broke. Everything
+        // downstream reads an interrupted classification as "the gallery was
+        // not confirmed", so the source was sent off to be scraped blind and
+        // came back with one tracking pixel's worth of nothing.
+        //
+        // A call that never reached the agent is not the agent's answer.
+        $calls = 0;
+        ProductGalleryPreflightAgent::fake(function () use (&$calls): array {
+            if (++$calls === 1) {
+                throw new RuntimeException('provider stream closed');
+            }
+
+            return [
+                'decision' => 'train_playwright',
+                'gallery_likely' => true,
+                'hidden_images_likely' => true,
+                'interaction_required' => true,
+                'expected_image_count' => 2,
+                'evidence' => ['gallery fixture'],
+                'confidence' => 0.95,
+                'reason' => 'Fixture requires browser interaction.',
+            ];
+        })->preventStrayPrompts();
+        ProductGalleryRecipeTrainerAgent::fake(fn (): array => $this->workingRecipe())->preventStrayPrompts();
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('scout')->andReturn([
+                'scout' => [
+                    'title' => 'MSI Katana 17 HX',
+                    'fragments' => [],
+                    'interactive_controls' => ['<a href="/Gallery">GALLERY</a>'],
+                    'network_image_samples' => [],
+                    'access_gate' => false,
+                    'rate_limited' => false,
+                ],
+                'diagnostics' => [],
+            ]);
+            $mock->shouldReceive('isConfirmedGalleryImage')->andReturn(true);
+            $mock->shouldReceive('isPartialGalleryImage')->andReturn(false);
+            $mock->shouldReceive('executeRecipe')->andReturn([
+                'images' => [
+                    'https://storage.example/one.webp',
+                    'https://storage.example/two.webp',
+                    'https://storage.example/three.webp',
+                ],
+            ]);
+        });
+
+        app(ProductGalleryRecipeTrainer::class)->train(
+            'https://us.msi.com/Laptop/Katana-17-HX-B14WX/Specification',
+            force: true,
+        );
+
+        $this->assertSame(2, $calls, 'The interrupted classification must be asked again before the page is written off.');
+        $this->assertSame(
+            'active',
+            ProductGalleryRecipe::query()->where('domain', 'us.msi.com')->first()?->status,
+            'With the second answer the page trains normally instead of being scraped blind.',
+        );
+    }
+
     private function workingRecipe(): array
     {
         return [

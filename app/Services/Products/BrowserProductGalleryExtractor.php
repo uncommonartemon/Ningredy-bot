@@ -419,6 +419,23 @@ class BrowserProductGalleryExtractor
     }
 
     /** @return array<string, mixed> */
+    /**
+     * Whether the browser never got a page because the server's HTTP/2 stack
+     * broke the stream. Distinguished from every other navigation failure
+     * because it is the one with a cheap, general remedy - the same request
+     * over HTTP/1.1 - rather than a property of the site worth recording.
+     *
+     * @param  array<string, mixed>|null  $result
+     */
+    private function looksLikeHttp2Failure(?array $result, string $stderr): bool
+    {
+        $signal = mb_strtolower(trim((string) ($result['error'] ?? '').' '.$stderr));
+
+        return $signal !== ''
+            && (str_contains($signal, 'err_http2_protocol_error')
+                || str_contains($signal, 'err_spdy_protocol_error'));
+    }
+
     private function runScript(
         string $url,
         array $recipe,
@@ -427,6 +444,7 @@ class BrowserProductGalleryExtractor
         ?callable $debug,
         ?int $telegramUpdateId,
         array $context,
+        bool $withoutHttp2 = false,
     ): array {
         if (! $this->available($limit, $debug)) {
             return [];
@@ -464,6 +482,7 @@ class BrowserProductGalleryExtractor
                 // script's only chance to serialize a partial result.
                 'PRODUCT_GALLERY_DEADLINE_MS' => (string) max(10000, ($timeoutSeconds - 12) * 1000),
                 'PRODUCT_GALLERY_TRANSFER_DIR' => $transferDirectory,
+                'PRODUCT_IMAGE_DISABLE_HTTP2' => $withoutHttp2 ? 'true' : 'false',
             ]);
             $process->setTimeout((float) $timeoutSeconds);
             $process->run();
@@ -476,10 +495,29 @@ class BrowserProductGalleryExtractor
                     'error' => $error,
                 ]);
 
+                if (! $withoutHttp2 && $this->looksLikeHttp2Failure(null, $error)) {
+                    $debug?->__invoke('warning', 'Сайт разорвал соединение по HTTP/2; повторяю один раз по HTTP/1.1.');
+                    File::deleteDirectory($transferDirectory);
+
+                    return $this->runScript($url, $recipe, $limit, $scoutOnly, $debug, $telegramUpdateId, $context, true);
+                }
+
                 return ['images' => [], 'error' => $error, 'failure_kind' => 'browser_process'];
             }
 
             $result = json_decode(trim($process->getOutput()), true);
+
+            // A server that negotiates HTTP/2 and then breaks the stream leaves
+            // Chromium with no page at all, and the site is written off in
+            // seconds - hp.com went from candidate to "no suitable image" in
+            // three, having never loaded. The same site serves over HTTP/1.1,
+            // so the one thing worth trying is the other protocol, once.
+            if (! $withoutHttp2 && $this->looksLikeHttp2Failure($result, $process->getErrorOutput())) {
+                $debug?->__invoke('warning', 'Сайт разорвал соединение по HTTP/2; повторяю один раз по HTTP/1.1.');
+                File::deleteDirectory($transferDirectory);
+
+                return $this->runScript($url, $recipe, $limit, $scoutOnly, $debug, $telegramUpdateId, $context, true);
+            }
 
             if (! is_array($result)) {
                 return ['images' => [], 'error' => 'Playwright returned invalid JSON.', 'failure_kind' => 'browser_protocol'];

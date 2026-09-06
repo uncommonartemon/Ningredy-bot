@@ -212,7 +212,17 @@ for (const channel of browser ? [] : [process.env.PRODUCT_IMAGE_BROWSER_CHANNEL 
             // headers claim, so a machine with a display can trade visibility
             // for reach on WAF-protected sites.
             headless: process.env.PRODUCT_IMAGE_BROWSER_HEADLESS !== 'false',
-            args: ['--disable-blink-features=AutomationControlled'],
+            // Some servers negotiate HTTP/2 and then break the stream, and
+            // Chromium reports ERR_HTTP2_PROTOCOL_ERROR without ever showing a
+            // page - a whole manufacturer lost three seconds into training,
+            // with no page ever loaded (hp.com, 2026-09-05). The same site
+            // serves fine over HTTP/1.1, which the browser falls back to when
+            // it does not offer h2. The caller re-runs once with this set
+            // rather than paying for the downgrade on every extraction.
+            args: [
+                '--disable-blink-features=AutomationControlled',
+                ...(process.env.PRODUCT_IMAGE_DISABLE_HTTP2 === 'true' ? ['--disable-http2'] : []),
+            ],
             ...(channel ? { channel } : {}),
         });
         launchedChannel = channel;
