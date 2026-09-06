@@ -9,10 +9,14 @@
  *
  * This process keeps a single browser alive for as long as the bot runs. Every
  * extraction connects to it, works in its own context, and disconnects - the
- * browser itself, and the reputation it accumulates with a host, stay. It is
- * started alongside the queue workers by npm run start, and extraction falls
- * back to launching its own browser whenever this is not reachable, so nothing
- * depends on it being up.
+ * browser itself, and the reputation it accumulates with a host, stay.
+ *
+ * It is NOT started by npm run start, and extraction does not use it unless
+ * PRODUCT_IMAGE_SHARED_BROWSER=true. Extraction launches its own browser with a
+ * persistent per-host profile instead, which a shared browser cannot offer and
+ * which is the better of the two against being blocked. Start this by hand to
+ * use it; extraction falls back to launching its own browser whenever this is
+ * not reachable, so nothing depends on it being up.
  */
 import { mkdir, writeFile, rm } from 'node:fs/promises';
 import { dirname } from 'node:path';

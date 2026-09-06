@@ -248,11 +248,24 @@ const offscreenArgs = [
     '--disable-background-timer-throttling',
     ...(process.env.PRODUCT_IMAGE_BROWSER_OFFSCREEN === 'true' ? ['--window-position=-2400,-2400'] : []),
 ];
-// Off unless asked for. Measured on 2026-09-04: with the shared browser every
-// extraction ran past the 120s process timeout - five sources in one search,
-// all of them - while the same page took 34 seconds on a private browser. The
-// cause is not understood yet, and an unexplained total outage of Playwright is
-// not something to leave switched on while it is investigated.
+// Off by default, but no longer because it is broken.
+//
+// It was: on 2026-09-04 every extraction ran past the 120s process timeout
+// against 34 seconds on a private browser. The cause is now known and fixed at
+// the bottom of this file - the process finished its work and then never
+// exited, because the websocket to the shared browser kept the event loop
+// alive. Re-measured afterwards: 14.8s shared against 17.0s private on the
+// same page, so it is faster, as it always should have been.
+//
+// It stays off because of a trade it cannot win. A shared browser can only
+// hand out ordinary contexts, while launching privately allows a persistent
+// per-host profile - a real cache, history and local state, which is what a
+// shop looking at behaviour rather than at headers actually reads. The profile
+// is the stronger defence against being blocked; the shared browser saves
+// startup time, which is not the problem we have.
+//
+// PRODUCT_IMAGE_SHARED_BROWSER=true switches it on, and the server has to be
+// running (node scripts/browser-server.mjs).
 try {
     if (process.env.PRODUCT_IMAGE_SHARED_BROWSER !== 'true') {
         throw new Error('shared browser disabled');
@@ -2459,6 +2472,20 @@ if (sharedBrowser) {
     await browser.close();
 }
 
+// This is why the shared browser appeared to hang every extraction.
+//
+// Closing a private browser drops its last handle and node ends by itself, so
+// nothing here ever needed to say so. A shared browser is reached over a
+// websocket that stays open after the borrowed context is closed - the work
+// finished, the JSON was written, and the process then sat there holding a
+// live socket until PHP killed it at the two-minute timeout. Measured on
+// 2026-09-04 as "past 120 seconds connected, 34 seconds private", and read as
+// Playwright being broken by the shared browser. It was not: the same
+// connection does connect in 0.04s and navigate in 0.18s. Only the ending was
+// missing.
+//
+// The callback runs after stdout is flushed, which matters because stdout is a
+// pipe here and a bare exit can truncate the last write.
 process.stdout.write(JSON.stringify({
     images,
     transferred_images: transferredImages,
@@ -2506,4 +2533,4 @@ process.stdout.write(JSON.stringify({
         action_plan: actionPlanStatus,
         browser_transfer_failures: transferFailures.slice(0, 20),
     },
-}));
+}), () => process.exit(0));
