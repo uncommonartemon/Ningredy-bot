@@ -219,6 +219,26 @@ const pruneOldBrowserProfiles = async (root, keepDirectory) => {
     }
 };
 
+// A real browser window that never appears over the operator's work.
+//
+// Headless is detectable at the browser level whatever the headers claim, so
+// the window has to exist - but it does not have to be on screen. Moved far
+// off the desktop it renders exactly as a visible one does, which is the whole
+// point, while nothing pops up in front of whatever you were doing.
+//
+// Chromium throttles windows it believes nobody is looking at - timers slow
+// down, rendering pauses - and a throttled page loads its gallery slowly or
+// not at all, so the three flags after the position are not optional.
+// PRODUCT_IMAGE_BROWSER_OFFSCREEN=false brings it back on screen when you want
+// to watch what it does.
+const offscreenArgs = process.env.PRODUCT_IMAGE_BROWSER_OFFSCREEN === 'false'
+    ? []
+    : [
+        '--window-position=-2400,-2400',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding',
+        '--disable-background-timer-throttling',
+    ];
 // Off unless asked for. Measured on 2026-09-04: with the shared browser every
 // extraction ran past the 120s process timeout - five sources in one search,
 // all of them - while the same page took 34 seconds on a private browser. The
@@ -259,6 +279,7 @@ for (const channel of browser ? [] : [process.env.PRODUCT_IMAGE_BROWSER_CHANNEL 
             // rather than paying for the downgrade on every extraction.
             args: [
                 '--disable-blink-features=AutomationControlled',
+                ...offscreenArgs,
                 ...(process.env.PRODUCT_IMAGE_DISABLE_HTTP2 === 'true' ? ['--disable-http2'] : []),
             ],
             ...(channel ? { channel } : {}),
@@ -346,6 +367,7 @@ if (profileDirectory && !sharedBrowser && process.env.PRODUCT_IMAGE_BROWSER_PROF
             headless: process.env.PRODUCT_IMAGE_BROWSER_HEADLESS === 'true',
             args: [
                 '--disable-blink-features=AutomationControlled',
+                ...offscreenArgs,
                 ...(process.env.PRODUCT_IMAGE_DISABLE_HTTP2 === 'true' ? ['--disable-http2'] : []),
             ],
             ...(launchedChannel ? { channel: launchedChannel } : {}),

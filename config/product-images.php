@@ -19,6 +19,11 @@ return [
     // instead of exhausting the worker's memory_limit, which loses the whole
     // search. Raise it only together with the workers' memory_limit.
     'decoded_pixel_budget' => 60_000_000,
+    // Frames are held at this edge while they are compared, hashed and shown to
+    // Vision - the same edge the encoder writes at, so nothing is lost that the
+    // catalog would have kept. Holding originals instead emptied the budget
+    // above three frames into a gallery of large photographs.
+    'working_edge' => 1600,
     // Width and height are checked independently so useful wide product shots
     // are not reduced to one ambiguous "minimum side" setting.
     'minimum_width' => (int) env('PRODUCT_IMAGE_MINIMUM_WIDTH', 700),

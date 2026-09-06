@@ -2323,6 +2323,36 @@ class ProductImageStorage
     private array $lastDegradedDomains = [];
 
     /** @param array<int, string> $urls @return array<int, array<string, mixed>> */
+    /**
+     * Shrink a decoded frame to the size it will be published at.
+     *
+     * Everything past this is a thumbnail for Vision, a perceptual hash, or a
+     * WebP the encoder caps at the same edge - none of them need the original
+     * pixels, and holding them is what emptied the memory budget three frames
+     * into a gallery.
+     */
+    private function downscaleForWork(GdImage $image): GdImage
+    {
+        $edge = (int) config('product-images.working_edge', 1600);
+        $width = imagesx($image);
+        $height = imagesy($image);
+
+        if ($edge < 1 || ($width <= $edge && $height <= $edge)) {
+            return $image;
+        }
+
+        $ratio = min($edge / $width, $edge / $height);
+        $scaled = imagescale($image, max(1, (int) round($width * $ratio)), max(1, (int) round($height * $ratio)));
+
+        if (! $scaled instanceof GdImage) {
+            return $image;
+        }
+
+        imagedestroy($image);
+
+        return $scaled;
+    }
+
     private function downloadCandidates(array $urls, ProductDraft $draft): array
     {
         $candidates = [];
@@ -2496,7 +2526,19 @@ class ProductImageStorage
                 continue;
             }
 
-            $decodedPixels += $imagePixels;
+            // Held at the size it will be stored at, not at the size it arrived.
+            //
+            // The encoder scales everything past 1600px on the way to disk
+            // anyway, so a 5000x5000 photograph spent 100 MB of the memory
+            // budget to become a 1600x1600 one. Live on dell.com: a recipe
+            // collected thirteen frames, the budget ran out on the fourth, and
+            // twenty-eight candidates were never even tried - the gallery was
+            // truncated by memory, not by anything about the photographs.
+            //
+            // The measured width and height in $download are untouched, so the
+            // category's minimum-size rule still judges the original.
+            $image = $this->downscaleForWork($image);
+            $decodedPixels += imagesx($image) * imagesy($image);
 
             $pageContext = $sourceContextsByUrl[$url] ?? null;
             $pageIdentityConfirmed = is_array($pageContext)
