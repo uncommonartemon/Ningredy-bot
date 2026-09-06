@@ -109,25 +109,47 @@ class ProductGalleryRecipeRouterTest extends TestCase
         ));
     }
 
-    public function test_one_domain_can_keep_separate_recipes_for_separate_paths(): void
+    public function test_a_shop_gets_one_recipe_rather_than_one_per_page_family(): void
     {
+        // A shop has one product-page template, and the gallery on it does not
+        // change between categories. Scoping every training to a path family
+        // was protection against the rare shop where that is untrue, and it
+        // cost the common one a full paid training per product: four of twenty
+        // live domains ended up with a recipe scoped to a single laptop.
         $router = app(ProductGalleryRecipeRouter::class);
 
-        $notebook = $router->recipeForTraining(
-            'https://rozetka.example/notebooks/lenovo-z50-70-13123',
-        );
-        $samePath = $router->recipeForTraining(
-            'https://rozetka.example/notebooks/asus-vivobook-999',
-        );
-        $component = $router->recipeForTraining(
-            'https://rozetka.example/components/case-1312',
-        );
+        $notebook = $router->recipeForTraining('https://rozetka.example/notebooks/lenovo-z50-70-13123');
+        $another = $router->recipeForTraining('https://rozetka.example/notebooks/asus-vivobook-999');
+        $component = $router->recipeForTraining('https://rozetka.example/components/case-1312');
 
-        $this->assertTrue($notebook->is($samePath));
-        $this->assertFalse($notebook->is($component));
-        $this->assertSame('/notebooks/*', $notebook->path_pattern);
-        $this->assertSame('/components/*', $component->path_pattern);
-        $this->assertDatabaseCount('product_gallery_recipes', 2);
+        $this->assertTrue($notebook->is($another));
+        $this->assertTrue($notebook->is($component));
+        $this->assertSame('*', $notebook->path_pattern);
+        $this->assertDatabaseCount('product_gallery_recipes', 1);
+    }
+
+    public function test_a_page_family_can_still_earn_its_own_recipe(): void
+    {
+        // Asked for by evidence - this recipe demonstrably failed here - never
+        // guessed from the shape of a URL.
+        $router = app(ProductGalleryRecipeRouter::class);
+
+        $shop = $router->recipeForTraining('https://rozetka.example/notebooks/lenovo-z50-70-13123');
+        $shop->update(['status' => 'active', 'recipe' => ['collect_selectors' => ['.shop img']]]);
+
+        $awkward = $router->recipeForTraining(
+            'https://rozetka.example/components/case-1312',
+            scopeToPath: true,
+        );
+        $awkward->update(['status' => 'active', 'recipe' => ['collect_selectors' => ['.component img']]]);
+
+        $this->assertFalse($shop->is($awkward));
+        $this->assertSame('/components/*', $awkward->path_pattern);
+        // The narrower row wins where it applies; everywhere else the shop's
+        // own recipe still answers.
+        $this->assertTrue($awkward->is($router->recipeForUrl('https://rozetka.example/components/case-999')));
+        $this->assertTrue($shop->is($router->recipeForUrl('https://rozetka.example/notebooks/other-1')));
+        $this->assertTrue($shop->is($router->recipeForUrl('https://rozetka.example/phones/pixel-9')));
     }
 
     public function test_exact_path_recipe_wins_and_other_domain_recipe_is_only_familiarity(): void
@@ -170,11 +192,14 @@ class ProductGalleryRecipeRouterTest extends TestCase
             'https://legacy.example/notebooks/model-1',
         )));
 
-        $exact = $router->recipeForTraining('https://legacy.example/notebooks/model-1');
-        $this->assertFalse($legacy->is($exact));
-        $this->assertTrue($exact->is($router->recipeForUrl(
+        // Training continues that recipe instead of forking a second one beside
+        // it: the row scoped to the whole shop is now where a recipe lives.
+        $trained = $router->recipeForTraining('https://legacy.example/notebooks/model-1');
+        $this->assertTrue($legacy->is($trained));
+        $this->assertTrue($legacy->is($router->recipeForUrl(
             'https://legacy.example/notebooks/model-2',
         )));
+        $this->assertDatabaseCount('product_gallery_recipes', 1);
     }
 
     public function test_a_confirmed_new_path_is_bound_to_the_existing_recipe_without_copying_it(): void

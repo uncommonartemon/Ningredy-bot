@@ -1187,18 +1187,71 @@ class ProductGalleryRecipeTrainer
             $canary = $this->canaryFailure($recipe, $candidate, $url, $telegramUpdateId, $debug);
 
             if ($canary !== null) {
+                // Two recipes, both correct, for two page families of one shop.
+                //
+                // The candidate opens the page in front of it and breaks the
+                // page the stored one already opened, which is exactly the
+                // evidence that this shop does not have a single template. Now
+                // that a recipe belongs to the whole shop, simply rejecting the
+                // candidate would leave that family permanently unopenable -
+                // and promoting it would break the rest of the site on the next
+                // search, then be repaired back, forever.
+                //
+                // So the shop keeps the recipe that still works everywhere
+                // else, and this family gets its own, which recipeForUrl()
+                // prefers where it applies. This is the one way a narrower
+                // scope is created, and it is created from evidence rather than
+                // from the shape of a URL.
+                $narrower = $this->recipeRouter->recipeForTraining($url, scopeToPath: true);
+
+                if ($narrower->is($recipe)) {
+                    $version->update([
+                        'status' => 'rejected',
+                        'promoted_at' => null,
+                        'error' => 'Починенный рецепт сломал страницу, где прежний работал: '.$canary,
+                    ]);
+                    $debug?->__invoke(
+                        'warning',
+                        'Новая версия рецепта не прошла проверку на прежде рабочей странице ('.$canary
+                            .'); оставляю прежнюю версию без изменений.',
+                    );
+
+                    return $oldImages;
+                }
+
+                $narrower->update([
+                    'recipe' => $this->withoutTrainingCounts($candidate),
+                    'status' => 'active',
+                    'region' => $this->regionForUrl($url),
+                    'sample_path' => mb_substr((string) (parse_url($url, PHP_URL_PATH) ?: '/'), 0, 1024),
+                    'layout_fingerprint' => $layoutFingerprint,
+                    'last_observed_layout_fingerprint' => $layoutFingerprint,
+                    'success_count' => $narrower->success_count + 1,
+                    'consecutive_hard_blocks' => 0,
+                    'hard_block_urls' => [],
+                    'last_success_at' => now(),
+                    'last_error' => null,
+                    'last_failure_kind' => null,
+                    'retry_after' => null,
+                    'source_blocked' => false,
+                    'source_block_reason' => null,
+                    'source_blocked_at' => null,
+                ]);
                 $version->update([
-                    'status' => 'rejected',
-                    'promoted_at' => null,
-                    'error' => 'Починенный рецепт сломал страницу, где прежний работал: '.$canary,
+                    'product_gallery_recipe_id' => $narrower->id,
+                    'status' => 'promoted',
+                    'promoted_at' => now(),
+                    'error' => 'Рецепт всего магазина не заменён: он ломается на '.$canary
+                        .'. Эта версия сохранена как отдельный рецепт для семейства страниц '
+                        .$narrower->path_pattern.'.',
                 ]);
                 $debug?->__invoke(
-                    'warning',
-                    'Новая версия рецепта не прошла проверку на прежде рабочей странице ('.$canary
-                        .'); оставляю прежнюю версию без изменений.',
+                    'done',
+                    'Этот раздел сайта устроен иначе, чем остальной: рецепт магазина оставлен как есть, '
+                        .'а для '.$narrower->path_pattern.' сохранён отдельный. Фото: '.count($candidateImages).'.',
                 );
 
-                return $oldImages;
+                return $candidateImages;
             }
 
             $recipe->update([

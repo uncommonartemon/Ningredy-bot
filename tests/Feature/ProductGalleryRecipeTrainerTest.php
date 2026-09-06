@@ -607,7 +607,9 @@ class ProductGalleryRecipeTrainerTest extends TestCase
         // surfaces days later as a domain that stopped producing photographs.
         $recipe = ProductGalleryRecipe::query()->create([
             'domain' => 'us.msi.com',
-            'path_pattern' => '/Laptop/Katana-17-HX-B14WX/*',
+            // The shop's own recipe: training writes here, not to a row
+            // scoped to the one product it happened to learn on.
+            'path_pattern' => '*',
             'status' => 'active',
             'recipe' => ['collect_selectors' => ['.gallery img'], 'gallery_present' => true, 'content_confirmed_product' => true],
             'success_count' => 4,
@@ -660,7 +662,24 @@ class ProductGalleryRecipeTrainerTest extends TestCase
             $recipe->fresh()->recipe['collect_selectors'],
             'The version that still opens the rest of the site stays.',
         );
-        $this->assertSame('rejected', $recipe->fresh()->versions()->latest('id')->first()?->status);
+        // The shop keeps the recipe that still opens the rest of it, and this
+        // page family gets its own rather than being left unopenable - the one
+        // way a narrower scope is created, and only from evidence.
+        $narrower = ProductGalleryRecipe::query()
+            ->where('domain', 'us.msi.com')
+            ->where('path_pattern', '!=', '*')
+            ->first();
+
+        $this->assertNotNull($narrower, 'The family that needs a different recipe must get one.');
+        $this->assertSame('active', $narrower->status);
+        $this->assertSame('/Laptop/Katana-17-HX-B14WX/*', $narrower->path_pattern);
+        $this->assertArrayNotHasKey(
+            'expected_image_count',
+            $narrower->recipe,
+            'A forked recipe carries no count either.',
+        );
+        $this->assertSame('promoted', $narrower->versions()->latest('id')->first()?->status);
+        $this->assertSame(0, $recipe->fresh()->versions()->count());
     }
 
     private function workingRecipe(): array

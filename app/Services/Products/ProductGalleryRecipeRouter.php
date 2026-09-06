@@ -71,7 +71,7 @@ class ProductGalleryRecipeRouter
             return $primary;
         }
 
-        return ProductGalleryRecipe::query()
+        $compatible = ProductGalleryRecipe::query()
             ->where('domain', $domain)
             ->get()
             ->first(fn (ProductGalleryRecipe $recipe): bool => in_array(
@@ -79,6 +79,18 @@ class ProductGalleryRecipeRouter
                 is_array($recipe->compatible_path_patterns) ? $recipe->compatible_path_patterns : [],
                 true,
             ));
+
+        if ($compatible) {
+            return $compatible;
+        }
+
+        // The shop's own recipe, which is where training now puts one. A page
+        // family with a recipe of its own still outranks it above - that row
+        // exists precisely because this one did not work there.
+        return ProductGalleryRecipe::query()
+            ->where('domain', $domain)
+            ->where('path_pattern', '*')
+            ->first();
     }
 
     /**
@@ -316,7 +328,7 @@ class ProductGalleryRecipeRouter
         return $this->recipeForUrl($url)?->source_blocked === true;
     }
 
-    public function recipeForTraining(string $url, bool $reuseLegacyFallback = false): ProductGalleryRecipe
+    public function recipeForTraining(string $url, bool $reuseLegacyFallback = false, bool $scopeToPath = false): ProductGalleryRecipe
     {
         if ($reuseLegacyFallback) {
             $legacy = $this->recipeForUrl($url);
@@ -326,9 +338,37 @@ class ProductGalleryRecipeRouter
             }
         }
 
+        $domain = $this->domainForUrl($url);
+
+        // A shop has one product-page template. The gallery on it is one
+        // component, and it does not change between categories - so the recipe
+        // belongs to the shop.
+        //
+        // Scoping every training to a path family was protection against the
+        // rare shop where that is untrue, and it broke the common one. Four of
+        // twenty domains ended up with a recipe scoped to a single product:
+        //
+        //     /us/en/p/laptops/yoga/yoga-slim-series/yoga-slim-9i-gen-10-14-inch-intel/*
+        //     /hp-omnibook-ultra-flip-14-convertible-laptop-copilot-pc-.../*
+        //
+        // because the id after the product name did not look like an id to the
+        // wildcarding rule ("len101y0052" is lower case). Those shops would have
+        // paid for a full training on every laptop, forever, while visiting a
+        // site we are already trying not to annoy.
+        //
+        // A narrower row is still possible and still wins in recipeForUrl(): it
+        // is created when this recipe demonstrably fails on a page family, which
+        // is evidence rather than a guess made from the shape of a URL.
+        if (! $scopeToPath) {
+            return ProductGalleryRecipe::query()->firstOrCreate(
+                ['domain' => $domain, 'path_pattern' => '*'],
+                ['status' => 'learning'],
+            );
+        }
+
         return ProductGalleryRecipe::query()->firstOrCreate(
             [
-                'domain' => $this->domainForUrl($url),
+                'domain' => $domain,
                 'path_pattern' => $this->pathPatternForUrl($url),
             ],
             ['status' => 'learning'],
