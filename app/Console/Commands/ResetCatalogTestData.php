@@ -3,12 +3,15 @@
 namespace App\Console\Commands;
 
 use App\Models\Product;
+use App\Models\ProductDraft;
 use App\Models\ProductDraftMedia;
 use App\Models\ProductMedia;
 use Illuminate\Console\Command;
+use Illuminate\Contracts\Filesystem\Filesystem;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Facades\Storage;
 
 class ResetCatalogTestData extends Command
 {
@@ -53,6 +56,22 @@ class ResetCatalogTestData extends Command
             $this->deleteIfPresent('telegram_chat_states');
         });
 
+        // Model deletes take the files of the rows they delete, and nothing had
+        // ever taken the files of rows deleted earlier by some other path. A
+        // wipe left 54 photographs and 2.3 MB behind with no row anywhere
+        // pointing at them - a "cleared" catalog that still had a folder per
+        // draft on disk. Guarded rather than assumed: the sweep only runs once
+        // the tables it belongs to are actually empty.
+        $orphanedFiles = 0;
+
+        if (ProductDraft::query()->count() === 0 && ProductDraftMedia::query()->count() === 0) {
+            $orphanedFiles += $this->sweep(Storage::disk('public'), 'drafts');
+        }
+
+        if (Product::query()->count() === 0 && ProductMedia::query()->count() === 0) {
+            $orphanedFiles += $this->sweep(Storage::disk('public'), 'products');
+        }
+
         Cache::flush();
 
         $after = $this->counts();
@@ -65,9 +84,26 @@ class ResetCatalogTestData extends Command
             $before['product_gallery_recipes'],
             $after['product_gallery_recipes'],
         ));
+
+        if ($orphanedFiles > 0) {
+            $this->line($orphanedFiles.' orphaned image file(s) removed from disk.');
+        }
+
         $this->line('Preserved settings, API keys, users, categories, brands, Telegram updates and AI/source audit history. IDs were not reset.');
 
         return self::SUCCESS;
+    }
+
+    /**
+     * Remove a directory the catalog no longer references. Returns how many
+     * files it held, so the operator sees that the disk was cleared too.
+     */
+    private function sweep(Filesystem $disk, string $directory): int
+    {
+        $files = count($disk->allFiles($directory));
+        $disk->deleteDirectory($directory);
+
+        return $files;
     }
 
     /** @return array{products: int, product_drafts: int, product_gallery_recipes: int} */
