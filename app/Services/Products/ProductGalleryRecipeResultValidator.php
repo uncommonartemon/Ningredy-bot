@@ -16,11 +16,21 @@ class ProductGalleryRecipeResultValidator
     public function __construct(private readonly AiSettings $settings) {}
 
     /** @return array{passed: bool, expected: int, extracted: int, reason: string} */
+    /**
+     * @param  bool  $countedOnThisPage  Whether the recipe's expected_image_count
+     *                                   describes the page being validated. It does
+     *                                   while the agent is training on that very
+     *                                   page, and it does not the moment the recipe
+     *                                   is reused somewhere else - a laptop with
+     *                                   seven photographs teaches nothing about how
+     *                                   many the next laptop has.
+     */
     public function validate(
         array $recipe,
         array $result,
         int $limit = 10,
         ?int $minimumSuccessCount = null,
+        bool $countedOnThisPage = true,
     ): array {
         $images = collect($result['images'] ?? [])
             ->filter(fn (mixed $image): bool => is_string($image) && $image !== '')
@@ -36,20 +46,35 @@ class ProductGalleryRecipeResultValidator
             $limit,
             max(1, $minimumSuccessCount ?? $this->settings->galleryMinSuccessCount()),
         );
-        $recipeExpected = max(0, min($limit, (int) ($recipe['expected_image_count'] ?? 0)));
+        $recipeExpected = $countedOnThisPage
+            ? max(0, min($limit, (int) ($recipe['expected_image_count'] ?? 0)))
+            : 0;
+        $observedGalleryCount = max(0, (int) data_get($result, 'diagnostics.observed_gallery_count', 0));
         $structuralCount = max(
             0,
             (int) data_get($result, 'diagnostics.distinct_dom_assets', 0),
-            (int) data_get($result, 'diagnostics.observed_gallery_count', 0),
+            $observedGalleryCount,
         );
         // Expected counts are estimates and cannot stand alone: lazy DOM nodes
         // and CDN renditions may inflate them. Once the strict recipe selectors
         // independently expose the same number of distinct physical assets,
         // however, that count is a deterministic completeness target. The
         // category minimum remains the fallback only when structure is unknown.
-        $structuralTarget = $recipeExpected >= $minSuccessCount && $structuralCount >= $minSuccessCount
-            ? min($recipeExpected, $structuralCount)
-            : 0;
+        //
+        // A reused recipe brings no count of its own: how many photographs the
+        // product it was trained on happened to have says nothing about this
+        // one. The gallery this page actually shows is the whole target, and
+        // it is taken alone - distinct_dom_assets counts every image on the
+        // page, so a badge or a banner outside the gallery would raise the bar
+        // above what the gallery even holds. Seen live: a recipe that opened
+        // cdw.com correctly and collected all six photographs was failed for
+        // "extracted 6 of 7 required", the seven being another product's count
+        // confirmed by a seventh image that was not part of the gallery.
+        $structuralTarget = match (true) {
+            ! $countedOnThisPage => $observedGalleryCount >= $minSuccessCount ? $observedGalleryCount : 0,
+            $recipeExpected >= $minSuccessCount && $structuralCount >= $minSuccessCount => min($recipeExpected, $structuralCount),
+            default => 0,
+        };
         $targetCount = max($minSuccessCount, $structuralTarget);
 
         $galleryPresent = filter_var(

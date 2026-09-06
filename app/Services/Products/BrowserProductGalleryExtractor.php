@@ -104,6 +104,7 @@ class BrowserProductGalleryExtractor
                 $recipe->recipe ?? [],
                 $result,
                 minimumSuccessCount: $minimumSuccessCount,
+                countedOnThisPage: false,
             );
             // A recipe is cached per domain, but the same domain can serve a
             // different page markup (a different regional storefront, an A/B
@@ -319,6 +320,7 @@ class BrowserProductGalleryExtractor
                 $candidate->recipe ?? [],
                 $result,
                 minimumSuccessCount: $minimumSuccessCount,
+                countedOnThisPage: false,
             );
             $selectorsMismatched = $this->recipeSelectorsMismatchPage(
                 $candidate->recipe ?? [],

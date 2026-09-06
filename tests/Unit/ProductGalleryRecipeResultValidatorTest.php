@@ -10,6 +10,90 @@ class ProductGalleryRecipeResultValidatorTest extends TestCase
 {
     use RefreshDatabase;
 
+    public function test_a_reused_recipe_is_not_held_to_the_photo_count_of_another_product(): void
+    {
+        // Live, 2026-09-05, cdw.com: the stored recipe opened the page, walked
+        // the gallery and collected all six photographs - 1920x1440, every one
+        // of them downloadable. It was failed with "extracted 6 of 7 required
+        // images", the seven being how many photographs the laptop it had been
+        // trained on happened to have. The whole source was then thrown away,
+        // two more recipes were probed, an AI call was spent and the search
+        // moved on to other shops.
+        //
+        // How many photographs a product has is a fact about that product. The
+        // recipe carries how to open the gallery, and nothing about its size.
+        $result = app(ProductGalleryRecipeResultValidator::class)->validate(
+            [
+                'gallery_present' => true,
+                'content_confirmed_product' => true,
+                'expected_image_count' => 7,
+            ],
+            [
+                'images' => $this->images(6),
+                // Six in the gallery; the seventh distinct asset on the page is
+                // something else entirely - a badge, a banner, a related item.
+                'diagnostics' => ['observed_gallery_count' => 6, 'distinct_dom_assets' => 7],
+            ],
+            countedOnThisPage: false,
+        );
+
+        $this->assertTrue($result['passed'], $result['reason']);
+        $this->assertSame(6, $result['expected']);
+        $this->assertSame(6, $result['extracted']);
+    }
+
+    public function test_an_image_outside_the_gallery_cannot_raise_the_bar_above_the_gallery(): void
+    {
+        // distinct_dom_assets counts every image on the page. Taken as the
+        // target it asks a six-photograph gallery for eleven.
+        $result = app(ProductGalleryRecipeResultValidator::class)->validate(
+            ['gallery_present' => true, 'content_confirmed_product' => true, 'expected_image_count' => 11],
+            [
+                'images' => $this->images(6),
+                'diagnostics' => ['observed_gallery_count' => 6, 'distinct_dom_assets' => 11],
+            ],
+            countedOnThisPage: false,
+        );
+
+        $this->assertTrue($result['passed'], $result['reason']);
+        $this->assertSame(6, $result['expected']);
+    }
+
+    public function test_a_reused_recipe_that_misses_photographs_of_this_page_still_fails(): void
+    {
+        // The other direction, and the reason the count is not simply dropped:
+        // this page shows nine and the recipe reached four, so the traversal is
+        // genuinely incomplete and must be sent back.
+        $result = app(ProductGalleryRecipeResultValidator::class)->validate(
+            ['gallery_present' => true, 'content_confirmed_product' => true, 'expected_image_count' => 4],
+            [
+                'images' => $this->images(4),
+                'diagnostics' => ['observed_gallery_count' => 9, 'distinct_dom_assets' => 9],
+            ],
+            countedOnThisPage: false,
+        );
+
+        $this->assertFalse($result['passed']);
+        $this->assertSame(9, $result['expected']);
+        $this->assertSame(4, $result['extracted']);
+    }
+
+    public function test_while_training_the_agents_own_count_for_this_page_still_governs(): void
+    {
+        // Unchanged where it belongs: the agent proposing a recipe has just
+        // looked at this page, so its count is evidence about it.
+        $result = app(ProductGalleryRecipeResultValidator::class)->validate(
+            ['gallery_present' => true, 'content_confirmed_product' => true, 'expected_image_count' => 7],
+            [
+                'images' => $this->images(6),
+                'diagnostics' => ['observed_gallery_count' => 6, 'distinct_dom_assets' => 7],
+            ],
+        );
+
+        $this->assertFalse($result['passed']);
+        $this->assertSame(7, $result['expected']);
+    }
+
     public function test_five_of_thirteen_structurally_observed_frames_is_not_complete(): void
     {
         $result = app(ProductGalleryRecipeResultValidator::class)->validate(
