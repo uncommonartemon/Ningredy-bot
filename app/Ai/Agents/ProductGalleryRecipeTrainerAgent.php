@@ -297,6 +297,23 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
             exclude_selectors rather than leaving it out of collect_selectors and hoping - an unlisted
             selector can still be re-added by a later round or a generic fallback, an excluded one cannot.
 
+            A recipe is how to open and walk THIS SHOP's gallery, never a description of the product in
+            front of you. No selector may contain the product's own name, model, SKU or colour as a
+            literal - not in an attribute match, not in a text match, not in an exclusion. Such a selector
+            matches on exactly one page of one shop in one language, so the site ends up with a recipe per
+            product instead of one that opens the site, and the very next laptop trains from scratch. This
+            is checked and a recipe that does it is rejected before it is ever run.
+
+            The case where this is tempting is a gallery block holding more than one variant - two
+            colourways, touch and non-touch, several configurations - where collecting everything mixes
+            photos of a product the buyer is not looking at. Do not separate them by name. The page has
+            already marked which group is showing, and that marking is what to select on: aria-checked or
+            aria-selected on the chosen swatch, the [data-group] value the active group carries, a class
+            the page adds to the selected group, or the container the visible hero image lives in. Scope
+            the collect_selectors to that group's container so the selection follows whichever variant the
+            page opens with, on every product. If you cannot find such a marking, say so in reason and
+            collect the whole block rather than inventing a name-based filter.
+
             actions is the preferred control mechanism for a layered or non-standard gallery. It is executed
             strictly in array order and may contain only:
             - click: click one matched element at index; limit is unused for this kind but the field is
