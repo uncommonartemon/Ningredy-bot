@@ -485,7 +485,7 @@ class ProductImageStorage
                 }
             }
 
-            $urls = $this->cleanUrls($source['image_urls'] ?? []);
+            $urls = $this->cleanUrls($source['image_urls'] ?? [], $draft->color);
 
             if (($source['url'] ?? null) === $draft->primary_source_url) {
                 $urls = array_values(array_unique([
@@ -2165,11 +2165,11 @@ class ProductImageStorage
                 $telegramUpdateId ?? $draft->telegram_update_id,
                 staticOnly: $staticOnly,
             ),
-        ]);
+        ], $draft->color);
     }
 
     /** @param array<int, mixed> $urls @return array<int, string> */
-    private function cleanUrls(array $urls): array
+    private function cleanUrls(array $urls, ?string $variantHint = null): array
     {
         $limit = (int) config('product-images.download_limit', 20);
 
@@ -2182,9 +2182,23 @@ class ProductImageStorage
                 'gallery_rank' => $this->resolver->isConfirmedGalleryImage($url)
                     ? 2
                     : ($this->resolver->isPartialGalleryImage($url) ? 1 : 0),
+                'variant_rank' => self::candidateMatchesVariant($url, $variantHint) ? 1 : 0,
                 'quality' => self::candidateUrlQualityScore($url),
-            ])
+            ]);
+
+        // A family landing page carries every colourway at once, and the
+        // download limit then decides which colour the card gets by whichever
+        // renditions happened to score higher. Seen live on a Surface Laptop in
+        // Platinum: the same hero shot existed as ...-platinum-... and
+        // ...-ocean-..., and only the limit stood between the card and a blue
+        // laptop. When the product has a colour and some candidates name it,
+        // those come first - no list of colour names, just the word the draft
+        // already knows. When nothing names it the signal is absent and the
+        // order is untouched, because inventing one would be worse than none.
+        $namesTheVariant = $ranked->contains(fn (array $item): bool => $item['variant_rank'] === 1);
+        $ranked = $ranked
             ->sort(fn (array $left, array $right): int => ($right['gallery_rank'] <=> $left['gallery_rank'])
+                ?: ($namesTheVariant ? ($right['variant_rank'] <=> $left['variant_rank']) : 0)
                 ?: ($right['quality'] <=> $left['quality'])
             )
             ->unique(fn (array $item): string => self::imageAssetKey($item['url']))
@@ -3021,6 +3035,32 @@ class ProductImageStorage
             '/__rendition__/',
             $normalized,
         ) ?: $normalized);
+    }
+
+    /**
+     * Whether a candidate URL names the colour the draft asked for.
+     *
+     * Deliberately no list of colour names: the draft already holds the word,
+     * and the only question is whether the URL says it too. Matched on token
+     * boundaries so "blue" cannot match "bluetooth", and only for a word long
+     * enough to mean something on its own.
+     */
+    private static function candidateMatchesVariant(string $url, ?string $variantHint): bool
+    {
+        $tokens = collect(preg_split('/[^\p{L}\p{N}]+/u', mb_strtolower((string) $variantHint)) ?: [])
+            ->filter(fn (string $token): bool => mb_strlen($token) >= 4)
+            ->values();
+
+        if ($tokens->isEmpty()) {
+            return false;
+        }
+
+        $haystack = mb_strtolower((string) parse_url($url, PHP_URL_PATH));
+
+        return $tokens->contains(fn (string $token): bool => preg_match(
+            '/(?:^|[^a-z0-9])'.preg_quote($token, '/').'(?:[^a-z0-9]|$)/i',
+            $haystack,
+        ) === 1);
     }
 
     private static function candidateUrlQualityScore(string $url): int
