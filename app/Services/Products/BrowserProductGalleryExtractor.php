@@ -22,6 +22,19 @@ class BrowserProductGalleryExtractor
     /** @var array<string, true> */
     private array $partialGalleryImages = [];
 
+    /**
+     * Frames collected from a page whose identity could not be compared with
+     * the product page - unknown, not wrong.
+     *
+     * They are kept, because the agent chose the control that led there and a
+     * shop that publishes no metadata is not thereby a shop with no gallery.
+     * What they do not get is the confirmed_gallery badge, which is what lets a
+     * frame skip ahead of the checks that would have caught a wrong product.
+     *
+     * @var array<string, true>
+     */
+    private array $identityUnconfirmedImages = [];
+
     public function __construct(
         private readonly AiSettings $settings,
         private readonly ProductSearchTimeBudget $timeBudget,
@@ -436,7 +449,10 @@ class BrowserProductGalleryExtractor
 
     public function isConfirmedGalleryImage(string $url): bool
     {
-        return isset($this->confirmedGalleryImages[$this->galleryImageKey($url)]);
+        $key = $this->galleryImageKey($url);
+
+        return isset($this->confirmedGalleryImages[$key])
+            && ! isset($this->identityUnconfirmedImages[$key]);
     }
 
     public function isPartialGalleryImage(string $url): bool
@@ -688,6 +704,7 @@ class BrowserProductGalleryExtractor
             // that showed a robot check is slowed down before the next visit
             // rather than after the third one draws another.
             $this->rememberAccessChallenge($url, is_array($result['scout'] ?? null) ? $result['scout'] : []);
+            $this->noteIdentityUnconfirmed($result, $debug);
 
             return $result;
         } catch (ProcessTimedOutException $exception) {
@@ -843,13 +860,58 @@ class BrowserProductGalleryExtractor
         }
     }
 
-    /** @param array<int, string> $images */
+    /**
+     * The browser navigated somewhere it could not identify.
+     *
+     * Recorded here, at the one place a browser result arrives, so it does not
+     * matter which of the three later decisions would have confirmed these
+     * frames. The run reported it; the frames carry it from now on.
+     *
+     * @param  array<string, mixed>  $result
+     */
+    private function noteIdentityUnconfirmed(array $result, ?callable $debug): void
+    {
+        if ((bool) data_get($result, 'diagnostics.identity_unconfirmed', false) !== true) {
+            return;
+        }
+
+        $images = collect($result['images'] ?? [])
+            ->filter(fn (mixed $image): bool => is_string($image) && $image !== '');
+
+        foreach ($images as $image) {
+            $this->identityUnconfirmedImages[$this->galleryImageKey($image)] = true;
+        }
+
+        $debug?->__invoke(
+            'warning',
+            'Часть кадров снята со страницы, которую не удалось опознать: ни она, ни карточка не публикуют '
+                .'sku, canonical или og:url. Кадры оставляю, но подтверждёнными галерейными они не считаются - '
+                .'их проверит Vision наравне с остальными.',
+        );
+    }
+
+    /**
+     * @param  array<int, string>  $images
+     */
     private function rememberConfirmedGalleryImages(array $images): void
     {
         foreach ($images as $image) {
-            if (is_string($image) && $image !== '') {
-                $this->confirmedGalleryImages[$this->galleryImageKey($image)] = true;
+            if (! is_string($image) || $image === '') {
+                continue;
             }
+
+            $key = $this->galleryImageKey($image);
+
+            // The badge is what lets a frame skip ahead of the checks that
+            // exist to catch a wrong product. A frame from a page we could not
+            // identify is exactly the frame those checks are for, so it is kept
+            // and sent through them rather than trusted past them. Unknown is
+            // not a soft yes.
+            if (isset($this->identityUnconfirmedImages[$key])) {
+                continue;
+            }
+
+            $this->confirmedGalleryImages[$key] = true;
         }
     }
 
