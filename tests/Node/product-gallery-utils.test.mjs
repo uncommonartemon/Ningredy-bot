@@ -253,6 +253,17 @@ test('requires the complete ordered action plan regardless of already collected 
     assert.equal(complete.completed_actions, 2);
 });
 
+test('runner exhaustion completes single-control traversal without accepting an unclicked marker', () => {
+    for (const kind of ['click_each', 'click_until_no_change']) {
+        const actions = [{ kind, selector: '.next', index: 0, limit: 40 }];
+        const trace = { action: kind, action_index: 0, clicked: true, changed: true,
+            selector_match_count: 1, traversal_exhausted: true };
+        assert.equal(recipeActionPlanStatus({ actions, actionTrace: [trace] }).complete, true);
+        assert.equal(recipeActionPlanStatus({ actions, actionTrace: [{ ...trace, clicked: false }] }).complete, false);
+        assert.equal(recipeActionPlanStatus({ actions, actionTrace: [{ ...trace, traversal_exhausted: false }] }).complete, false);
+    }
+});
+
 test('requires arrow traversal to reach no-change or its declared limit', () => {
     const actions = [{
         kind: 'click_until_no_change',

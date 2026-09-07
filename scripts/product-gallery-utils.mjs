@@ -631,7 +631,8 @@ export const recipeActionPlanStatus = ({ actions, actionTrace }) => {
                 ? Math.min(action.limit, selectorMatches)
                 : action.limit;
             const exhausted = selectorMatches <= 1
-                && primaryTraces.some((item) => item.clicked === true && item.changed === false);
+                && primaryTraces.some((item) => item.clicked === true
+                    && (item.changed === false || item.traversal_exhausted === true));
             const presses = exhausted ? clicked.length : requiredClicks;
             complete = exhausted || clicked.length >= requiredClicks;
             completion = complete ? 'all_matches_clicked' : 'matches_left_unclicked';
@@ -641,7 +642,7 @@ export const recipeActionPlanStatus = ({ actions, actionTrace }) => {
                 completion = 'after_each_incomplete';
             }
         } else if (action.kind === 'click_until_no_change') {
-            const exhausted = clicked.some((item) => item.changed === false);
+            const exhausted = clicked.some((item) => item.changed === false || item.traversal_exhausted === true);
             complete = exhausted || clicked.length >= action.limit;
             requiredClicks = exhausted ? clicked.length : action.limit;
             completion = complete

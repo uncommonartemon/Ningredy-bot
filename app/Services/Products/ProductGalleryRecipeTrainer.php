@@ -619,6 +619,7 @@ class ProductGalleryRecipeTrainer
             $stalled = false;
             $budgetDeferred = false;
             $downloadInterrupted = false;
+            $abandonmentReviewPending = false;
             $stuckOnValidation = false;
             $agentAbandoned = false;
             $agentAbandonReason = null;
@@ -870,6 +871,44 @@ class ProductGalleryRecipeTrainer
                     $candidate = $this->validateRecipe($response->toArray(), (string) ($pageScout['title'] ?? ''));
 
                     if (($candidate['training_decision'] ?? 'propose_recipe') === 'abandon_page') {
+                        // A terminal page verdict cannot silently discard an
+                        // unexplored gallery prospect. This is a contradiction
+                        // review, not a server guess based on link vocabulary.
+                        $unexploredProspect = $previousCandidateResult === null
+                            && ($preflight['gallery_likely'] ?? false)
+                            && (($pageScout['action_candidates'] ?? []) !== []
+                                || ($pageScout['interactive_controls'] ?? []) !== []);
+                        if ($unexploredProspect) {
+                            $attempts[] = [
+                                'attempt' => $attempt,
+                                'selectors_tried' => $candidate,
+                                'error' => 'unexplored_gallery_prospect',
+                            ];
+                            $this->attempts->record([
+                                'telegram_update_id' => $telegramUpdateId,
+                                'product_gallery_recipe_version_id' => $version->id,
+                                'product_url' => $url,
+                                'actor' => 'server', 'phase' => 'gallery_training',
+                                'action' => 'review_abandonment', 'status' => 'interrupted',
+                                'decision' => 'unexplored_gallery_prospect', 'round' => $attempt,
+                                'output' => ['assessment' => $candidate, 'preflight' => $preflight],
+                            ]);
+                            if ($abandonmentReviewPending) {
+                                // One reconsideration, within the same budget.
+                                // Repeating a claim is not new page evidence.
+                                break;
+                            }
+                            $abandonmentReviewPending = true;
+                            $feedback = [
+                                'rejected_recipe' => $candidate,
+                                'error' => 'Abandonment conflicts with an unexplored gallery prospect: preflight reports gallery_likely and the page has observed controls, but no candidate has been executed.',
+                                'preflight' => $preflight,
+                                'instruction' => 'Reconcile this assessment with the observed controls and your own evidence. A safe transition to the same product media is part of a replayable recipe, not a reason to discard its starting page. Use the available read-only observation tools, including Vision if visual interpretation is needed. Return a complete safe plan from the original page when a prospect exists; exact product identity must still be verified. Do not invent a URL or bypass navigation checks. Repeating abandonment without an execution leaves this source unverified, not unsuitable.',
+                            ];
+                            $debug?->__invoke('warning', 'Агент предложил отказаться от страницы до проверки найденной перспективы галереи; возвращаю наблюдения на пересмотр.');
+
+                            continue;
+                        }
                         $pageRule = $this->pageRules->rememberUnsuitable(
                             $url,
                             (string) ($candidate['page_kind'] ?? 'unknown'),
@@ -972,6 +1011,7 @@ class ProductGalleryRecipeTrainer
 
                 $debug?->__invoke('step', "AI-тренер: проверяю рецепт, раунд {$roundLabel} · {$url}");
                 $candidateResult = $this->browser->executeRecipe($url, $candidate, 20, $debug, $telegramUpdateId, $context);
+                $abandonmentReviewPending = false;
                 $this->recordExecutionTrace(
                     $url,
                     $version,
@@ -1168,6 +1208,7 @@ class ProductGalleryRecipeTrainer
             $version->update([
                 'status' => match (true) {
                     $promote => 'promoted',
+                    $abandonmentReviewPending => 'interrupted',
                     $downloadInterrupted => 'interrupted',
                     // Not a verdict on the recipe: the session was rationed, not
                     // judged. The row keeps the candidate and the round history
@@ -1187,6 +1228,7 @@ class ProductGalleryRecipeTrainer
                     'diagnostics' => $candidateResult['diagnostics'] ?? [],
                     'action_trace' => $candidateResult['action_trace'] ?? [],
                     'failure_kind' => match (true) {
+                        $abandonmentReviewPending => 'unexplored_gallery_prospect',
                         $downloadInterrupted => 'download_interrupted',
                         $stalled => 'page_stalled',
                         $agentAbandoned => $failureKind,
@@ -1199,6 +1241,7 @@ class ProductGalleryRecipeTrainer
                 'promoted_at' => $promote ? now() : null,
                 'error' => match (true) {
                     $promote => null,
+                    $abandonmentReviewPending => 'Gallery prospect remains unverified: abandonment was not backed by an executed candidate. Review history is preserved.',
                     $downloadInterrupted => $validation['reason'],
                     $budgetDeferred => 'Обучение отложено: этот источник израсходовал свою долю денежного бюджета текущего поиска. Кандидат и история раундов сохранены.',
                     $stalled => 'Обучение остановлено: три последовательных раунда не дали материального прогресса.',
@@ -1208,10 +1251,12 @@ class ProductGalleryRecipeTrainer
                 },
             ]);
 
-            if (! $promote && ($budgetDeferred || $downloadInterrupted)) {
+            if (! $promote && ($budgetDeferred || $downloadInterrupted || $abandonmentReviewPending)) {
                 // A deferred candidate must never fall through to the active
                 // recipe update below. Keep the last working version intact.
-                return $oldImages;
+                // These URLs are provisional, not a working recipe. Preserve
+                // them for downstream download/content checks even on deferral.
+                return $bestPartialImages;
             }
 
             if (! $promote) {
@@ -1405,7 +1450,10 @@ class ProductGalleryRecipeTrainer
                 'rejected_recipe' => $last['selectors_tried'] ?? null,
                 'candidate_count' => (int) ($last['candidate_count'] ?? 0),
                 'downloaded_frames' => $last['download_probe'] ?? null,
-                'error' => 'A previous training session on this domain was stopped part-way because it had spent '
+                'error' => $version?->status === 'interrupted'
+                    ? 'A previous training session was interrupted, not a terminal page verdict. Reason: '
+                        .($version->error ?? 'Verification did not complete.').' Its last rounds are in attempt_history.'
+                    : 'A previous training session on this domain was stopped part-way because it had spent '
                     .'its share of that search\'s budget - not because these recipes were wrong. Its last rounds '
                     .'are in attempt_history.',
                 'instruction' => 'Continue that work rather than starting over: the selectors and actions already '

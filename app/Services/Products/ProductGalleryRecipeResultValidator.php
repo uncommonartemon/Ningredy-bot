@@ -328,7 +328,8 @@ class ProductGalleryRecipeResultValidator
             if ($kind === 'click_until_no_change') {
                 $limit = max(1, (int) ($action['limit'] ?? 1));
                 $exhausted = $completedTrace->contains(
-                    fn (array $item): bool => ($item['changed'] ?? null) === false,
+                    fn (array $item): bool => ($item['changed'] ?? null) === false
+                        || ($item['traversal_exhausted'] ?? false) === true,
                 );
 
                 if (! $exhausted && $completedTrace->count() < $limit) {

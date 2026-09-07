@@ -250,7 +250,9 @@ class BrowserProductGalleryExtractor
             ?? $this->recipeRouter->recipeForUrl($url);
         $latestVersion = $trainedRecipe?->versions()->latest('id')->first();
 
-        if ($latestVersion?->status === 'partial') {
+        if (in_array($latestVersion?->status, ['partial', 'deferred', 'interrupted'], true)) {
+            // An older active recipe must not lend its trust to frames from
+            // an unfinished repair. Provisional frames still need verification.
             $this->rememberPartialGalleryImages($images);
         } elseif ($trainedRecipe?->status === 'active') {
             $latestResult = is_array($latestVersion?->result) ? $latestVersion->result : [];

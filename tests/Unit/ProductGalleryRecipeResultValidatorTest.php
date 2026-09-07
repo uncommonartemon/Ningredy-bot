@@ -89,6 +89,23 @@ class ProductGalleryRecipeResultValidatorTest extends TestCase
         $this->assertTrue($result['passed'], $result['reason']);
     }
 
+    public function test_arrow_exhaustion_requires_a_successful_click_and_does_not_replace_image_validation(): void
+    {
+        $recipe = ['gallery_present' => true, 'content_confirmed_product' => true,
+            'actions' => [['kind' => 'click_until_no_change', 'selector' => '.next', 'limit' => 40]]];
+        $trace = ['action' => 'click_until_no_change', 'action_index' => 0,
+            'clicked' => true, 'changed' => true, 'selector_match_count' => 1, 'traversal_exhausted' => true];
+        $result = ['images' => $this->images(5),
+            'diagnostics' => ['observed_gallery_count' => 5, 'distinct_dom_assets' => 5],
+            'action_trace' => [$trace]];
+        $validator = app(ProductGalleryRecipeResultValidator::class);
+        $this->assertTrue($validator->validate($recipe, $result)['passed']);
+        $this->assertFalse($validator->validate($recipe, [...$result,
+            'action_trace' => [[...$trace, 'clicked' => false]]])['passed']);
+        $this->assertFalse($validator->validate($recipe, [...$result,
+            'images' => $this->images(1)])['passed']);
+    }
+
     public function test_a_reused_recipe_is_not_held_to_the_photo_count_of_another_product(): void
     {
         // Live, 2026-09-05, cdw.com: the stored recipe opened the page, walked

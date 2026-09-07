@@ -12,6 +12,8 @@ use App\Models\ProductGalleryRecipe;
 use App\Models\ProductGalleryRecipeVersion;
 use App\Models\ProductSourceAttempt;
 use App\Models\ProductSourceDomain;
+use App\Models\TelegramUpdate;
+use App\Services\Ai\ProductSearchCostBudget;
 use App\Services\Ai\ProductSearchTimeBudget;
 use App\Services\Products\BrowserProductGalleryExtractor;
 use App\Services\Products\GalleryTrainingAbandonSignal;
@@ -645,13 +647,58 @@ class ProductGalleryRecipeTrainerTest extends TestCase
         $result = app(ProductGalleryRecipeTrainer::class)->train('https://unavailable.example/product', force: true);
         $recipe = ProductGalleryRecipe::where('domain', 'unavailable.example')->firstOrFail();
         $version = $recipe->versions()->firstOrFail();
-        $this->assertSame([], $result);
+        $this->assertSame([
+            'https://93.184.216.34/a.jpg', 'https://93.184.216.34/b.jpg', 'https://93.184.216.34/c.jpg',
+        ], $result, 'Unverified URLs must survive for downstream checks, not disappear with the failed activation.');
         $this->assertNotSame('active', $recipe->status);
         $this->assertSame(0, $recipe->failure_count);
         $this->assertSame('interrupted', $version->status);
         $this->assertNull($version->promoted_at);
         $this->assertSame('download_interrupted', $version->result['failure_kind']);
         $this->assertCount(1, $version->result['attempts']);
+    }
+
+    public function test_source_budget_deferral_returns_observed_frames_without_promoting_the_recipe(): void
+    {
+        $update = TelegramUpdate::create([
+            'update_id' => 991122, 'telegram_user_id' => '111', 'chat_id' => '222',
+            'message_id' => 1, 'payload' => [], 'status' => 'processing',
+        ]);
+        $this->mock(ProductSearchCostBudget::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('limit')->andReturn(1.0);
+            $mock->shouldReceive('unmeasurable', 'exceeded', 'reachedFraction')->andReturn(false);
+            $mock->shouldReceive('spent', 'spentFraction')->andReturn(0.0);
+            $mock->shouldReceive('exceededForSource')->twice()->andReturn(false, true);
+        });
+        ProductGalleryRecipeTrainerAgent::fake(fn () => [...$this->workingRecipe(),
+            'actions' => [['kind' => 'click_until_no_change', 'selector' => '.next', 'index' => 0,
+                'limit' => 14, 'wait_after_ms' => 100, 'purpose' => 'Traverse the product viewer']],
+        ])->preventStrayPrompts();
+        $urls = array_map(fn ($n) => 'https://cdn.example/frame-'.$n.'.jpg', range(1, 15));
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock) use ($urls): void {
+            $mock->shouldReceive('scout')->once()->andReturn([
+                'scout' => ['title' => 'Laptop', 'fragments' => [], 'interactive_controls' => ['Media']],
+                'diagnostics' => [],
+            ]);
+            $mock->shouldReceive('executeRecipe')->once()->andReturn([
+                'images' => $urls, 'diagnostics' => ['action_plan' => ['required' => true, 'complete' => false]],
+            ]);
+        });
+        // Use the measurable-budget branch with the test database and AI fakes.
+        $this->app->instance('env', 'local');
+        try {
+            $result = app(ProductGalleryRecipeTrainer::class)->train(
+                'https://budget.example/product', force: true, telegramUpdateId: $update->id,
+            );
+        } finally {
+            $this->app->instance('env', 'testing');
+        }
+        $version = ProductGalleryRecipeVersion::latest('id')->firstOrFail();
+        $this->assertSame($urls, $result);
+        $this->assertSame('deferred', $version->status);
+        $this->assertNull($version->promoted_at);
+        $this->assertSame(15, $version->result['best_partial_count']);
+        $this->assertNotSame('active', ProductGalleryRecipe::where('domain', 'budget.example')->firstOrFail()->status);
     }
 
     public function test_temporary_download_failure_can_recover_in_the_same_session(): void
@@ -2487,6 +2534,74 @@ class ProductGalleryRecipeTrainerTest extends TestCase
         $version = ProductGalleryRecipeVersion::query()->latest('id')->firstOrFail();
         $this->assertSame('rejected', $version->status);
         $this->assertSame('abandon_page', $version->result['page_assessment']['training_decision']);
+    }
+
+    public function test_unexplored_gallery_is_reconsidered_and_can_be_trained_without_losing_the_starting_page(): void
+    {
+        $this->assertGalleryAbandonmentReview(recovers: true);
+    }
+
+    public function test_repeated_unexplored_abandonment_is_interrupted_not_a_persistent_page_ban(): void
+    {
+        $this->assertGalleryAbandonmentReview(recovers: false);
+    }
+
+    private function assertGalleryAbandonmentReview(bool $recovers): void
+    {
+        AppSetting::put('ai.gallery_training_max_rounds', '5');
+        $page = 'https://prospect.example/products/laptop';
+        $prompts = [];
+        ProductGalleryRecipeTrainerAgent::fake(function (string $prompt) use (&$prompts, $recovers): array {
+            $prompts[] = json_decode($prompt, true);
+            if ($recovers && count($prompts) > 1) {
+                return $this->workingRecipe();
+            }
+
+            return [...$this->workingRecipe(),
+                'training_decision' => 'abandon_page',
+                'page_kind' => 'product_family_landing',
+                'page_assessment_evidence' => [
+                    'This page contains feature illustrations.',
+                    'A separate same-product media control is present; the gallery is on that linked page.',
+                ],
+                'content_confirmed_product' => false,
+                'expected_image_count' => 0,
+                'reason' => 'Train the linked media page instead of the starting page.',
+            ];
+        })->preventStrayPrompts();
+        $urls = ['https://cdn.example/one.jpg', 'https://cdn.example/two.jpg', 'https://cdn.example/three.jpg'];
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock) use ($recovers, $page, $urls): void {
+            $mock->shouldReceive('scout')->once()->andReturn([
+                'scout' => ['title' => 'Laptop', 'fragments' => [],
+                    'interactive_controls' => ['Product media control']],
+                'diagnostics' => [],
+            ]);
+            if ($recovers) {
+                $mock->shouldReceive('executeRecipe')->once()->withArgs(
+                    fn ($url, $recipe) => $url === $page && $recipe['pre_click_selectors'] !== [],
+                )->andReturn(['images' => $urls]);
+            } else {
+                $mock->shouldNotReceive('executeRecipe');
+            }
+        });
+        $result = app(ProductGalleryRecipeTrainer::class)->train($page, force: true);
+        $this->assertCount(2, $prompts);
+        $this->assertSame('abandon_page', $prompts[1]['previous_attempt_feedback']['rejected_recipe']['training_decision']);
+        $this->assertStringContainsString('unexplored gallery prospect', $prompts[1]['previous_attempt_feedback']['error']);
+        $this->assertSame($recovers ? $urls : [], $result);
+        $this->assertDatabaseMissing('product_source_page_rules', ['domain' => 'prospect.example']);
+        $version = ProductGalleryRecipeVersion::latest('id')->firstOrFail();
+        $this->assertSame($recovers ? 'promoted' : 'interrupted', $version->status);
+        $this->assertSame(0, (int) ProductGalleryRecipe::where('domain', 'prospect.example')->firstOrFail()->failure_count);
+        if (! $recovers) {
+            $this->assertNull($version->promoted_at);
+            $this->assertSame('unexplored_gallery_prospect', $version->result['failure_kind']);
+            $resume = new \ReflectionMethod(ProductGalleryRecipeTrainer::class, 'interruptedTrainingProgress');
+            $progress = $resume->invoke(app(ProductGalleryRecipeTrainer::class),
+                ProductGalleryRecipe::where('domain', 'prospect.example')->firstOrFail());
+            $this->assertStringContainsString('Gallery prospect remains unverified', $progress['feedback']['error']);
+            $this->assertSame('abandon_page', $progress['feedback']['rejected_recipe']['training_decision']);
+        }
     }
 
     public function test_three_identical_browser_outcomes_stop_only_the_current_page(): void

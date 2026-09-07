@@ -45,6 +45,31 @@ class BrowserProductGalleryExtractorTest extends TestCase
         ));
     }
 
+    public function test_unfinished_training_frames_do_not_borrow_an_active_recipes_trust(): void
+    {
+        config(['product-images.browser_fallback.enabled' => true]);
+        $urls = ['https://cdn.example/a.jpg', 'https://cdn.example/b.jpg', 'https://cdn.example/c.jpg'];
+        $this->mock(ProductGalleryRecipeTrainer::class)->shouldReceive('train')->once()->andReturnUsing(function () use ($urls) {
+            $recipe = ProductGalleryRecipe::create([
+                'domain' => 'reserve.example', 'path_pattern' => '*', 'status' => 'active',
+                'recipe' => ['gallery_present' => true, 'content_confirmed_product' => true],
+            ]);
+            $recipe->versions()->create([
+                'domain' => 'reserve.example', 'product_url' => 'https://reserve.example/product',
+                'trigger' => 'automatic_failure', 'status' => 'deferred', 'result' => [],
+                'provider' => 'openai', 'model' => 'test-model',
+            ]);
+
+            return $urls;
+        });
+        $browser = app(BrowserProductGalleryExtractor::class);
+        $this->assertSame($urls, $browser->extract('https://reserve.example/product'));
+        foreach ($urls as $url) {
+            $this->assertFalse($browser->isConfirmedGalleryImage($url));
+            $this->assertTrue($browser->isPartialGalleryImage($url));
+        }
+    }
+
     public function test_selector_mismatch_is_detected_when_the_recipes_own_selectors_matched_nothing(): void
     {
         $mismatched = $this->invoke([
