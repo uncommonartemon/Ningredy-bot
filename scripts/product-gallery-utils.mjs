@@ -75,9 +75,32 @@ export const traversalCeiling = (declared, fallback = TRAVERSAL_CEILING) => {
 // video, a repeated frame, an image still loading.
 export const TRAVERSAL_PATIENCE = 3;
 
+/**
+ * What the page publishes about the product it is showing.
+ *
+ * Read from the markup shops write for search engines and price comparison,
+ * which is the same everywhere and in no language. Identifiers are kept apart
+ * by their kind: a sku, an mpn and a gtin live in different namespaces, and a
+ * value found under one of them proves nothing about a value found under
+ * another.
+ *
+ * Anything the page does not publish stays absent. An earlier version resolved
+ * a missing canonical through new URL('', location.href), which returns the
+ * current address - so every page without one reported its own path as its
+ * canonical, and /product?id=A matched /product?id=B. Absence must survive as
+ * absence, because the whole point of this is to know when we do not know.
+ */
 export const readProductIdentityInPage = () => {
-    const attr = (selector, name) => document.querySelector(selector)?.getAttribute(name) || null;
+    const attr = (selector, name) => {
+        const value = document.querySelector(selector)?.getAttribute(name);
+
+        return typeof value === 'string' && value.trim() !== '' ? value.trim() : null;
+    };
     const path = (raw) => {
+        if (!raw) {
+            return null;
+        }
+
         try {
             return new URL(raw, location.href).pathname.replace(/\/+$/, '').toLowerCase() || null;
         } catch {
@@ -102,9 +125,9 @@ export const readProductIdentityInPage = () => {
                     queue.push(...item['@graph']);
                 }
 
-                const type = String(item['@type'] || '').toLowerCase();
+                const types = [].concat(item['@type'] || []).map((type) => String(type).toLowerCase());
 
-                if (type === 'product' || (Array.isArray(item['@type']) && item['@type'].some((t) => String(t).toLowerCase() === 'product'))) {
+                if (types.includes('product')) {
                     products.push(item);
                 }
             }
@@ -113,52 +136,70 @@ export const readProductIdentityInPage = () => {
         }
     }
 
-    const first = (values) => values.map((value) => (typeof value === 'string' ? value.trim() : ''))
+    const firstString = (values) => values
+        .map((value) => (typeof value === 'string' || typeof value === 'number' ? String(value).trim() : ''))
         .find((value) => value !== '') || null;
+    const identifiers = {};
+
+    for (const key of ['sku', 'mpn', 'productID', 'gtin13', 'gtin12', 'gtin8', 'gtin']) {
+        const value = firstString(products.map((item) => item[key]));
+
+        if (value !== null) {
+            identifiers[key] = value.toLowerCase();
+        }
+    }
+
+    const name = firstString(products.map((item) => item.name)) || attr('meta[property="og:title"]', 'content');
 
     return {
-        canonical: path(attr('link[rel="canonical"]', 'href') || ''),
-        og_url: path(attr('meta[property="og:url"]', 'content') || ''),
-        sku: first(products.flatMap((item) => [item.sku, item.mpn, item.productID, item.gtin13, item.gtin])),
-        name: (first(products.map((item) => item.name))
-            || attr('meta[property="og:title"]', 'content')
-            || '').slice(0, 200).toLowerCase() || null,
+        canonical: path(attr('link[rel="canonical"]', 'href')),
+        og_url: path(attr('meta[property="og:url"]', 'content')),
+        identifiers,
+        name: name === null ? null : name.slice(0, 200).toLowerCase(),
     };
 };
-
 
 /**
  * Whether two pages are the same product, judged on what each published.
  *
- * Returns null when neither page offers comparable evidence - the caller then
- * has nothing better than the shape of the URL, which cannot answer this.
+ * Three answers, and the third one matters most: true, false, and null for "no
+ * comparable evidence". Null is not a soft yes. A caller that turns it into one
+ * has rebuilt the thing this replaced - a rule that guesses identity from the
+ * shape of a URL, where /store/laptops/model-a and /store/laptops/model-b look
+ * exactly as related as /product/spec and /product/gallery do.
  *
- * Strongest evidence first. An id both pages carry settles it either way; a
- * canonical or og:url is next, because a product's tab points back at the
- * product; the name is last, because two configurations of one laptop can share
- * it. This is the check that replaced a list of English tab names, and the
- * thing it must get right is the case that list was accidentally covering:
- * /store/laptops/model-a and /store/laptops/model-b are one segment apart and
- * are not the same product.
+ * Identifiers are compared within their own kind only. A name is deliberately
+ * asymmetric: two different names are two different products, but one name is
+ * shared by every configuration of a laptop, so an equal name proves nothing
+ * and yields null rather than true.
  */
 export const sameProductIdentity = (expected, landed) => {
     if (!expected || !landed) {
         return null;
     }
 
-    if (expected.sku && landed.sku) {
-        return expected.sku === landed.sku;
+    const mine = expected.identifiers || {};
+    const theirs = landed.identifiers || {};
+
+    for (const key of Object.keys(mine)) {
+        if (theirs[key]) {
+            return mine[key] === theirs[key];
+        }
     }
 
-    for (const key of ['canonical', 'og_url', 'name']) {
+    for (const key of ['canonical', 'og_url']) {
         if (expected[key] && landed[key]) {
             return expected[key] === landed[key];
         }
     }
 
+    // Enough to rule out, never enough to confirm.
+    if (expected.name && landed.name && expected.name !== landed.name) {
+        return false;
+    }
+
     return null;
 };
-
 
 
 const comparableHost = (hostname) => String(hostname || '').toLowerCase().replace(/^www\./, '');

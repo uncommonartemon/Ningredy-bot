@@ -4,72 +4,98 @@ import { chromium } from 'playwright-core';
 import { readProductIdentityInPage, sameProductIdentity } from '../../scripts/product-gallery-utils.mjs';
 
 /**
- * The check that replaced a list of English tab names. It went in untested and
- * an earlier attempt at the same repair let /store/laptops/model-a reach
- * /store/laptops/model-b, which a path rule cannot tell apart from
- * /product/spec reaching /product/gallery. This is the evidence that it does.
+ * The check that replaced a list of English tab names. Its first version went
+ * in on my word that it worked, and a review found three ways it said "same
+ * product" without evidence. Each one is a test here now.
  */
-test('an id both pages carry settles it, either way', () => {
-    assert.equal(
-        sameProductIdentity({ sku: 'NX-JNQEK-003', name: 'aspire 14' }, { sku: 'NX-JNQEK-003', name: 'aspire 14 gallery' }),
-        true,
-    );
-    // The case the tab-name list was accidentally covering.
-    assert.equal(
-        sameProductIdentity({ sku: 'MODEL-A', canonical: '/store/laptops/model-a' }, { sku: 'MODEL-B', canonical: '/store/laptops/model-b' }),
-        false,
-    );
-});
-
-test('a canonical or og url answers when there is no id', () => {
-    assert.equal(
-        sameProductIdentity({ canonical: '/p/laptop-9' }, { canonical: '/p/laptop-9' }),
-        true,
-        "A product's own gallery tab points back at the product.",
-    );
-    assert.equal(
-        sameProductIdentity({ canonical: '/p/laptop-9' }, { canonical: '/p/laptop-10' }),
-        false,
-    );
-    assert.equal(
-        sameProductIdentity({ og_url: '/p/laptop-9' }, { og_url: '/p/laptop-9' }),
-        true,
-    );
-});
-
-test('the strongest available evidence is the one that decides', () => {
-    // Names collide across configurations of one laptop, so an id outranks
-    // them; a page that only has a name still gets an answer from it.
+test('an identifier both pages carry settles it, either way', () => {
     assert.equal(
         sameProductIdentity(
-            { sku: 'A', canonical: '/p/one', name: 'thinkpad x1' },
-            { sku: 'B', canonical: '/p/one', name: 'thinkpad x1' },
+            { identifiers: { sku: 'nx-jnqek-003' } },
+            { identifiers: { sku: 'nx-jnqek-003' } },
+        ),
+        true,
+    );
+    // The case a path rule cannot see: one segment apart, different laptops.
+    assert.equal(
+        sameProductIdentity(
+            { identifiers: { sku: 'model-a' }, canonical: '/store/laptops/model-a' },
+            { identifiers: { sku: 'model-b' }, canonical: '/store/laptops/model-b' },
         ),
         false,
     );
-    assert.equal(sameProductIdentity({ name: 'thinkpad x1' }, { name: 'thinkpad x1' }), true);
+});
+
+test('identifiers are compared within their own kind', () => {
+    // sku, mpn and gtin are different namespaces. A value found under one says
+    // nothing about a value found under another, and treating them as one field
+    // manufactures both matches and mismatches.
+    assert.equal(
+        sameProductIdentity({ identifiers: { sku: 'x1' } }, { identifiers: { mpn: 'x1' } }),
+        null,
+        'Nothing comparable was published, so there is no verdict.',
+    );
+    assert.equal(
+        sameProductIdentity(
+            { identifiers: { sku: 'a', mpn: 'shared' } },
+            { identifiers: { mpn: 'shared' } },
+        ),
+        true,
+    );
+});
+
+test('an equal name is not proof, an unequal one is', () => {
+    // Every configuration of a laptop shares its name, so equality proves
+    // nothing - the previous version accepted it and a test locked that in.
+    assert.equal(sameProductIdentity({ name: 'thinkpad x1' }, { name: 'thinkpad x1' }), null);
     assert.equal(sameProductIdentity({ name: 'thinkpad x1' }, { name: 'thinkpad x13' }), false);
 });
 
 test('no comparable evidence is not a verdict', () => {
-    // The caller must fall back rather than treat silence as agreement.
-    assert.equal(sameProductIdentity(null, { sku: 'A' }), null);
-    assert.equal(sameProductIdentity({ sku: 'A' }, null), null);
+    assert.equal(sameProductIdentity(null, { identifiers: { sku: 'a' } }), null);
+    assert.equal(sameProductIdentity({ identifiers: { sku: 'a' } }, null), null);
     assert.equal(sameProductIdentity({}, {}), null);
-    assert.equal(sameProductIdentity({ sku: 'A' }, { canonical: '/p/one' }), null);
+    assert.equal(sameProductIdentity({ identifiers: { sku: 'a' } }, { canonical: '/p/one' }), null);
+});
+
+test('what a page does not publish stays absent', async (t) => {
+    const browser = await launch();
+
+    if (!browser) {
+        t.skip('No Chromium available on this machine.');
+
+        return;
+    }
+
+    try {
+        const page = await browser.newPage();
+
+        // Two different products on a shop that publishes no metadata at all.
+        // An earlier version resolved the missing canonical through
+        // new URL('', location.href) and reported each page's own path, so
+        // these two matched. Absence has to survive as absence.
+        await page.goto('https://example.com/product?id=A').catch(() => {});
+        await page.setContent('<html><head><title>A</title></head><body></body></html>');
+        const first = await page.evaluate(readProductIdentityInPage);
+
+        assert.equal(first.canonical, null);
+        assert.equal(first.og_url, null);
+        assert.deepEqual(first.identifiers, {});
+
+        await page.setContent('<html><head><title>B</title></head><body></body></html>');
+
+        assert.equal(
+            sameProductIdentity(first, await page.evaluate(readProductIdentityInPage)),
+            null,
+            'Two pages that published nothing are not thereby the same product.',
+        );
+    } finally {
+        await browser.close();
+    }
 });
 
 test('the reader takes its evidence off a real page', async (t) => {
-    let browser;
-
-    for (const channel of ['msedge', 'chrome', null]) {
-        try {
-            browser = await chromium.launch({ headless: true, ...(channel ? { channel } : {}) });
-            break;
-        } catch {
-            // Try the next locally available Chromium.
-        }
-    }
+    const browser = await launch();
 
     if (!browser) {
         t.skip('No Chromium available on this machine.');
@@ -84,32 +110,50 @@ test('the reader takes its evidence off a real page', async (t) => {
                 <link rel="canonical" href="https://shop.example/p/laptop-9/">
                 <meta property="og:url" content="https://shop.example/p/laptop-9">
                 <script type="application/ld+json">
-                    {"@graph":[{"@type":"BreadcrumbList"},{"@type":"Product","sku":"SKU-9","name":"ThinkPad X1"}]}
+                    {"@graph":[{"@type":"BreadcrumbList"},{"@type":["Product","Thing"],"sku":"SKU-9","mpn":"MPN-9","name":"ThinkPad X1"}]}
                 </script>
             </head><body></body></html>
         `);
 
         const identity = await page.evaluate(readProductIdentityInPage);
 
-        assert.equal(identity.sku, 'SKU-9', 'A Product nested in @graph is still the product.');
+        assert.equal(identity.identifiers.sku, 'sku-9', 'A Product nested in @graph is still the product.');
+        assert.equal(identity.identifiers.mpn, 'mpn-9', 'Kinds are kept apart.');
         assert.equal(identity.name, 'thinkpad x1');
         assert.equal(identity.canonical, '/p/laptop-9', 'Compared as a path, so host and trailing slash cannot split a match.');
-        assert.equal(identity.og_url, '/p/laptop-9');
 
-        // A gallery tab of the same product, as shops actually build one.
+        // The gallery tab of that same product, publishing less than the page
+        // it belongs to - which is normal, and enough.
         await page.setContent(`
             <html><head>
                 <link rel="canonical" href="https://shop.example/p/laptop-9">
-                <script type="application/ld+json">{"@type":"Product","mpn":"SKU-9"}</script>
             </head><body></body></html>
         `);
 
         assert.equal(sameProductIdentity(identity, await page.evaluate(readProductIdentityInPage)), true);
 
-        // A page that publishes nothing gives no verdict rather than a wrong one.
-        await page.setContent('<html><head></head><body>nothing here</body></html>');
-        assert.equal(sameProductIdentity(identity, await page.evaluate(readProductIdentityInPage)), null);
+        // The neighbouring laptop, same template, one segment away.
+        await page.setContent(`
+            <html><head>
+                <link rel="canonical" href="https://shop.example/p/laptop-10">
+                <script type="application/ld+json">{"@type":"Product","sku":"SKU-10"}</script>
+            </head><body></body></html>
+        `);
+
+        assert.equal(sameProductIdentity(identity, await page.evaluate(readProductIdentityInPage)), false);
     } finally {
         await browser.close();
     }
 });
+
+const launch = async () => {
+    for (const channel of ['msedge', 'chrome', null]) {
+        try {
+            return await chromium.launch({ headless: true, ...(channel ? { channel } : {}) });
+        } catch {
+            // Try the next locally available Chromium.
+        }
+    }
+
+    return null;
+};

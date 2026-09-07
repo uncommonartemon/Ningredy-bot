@@ -444,6 +444,11 @@ let galleryReadiness = {};
 let productPageUrl = sourceUrl;
 let leftProductPage = false;
 let productIdentity = null;
+// Set when a navigation left us somewhere neither page could identify. The
+// shape of a URL is enough to keep exploring - the agent chose this control and
+// deserves to see where it leads - and is not enough to accept a photograph
+// from. Reported so the decision is made downstream, where Vision is.
+let identityUnconfirmed = false;
 
 /**
  * What the page says it is about, in its own words.
@@ -481,11 +486,23 @@ const onProductPage = async () => {
         return verdict;
     }
 
+    // No comparable evidence on either page. Falling through to the URL is how
+    // exploration continues on a shop that publishes no metadata, but it is a
+    // guess, and calling it confirmation is exactly the mistake the tab-name
+    // list made. It is recorded as a guess instead.
+    let allowedByShape = false;
+
     try {
-        return isAllowedProductNavigation(productPageUrl, page.url());
+        allowedByShape = isAllowedProductNavigation(productPageUrl, page.url());
     } catch {
-        return false;
+        allowedByShape = false;
     }
+
+    if (allowedByShape && page.url() !== productPageUrl) {
+        identityUnconfirmed = true;
+    }
+
+    return allowedByShape;
 };
 
 // Any unhandled error anywhere below (a click triggering a navigation that
@@ -2600,6 +2617,10 @@ process.stdout.write(JSON.stringify({
         effective_minimum_width: minimumWidth,
         effective_minimum_height: minimumHeight,
         stopped_early: outOfTime(),
+        // True when frames were collected from a page whose identity could not be
+        // compared with the product page - unknown, not wrong. Whatever accepts
+        // photographs has to weigh this rather than assume.
+        identity_unconfirmed: identityUnconfirmed,
         action_plan: actionPlanStatus,
         browser_transfer_failures: transferFailures.slice(0, 20),
     },
