@@ -1192,6 +1192,22 @@ const clickAndWaitForGalleryChange = async (locator, meta = {}) => {
             changed: false,
             navigation_blocked: true,
             navigation_target: href,
+            // Said out loud, because the agent could not tell this apart from
+            // the shop refusing. On 2026-09-07 it asked to open the gallery tab
+            // of the product it was already on, was refused here, read that as
+            // a bad link, and spent three rounds looking for another one.
+            navigation_blocked_by: 'this extractor, not the site',
+            navigation_blocked_reason: 'The link leaves this product: its path is not '
+                + 'the product page you are on plus a gallery section. Pick a control that stays on '
+                + 'this product, or if you believe this link is the same product\'s gallery, say so in '
+                + 'reason - the rule, not the link, would then be what is wrong.',
+            navigation_source_path: (() => {
+                try {
+                    return new URL(productPageUrl).pathname;
+                } catch {
+                    return productPageUrl;
+                }
+            })(),
             before_images: beforeState.observed_count || 0,
             after_images: beforeState.observed_count || 0,
             network_delta: 0,

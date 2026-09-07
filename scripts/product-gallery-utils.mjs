@@ -76,7 +76,6 @@ export const traversalCeiling = (declared, fallback = TRAVERSAL_CEILING) => {
 export const TRAVERSAL_PATIENCE = 3;
 
 
-const PRODUCT_SECTION_SEGMENT = /^(?:sp|specification|specifications|specs|overview|details|features|gallery|media|images?|photos?|product-images?|product-media)$/i;
 const GALLERY_SECTION_SEGMENT = /^(?:gallery|media|images?|photos?|product-images?|product-media)$/i;
 
 const comparableHost = (hostname) => String(hostname || '').toLowerCase().replace(/^www\./, '');
@@ -90,15 +89,30 @@ const pathSegments = (pathname) => String(pathname || '')
         }
     })
     .filter(Boolean);
-const withoutProductSection = (segments) => PRODUCT_SECTION_SEGMENT.test(segments.at(-1) || '')
-    ? segments.slice(0, -1)
-    : segments;
-
 // A gallery recipe may click a same-product tab that changes the pathname
 // (for example /Specification -> /Gallery). Exact-path navigation remains
 // allowed, while a changed path must stay on the same host, explicitly target
-// a gallery/media section, and preserve a non-trivial product-root path. This
-// keeps generic category/search links out without baking in any site name.
+// a gallery/media section, and belong to the same product.
+//
+// "The same product" used to be decided by a list of fourteen English tab
+// names: a path whose last segment was one of them was a tab, anything else
+// was a different page. The list grew one word per shop - "sp" for gigabyte,
+// "specification" for msi - and on 2026-09-07 it refused this, verbatim from
+// the run's own trace:
+//
+//   purpose:            "open the same-product Gallery page where the actual
+//                        product photo set is exposed"
+//   navigation_target:  /us/laptops/rog-strix/rog-strix-scar-18-2025/gallery/
+//   navigation_blocked: true
+//
+// from /us/laptops/rog-strix/rog-strix-scar-18-2025/spec/ - the same product,
+// one segment apart. "spec" was not on the list. Three training rounds ended
+// as "no material progress" and the shop got no recipe.
+//
+// The relationship is structural and needs no vocabulary: the target's product
+// root - its path without the gallery segment - must be where the source
+// already is, give or take the source's own tab. Any tab name in any language
+// passes; a different product, or a jump up to a category's gallery, does not.
 export const isAllowedProductNavigation = (sourceRawUrl, targetRawUrl) => {
     let source;
     let target;
@@ -129,12 +143,15 @@ export const isAllowedProductNavigation = (sourceRawUrl, targetRawUrl) => {
         return false;
     }
 
-    const sourceRoot = withoutProductSection(sourceSegments);
-    const targetRoot = withoutProductSection(targetSegments);
+    const targetRoot = targetSegments.slice(0, -1);
 
-    return sourceRoot.length >= 2
-        && sourceRoot.length === targetRoot.length
-        && sourceRoot.every((segment, index) => segment === targetRoot[index]);
+    // Two or more segments so a site-wide /gallery cannot pass as a product's.
+    // At most one segment of slack, which is the source's own tab, whatever it
+    // is called - more than that and the target is an ancestor, not a sibling.
+    return targetRoot.length >= 2
+        && sourceSegments.length >= targetRoot.length
+        && sourceSegments.length - targetRoot.length <= 1
+        && targetRoot.every((segment, index) => segment === sourceSegments[index]);
 };
 
 // Shopify encodes size as a filename suffix, not a query param - e.g.

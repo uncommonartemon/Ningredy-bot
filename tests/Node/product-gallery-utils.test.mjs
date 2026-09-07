@@ -65,6 +65,63 @@ test('allows a same-product internal gallery route but rejects unrelated navigat
     );
 });
 
+test('a tab is recognised by where it sits, not by what it is called', () => {
+    // Live on 2026-09-07: the agent asked to open
+    // /us/laptops/rog-strix/rog-strix-scar-18-2025/gallery/ from that product's
+    // own /spec/ page - one segment apart - and was refused, because the list of
+    // tab names held "specs", "specification" and "sp" but not "spec". Three
+    // training rounds ended as "no material progress" and the shop got no
+    // recipe. The list had grown one word per shop and could never be finished.
+    const asusSpec = 'https://rog.asus.com/us/laptops/rog-strix/rog-strix-scar-18-2025/spec/';
+
+    assert.equal(
+        isAllowedProductNavigation(asusSpec, '/us/laptops/rog-strix/rog-strix-scar-18-2025/gallery/'),
+        true,
+    );
+
+    // Whatever the shop calls the tab, in whatever language.
+    for (const tab of ['spec', 'tech-specs', 'datasheet', 'technische-daten', 'caracteristicas', 'l3v3l-9']) {
+        assert.equal(
+            isAllowedProductNavigation(
+                `https://shop.example/store/laptops/model-x/${tab}`,
+                '/store/laptops/model-x/gallery',
+            ),
+            true,
+            `A tab named "${tab}" is still the same product's tab.`,
+        );
+    }
+
+    // And the protections the list was there for, all still standing.
+    assert.equal(
+        isAllowedProductNavigation(asusSpec, '/us/laptops/rog-strix/another-laptop/gallery/'),
+        false,
+        'A different product is not this product.',
+    );
+    assert.equal(
+        isAllowedProductNavigation(asusSpec, '/us/laptops/gallery/'),
+        false,
+        "A category's gallery is not this product's.",
+    );
+    assert.equal(
+        isAllowedProductNavigation(asusSpec, '/gallery/'),
+        false,
+        'A site-wide gallery is not a product gallery.',
+    );
+    assert.equal(
+        isAllowedProductNavigation(asusSpec, '/us/laptops/rog-strix/rog-strix-scar-18-2025/spec/reviews'),
+        false,
+        'Only a gallery section is worth navigating to.',
+    );
+    assert.equal(
+        isAllowedProductNavigation(
+            'https://shop.example/store/laptops/model-x/spec/detail',
+            '/store/laptops/model-x/gallery',
+        ),
+        false,
+        'Two levels down is not a sibling tab.',
+    );
+});
+
 test('keeps same-path modal and query interactions allowed', () => {
     assert.equal(
         isAllowedProductNavigation(productUrl, productUrl+'?view=gallery#media'),
