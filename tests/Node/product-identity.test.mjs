@@ -44,6 +44,50 @@ test('identifiers are compared within their own kind', () => {
     );
 });
 
+test('a shared identifier cannot hide a conflicting identifier regardless of field order', () => {
+    for (const identifiers of [
+        { mpn: 'shared-family', sku: 'sku-a' },
+        { sku: 'sku-a', mpn: 'shared-family' },
+    ]) {
+        assert.equal(sameProductIdentity(
+            { identifiers },
+            { identifiers: { mpn: 'shared-family', sku: 'sku-b' } },
+        ), false);
+    }
+});
+
+test('canonical evidence preserves product queries, host and path case', async (t) => {
+    const browser = await launch();
+    if (!browser) {
+        t.skip('No Chromium available on this machine.');
+        return;
+    }
+    try {
+        const page = await browser.newPage();
+        const read = async (url) => {
+            await page.setContent('<html><head></head><body></body></html>');
+            await page.evaluate((href) => {
+                const link = document.createElement('link');
+                link.rel = 'canonical';
+                link.href = href;
+                document.head.appendChild(link);
+            }, url);
+            return await page.evaluate(readProductIdentityInPage);
+        };
+        const first = await read('https://shop.example/Product?id=A');
+        for (const url of [
+            'https://shop.example/Product?id=B',
+            'https://other.example/Product?id=A',
+            'https://shop.example/product?id=A',
+        ]) {
+            assert.equal(sameProductIdentity(first, await read(url)), false, url);
+        }
+        assert.equal(sameProductIdentity(first, await read('https://shop.example/Product/?id=A#gallery')), true);
+    } finally {
+        await browser.close();
+    }
+});
+
 test('an equal name is not proof, an unequal one is', () => {
     // Every configuration of a laptop shares its name, so equality proves
     // nothing - the previous version accepted it and a test locked that in.
@@ -120,7 +164,7 @@ test('the reader takes its evidence off a real page', async (t) => {
         assert.equal(identity.identifiers.sku, 'sku-9', 'A Product nested in @graph is still the product.');
         assert.equal(identity.identifiers.mpn, 'mpn-9', 'Kinds are kept apart.');
         assert.equal(identity.name, 'thinkpad x1');
-        assert.equal(identity.canonical, '/p/laptop-9', 'Compared as a path, so host and trailing slash cannot split a match.');
+        assert.equal(identity.canonical, 'https://shop.example/p/laptop-9', 'Preserves the host, normalizes only trailing slashes.');
 
         // The gallery tab of that same product, publishing less than the page
         // it belongs to - which is normal, and enough.

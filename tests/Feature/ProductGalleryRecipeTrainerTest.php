@@ -12,6 +12,7 @@ use App\Models\ProductGalleryRecipe;
 use App\Models\ProductGalleryRecipeVersion;
 use App\Models\ProductSourceAttempt;
 use App\Models\ProductSourceDomain;
+use App\Services\Ai\ProductSearchTimeBudget;
 use App\Services\Products\BrowserProductGalleryExtractor;
 use App\Services\Products\GalleryTrainingAbandonSignal;
 use App\Services\Products\ProductGalleryRecipeTrainer;
@@ -80,6 +81,29 @@ class ProductGalleryRecipeTrainerTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
+
+        // Structural-training fixtures use reserved .example image hosts.
+        // Give those fixtures explicit downloaded pixels: a DNS failure must
+        // no longer count as successful technical verification. Tests using
+        // real HTTP fakes (the public IP fixtures) still exercise the loader.
+        $resolver = app(ProductImageResolver::class);
+        $dependencies = array_map(
+            fn ($parameter) => app((string) $parameter->getType()),
+            (new \ReflectionClass(ProductImageResolver::class))->getConstructor()->getParameters(),
+        );
+        $fixtureResolver = \Mockery::mock(ProductImageResolver::class, $dependencies)->makePartial();
+        $fixtureBytes = $this->publishableJpeg();
+        $fixtureResolver->shouldReceive('download')->andReturnUsing(
+            function (string $url, int $maxBytes = 8388608, ?string &$failureReason = null, ?string $refererUrl = null) use ($resolver, $fixtureBytes): ?array {
+                if (str_ends_with((string) parse_url($url, PHP_URL_HOST), '.example')) {
+                    return ['bytes' => $fixtureBytes, 'source_url' => $url, 'mime_type' => 'image/jpeg',
+                        'width' => 1200, 'height' => 800, 'confirmed_gallery' => false, 'partial_gallery' => false];
+                }
+
+                return $resolver->download($url, $maxBytes, $failureReason, $refererUrl);
+            },
+        );
+        $this->app->instance(ProductImageResolver::class, $fixtureResolver);
 
         ProductGalleryPreflightAgent::fake(fn (): array => [
             'decision' => 'train_playwright',
@@ -602,6 +626,196 @@ class ProductGalleryRecipeTrainerTest extends TestCase
         imagedestroy($image);
 
         return (string) ob_get_clean();
+    }
+
+    public function test_unavailable_downloads_interrupt_training_without_activating_or_penalising_the_recipe(): void
+    {
+        AppSetting::put('ai.gallery_training_max_rounds', '1');
+        Http::fake(fn () => Http::response('', 403));
+        ProductGalleryRecipeTrainerAgent::fake(fn () => $this->workingRecipe())->preventStrayPrompts();
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('scout')->once()->andReturn([
+                'scout' => ['title' => 'Laptop', 'fragments' => [], 'interactive_controls' => ['Gallery']],
+                'diagnostics' => [],
+            ]);
+            $mock->shouldReceive('executeRecipe')->once()->andReturn(['images' => [
+                'https://93.184.216.34/a.jpg', 'https://93.184.216.34/b.jpg', 'https://93.184.216.34/c.jpg',
+            ]]);
+        });
+        $result = app(ProductGalleryRecipeTrainer::class)->train('https://unavailable.example/product', force: true);
+        $recipe = ProductGalleryRecipe::where('domain', 'unavailable.example')->firstOrFail();
+        $version = $recipe->versions()->firstOrFail();
+        $this->assertSame([], $result);
+        $this->assertNotSame('active', $recipe->status);
+        $this->assertSame(0, $recipe->failure_count);
+        $this->assertSame('interrupted', $version->status);
+        $this->assertNull($version->promoted_at);
+        $this->assertSame('download_interrupted', $version->result['failure_kind']);
+        $this->assertCount(1, $version->result['attempts']);
+    }
+
+    public function test_temporary_download_failure_can_recover_in_the_same_session(): void
+    {
+        $prompts = [];
+        $bytes = $this->publishableJpeg();
+        Http::fake(function () use (&$prompts, $bytes) {
+            return count($prompts) <= 1 ? Http::response('', 403) : Http::response($bytes, 200);
+        });
+        ProductGalleryRecipeTrainerAgent::fake(function (string $prompt) use (&$prompts) {
+            $prompts[] = json_decode($prompt, true);
+
+            return $this->workingRecipe();
+        })->preventStrayPrompts();
+        $urls = ['https://93.184.216.34/a.jpg', 'https://93.184.216.34/b.jpg', 'https://93.184.216.34/c.jpg'];
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock) use ($urls): void {
+            $mock->shouldReceive('scout')->once()->andReturn([
+                'scout' => ['title' => 'Laptop', 'fragments' => [], 'interactive_controls' => ['Gallery']],
+                'diagnostics' => [],
+            ]);
+            $mock->shouldReceive('executeRecipe')->twice()->andReturn(['images' => $urls]);
+        });
+        $result = app(ProductGalleryRecipeTrainer::class)->train('https://retry.example/product', force: true);
+        $this->assertSame($urls, $result);
+        $this->assertCount(2, $prompts);
+        $this->assertSame(3, $prompts[1]['previous_attempt_feedback']['downloaded_frames']['unknown']);
+        $this->assertStringContainsString('interrupted', $prompts[1]['previous_attempt_feedback']['error']);
+        $recipe = ProductGalleryRecipe::where('domain', 'retry.example')->firstOrFail();
+        $this->assertSame('active', $recipe->status);
+        $this->assertSame(1, $recipe->versions()->count());
+    }
+
+    public function test_failures_after_the_first_four_frames_are_repaired_in_the_same_training_session(): void
+    {
+        $prompts = [];
+        ProductGalleryRecipeTrainerAgent::fake(function (string $prompt) use (&$prompts): array {
+            $prompts[] = json_decode($prompt, true);
+
+            return $this->workingRecipe();
+        })->preventStrayPrompts();
+        $good = $this->publishableJpeg();
+        $small = $this->tinyJpeg();
+        Http::fake(fn ($request) => Http::response(
+            str_contains($request->url(), '/small-') ? $small : $good,
+            200, ['Content-Type' => 'image/jpeg'],
+        ));
+        $first = array_map(fn ($n) => 'https://93.184.216.34/'.($n < 5 ? 'good-' : 'small-').$n.'.jpg', range(1, 7));
+        $fixed = array_map(fn ($n) => 'https://93.184.216.34/full-'.$n.'.jpg', range(1, 7));
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock) use ($first, $fixed): void {
+            $mock->shouldReceive('scout')->once()->andReturn([
+                'scout' => ['title' => 'Laptop', 'fragments' => [], 'interactive_controls' => ['Gallery']],
+                'diagnostics' => [],
+            ]);
+            $mock->shouldReceive('isConfirmedGalleryImage')->andReturn(true);
+            $mock->shouldReceive('isPartialGalleryImage')->andReturn(false);
+            $mock->shouldReceive('executeRecipe')->twice()->andReturn(['images' => $first], ['images' => $fixed]);
+        });
+
+        $result = app(ProductGalleryRecipeTrainer::class)->train(
+            'https://repair.example/product', force: true,
+            context: ['minimum_verified_images' => 7],
+        );
+
+        $this->assertCount(2, $prompts);
+        $feedback = $prompts[1]['previous_attempt_feedback']['downloaded_frames'];
+        $this->assertSame(7, $feedback['fetched']);
+        $this->assertSame(4, $feedback['usable']);
+        $this->assertSame('too_small', $feedback['frames'][4]['status']);
+        $this->assertSame($first[4], $feedback['frames'][4]['url']);
+        $this->assertSame($fixed, $result);
+        $recipe = ProductGalleryRecipe::where('domain', 'repair.example')->firstOrFail();
+        $this->assertSame('active', $recipe->status);
+        $this->assertSame(1, $recipe->versions()->count());
+        $this->assertCount(2, $recipe->versions()->first()->result['attempts']);
+    }
+
+    public function test_trained_recipe_is_reused_for_another_product_without_another_llm_call(): void
+    {
+        config(['product-images.browser_fallback.enabled' => true]);
+        $prompts = 0;
+        ProductGalleryRecipeTrainerAgent::fake(function () use (&$prompts): array {
+            $prompts++;
+
+            return $this->workingRecipe();
+        })->preventStrayPrompts();
+        $firstPage = 'https://transfer.example/product-a';
+        $secondPage = 'https://transfer.example/product-b';
+        $firstImages = array_map(fn ($n) => 'https://cdn.example/a-'.$n.'.jpg', range(1, 3));
+        $secondImages = array_map(fn ($n) => 'https://cdn.example/b-'.$n.'.jpg', range(1, 7));
+        $dependencies = array_map(
+            fn ($parameter) => app((string) $parameter->getType()),
+            (new \ReflectionClass(BrowserProductGalleryExtractor::class))->getConstructor()->getParameters(),
+        );
+        // Only the browser process is replaced. Routing, learning, persistence
+        // and result validation execute normally for both product pages.
+        $browser = \Mockery::mock(BrowserProductGalleryExtractor::class, $dependencies)->makePartial();
+        $browser->shouldReceive('scout')->once()->andReturn([
+            'scout' => ['title' => 'Product A', 'fragments' => [], 'interactive_controls' => ['Gallery']],
+            'diagnostics' => [],
+        ]);
+        $executions = [];
+        $browser->shouldReceive('executeRecipe')->twice()->andReturnUsing(
+            function (string $url, array $recipe) use (&$executions, $firstPage, $secondPage, $firstImages, $secondImages): array {
+                $executions[] = ['url' => $url, 'recipe' => $recipe];
+                $this->assertContains($url, [$firstPage, $secondPage]);
+
+                return ['images' => $url === $firstPage ? $firstImages : $secondImages];
+            },
+        );
+        $this->app->instance(BrowserProductGalleryExtractor::class, $browser);
+
+        $this->assertSame($firstImages, app(ProductGalleryRecipeTrainer::class)->train($firstPage, force: true));
+        $stored = ProductGalleryRecipe::where('domain', 'transfer.example')->firstOrFail();
+        $this->assertSame('active', $stored->status);
+        $this->assertArrayNotHasKey('expected_image_count', $stored->recipe);
+        $this->assertSame($secondImages, $browser->extract($secondPage));
+        $this->assertSame(1, $prompts, 'Product B must not retrain a working recipe.');
+        $this->assertSame($secondPage, $executions[1]['url']);
+        $this->assertSame($stored->recipe, $executions[1]['recipe']);
+        $this->assertSame(1, ProductGalleryRecipeVersion::count());
+        $this->assertSame(1, ProductGalleryRecipe::count());
+        $this->assertSame(7, count($secondImages), 'The three photos on A must not cap B.');
+    }
+
+    public function test_download_measurements_do_not_extrapolate_or_count_network_failures_as_small_images(): void
+    {
+        Http::fake([
+            '93.184.216.34/small-*' => Http::response($this->tinyJpeg(), 200),
+            '93.184.216.34/unavailable' => Http::response('', 403),
+            '*' => Http::response($this->publishableJpeg(), 200),
+        ]);
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('isConfirmedGalleryImage')->andReturn(false);
+            $mock->shouldReceive('isPartialGalleryImage')->andReturn(false);
+        });
+        $trainer = app(ProductGalleryRecipeTrainer::class);
+        $method = new \ReflectionMethod($trainer, 'measureDownloadableFrames');
+        $urls = array_map(fn ($n) => 'https://93.184.216.34/'.($n < 4 ? 'small-' : 'full-').$n, range(1, 8));
+        $urls[] = 'https://93.184.216.34/unavailable';
+        $result = $method->invoke($trainer, $urls, [], 'https://repair.example/product');
+
+        $this->assertSame(9, $result['measured']);
+        $this->assertSame(8, $result['fetched']);
+        $this->assertSame(5, $result['usable']);
+        $this->assertSame(1, $result['unknown']);
+        $this->assertFalse($result['complete']);
+        $this->assertSame('unavailable', $result['frames'][8]['status']);
+    }
+
+    public function test_download_measurements_leave_unvisited_frames_unknown_when_time_is_reserved(): void
+    {
+        Http::fake();
+        $this->mock(ProductSearchTimeBudget::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('timeoutFor')->once()->andReturn(1);
+            $mock->shouldReceive('canStart')->once()->with(123, 1)->andReturn(false);
+        });
+        $trainer = app(ProductGalleryRecipeTrainer::class);
+        $method = new \ReflectionMethod($trainer, 'measureDownloadableFrames');
+        $result = $method->invoke($trainer, ['https://93.184.216.34/photo.jpg'], [], 'https://repair.example/product', 123);
+
+        $this->assertSame(0, $result['measured']);
+        $this->assertSame(1, $result['unknown']);
+        $this->assertFalse($result['complete']);
+        Http::assertNothingSent();
     }
 
     private function tinyJpeg(): string

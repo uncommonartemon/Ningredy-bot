@@ -117,7 +117,7 @@ class ProductGalleryRecipeTrainer
         return $validation['passed'] ? null : (string) $validation['reason'];
     }
 
-    private function measureDownloadableFrames(array $urls, array $context, string $pageUrl): array
+    private function measureDownloadableFrames(array $urls, array $context, string $pageUrl, ?int $telegramUpdateId = null): array
     {
         $minimumWidth = (int) ($context['minimum_image_width'] ?? 0) > 0
             ? (int) $context['minimum_image_width']
@@ -125,26 +125,33 @@ class ProductGalleryRecipeTrainer
         $minimumHeight = ($context['minimum_image_height'] ?? null) === null
             ? $this->settings->imageMinimumHeight()
             : max(0, (int) $context['minimum_image_height']);
-        // A sample, not the set: this is diagnosis, and downloading twenty
-        // frames on every round would cost more time than the answer is worth.
-        // Distinct assets only, so five renditions of one photo cannot make a
-        // thumbnail-only recipe look healthy.
+        // Inspect actual candidates, not an extrapolation from the first four.
+        // Keep a wall-clock bound and explicitly report anything not measured.
         $sample = collect($urls)
             ->filter(fn (mixed $url): bool => is_string($url) && filter_var($url, FILTER_VALIDATE_URL) !== false)
             ->unique(fn (string $url): string => ProductImageStorage::imageAssetKey($url))
-            ->take(self::DOWNLOAD_PROBE_SAMPLE)
             ->values();
         $usable = 0;
         $fetched = 0;
         $rejected = [];
         $samples = [];
+        $frames = [];
+        $measured = 0;
+        $seconds = $this->timeBudget->timeoutFor($telegramUpdateId,
+            max(1, (int) config('product-images.http.download_wall_clock_cap_seconds', 90)));
+        $deadline = microtime(true) + $seconds;
 
         foreach ($sample as $url) {
+            if (microtime(true) >= $deadline || ! $this->timeBudget->canStart($telegramUpdateId, 1)) {
+                break;
+            }
+            $measured++;
             $failure = null;
             $download = $this->resolver->download($url, failureReason: $failure, refererUrl: $pageUrl);
 
             if ($download === null) {
                 $rejected[$failure ?: 'download_failed'] = ($rejected[$failure ?: 'download_failed'] ?? 0) + 1;
+                $frames[] = ['url' => $url, 'status' => 'unavailable', 'reason' => $failure ?: 'download_failed'];
 
                 continue;
             }
@@ -155,7 +162,9 @@ class ProductGalleryRecipeTrainer
             $samples[] = $width.'x'.$height;
 
             if ($width >= $minimumWidth && ($minimumHeight === 0 || $height >= $minimumHeight)) {
+                $this->resolver->rememberTrainingDownload($url, $pageUrl, $download);
                 $usable++;
+                $frames[] = ['url' => $url, 'status' => 'usable', 'width' => $width, 'height' => $height];
 
                 continue;
             }
@@ -163,12 +172,17 @@ class ProductGalleryRecipeTrainer
             $reason = 'too_small (required width>='.$minimumWidth
                 .($minimumHeight > 0 ? ', height>='.$minimumHeight : ', height=any').')';
             $rejected[$reason] = ($rejected[$reason] ?? 0) + 1;
+            $frames[] = ['url' => $url, 'status' => 'too_small', 'width' => $width, 'height' => $height, 'reason' => $reason];
         }
 
         return [
-            'measured' => $sample->count(),
+            'total' => $sample->count(),
+            'measured' => $measured,
             'fetched' => $fetched,
             'usable' => $usable,
+            'unknown' => $sample->count() - $fetched,
+            'complete' => $fetched === $sample->count(),
+            'frames' => $frames,
             'rejected' => $rejected,
             'samples' => $samples,
         ];
@@ -604,6 +618,7 @@ class ProductGalleryRecipeTrainer
             $photoOutcome = $this->previousPhotoOutcome($host, $url);
             $stalled = false;
             $budgetDeferred = false;
+            $downloadInterrupted = false;
             $stuckOnValidation = false;
             $agentAbandoned = false;
             $agentAbandonReason = null;
@@ -996,8 +1011,9 @@ class ProductGalleryRecipeTrainer
                 // recipe already going back for structural repair learns
                 // nothing extra from the size of frames it will not keep.
                 $downloadProbe = $validation['passed'] && $candidateImages !== []
-                    ? $this->measureDownloadableFrames($candidateImages, $context, $url)
+                    ? $this->measureDownloadableFrames($candidateImages, $context, $url, $telegramUpdateId)
                     : null;
+                $downloadInterrupted = false;
                 // A gallery of thumbnails is not a working recipe, however
                 // complete its traversal. Promoting one is how a domain came to
                 // hold a "proven" recipe that had never put a photograph in the
@@ -1009,37 +1025,16 @@ class ProductGalleryRecipeTrainer
                 // failure as a verdict that the strategy forbids.
                 $yieldsNothingUsable = $downloadProbe !== null
                     && $downloadProbe['fetched'] > 0
-                    && $downloadProbe['usable'] === 0;
+                    && $downloadProbe['usable'] === 0
+                    && $downloadProbe['unknown'] === 0;
 
-                // Nothing usable was too weak a bar, and the gap between it and
-                // the truth is where a whole gallery goes missing.
-                //
-                // cdw.com: the recipe collected nine frames, the probe found one
-                // of four publishable, and that passed - so the recipe was
-                // promoted, the search downloaded all nine, and one photograph
-                // reached the catalog. The agent was gone by then and learned
-                // none of it. A recipe that yields one publishable frame in four
-                // is collecting thumbnails just as surely as one that yields
-                // none; it simply has a stray full-size frame among them.
-                //
-                // Measured against what a gallery has to be worth, not against
-                // zero: the probe's rate applied to the frames this recipe
-                // actually collected, compared with the minimum this search
-                // needs. Both conditions must hold - a majority unpublishable,
-                // AND the extrapolation falling short - so one odd small frame
-                // in a good gallery is not a verdict.
-                $publishable = $downloadProbe !== null && $downloadProbe['fetched'] > 0
-                    ? $downloadProbe['usable'] / $downloadProbe['fetched']
-                    : null;
-                $minimumGallery = max(1, $contextMinimum > 0
-                    ? $contextMinimum
-                    : $this->settings->galleryMinSuccessCount());
-                $expectedKeepers = $publishable === null
-                    ? null
-                    : (int) floor(count($candidateImages) * $publishable);
-                $yieldsTooFewToPublish = $publishable !== null
-                    && $downloadProbe['fetched'] > $downloadProbe['usable'] * 2
-                    && $expectedKeepers < $minimumGallery;
+                // Use the validator's current-page target, not merely the
+                // category fallback. Unknown downloads are not bad images:
+                // only reject for size when even all unknown frames passing
+                // could not meet the target. Never extrapolate a sample rate.
+                $minimumGallery = max(1, (int) $validation['expected']);
+                $yieldsTooFewToPublish = $downloadProbe !== null
+                    && $minimumGallery > $downloadProbe['usable'] + $downloadProbe['unknown'];
 
                 if ($yieldsNothingUsable || $yieldsTooFewToPublish) {
                     $measured = collect($downloadProbe['rejected'])->map(
@@ -1054,10 +1049,24 @@ class ProductGalleryRecipeTrainer
                             ? 'Every measured frame was rejected by the download rules ('.$measured
                                 .'). Observed sizes: '.$sizes.'.'
                             : 'Only '.$downloadProbe['usable'].' of '.$downloadProbe['fetched']
-                                .' measured frames can be published ('.$measured.'). At that rate the '
-                                .count($candidateImages).' frames this recipe collects would leave about '
-                                .$expectedKeepers.' in the catalog, and this search needs '.$minimumGallery
+                                .' measured frames can be published ('.$measured.'). There are '
+                                .$downloadProbe['unknown'].' unverified frames, and this search needs '.$minimumGallery
                                 .'. Observed sizes: '.$sizes.'.',
+                    ];
+                }
+
+                // Missing bytes are neither proof of a broken selector nor
+                // permission to activate it. Keep the current session alive
+                // with the actual transport failures for the next round.
+                if ($downloadProbe !== null && ! $downloadProbe['complete']
+                    && $downloadProbe['usable'] < $minimumGallery
+                    && ! $yieldsNothingUsable && ! $yieldsTooFewToPublish) {
+                    $downloadInterrupted = true;
+                    $validation = [
+                        ...$validation,
+                        'passed' => false,
+                        'reason' => 'Download verification interrupted: '.$downloadProbe['usable']
+                            .' usable frames, '.$downloadProbe['unknown'].' unknown; required '.$minimumGallery.'.',
                     ];
                 }
 
@@ -1159,6 +1168,7 @@ class ProductGalleryRecipeTrainer
             $version->update([
                 'status' => match (true) {
                     $promote => 'promoted',
+                    $downloadInterrupted => 'interrupted',
                     // Not a verdict on the recipe: the session was rationed, not
                     // judged. The row keeps the candidate and the round history
                     // so the next search resumes from it.
@@ -1177,6 +1187,7 @@ class ProductGalleryRecipeTrainer
                     'diagnostics' => $candidateResult['diagnostics'] ?? [],
                     'action_trace' => $candidateResult['action_trace'] ?? [],
                     'failure_kind' => match (true) {
+                        $downloadInterrupted => 'download_interrupted',
                         $stalled => 'page_stalled',
                         $agentAbandoned => $failureKind,
                         $stuckOnValidation => 'recipe_mismatch',
@@ -1188,6 +1199,7 @@ class ProductGalleryRecipeTrainer
                 'promoted_at' => $promote ? now() : null,
                 'error' => match (true) {
                     $promote => null,
+                    $downloadInterrupted => $validation['reason'],
                     $budgetDeferred => 'Обучение отложено: этот источник израсходовал свою долю денежного бюджета текущего поиска. Кандидат и история раундов сохранены.',
                     $stalled => 'Обучение остановлено: три последовательных раунда не дали материального прогресса.',
                     $agentAbandoned => 'Обучение остановлено по решению AI-агента: '.($agentAbandonReason ?? ''),
@@ -1196,7 +1208,13 @@ class ProductGalleryRecipeTrainer
                 },
             ]);
 
-            if (! $promote && ! $budgetDeferred) {
+            if (! $promote && ($budgetDeferred || $downloadInterrupted)) {
+                // A deferred candidate must never fall through to the active
+                // recipe update below. Keep the last working version intact.
+                return $oldImages;
+            }
+
+            if (! $promote) {
                 $failureKind = $agentAbandoned ? $failureKind : 'recipe_mismatch';
                 $this->recordFailure(
                     $recipe,
@@ -1367,7 +1385,7 @@ class ProductGalleryRecipeTrainer
     {
         $version = ProductGalleryRecipeVersion::query()
             ->where('product_gallery_recipe_id', $recipe->id)
-            ->where('status', 'deferred')
+            ->whereIn('status', ['deferred', 'interrupted'])
             ->where('created_at', '>=', now()->subDays(7))
             ->latest('id')
             ->first();
@@ -1797,13 +1815,6 @@ class ProductGalleryRecipeTrainer
      * fail identically forever, and the agent never even sees it - the call
      * does not reach the model, so there is nobody to reason about it.
      */
-    /**
-     * How many of a round's frames are actually fetched to see what the
-     * downloader makes of them. A sample answers "are these publishable at
-     * all" without paying to download a whole gallery on every round.
-     */
-    private const DOWNLOAD_PROBE_SAMPLE = 4;
-
     private const MAX_IDENTICAL_TECHNICAL_FAILURES = 3;
 
     /**

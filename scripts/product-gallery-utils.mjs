@@ -102,7 +102,13 @@ export const readProductIdentityInPage = () => {
         }
 
         try {
-            return new URL(raw, location.href).pathname.replace(/\/+$/, '').toLowerCase() || null;
+            const url = new URL(raw, location.href);
+            if (!['http:', 'https:'].includes(url.protocol)) {
+                return null;
+            }
+            // Query parameters can select the product or its configuration.
+            // Preserve host and case too: a path alone is not an identity.
+            return url.origin + (url.pathname.replace(/\/+$/, '') || '/') + url.search;
         } catch {
             return null;
         }
@@ -181,10 +187,10 @@ export const sameProductIdentity = (expected, landed) => {
     const mine = expected.identifiers || {};
     const theirs = landed.identifiers || {};
 
-    for (const key of Object.keys(mine)) {
-        if (theirs[key]) {
-            return mine[key] === theirs[key];
-        }
+    const comparable = Object.keys(mine).filter((key) => mine[key] && theirs[key]);
+    if (comparable.length > 0) {
+        // A shared family identifier must not conceal a conflicting SKU/GTIN.
+        return comparable.every((key) => mine[key] === theirs[key]);
     }
 
     for (const key of ['canonical', 'og_url']) {

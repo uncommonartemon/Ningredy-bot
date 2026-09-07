@@ -27,6 +27,7 @@ class ProductImageResolver
         private readonly BrowserProductImageTransferStore $transfers,
         private readonly ProductGalleryRecipeRouter $recipeRouter,
         private readonly HostReputation $reputation,
+        private readonly GalleryDownloadCache $galleryDownloads,
     ) {}
 
     /** @var array<int, true> */
@@ -472,6 +473,13 @@ class ProductImageResolver
             return null;
         }
 
+        if ($download = $this->galleryDownloads->get($url, $refererUrl, $maxBytes)) {
+            return [...$download,
+                'confirmed_gallery' => $this->browser->isConfirmedGalleryImage($url),
+                'partial_gallery' => $this->browser->isPartialGalleryImage($url),
+            ];
+        }
+
         if ($transferred = $this->transfers->get($url, $maxBytes)) {
             return [
                 ...$transferred,
@@ -531,6 +539,11 @@ class ProductImageResolver
     public function isConfirmedGalleryImage(string $url): bool
     {
         return $this->browser->isConfirmedGalleryImage($url);
+    }
+
+    public function rememberTrainingDownload(string $url, string $pageUrl, array $download): void
+    {
+        $this->galleryDownloads->remember($url, $pageUrl, $download);
     }
 
     public function isPartialGalleryImage(string $url): bool
