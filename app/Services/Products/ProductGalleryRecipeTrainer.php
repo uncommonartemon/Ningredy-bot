@@ -1011,16 +1011,53 @@ class ProductGalleryRecipeTrainer
                     && $downloadProbe['fetched'] > 0
                     && $downloadProbe['usable'] === 0;
 
-                if ($yieldsNothingUsable) {
+                // Nothing usable was too weak a bar, and the gap between it and
+                // the truth is where a whole gallery goes missing.
+                //
+                // cdw.com: the recipe collected nine frames, the probe found one
+                // of four publishable, and that passed - so the recipe was
+                // promoted, the search downloaded all nine, and one photograph
+                // reached the catalog. The agent was gone by then and learned
+                // none of it. A recipe that yields one publishable frame in four
+                // is collecting thumbnails just as surely as one that yields
+                // none; it simply has a stray full-size frame among them.
+                //
+                // Measured against what a gallery has to be worth, not against
+                // zero: the probe's rate applied to the frames this recipe
+                // actually collected, compared with the minimum this search
+                // needs. Both conditions must hold - a majority unpublishable,
+                // AND the extrapolation falling short - so one odd small frame
+                // in a good gallery is not a verdict.
+                $publishable = $downloadProbe !== null && $downloadProbe['fetched'] > 0
+                    ? $downloadProbe['usable'] / $downloadProbe['fetched']
+                    : null;
+                $minimumGallery = max(1, $contextMinimum > 0
+                    ? $contextMinimum
+                    : $this->settings->galleryMinSuccessCount());
+                $expectedKeepers = $publishable === null
+                    ? null
+                    : (int) floor(count($candidateImages) * $publishable);
+                $yieldsTooFewToPublish = $publishable !== null
+                    && $downloadProbe['fetched'] > $downloadProbe['usable'] * 2
+                    && $expectedKeepers < $minimumGallery;
+
+                if ($yieldsNothingUsable || $yieldsTooFewToPublish) {
+                    $measured = collect($downloadProbe['rejected'])->map(
+                        fn (int $count, string $reason): string => $reason.' x'.$count,
+                    )->implode('; ');
+                    $sizes = implode(', ', $downloadProbe['samples']) ?: 'none';
                     $validation = [
                         'passed' => false,
                         'expected' => $validation['expected'],
                         'extracted' => $validation['extracted'],
-                        'reason' => 'Every measured frame was rejected by the download rules ('
-                            .collect($downloadProbe['rejected'])->map(
-                                fn (int $count, string $reason): string => $reason.' x'.$count,
-                            )->implode('; ').'). Observed sizes: '
-                            .(implode(', ', $downloadProbe['samples']) ?: 'none').'.',
+                        'reason' => $yieldsNothingUsable
+                            ? 'Every measured frame was rejected by the download rules ('.$measured
+                                .'). Observed sizes: '.$sizes.'.'
+                            : 'Only '.$downloadProbe['usable'].' of '.$downloadProbe['fetched']
+                                .' measured frames can be published ('.$measured.'). At that rate the '
+                                .count($candidateImages).' frames this recipe collects would leave about '
+                                .$expectedKeepers.' in the catalog, and this search needs '.$minimumGallery
+                                .'. Observed sizes: '.$sizes.'.',
                     ];
                 }
 
@@ -1091,10 +1128,12 @@ class ProductGalleryRecipeTrainer
                     // to publish.
                     'downloaded_frames' => $downloadProbe === null ? null : [
                         ...$downloadProbe,
-                        'instruction' => $downloadProbe['usable'] === 0 && $downloadProbe['fetched'] > 0
-                            ? 'None of these frames can be published at these sizes. Look for the full-size source '
-                                .'behind the same photographs - a zoom or lightbox control, a data attribute holding '
-                                .'a larger rendition, or a URL parameter the page itself uses for the large view.'
+                        'instruction' => ($yieldsNothingUsable || $yieldsTooFewToPublish)
+                            ? 'Too few of these frames can be published at these sizes for this gallery to be '
+                                .'worth keeping. Look for the full-size source behind the same photographs - a zoom '
+                                .'or lightbox control, a data attribute holding a larger rendition, or a URL '
+                                .'parameter the page itself uses for the large view. Collecting more thumbnails '
+                                .'does not help; the same photographs at their real size do.'
                             : 'These are the real sizes the downloader measured for the frames you collected.',
                     ],
                     'previous_working_count' => count($oldImages),

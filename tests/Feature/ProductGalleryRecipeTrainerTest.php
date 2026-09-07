@@ -470,6 +470,140 @@ class ProductGalleryRecipeTrainerTest extends TestCase
         );
     }
 
+    public function test_one_publishable_frame_among_thumbnails_is_still_a_thumbnail_recipe(): void
+    {
+        // Live on cdw.com: the recipe collected nine frames, the probe found one
+        // of four publishable, and that passed the bar - which was "not a single
+        // usable frame". So the recipe was promoted, the search downloaded all
+        // nine, one photograph reached the catalog, and the agent had stopped
+        // listening long before any of that was known.
+        //
+        // A recipe yielding one publishable frame in four is collecting
+        // thumbnails as surely as one yielding none; it just has a stray
+        // full-size frame among them.
+        $seen = [];
+        ProductGalleryRecipeTrainerAgent::fake(function (string $prompt) use (&$seen): array {
+            $seen[] = json_decode($prompt, true);
+
+            return $this->workingRecipe();
+        })->preventStrayPrompts();
+        Http::fake([
+            '93.184.216.34/full.jpg' => Http::response($this->publishableJpeg(), 200, ['Content-Type' => 'image/jpeg']),
+            '93.184.216.34/*' => Http::response($this->tinyJpeg(), 200, ['Content-Type' => 'image/jpeg']),
+        ]);
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('scout')->andReturn([
+                'scout' => [
+                    'title' => 'CDW HP OmniBook 7',
+                    'fragments' => [],
+                    'interactive_controls' => ['<button aria-label="Expand">+ 3 Photos</button>'],
+                    'network_image_samples' => [],
+                    'access_gate' => false,
+                    'rate_limited' => false,
+                ],
+                'diagnostics' => [],
+            ]);
+            $mock->shouldReceive('isConfirmedGalleryImage')->andReturn(true);
+            $mock->shouldReceive('isPartialGalleryImage')->andReturn(false);
+            $mock->shouldReceive('executeRecipe')->andReturn([
+                'images' => [
+                    'https://93.184.216.34/full.jpg',
+                    'https://93.184.216.34/one.jpg',
+                    'https://93.184.216.34/two.jpg',
+                    'https://93.184.216.34/three.jpg',
+                    'https://93.184.216.34/four.jpg',
+                    'https://93.184.216.34/five.jpg',
+                ],
+            ]);
+        });
+
+        app(ProductGalleryRecipeTrainer::class)->train(
+            'https://www.cdw.com/product/hp-omnibook-7-16-ay0087nr/9013934',
+            force: true,
+            context: ['minimum_verified_images' => 5],
+        );
+
+        $recipe = ProductGalleryRecipe::query()->where('domain', 'www.cdw.com')->first();
+        $this->assertNotSame(
+            'active',
+            $recipe?->status,
+            'One full-size frame among five thumbnails is not a gallery worth promoting.',
+        );
+
+        $feedback = collect($seen)->pluck('previous_attempt_feedback')->filter()->values();
+        $measured = $feedback->pluck('downloaded_frames')->filter()->first();
+
+        $this->assertNotNull($measured, 'The next round must be told what the downloader made of these frames.');
+        $this->assertSame(1, $measured['usable'], 'The one real photograph was measured as such.');
+        $this->assertGreaterThan(1, $measured['fetched']);
+        $this->assertStringContainsString('full-size source', $measured['instruction']);
+    }
+
+    public function test_the_arithmetic_is_named_rather_than_asserted(): void
+    {
+        // The agent has to be able to argue with the verdict, which means seeing
+        // how it was reached: the rate measured, the frames collected, the
+        // number this search needs.
+        $errors = [];
+        ProductGalleryRecipeTrainerAgent::fake(fn (): array => $this->workingRecipe())->preventStrayPrompts();
+        Http::fake([
+            '93.184.216.34/full.jpg' => Http::response($this->publishableJpeg(), 200, ['Content-Type' => 'image/jpeg']),
+            '93.184.216.34/*' => Http::response($this->tinyJpeg(), 200, ['Content-Type' => 'image/jpeg']),
+        ]);
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('scout')->andReturn([
+                'scout' => [
+                    'title' => 'CDW HP OmniBook 7',
+                    'fragments' => [],
+                    'interactive_controls' => ['<button aria-label="Expand">+ 3 Photos</button>'],
+                    'network_image_samples' => [],
+                    'access_gate' => false,
+                    'rate_limited' => false,
+                ],
+                'diagnostics' => [],
+            ]);
+            $mock->shouldReceive('isConfirmedGalleryImage')->andReturn(true);
+            $mock->shouldReceive('isPartialGalleryImage')->andReturn(false);
+            // Six frames against a minimum of five: the structural check passes,
+            // which is the only way the download probe runs at all.
+            $mock->shouldReceive('executeRecipe')->andReturn([
+                'images' => [
+                    'https://93.184.216.34/full.jpg',
+                    'https://93.184.216.34/one.jpg',
+                    'https://93.184.216.34/two.jpg',
+                    'https://93.184.216.34/three.jpg',
+                    'https://93.184.216.34/four.jpg',
+                    'https://93.184.216.34/five.jpg',
+                ],
+            ]);
+        });
+
+        app(ProductGalleryRecipeTrainer::class)->train(
+            'https://www.cdw.com/product/hp-omnibook-7-16-ay0087nr/9013934',
+            force: true,
+            context: ['minimum_verified_images' => 5],
+        );
+
+        $version = ProductGalleryRecipeVersion::query()->where('domain', 'www.cdw.com')->latest('id')->first();
+        $attempts = collect($version?->result['attempts'] ?? []);
+        $reason = (string) $attempts->pluck('validation.reason')->filter()->first();
+
+        $this->assertStringContainsString('can be published', $reason);
+        $this->assertStringContainsString('this search needs 5', $reason);
+    }
+
+    private function publishableJpeg(): string
+    {
+        // 1200x800 - comfortably over any category floor, so the probe counts it.
+        $image = imagecreatetruecolor(1200, 800);
+        imagefilledrectangle($image, 0, 0, 1199, 799, imagecolorallocate($image, 40, 90, 140));
+        ob_start();
+        imagejpeg($image, null, 90);
+        imagedestroy($image);
+
+        return (string) ob_get_clean();
+    }
+
     private function tinyJpeg(): string
     {
         // 120x90 - a real photograph, and far under any category floor.
