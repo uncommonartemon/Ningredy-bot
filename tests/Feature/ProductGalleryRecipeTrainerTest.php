@@ -6,6 +6,7 @@ use App\Ai\Agents\ProductGalleryPreflightAgent;
 use App\Ai\Agents\ProductGalleryRecipeTrainerAgent;
 use App\Ai\Tools\AbandonGalleryTrainingAttempt;
 use App\Ai\Tools\FlagDomainRecipeNote;
+use App\Exceptions\InvalidGalleryRecipeException;
 use App\Models\AppSetting;
 use App\Models\ProductGalleryRecipe;
 use App\Models\ProductGalleryRecipeVersion;
@@ -16,6 +17,7 @@ use App\Services\Products\GalleryTrainingAbandonSignal;
 use App\Services\Products\ProductGalleryRecipeTrainer;
 use App\Services\Products\ProductImageResolver;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\JsonSchema\JsonSchemaTypeFactory;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Http;
 use Laravel\Ai\Responses\Data\ToolCall;
@@ -701,6 +703,63 @@ class ProductGalleryRecipeTrainerTest extends TestCase
             'confidence' => 0.95,
             'reason' => 'Open the internal Gallery tab, then collect its images.',
         ];
+    }
+
+    public function test_gallery_observation_counts_are_not_execution_limits(): void
+    {
+        $trainer = app(ProductGalleryRecipeTrainer::class);
+        $preflight = new \ReflectionMethod($trainer, 'preflight');
+        $validate = new \ReflectionMethod($trainer, 'validateRecipe');
+
+        foreach ([0, 21, 999, -1, 1.5] as $count) {
+            ProductGalleryPreflightAgent::fake(fn (): array => [
+                'decision' => 'train_playwright',
+                'page_kind' => 'product_card',
+                'gallery_likely' => true,
+                'hidden_images_likely' => true,
+                'interaction_required' => true,
+                'expected_image_count' => $count,
+                'evidence' => ['Current gallery observation.'],
+                'confidence' => 0.95,
+                'reason' => 'Gallery needs interaction.',
+            ])->preventStrayPrompts();
+
+            $result = $preflight->invoke(
+                $trainer, 'https://gallery.example/product', [], [], [], null, null,
+                'openai', 'gpt-5-mini', new ProductGalleryRecipeVersion, null, null,
+            );
+            if ($count < 0 || ! is_int($count)) {
+                $this->assertSame('interrupted', $result['decision']);
+
+                try {
+                    $validate->invoke($trainer, [
+                        ...$this->workingRecipe(), 'expected_image_count' => $count,
+                    ]);
+                    $this->fail('An invalid observation must not become a valid recipe.');
+                } catch (InvalidGalleryRecipeException $exception) {
+                    $this->assertContains('expected_image_count', $exception->ruleSignature);
+                }
+
+                continue;
+            }
+            $this->assertSame('train_playwright', $result['decision'], $result['reason']);
+            $this->assertSame($count, $result['expected_image_count']);
+
+            $recipe = $validate->invoke($trainer, [
+                ...$this->workingRecipe(), 'expected_image_count' => $count,
+            ]);
+            $this->assertSame($count, $recipe['expected_image_count']);
+        }
+    }
+
+    public function test_gallery_count_schemas_do_not_cap_current_page_observations(): void
+    {
+        foreach ([new ProductGalleryPreflightAgent, new ProductGalleryRecipeTrainerAgent] as $agent) {
+            $schema = $agent->schema(new JsonSchemaTypeFactory);
+            $count = $schema['expected_image_count']->toArray();
+            $this->assertSame(0, $count['minimum']);
+            $this->assertArrayNotHasKey('maximum', $count);
+        }
     }
 
     public function test_gallery_control_without_fragments_reaches_recipe_training(): void
@@ -2277,7 +2336,7 @@ class ProductGalleryRecipeTrainerTest extends TestCase
             $callCount++;
 
             if ($callCount === 3) {
-                return $this->validRecipeResponse(['expected_image_count' => 999]);
+                return $this->validRecipeResponse(['expected_image_count' => -1]);
             }
 
             return $this->validRecipeResponse([

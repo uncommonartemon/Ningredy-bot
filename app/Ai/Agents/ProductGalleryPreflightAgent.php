@@ -91,7 +91,8 @@ class ProductGalleryPreflightAgent implements Agent, HasStructuredOutput
             'gallery_likely' => $schema->boolean()->required(),
             'hidden_images_likely' => $schema->boolean()->required(),
             'interaction_required' => $schema->boolean()->required(),
-            'expected_image_count' => $schema->integer()->min(0)->max(20)->required(),
+            // A page observation, not permission to click or download this many times.
+            'expected_image_count' => $schema->integer()->min(0)->required(),
             'evidence' => $schema->array()->max(12)
                 ->items($schema->string()->max(500))->required(),
             'confidence' => $schema->number()->min(0)->max(1)->required(),

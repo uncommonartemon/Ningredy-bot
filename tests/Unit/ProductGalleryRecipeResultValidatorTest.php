@@ -214,6 +214,23 @@ class ProductGalleryRecipeResultValidatorTest extends TestCase
         $this->assertSame(3, $result['expected']);
     }
 
+    public function test_large_observed_gallery_does_not_raise_the_publication_limit_or_accept_missing_frames(): void
+    {
+        foreach ([5 => false, 10 => true] as $extracted => $passed) {
+            $result = app(ProductGalleryRecipeResultValidator::class)->validate(
+                ['gallery_present' => true, 'content_confirmed_product' => true, 'expected_image_count' => 999],
+                [
+                    'images' => $this->images($extracted),
+                    'diagnostics' => ['distinct_dom_assets' => 999],
+                ],
+            );
+
+            $this->assertSame($passed, $result['passed']);
+            $this->assertSame(10, $result['expected']);
+            $this->assertSame($extracted, $result['extracted']);
+        }
+    }
+
     public function test_an_absent_if_present_gate_does_not_fail_the_recipe(): void
     {
         // The consent wall was up when this recipe was trained and is not up

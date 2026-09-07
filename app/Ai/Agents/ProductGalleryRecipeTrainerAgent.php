@@ -437,7 +437,8 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
             'page_assessment_evidence' => $schema->array()->max(8)
                 ->items($schema->string()->max(500))->required(),
             'gallery_present' => $schema->boolean()->required(),
-            'expected_image_count' => $schema->integer()->min(0)->max(20)->required(),
+            // A page observation, not permission to click or download this many times.
+            'expected_image_count' => $schema->integer()->min(0)->required(),
             'expected_count_evidence' => $schema->string()->max(500)->required(),
             'content_confirmed_product' => $schema->boolean()->required(),
             'actions' => $actions,
