@@ -441,7 +441,101 @@ let galleryReadiness = {};
 // silently keep collecting - and shipping - photos of a different product.
 let productPageUrl = sourceUrl;
 let leftProductPage = false;
-const onProductPage = () => {
+let productIdentity = null;
+
+/**
+ * What the page says it is about, in its own words.
+ *
+ * Read from the markup a shop publishes for search engines and price
+ * comparison, which is the same everywhere and in no language: the canonical
+ * link, og:url, and the Product entry of JSON-LD. A gallery tab and its product
+ * page agree on all of these; two different laptops disagree on every one.
+ */
+const readProductIdentity = async () => await page.evaluate(() => {
+    const attr = (selector, name) => document.querySelector(selector)?.getAttribute(name) || null;
+    const path = (raw) => {
+        try {
+            return new URL(raw, location.href).pathname.replace(/\/+$/, '').toLowerCase() || null;
+        } catch {
+            return null;
+        }
+    };
+    const products = [];
+
+    for (const node of document.querySelectorAll('script[type="application/ld+json"]')) {
+        try {
+            const parsed = JSON.parse(node.textContent || '');
+            const queue = Array.isArray(parsed) ? [...parsed] : [parsed];
+
+            while (queue.length && products.length < 8) {
+                const item = queue.shift();
+
+                if (!item || typeof item !== 'object') {
+                    continue;
+                }
+
+                if (Array.isArray(item['@graph'])) {
+                    queue.push(...item['@graph']);
+                }
+
+                const type = String(item['@type'] || '').toLowerCase();
+
+                if (type === 'product' || (Array.isArray(item['@type']) && item['@type'].some((t) => String(t).toLowerCase() === 'product'))) {
+                    products.push(item);
+                }
+            }
+        } catch {
+            // A shop with malformed JSON-LD simply offers no evidence here.
+        }
+    }
+
+    const first = (values) => values.map((value) => (typeof value === 'string' ? value.trim() : ''))
+        .find((value) => value !== '') || null;
+
+    return {
+        canonical: path(attr('link[rel="canonical"]', 'href') || ''),
+        og_url: path(attr('meta[property="og:url"]', 'content') || ''),
+        sku: first(products.flatMap((item) => [item.sku, item.mpn, item.productID, item.gtin13, item.gtin])),
+        name: (first(products.map((item) => item.name))
+            || attr('meta[property="og:title"]', 'content')
+            || '').slice(0, 200).toLowerCase() || null,
+    };
+});
+
+/**
+ * Whether the page we are on now is still the product we came for.
+ *
+ * This used to be a question about the shape of the URL, which cannot answer
+ * it: /store/laptops/model-a and /store/laptops/model-b differ exactly as much
+ * as /product/spec and /product/gallery do. It was propped up by a list of
+ * English tab names, which refused a real gallery link on 2026-09-07 because
+ * the shop spelled the tab "spec".
+ *
+ * So it is answered with evidence instead, strongest first, and the shape of
+ * the URL is only the fallback for a page that publishes none.
+ */
+const onProductPage = async () => {
+    let identity = null;
+
+    try {
+        identity = await readProductIdentity();
+    } catch {
+        identity = null;
+    }
+
+    if (productIdentity && identity) {
+        // An id both pages carry is the whole answer, either way.
+        if (productIdentity.sku && identity.sku) {
+            return productIdentity.sku === identity.sku;
+        }
+
+        for (const key of ['canonical', 'og_url', 'name']) {
+            if (productIdentity[key] && identity[key]) {
+                return productIdentity[key] === identity[key];
+            }
+        }
+    }
+
     try {
         return isAllowedProductNavigation(productPageUrl, page.url());
     } catch {
@@ -1269,17 +1363,27 @@ const clickAndWaitForGalleryChange = async (locator, meta = {}) => {
     // throwing, misreported as "the gallery changed". Checked both here and
     // on every poll iteration below for that reason.
     const bailIfNavigatedAway = async () => {
-        if (onProductPage()) {
+        if (await onProductPage()) {
             return false;
         }
 
         leftProductPage = true;
+        const landedOn = page.url();
+        const landedIdentity = await readProductIdentity().catch(() => null);
         await page.goBack({ waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {});
         actionTrace.push({
             ...meta,
             clicked: true,
             changed: false,
             navigated_away: true,
+            // Said in full, because "navigated away" alone reads as a bad
+            // selector when it may be a perfectly good link to another product.
+            navigated_away_to: landedOn,
+            navigated_away_reason: 'The page this opened is a different product from the one being '
+                + 'trained, so nothing was collected from it and we came back. Compare the identities '
+                + 'below: they are what the two pages published about themselves.',
+            expected_product_identity: productIdentity,
+            landed_product_identity: landedIdentity,
             before_images: beforeState.observed_count || 0,
             after_images: beforeState.observed_count || 0,
             network_delta: 0,
@@ -1839,6 +1943,10 @@ try {
     // Use the browser's final product URL after redirects/interstitials as the
     // logical root for later same-product Gallery/Media navigation checks.
     productPageUrl = page.url();
+    // Taken here, on the page we were sent to, so every later "is this still
+    // that product?" is answered against what this page itself declared rather
+    // than against the shape of its address.
+    productIdentity = await readProductIdentity().catch(() => null);
 
     for (const selector of preClickSelectors) {
         if (leftProductPage) {

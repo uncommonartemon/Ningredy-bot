@@ -65,7 +65,7 @@ test('allows a same-product internal gallery route but rejects unrelated navigat
     );
 });
 
-test('a tab is recognised by where it sits, not by what it is called', () => {
+test('a page is judged by where it sits, never by what it is called', () => {
     // Live on 2026-09-07: the agent asked to open
     // /us/laptops/rog-strix/rog-strix-scar-18-2025/gallery/ from that product's
     // own /spec/ page - one segment apart - and was refused, because the list of
@@ -95,7 +95,20 @@ test('a tab is recognised by where it sits, not by what it is called', () => {
     assert.equal(
         isAllowedProductNavigation(asusSpec, '/us/laptops/rog-strix/another-laptop/gallery/'),
         false,
-        'A different product is not this product.',
+        'Two segments away is an ancestor, not a sibling.',
+    );
+
+    // Deliberate, and the reason this function must stay small: a path cannot
+    // tell one product from another. /store/laptops/model-a and
+    // /store/laptops/model-b differ exactly as much as /product/spec and
+    // /product/gallery do, so any rule that refuses the second refuses the
+    // first - which is precisely what the tab-name list was doing. The sieve
+    // lets it through and onProductPage() catches it on arrival, comparing what
+    // the two pages publish about themselves. If this assertion ever starts
+    // failing, someone has taught this function to guess again.
+    assert.equal(
+        isAllowedProductNavigation('https://shop.example/store/laptops/model-a', '/store/laptops/model-b'),
+        true,
     );
     assert.equal(
         isAllowedProductNavigation(asusSpec, '/us/laptops/gallery/'),
@@ -107,11 +120,23 @@ test('a tab is recognised by where it sits, not by what it is called', () => {
         false,
         'A site-wide gallery is not a product gallery.',
     );
+    // Which route is the gallery is the agent's judgement, not this function's:
+    // it is looking at the page and chose the control. This only answers whether
+    // we are still on the same product, and a route one level deeper on it is.
     assert.equal(
-        isAllowedProductNavigation(asusSpec, '/us/laptops/rog-strix/rog-strix-scar-18-2025/spec/reviews'),
-        false,
-        'Only a gallery section is worth navigating to.',
+        isAllowedProductNavigation(asusSpec, '/us/laptops/rog-strix/rog-strix-scar-18-2025/spec/enlarge'),
+        true,
     );
+    for (const section of ['bilder', 'imagenes', 'galeria', 'fotogalerie', 'media-2']) {
+        assert.equal(
+            isAllowedProductNavigation(
+                'https://shop.example/store/laptops/model-x/spec',
+                `/store/laptops/model-x/${section}`,
+            ),
+            true,
+            `A shop calling its gallery "${section}" is still this product.`,
+        );
+    }
     assert.equal(
         isAllowedProductNavigation(
             'https://shop.example/store/laptops/model-x/spec/detail',

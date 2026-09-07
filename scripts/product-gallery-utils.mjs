@@ -76,7 +76,6 @@ export const traversalCeiling = (declared, fallback = TRAVERSAL_CEILING) => {
 export const TRAVERSAL_PATIENCE = 3;
 
 
-const GALLERY_SECTION_SEGMENT = /^(?:gallery|media|images?|photos?|product-images?|product-media)$/i;
 
 const comparableHost = (hostname) => String(hostname || '').toLowerCase().replace(/^www\./, '');
 const pathSegments = (pathname) => String(pathname || '')
@@ -90,15 +89,15 @@ const pathSegments = (pathname) => String(pathname || '')
     })
     .filter(Boolean);
 // A gallery recipe may click a same-product tab that changes the pathname
-// (for example /Specification -> /Gallery). Exact-path navigation remains
-// allowed, while a changed path must stay on the same host, explicitly target
-// a gallery/media section, and belong to the same product.
+// (for example /Specification -> /Gallery). This answers one question and no
+// other: is the page we would land on still this product?
 //
-// "The same product" used to be decided by a list of fourteen English tab
-// names: a path whose last segment was one of them was a tab, anything else
-// was a different page. The list grew one word per shop - "sp" for gigabyte,
-// "specification" for msi - and on 2026-09-07 it refused this, verbatim from
-// the run's own trace:
+// It used to answer two, and the second one wrecked the first. "Is this a tab
+// of the same product" was decided by a list of fourteen English tab names,
+// and "is the target the gallery" by a list of six more. A path whose last
+// segment was not on the list was a different page. The lists grew one word per
+// shop - "sp" for gigabyte, "specification" for msi - and on 2026-09-07 the
+// first of them refused this, verbatim from the run's own trace:
 //
 //   purpose:            "open the same-product Gallery page where the actual
 //                        product photo set is exposed"
@@ -109,10 +108,24 @@ const pathSegments = (pathname) => String(pathname || '')
 // one segment apart. "spec" was not on the list. Three training rounds ended
 // as "no material progress" and the shop got no recipe.
 //
-// The relationship is structural and needs no vocabulary: the target's product
-// root - its path without the gallery segment - must be where the source
-// already is, give or take the source's own tab. Any tab name in any language
-// passes; a different product, or a jump up to a category's gallery, does not.
+// No vocabulary can finish either list: bilder, imagenes, galeria, datasheet,
+// technische-daten, and whatever the next shop chooses. So there is none here.
+//
+// What is left is a cheap sieve, and it is important to be honest about what it
+// cannot do. A path cannot tell one product from another: /store/laptops/model-a
+// and /store/laptops/model-b differ exactly as much as /product/spec and
+// /product/gallery do. This function therefore does NOT decide whether a link
+// stays on the same product, and must never be extended to pretend it does -
+// that pretence is what the tab-name list was.
+//
+// It refuses only what is wrong regardless of product: another host, and a jump
+// two or more levels up, which is a category or the site root rather than
+// anything belonging to a product page.
+//
+// Whether we actually landed on the same product is decided after arriving, by
+// what the two pages publish about themselves - canonical, og:url, JSON-LD sku
+// and name - in onProductPage(). That is evidence, it works in every language,
+// and it is the only thing that can answer the question.
 export const isAllowedProductNavigation = (sourceRawUrl, targetRawUrl) => {
     let source;
     let target;
@@ -139,15 +152,13 @@ export const isAllowedProductNavigation = (sourceRawUrl, targetRawUrl) => {
     const sourceSegments = pathSegments(sourcePath);
     const targetSegments = pathSegments(targetPath);
 
-    if (!GALLERY_SECTION_SEGMENT.test(targetSegments.at(-1) || '')) {
-        return false;
-    }
-
     const targetRoot = targetSegments.slice(0, -1);
 
-    // Two or more segments so a site-wide /gallery cannot pass as a product's.
+    // Two or more segments, so a site-wide /gallery cannot pass for a product's.
     // At most one segment of slack, which is the source's own tab, whatever it
     // is called - more than that and the target is an ancestor, not a sibling.
+    // A sibling that happens to be a different product passes here on purpose:
+    // it is caught on arrival, where there is evidence to catch it with.
     return targetRoot.length >= 2
         && sourceSegments.length >= targetRoot.length
         && sourceSegments.length - targetRoot.length <= 1
