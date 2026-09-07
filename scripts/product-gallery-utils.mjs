@@ -75,6 +75,90 @@ export const traversalCeiling = (declared, fallback = TRAVERSAL_CEILING) => {
 // video, a repeated frame, an image still loading.
 export const TRAVERSAL_PATIENCE = 3;
 
+export const readProductIdentityInPage = () => {
+    const attr = (selector, name) => document.querySelector(selector)?.getAttribute(name) || null;
+    const path = (raw) => {
+        try {
+            return new URL(raw, location.href).pathname.replace(/\/+$/, '').toLowerCase() || null;
+        } catch {
+            return null;
+        }
+    };
+    const products = [];
+
+    for (const node of document.querySelectorAll('script[type="application/ld+json"]')) {
+        try {
+            const parsed = JSON.parse(node.textContent || '');
+            const queue = Array.isArray(parsed) ? [...parsed] : [parsed];
+
+            while (queue.length && products.length < 8) {
+                const item = queue.shift();
+
+                if (!item || typeof item !== 'object') {
+                    continue;
+                }
+
+                if (Array.isArray(item['@graph'])) {
+                    queue.push(...item['@graph']);
+                }
+
+                const type = String(item['@type'] || '').toLowerCase();
+
+                if (type === 'product' || (Array.isArray(item['@type']) && item['@type'].some((t) => String(t).toLowerCase() === 'product'))) {
+                    products.push(item);
+                }
+            }
+        } catch {
+            // A shop with malformed JSON-LD simply offers no evidence here.
+        }
+    }
+
+    const first = (values) => values.map((value) => (typeof value === 'string' ? value.trim() : ''))
+        .find((value) => value !== '') || null;
+
+    return {
+        canonical: path(attr('link[rel="canonical"]', 'href') || ''),
+        og_url: path(attr('meta[property="og:url"]', 'content') || ''),
+        sku: first(products.flatMap((item) => [item.sku, item.mpn, item.productID, item.gtin13, item.gtin])),
+        name: (first(products.map((item) => item.name))
+            || attr('meta[property="og:title"]', 'content')
+            || '').slice(0, 200).toLowerCase() || null,
+    };
+};
+
+
+/**
+ * Whether two pages are the same product, judged on what each published.
+ *
+ * Returns null when neither page offers comparable evidence - the caller then
+ * has nothing better than the shape of the URL, which cannot answer this.
+ *
+ * Strongest evidence first. An id both pages carry settles it either way; a
+ * canonical or og:url is next, because a product's tab points back at the
+ * product; the name is last, because two configurations of one laptop can share
+ * it. This is the check that replaced a list of English tab names, and the
+ * thing it must get right is the case that list was accidentally covering:
+ * /store/laptops/model-a and /store/laptops/model-b are one segment apart and
+ * are not the same product.
+ */
+export const sameProductIdentity = (expected, landed) => {
+    if (!expected || !landed) {
+        return null;
+    }
+
+    if (expected.sku && landed.sku) {
+        return expected.sku === landed.sku;
+    }
+
+    for (const key of ['canonical', 'og_url', 'name']) {
+        if (expected[key] && landed[key]) {
+            return expected[key] === landed[key];
+        }
+    }
+
+    return null;
+};
+
 
 
 const comparableHost = (hostname) => String(hostname || '').toLowerCase().replace(/^www\./, '');
