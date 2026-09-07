@@ -123,7 +123,7 @@ Write-Host '  ============================================' -ForegroundColor Dar
 Write-Host '    Бот запускается' -ForegroundColor Green
 Write-Host '  ============================================' -ForegroundColor DarkGray
 Write-Host ''
-Write-Host '    Панель управления откроется сама:'
+Write-Host '    Панель управления:'
 Write-Host '      http://127.0.0.1:8000/admin' -ForegroundColor Cyan
 Write-Host ''
 Write-Host '    Состояние бота - первый раздел в панели.'
@@ -132,14 +132,11 @@ Write-Host ''
 Write-Host '    Чтобы остановить бота - закройте это окно.' -ForegroundColor Yellow
 Write-Host ''
 
-# The panel is the whole interface, so it is opened rather than described.
-# Detached and delayed: the server needs a few seconds to bind, and this window
-# must not wait for a browser.
-Start-Process powershell -WindowStyle Hidden -ArgumentList @(
-    '-NoProfile',
-    '-Command',
-    "Start-Sleep -Seconds 12; Start-Process 'http://127.0.0.1:8000/admin'"
-) | Out-Null
+# The launcher used to open the panel in a browser by itself, twelve seconds in.
+# Nobody asked it to. Starting a bot and taking over the screen are two separate
+# things, and the second one belongs to whoever is at the keyboard - they may be
+# starting it to leave it running. The address is printed above; that is enough
+# to describe an interface without seizing focus.
 
 & npm run start
 
