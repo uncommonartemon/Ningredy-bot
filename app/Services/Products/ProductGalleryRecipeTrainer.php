@@ -1603,6 +1603,51 @@ class ProductGalleryRecipeTrainer
         return $candidate;
     }
 
+    /**
+     * A list that came back one entry too long is trimmed, not thrown away.
+     *
+     * Live on dell.com: a ninth exclude_selector - two colourways, video, 3D,
+     * AR, recommendations, all worth excluding - discarded a finished recipe
+     * and the paid round that produced it. The cap exists to stop a degenerate
+     * answer, not to buy anything per entry: a selector is forty characters,
+     * and exclusions are a filter over frames already collected.
+     *
+     * Only the selector and attribute lists. actions is a plan, and dropping
+     * its last step changes what runs rather than costing a little precision,
+     * so an overlong plan is still refused and the agent is told the bound.
+     *
+     * The caps are read off the validation rules rather than written a second
+     * time here, because the copy is what drifts.
+     *
+     * @param  array<string, mixed>  $data
+     * @return array<string, mixed>
+     */
+    private function trimOverlongSelectorLists(array $data): array
+    {
+        $trimmable = [
+            'pre_click_selectors', 'collect_selectors', 'thumbnail_selectors',
+            'open_selectors', 'next_selectors', 'exclude_selectors', 'attributes',
+        ];
+        $rules = $this->recipeValidationRules();
+
+        foreach ($trimmable as $key) {
+            if (! is_array($data[$key] ?? null)) {
+                continue;
+            }
+
+            $cap = collect(is_array($rules[$key] ?? null) ? $rules[$key] : [])
+                ->filter(fn (mixed $rule): bool => is_string($rule) && str_starts_with($rule, 'max:'))
+                ->map(fn (string $rule): int => (int) substr($rule, 4))
+                ->first();
+
+            if ($cap !== null && $cap > 0 && count($data[$key]) > $cap) {
+                $data[$key] = array_slice(array_values($data[$key]), 0, $cap);
+            }
+        }
+
+        return $data;
+    }
+
     private function regionForUrl(string $url): ?string
     {
         $host = strtolower((string) parse_url($url, PHP_URL_HOST));
@@ -2225,6 +2270,8 @@ class ProductGalleryRecipeTrainer
             ->values()
             ->all();
 
+        $data = $this->trimOverlongSelectorLists($data);
+
         try {
             $data = Validator::make(
                 $data,
@@ -2372,10 +2419,10 @@ class ProductGalleryRecipeTrainer
             'actions.*.purpose' => ['required', 'string', 'max:200'],
             'pre_click_selectors' => ['present', 'array', 'max:5'],
             'collect_selectors' => ['present', 'array', 'max:12'],
-            'thumbnail_selectors' => ['present', 'array', 'max:8'],
+            'thumbnail_selectors' => ['present', 'array', 'max:12'],
             'open_selectors' => ['present', 'array', 'max:5'],
             'next_selectors' => ['present', 'array', 'max:5'],
-            'exclude_selectors' => ['present', 'array', 'max:8'],
+            'exclude_selectors' => ['present', 'array', 'max:20'],
             'pre_click_selectors.*' => ['string', 'max:300'],
             'collect_selectors.*' => ['string', 'max:300'],
             'thumbnail_selectors.*' => ['string', 'max:300'],

@@ -279,8 +279,23 @@ class ProductGalleryRecipeResultValidator
             }
 
             if ($kind === 'click_each') {
-                $selectorMatches = (int) $actionTrace
-                    ->max(fn (array $item): int => max(0, (int) ($item['selector_match_count'] ?? 0)));
+                // How many controls the runner faced when it stopped, not how
+                // many it ever saw.
+                //
+                // A strip is not a fixed thing. Live on dell.com: eighteen
+                // thumbnails before the viewer opened - two colourways - and
+                // nine once it had, because only the shown colourway is
+                // rendered. The runner walked the nine that existed and stopped
+                // because there were no more; this check remembered eighteen
+                // and called that half a traversal. It refused three separate
+                // rounds that had already collected all eighteen photographs,
+                // and the two counts could never agree on any page whose strip
+                // changes size - which is every page with a variant selector.
+                $observedMatches = $completedTrace
+                    ->map(fn (array $item): int => max(0, (int) ($item['selector_match_count'] ?? 0)))
+                    ->filter(fn (int $count): bool => $count > 0);
+                $selectorMatches = (int) ($observedMatches->last() ?? $actionTrace
+                    ->max(fn (array $item): int => max(0, (int) ($item['selector_match_count'] ?? 0))));
                 $limit = max(1, (int) ($action['limit'] ?? 1));
                 // Several matched controls are walked one each, so the plan can
                 // never need more clicks than there are elements. A single match

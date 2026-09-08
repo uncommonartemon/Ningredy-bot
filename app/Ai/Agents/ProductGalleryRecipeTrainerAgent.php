@@ -324,7 +324,13 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
             Numeric fields have hard accepted ranges and a value outside them throws the whole recipe away
             for that round, however good its selectors are: index 0-20, limit 1-20, wait_after_ms and
             after_each_wait_after_ms 50-1500, after_each_limit 1-20, max_thumbnail_clicks 0-20,
-            max_next_clicks 0-15, wait_after_click_ms 50-1000. A page that needs a longer settle than 1500ms
+            max_next_clicks 0-15, wait_after_click_ms 50-1000. The selector lists are bounded too, and were
+            not written down here until a recipe was thrown away for a ninth exclusion nobody had told the
+            agent about: actions 12, collect_selectors 12, exclude_selectors 20, thumbnail_selectors 12,
+            pre_click_selectors 5, open_selectors 5, next_selectors 5, attributes 12. An overlong selector
+            or attribute list is trimmed to its bound rather than rejected, so the excess is simply lost - put
+            the entries that matter first. actions is the exception: it is a plan, and dropping its last step
+            would change what runs, so an overlong one is refused outright. A page that needs a longer settle than 1500ms
             must be handled with an extra action or a click_until_no_change, never by exceeding the bound.
             Every action must also return after_each_selector, after_each_limit and after_each_wait_after_ms.
             Set all three to null normally. When selecting each thumbnail resets a nested zoom/enlargement state,
@@ -444,10 +450,10 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
             'actions' => $actions,
             'pre_click_selectors' => $selectors(5),
             'collect_selectors' => $selectors(12),
-            'thumbnail_selectors' => $selectors(8),
+            'thumbnail_selectors' => $selectors(12),
             'open_selectors' => $selectors(5),
             'next_selectors' => $selectors(5),
-            'exclude_selectors' => $selectors(8),
+            'exclude_selectors' => $selectors(20),
             'attributes' => $schema->array()->max(12)
                 ->items($schema->string()->max(80))->required(),
             'max_thumbnail_clicks' => $schema->integer()->min(0)->max(20)->required(),
