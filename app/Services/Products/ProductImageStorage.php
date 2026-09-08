@@ -1405,17 +1405,16 @@ class ProductImageStorage
                 && ! $this->sourceExcludedByUrls($source['url'], $cycleExcludedSourceUrls))
             ->values();
 
-        // Two filters that cost nothing, applied before anything knocks on a
-        // shop's door.
+        // A colour filter stood here and it was a word list. It dropped a Grey
+        // listing for a Gray request, a "Золотой" one for a Gold request, and
+        // any card whose title said "Black Friday" - each because a vocabulary
+        // of colour words cannot survive spelling, language, or a marketing
+        // phrase. It was written the day after a list of English tab names was
+        // removed for being unfinishable, and it was the same mistake facing
+        // the other way. Colour is judged by Vision on the frames, where the
+        // evidence is, and what to do about it is the agent's call.
         //
-        // The colour one first, because it can only ever remove: a listing that
-        // calls itself Silver when the operator asked for Gold is another
-        // variant's page, and opening it is a wasted request on a shop we are
-        // already trying not to annoy. It never confirms - half of all listings
-        // omit the colour entirely, and the word in a title can name a product
-        // line rather than a chassis. Vision still decides that, on frames.
-        $cardSources = $this->withoutContradictedColour($cardSources, $draft, $progress);
-        // Then the shops we already know how to open, moved to the front. This
+        // The shops we already know how to open, moved to the front. This
         // was decided inside preflight, which means it was decided after we had
         // already spent a request on every candidate - while it follows from
         // the host alone, and the recipes are per-domain now. Five recipes have
@@ -2403,77 +2402,6 @@ class ProductImageStorage
         }
 
         return $kept;
-    }
-
-    /**
-     * Candidates whose own words name a different colour than the one asked for.
-     *
-     * Free, and it only ever removes. A listing titled "Silver" when the
-     * operator asked for Gold is another variant's page, and opening it costs a
-     * request on a shop we are already trying not to annoy.
-     *
-     * It cannot confirm, and must not be read as confirming: half of all
-     * listings omit the colour, and the word in a title often names a product
-     * line rather than a chassis. Same asymmetry the identity check uses - a
-     * different name proves difference, an equal one proves nothing - and the
-     * colour a gallery actually shows is still decided by Vision on frames.
-     *
-     * @param  Collection<int, array<string, mixed>>  $sources
-     * @return Collection<int, array<string, mixed>>
-     */
-    private function withoutContradictedColour(Collection $sources, ProductDraft $draft, ?callable $progress): Collection
-    {
-        $wanted = $this->colourWords((string) $draft->color);
-
-        if ($wanted === []) {
-            return $sources;
-        }
-
-        $dropped = 0;
-        $kept = $sources->reject(function (array $source) use ($wanted, &$dropped): bool {
-            $said = $this->colourWords((string) ($source['title'] ?? ''));
-
-            // Says a colour, and none of them is one of ours.
-            $contradicts = $said !== [] && array_intersect($said, $wanted) === [];
-            $dropped += $contradicts ? 1 : 0;
-
-            return $contradicts;
-        })->values();
-
-        if ($dropped > 0) {
-            $progress?->__invoke(sprintf(
-                'Пропускаю %d карточк(и/у) другого цвета: в названии указан не %s. Ни одного запроса на них не потратил.',
-                $dropped,
-                trim((string) $draft->color),
-            ));
-        }
-
-        return $kept;
-    }
-
-    /**
-     * The colour words a piece of text names, if any.
-     *
-     * A small vocabulary rather than free text, because "Gold" has to match
-     * "gold" inside "14-inch Gold Edition" while "Rose Gold" must not pass for
-     * "Gold" - so each known word is looked for whole, and a compound colour is
-     * simply two words that both have to be there.
-     *
-     * @return array<int, string>
-     */
-    private function colourWords(string $text): array
-    {
-        $text = mb_strtolower($text);
-        $vocabulary = (array) config('product-images.colour_words', []);
-        $found = [];
-
-        foreach ($vocabulary as $word) {
-            if (preg_match('/(?<![\p{L}])'.preg_quote((string) $word, '/').'(?![\p{L}])/u', $text) === 1) {
-                $found[] = (string) $word;
-            }
-        }
-
-        return array_values(array_unique($found));
     }
 
     private function cleanUrls(array $urls, ?string $variantHint = null): array
