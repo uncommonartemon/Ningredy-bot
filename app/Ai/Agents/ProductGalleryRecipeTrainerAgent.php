@@ -79,7 +79,7 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
         ];
 
         if ($this->visionImageUrls !== []) {
-            $tools[] = new InspectGalleryImages($this->visionImageUrls, $this->telegramUpdateId);
+            $tools[] = new InspectGalleryImages($this->visionImageUrls, $this->telegramUpdateId, $this->update?->text);
         }
 
         if (app(AiSettings::class)->galleryAgentWriteToolsEnabled()) {
@@ -105,6 +105,19 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
     {
         return <<<'PROMPT'
             You design safe, reusable Playwright gallery extraction recipes for product pages.
+            Read original_operator_request to determine what the operator actually specified. If a color is
+            explicitly requested, use InspectGalleryImages on informative views from the candidate slider
+            before proposing a working extraction recipe. If those views are not exposed yet, you may propose
+            a safe exploratory opening plan, but do not set content_confirmed_product=true yet. Inspect the
+            newly observed views next round. Choose further observations yourself while budget remains.
+            Assess color across the set, not independently as a rejection gate on every frame. An unclear side,
+            underside or detail does not contradict informative views. A real conflicting color requires a
+            different selected variant/container or another source; uncertainty requires more evidence.
+            Prove one coherent slider using DOM scope, selected variant and action/network continuity; visual
+            similarity alone does not prove membership. Do not combine neighboring hidden color stacks or
+            responsive duplicate controls into one gallery. Keep ambiguous individual views belonging to a
+            confirmed coherent set. Visual observations never prove an exact SKU and are not reusable facts
+            about the color of future products on this domain.
             Inspect only the supplied sanitized DOM fragments, structured action_candidates and
             image_candidates, interactive controls, selector counts, observed image-network URLs, page
             geometry, page title and URL. action_candidates contain visible controls with a runner-generated
@@ -411,7 +424,7 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
 
     public function schema(JsonSchema $schema): array
     {
-        $selectors = fn (int $max) => $schema->array()->max($max)
+        $selectors = fn () => $schema->array()
             ->items($schema->string()->max(300))->required();
         $actions = $schema->array()->max(12)->items($schema->object([
             'kind' => $schema->string()->enum([
@@ -448,12 +461,12 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
             'expected_count_evidence' => $schema->string()->max(500)->required(),
             'content_confirmed_product' => $schema->boolean()->required(),
             'actions' => $actions,
-            'pre_click_selectors' => $selectors(5),
-            'collect_selectors' => $selectors(12),
-            'thumbnail_selectors' => $selectors(12),
-            'open_selectors' => $selectors(5),
-            'next_selectors' => $selectors(5),
-            'exclude_selectors' => $selectors(20),
+            'pre_click_selectors' => $selectors(),
+            'collect_selectors' => $selectors(),
+            'thumbnail_selectors' => $selectors(),
+            'open_selectors' => $selectors(),
+            'next_selectors' => $selectors(),
+            'exclude_selectors' => $selectors(),
             'attributes' => $schema->array()->max(12)
                 ->items($schema->string()->max(80))->required(),
             'max_thumbnail_clicks' => $schema->integer()->min(0)->max(20)->required(),

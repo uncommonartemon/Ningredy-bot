@@ -379,18 +379,6 @@ class ProductImageStorage
             // the money is spent, and a source that may only reuse an existing
             // recipe trains nothing - stopping there would skip the free half
             // of the search to protect a budget it does not spend.
-            if (
-                $sourceIndex > 0
-                && ! $reuseOnly
-                && $deferredVisionSets !== []
-                && $this->costBudget->reachedFraction(
-                    $telegramUpdateId,
-                    (float) config('product-images.source_exploration_budget_fraction', 0.70),
-                )
-            ) {
-                $progress?->__invoke('Резервирую остаток бюджета для Vision и резервного поиска; новые домены Playwright не обучаю.');
-                break;
-            }
 
             if (! $this->timeBudget->canStart($telegramUpdateId, 20)) {
                 $progress?->__invoke('Резерв времени достигнут: новые источники больше не открываю, завершаю текущий результат.');

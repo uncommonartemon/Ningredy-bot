@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { chromium } from 'playwright-core';
+import { closeWithin, saveGalleryCheckpoint } from './gallery-checkpoint.mjs';
 import {
     browserServerEndpointFile,
     clearBlockingOverlays,
@@ -436,6 +437,18 @@ let navigationStatus = null;
 let screenshotPath = null;
 let dismissedOverlays = { dismissed: [], still_blocking: [] };
 let galleryReadiness = {};
+let browserStage = 'page_created';
+const checkpoint = (stage = browserStage) => {
+    browserStage = stage;
+    saveGalleryCheckpoint(transferDirectory, {
+        images: [], // Observations are not validated photographs.
+        scout: { ...scout, network_image_samples: [...new Set([...networkImages, ...payloadImages])].slice(0, 30) },
+        post_interaction_scout: postInteractionScout,
+        action_trace: actionTrace,
+        diagnostics: { partial: true, stopped_early: true, browser_stage: stage },
+    });
+};
+checkpoint();
 
 // A gallery click can trigger a real page navigation instead of an in-page
 // DOM update (a different product's page, a category listing, ...). Nothing
@@ -512,7 +525,7 @@ const onProductPage = async () => {
 // exit code 0 to accept a result - even a partial one - so emit whatever was
 // collected so far instead of losing it to a raw stack trace.
 let crashResultEmitted = false;
-const emitCrashResult = (error) => {
+const emitCrashResult = (error, failureKind = 'browser_crash') => {
     if (crashResultEmitted) {
         return;
     }
@@ -532,20 +545,27 @@ const emitCrashResult = (error) => {
         action_trace: actionTrace,
         learned_recipe: learnedRecipe,
         error: String(error?.stack || error).slice(0, 1000),
-        failure_kind: 'browser_crash',
+        failure_kind: failureKind,
         diagnostics: {
             partial: true,
+            stopped_early: true,
+            browser_stage: browserStage,
             dom_candidates: gathered.length,
             network_candidates: networkImages.length,
             action_plan: recipeActionPlanStatus({ actions: recipeActions, actionTrace }),
         },
     }));
 
-    Promise.resolve(browser?.close?.()).catch(() => {}).finally(() => process.exit(0));
+    closeWithin(() => sharedBrowser ? context.close() : browser.close()).finally(() => process.exit(0));
 };
 
-process.on('uncaughtException', emitCrashResult);
-process.on('unhandledRejection', emitCrashResult);
+process.on('uncaughtException', (error) => emitCrashResult(error));
+process.on('unhandledRejection', (error) => emitCrashResult(error));
+// The event loop stays responsive while a browser/CDP call is stuck. Flush
+// observations before PHP's hard kill; the disk checkpoint covers a blocked
+// Node event loop as well. This timer never turns an interruption into success.
+setTimeout(() => emitCrashResult(new Error(`Browser deadline at ${browserStage}`), 'browser_timeout'),
+    Math.max(1, softDeadline - Date.now())).unref();
 const imageUrlsFromText = (text) => {
     const decoded = text
         .replaceAll('\\u002F', '/')
@@ -1192,6 +1212,7 @@ const enoughCollected = () => new Set(
         .map(imageAssetKey),
 ).size >= collectionTarget;
 const collect = async () => {
+    checkpoint('collection');
     const collection = await collectDomImages().catch((error) => {
         collectionErrors.push(String(error?.message || error || 'unknown collection error').slice(0, 1000));
         return { urls: [], excluded_contexts: [] };
@@ -1209,6 +1230,7 @@ const collect = async () => {
             .filter(Boolean),
     ).catch(() => []));
     }
+    checkpoint('interaction');
 };
 const collectionSignature = async () => page.evaluate(({ selectors, attributes }) => {
     const values = [];
@@ -1879,6 +1901,7 @@ try {
     if (firstEverVisitToHost) {
         try {
             const origin = new URL(sourceUrl).origin;
+            checkpoint('homepage_navigation');
             await page.goto(origin, { waitUntil: 'domcontentloaded', timeout: 12_000 });
             await settleLikeAReader(page);
             referer = origin;
@@ -1888,18 +1911,24 @@ try {
         }
     }
 
+    checkpoint('product_navigation');
     const navigation = await page.goto(sourceUrl, {
         waitUntil: 'domcontentloaded',
         timeout: 20_000,
         ...(referer ? { referer } : {}),
     });
     navigationStatus = navigation?.status() ?? null;
+    checkpoint('initial_dom');
+    scout = await captureInteractionScout().catch(() => ({}));
+    checkpoint('page_settling');
     await page.waitForLoadState('load', { timeout: 5_000 }).catch(() => {});
 
+    checkpoint('overlay_handling');
     dismissedOverlays = await clearBlockingOverlays(page);
     // Landing, reading the whole DOM in forty milliseconds and leaving is not a
     // reading pattern. This also does the one thing a gallery needs anyway:
     // lazy-loaded frames below the fold are fetched by scrolling past them.
+    checkpoint('lazy_loading');
     await settleLikeAReader(page);
 
     // Use the browser's final product URL after redirects/interstitials as the
@@ -1908,6 +1937,7 @@ try {
     // Taken here, on the page we were sent to, so every later "is this still
     // that product?" is answered against what this page itself declared rather
     // than against the shape of its address.
+    checkpoint('product_identity');
     productIdentity = await readProductIdentity().catch(() => null);
 
     for (const selector of preClickSelectors) {
@@ -1922,8 +1952,10 @@ try {
         }
     }
 
+    checkpoint('gallery_readiness');
     galleryReadiness = await waitForStableGallery();
 
+    checkpoint('gallery_dom');
     scout = await captureInteractionScout();
     const accessState = await page.evaluate((httpStatus) => {
         const pageText = `${document.title}\n${document.body?.innerText || ''}`.slice(0, 20_000);
@@ -1953,6 +1985,7 @@ try {
     // consent wall - and would plan a recipe for the wrong document.
     scout.dismissed_overlays = dismissedOverlays.dismissed || [];
     scout.blocking_overlays = dismissedOverlays.still_blocking || [];
+    checkpoint('collection');
 
     await collect();
 
@@ -1967,10 +2000,10 @@ try {
         selectorCounts[selector] = await page.locator(selector).count().catch(() => 0);
     }
     learnedRecipe = {
-        collect_selectors: gallerySelectors.filter((selector) => selectorCounts[selector] > 0).slice(0, 12),
-        thumbnail_selectors: thumbnailSelectors.filter((selector) => selectorCounts[selector] > 1).slice(0, 8),
-        open_selectors: openSelectors.filter((selector) => selectorCounts[selector] > 0).slice(0, 5),
-        next_selectors: nextSelectors.filter((selector) => selectorCounts[selector] > 0).slice(0, 5),
+        collect_selectors: gallerySelectors.filter((selector) => selectorCounts[selector] > 0),
+        thumbnail_selectors: thumbnailSelectors.filter((selector) => selectorCounts[selector] > 1),
+        open_selectors: openSelectors.filter((selector) => selectorCounts[selector] > 0),
+        next_selectors: nextSelectors.filter((selector) => selectorCounts[selector] > 0),
         actions: recipeActions.filter((action) => selectorCounts[action.selector] > 0),
     };
 
@@ -2334,7 +2367,8 @@ try {
     }
     }
 } finally {
-    await Promise.allSettled([...pendingPayloads]);
+    checkpoint('pending_payloads');
+    await closeWithin(() => Promise.allSettled([...pendingPayloads]));
     if (scout && typeof scout === 'object') {
         scout.network_image_samples = [...new Set([
             ...networkImages,
@@ -2498,6 +2532,7 @@ const transferFailures = [];
 // on top of the page. The agent has been reasoning about a layout it could
 // never see - which is a strange handicap for work that is entirely visual.
 if (transferDirectory !== '') {
+    checkpoint('screenshot');
     try {
         const path = join(transferDirectory, 'page.png');
         await page.screenshot({ path, timeout: 5_000 });
@@ -2508,6 +2543,7 @@ if (transferDirectory !== '') {
 }
 
 if (!scoutOnly && transferDirectory !== '') {
+    checkpoint('image_transfer');
     const selected = [...bestImages.values()].slice(0, limit);
 
     for (let index = 0; index < selected.length; index += 4) {
@@ -2543,9 +2579,10 @@ if (!scoutOnly && transferDirectory !== '') {
 // runs that fell back to a throwaway context - writing it from a profile run
 // would keep a second, staler copy of the same state.
 if (sessionFile && !usingProfile) {
+    checkpoint('session_save');
     try {
         await mkdir(dirname(sessionFile), { recursive: true });
-        await context.storageState({ path: sessionFile });
+        await closeWithin(() => context.storageState({ path: sessionFile }));
     } catch {
         // Continuity is an optimisation, not a requirement.
     }
@@ -2553,11 +2590,8 @@ if (sessionFile && !usingProfile) {
 
 // Closing a browser that belongs to the whole bot would take the window down
 // for everyone; only the borrowed context is released.
-if (sharedBrowser) {
-    await context.close().catch(() => {});
-} else {
-    await browser.close();
-}
+checkpoint('browser_close');
+await closeWithin(() => sharedBrowser ? context.close() : browser.close());
 
 // This is why the shared browser appeared to hang every extraction.
 //
@@ -2573,7 +2607,7 @@ if (sharedBrowser) {
 //
 // The callback runs after stdout is flushed, which matters because stdout is a
 // pipe here and a bare exit can truncate the last write.
-process.stdout.write(JSON.stringify({
+if (!crashResultEmitted) process.stdout.write(JSON.stringify({
     images,
     transferred_images: transferredImages,
     screenshot_path: screenshotPath,

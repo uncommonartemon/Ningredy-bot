@@ -22,6 +22,7 @@ class InspectGalleryImages implements Tool
     public function __construct(
         private readonly array $allowedImageUrls,
         private readonly ?int $telegramUpdateId = null,
+        private readonly ?string $originalOperatorRequest = null,
     ) {}
 
     public function description(): Stringable|string
@@ -30,7 +31,9 @@ class InspectGalleryImages implements Tool
             .'Use only when pixels are needed to understand whether a candidate container is one coherent product '
             .'gallery, whether the product remains visible in effects/lifestyle/unusual-angle frames, or whether '
             .'prominent in-image text uses a language other than English/Czech. This is observational: it never '
-            .'selects, rejects, ranks, or proves an exact SKU. Call again with another observed batch if needed.';
+            .'selects, rejects, ranks, or proves an exact SKU. For an explicitly requested color, inspect several '
+            .'informative views from the same candidate slider together; unclear detail views are not conflicts. '
+            .'Call again with another observed batch if needed.';
     }
 
     public function handle(Request $request): Stringable|string
@@ -92,6 +95,7 @@ class InspectGalleryImages implements Tool
         $timeout = $timeBudget->timeoutFor($this->telegramUpdateId, $settings->imageVisionTimeoutSeconds());
         $productContext = mb_substr(trim((string) $request->string('product_context')), 0, 1000);
         $prompt = json_encode([
+            'original_operator_request' => $this->originalOperatorRequest,
             'requested_product_context' => $productContext,
             'inspection_scope' => 'visual observations only; exact SKU must be proven from page evidence',
             'image_urls_in_attachment_order' => $inspectedUrls,

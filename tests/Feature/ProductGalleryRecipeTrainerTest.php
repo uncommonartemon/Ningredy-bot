@@ -658,31 +658,36 @@ class ProductGalleryRecipeTrainerTest extends TestCase
         $this->assertCount(1, $version->result['attempts']);
     }
 
-    public function test_source_budget_deferral_returns_observed_frames_without_promoting_the_recipe(): void
+    public function test_global_budget_deferral_returns_observed_frames_without_promoting_the_recipe(): void
     {
         $update = TelegramUpdate::create([
             'update_id' => 991122, 'telegram_user_id' => '111', 'chat_id' => '222',
             'message_id' => 1, 'payload' => [], 'status' => 'processing',
         ]);
-        $this->mock(ProductSearchCostBudget::class, function (MockInterface $mock): void {
+        $executed = false;
+        $this->mock(ProductSearchCostBudget::class, function (MockInterface $mock) use (&$executed): void {
             $mock->shouldReceive('limit')->andReturn(1.0);
-            $mock->shouldReceive('unmeasurable', 'exceeded', 'reachedFraction')->andReturn(false);
+            $mock->shouldReceive('unmeasurable', 'reachedFraction')->andReturn(false);
+            $mock->shouldReceive('exceeded')->andReturnUsing(function () use (&$executed) { return $executed; });
             $mock->shouldReceive('spent', 'spentFraction')->andReturn(0.0);
-            $mock->shouldReceive('exceededForSource')->twice()->andReturn(false, true);
+            $mock->shouldNotReceive('exceededForSource');
         });
         ProductGalleryRecipeTrainerAgent::fake(fn () => [...$this->workingRecipe(),
             'actions' => [['kind' => 'click_until_no_change', 'selector' => '.next', 'index' => 0,
                 'limit' => 14, 'wait_after_ms' => 100, 'purpose' => 'Traverse the product viewer']],
         ])->preventStrayPrompts();
         $urls = array_map(fn ($n) => 'https://cdn.example/frame-'.$n.'.jpg', range(1, 15));
-        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock) use ($urls): void {
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock) use ($urls, &$executed): void {
             $mock->shouldReceive('scout')->once()->andReturn([
                 'scout' => ['title' => 'Laptop', 'fragments' => [], 'interactive_controls' => ['Media']],
                 'diagnostics' => [],
             ]);
-            $mock->shouldReceive('executeRecipe')->once()->andReturn([
+            $mock->shouldReceive('executeRecipe')->once()->andReturnUsing(function () use ($urls, &$executed) {
+                $executed = true;
+                return [
                 'images' => $urls, 'diagnostics' => ['action_plan' => ['required' => true, 'complete' => false]],
-            ]);
+                ];
+            });
         });
         // Use the measurable-budget branch with the test database and AI fakes.
         $this->app->instance('env', 'local');

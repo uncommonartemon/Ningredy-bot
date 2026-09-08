@@ -710,18 +710,16 @@ class BrowserProductGalleryExtractor
 
             return $result;
         } catch (ProcessTimedOutException $exception) {
-            $this->reputation->noteRefusal($url, HostReputation::REFUSAL_SILENCE);
+            // A process timeout can be DOM evaluation or browser cleanup, not
+            // evidence that the remote host refused a connection.
+            $recovered = BrowserGalleryCheckpoint::interrupted($transferDirectory, $exception->getMessage());
             $debug?->__invoke('warning', 'Playwright превысил лимит времени; источник можно повторить позже.');
             Log::notice('Browser product gallery extraction timed out.', [
                 'host' => parse_url($url, PHP_URL_HOST),
                 'error' => $exception->getMessage(),
             ]);
 
-            return [
-                'images' => [],
-                'error' => $exception->getMessage(),
-                'failure_kind' => 'browser_timeout',
-            ];
+            return $recovered;
         } catch (Throwable $exception) {
             $debug?->__invoke('error', 'Playwright: '.$exception->getMessage());
             Log::debug('Browser product gallery extractor was unavailable.', [

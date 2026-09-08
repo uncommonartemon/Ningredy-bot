@@ -372,10 +372,7 @@ class ProductGalleryRecipeTrainer
                 // five static photos waiting when the budget ran out. Past the
                 // same reservation the source loop uses, the estimate is taken
                 // at its word: photos in hand beat a recipe nobody can pay for.
-                $canAffordToDisbelieve = ! $this->costBudget->reachedFraction(
-                    $telegramUpdateId,
-                    (float) config('product-images.source_exploration_budget_fraction', 0.70),
-                );
+                $canAffordToDisbelieve = ! $this->costBudget->exceeded($telegramUpdateId);
 
                 $measuredStatic = $this->usableStaticGallerySize($pageScout, $context);
                 $requiredImages = max(1, (int) ($context['minimum_verified_images'] ?? 3));
@@ -605,8 +602,6 @@ class ProductGalleryRecipeTrainer
             // other known sources). Capping how much THIS training session
             // alone may spend, as a share of the total limit, guarantees at
             // least a couple of other sources still get tried.
-            $costAtTrainingStart = $this->costBudget->spent($telegramUpdateId) ?? 0.0;
-            $sourceCostShare = (float) config('product-images.source_training_cost_share_fraction', 0.4);
             $previousCandidate = null;
             $previousCandidateResult = null;
             $previousProgressSignature = null;
@@ -628,6 +623,7 @@ class ProductGalleryRecipeTrainer
                 $costExceeded = ! $safetyLimited && $this->costBudget->exceeded($telegramUpdateId);
 
                 if (! $this->timeBudget->canStart($telegramUpdateId, 30) || $costExceeded) {
+                    $budgetDeferred = true;
                     $reason = $costExceeded
                         ? 'Бюджет поиска исчерпан: дополнительную попытку обучения не запускаю.'
                         : 'Резерв времени достигнут: дополнительную попытку обучения не запускаю.';
@@ -647,29 +643,6 @@ class ProductGalleryRecipeTrainer
                     break;
                 }
 
-                // Not a verdict on the recipe: this domain would likely keep
-                // being tried, but it must not be allowed to spend the
-                // whole search's budget by itself before any other
-                // candidate source gets a turn. Deferred like an attempt-1
-                // global budget stop (never recordFailure()'d) so this
-                // domain gets a full, unpenalized shot on its next search
-                // instead of edging toward auto-disable over a rationing
-                // decision that had nothing to do with whether it works.
-                if (! $safetyLimited && $this->costBudget->exceededForSource($telegramUpdateId, $costAtTrainingStart, $sourceCostShare)) {
-                    $debug?->__invoke(
-                        'warning',
-                        "AI-тренер: {$host} израсходовал свою долю бюджета этого поиска после {$attempt} раунд(а/ов); "
-                            .'работу сохраняю, следующий поиск продолжит с этого места.',
-                    );
-                    // Breaks rather than returns, so the ordinary finalization
-                    // below writes the candidate and the whole round history to
-                    // the version - the same record a training that ran out of
-                    // rounds leaves. It returned here once, and everything the
-                    // rounds had learned went with it.
-                    $budgetDeferred = true;
-
-                    break;
-                }
 
                 // Field order matters for OpenAI's automatic prompt caching,
                 // which only discounts a request's longest prefix that is
@@ -694,6 +667,7 @@ class ProductGalleryRecipeTrainer
                     'preflight' => $preflight,
                     'domain_hint' => $domainHint,
                     'operator_hint' => $userHint,
+                    'original_operator_request' => $update?->text,
                     // This is always the original, freshly loaded page. Every
                     // recipe execution starts from this state in a new browser
                     // process; post-interaction DOM is diagnostic feedback only.
@@ -1243,7 +1217,7 @@ class ProductGalleryRecipeTrainer
                     $promote => null,
                     $abandonmentReviewPending => 'Gallery prospect remains unverified: abandonment was not backed by an executed candidate. Review history is preserved.',
                     $downloadInterrupted => $validation['reason'],
-                    $budgetDeferred => 'Обучение отложено: этот источник израсходовал свою долю денежного бюджета текущего поиска. Кандидат и история раундов сохранены.',
+                    $budgetDeferred => 'Обучение отложено: достигнут общий денежный или временной лимит поиска. Кандидат и история раундов сохранены.',
                     $stalled => 'Обучение остановлено: три последовательных раунда не дали материального прогресса.',
                     $agentAbandoned => 'Обучение остановлено по решению AI-агента: '.($agentAbandonReason ?? ''),
                     $stuckOnValidation => 'Обучение остановлено: '.self::MAX_IDENTICAL_VALIDATION_FAILURES.' раунда подряд одна и та же ошибка валидации ('.implode(', ', $lastValidationSignature ?? []).').',
@@ -1507,6 +1481,7 @@ class ProductGalleryRecipeTrainer
         )));
     }
 
+
     /**
      * A recipe is how to open a gallery, so it must not name the product.
      *
@@ -1601,51 +1576,6 @@ class ProductGalleryRecipeTrainer
         unset($candidate['expected_image_count']);
 
         return $candidate;
-    }
-
-    /**
-     * A list that came back one entry too long is trimmed, not thrown away.
-     *
-     * Live on dell.com: a ninth exclude_selector - two colourways, video, 3D,
-     * AR, recommendations, all worth excluding - discarded a finished recipe
-     * and the paid round that produced it. The cap exists to stop a degenerate
-     * answer, not to buy anything per entry: a selector is forty characters,
-     * and exclusions are a filter over frames already collected.
-     *
-     * Only the selector and attribute lists. actions is a plan, and dropping
-     * its last step changes what runs rather than costing a little precision,
-     * so an overlong plan is still refused and the agent is told the bound.
-     *
-     * The caps are read off the validation rules rather than written a second
-     * time here, because the copy is what drifts.
-     *
-     * @param  array<string, mixed>  $data
-     * @return array<string, mixed>
-     */
-    private function trimOverlongSelectorLists(array $data): array
-    {
-        $trimmable = [
-            'pre_click_selectors', 'collect_selectors', 'thumbnail_selectors',
-            'open_selectors', 'next_selectors', 'exclude_selectors', 'attributes',
-        ];
-        $rules = $this->recipeValidationRules();
-
-        foreach ($trimmable as $key) {
-            if (! is_array($data[$key] ?? null)) {
-                continue;
-            }
-
-            $cap = collect(is_array($rules[$key] ?? null) ? $rules[$key] : [])
-                ->filter(fn (mixed $rule): bool => is_string($rule) && str_starts_with($rule, 'max:'))
-                ->map(fn (string $rule): int => (int) substr($rule, 4))
-                ->first();
-
-            if ($cap !== null && $cap > 0 && count($data[$key]) > $cap) {
-                $data[$key] = array_slice(array_values($data[$key]), 0, $cap);
-            }
-        }
-
-        return $data;
     }
 
     private function regionForUrl(string $url): ?string
@@ -2270,8 +2200,6 @@ class ProductGalleryRecipeTrainer
             ->values()
             ->all();
 
-        $data = $this->trimOverlongSelectorLists($data);
-
         try {
             $data = Validator::make(
                 $data,
@@ -2417,12 +2345,12 @@ class ProductGalleryRecipeTrainer
             'actions.*.after_each_limit' => ['nullable', 'integer', 'between:1,20'],
             'actions.*.after_each_wait_after_ms' => ['nullable', 'integer', 'between:50,1500'],
             'actions.*.purpose' => ['required', 'string', 'max:200'],
-            'pre_click_selectors' => ['present', 'array', 'max:5'],
-            'collect_selectors' => ['present', 'array', 'max:12'],
-            'thumbnail_selectors' => ['present', 'array', 'max:12'],
-            'open_selectors' => ['present', 'array', 'max:5'],
-            'next_selectors' => ['present', 'array', 'max:5'],
-            'exclude_selectors' => ['present', 'array', 'max:20'],
+            'pre_click_selectors' => ['present', 'array'],
+            'collect_selectors' => ['present', 'array'],
+            'thumbnail_selectors' => ['present', 'array'],
+            'open_selectors' => ['present', 'array'],
+            'next_selectors' => ['present', 'array'],
+            'exclude_selectors' => ['present', 'array'],
             'pre_click_selectors.*' => ['string', 'max:300'],
             'collect_selectors.*' => ['string', 'max:300'],
             'thumbnail_selectors.*' => ['string', 'max:300'],
