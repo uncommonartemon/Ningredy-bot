@@ -289,6 +289,7 @@ class ProductImageStorage
         // only by accident because nothing puts them first while it still costs
         // nothing to do so.
         $cardSources = $this->knownShopsFirst($cardSources);
+        $cardSources = $this->limitPerHost($cardSources, $progress);
 
         if (config('product-images.source_preflight', true)) {
             $progress?->__invoke('Быстро проверяю доступность карточек, CAPTCHA/WAF, статические фото и готовые рецепты до запуска Playwright.');
@@ -2310,6 +2311,53 @@ class ProductImageStorage
         });
 
         return $reusable->concat($rest)->values();
+    }
+
+    /**
+     * At most a couple of pages from any one shop.
+     *
+     * The fallback search has had this since the day research returned four
+     * acer.com links and the bot visited all four inside three minutes - they
+     * were never four chances, they were one shop asked four times, and they
+     * failed together while looking exactly like a scraper. The main queue,
+     * which is where researched cards actually go, never got the same rule.
+     *
+     * It matters more now that breadth is asked for: fifty candidates from a
+     * widely-sold product can easily be six pages of the same three retailers.
+     * The ones over the cap are dropped rather than deferred, because a second
+     * page of a shop that refused the first is not a fallback.
+     *
+     * @param  Collection<int, array<string, mixed>>  $sources
+     * @return Collection<int, array<string, mixed>>
+     */
+    private function limitPerHost(Collection $sources, ?callable $progress): Collection
+    {
+        $cap = max(1, (int) config('product-images.max_sources_per_host', 2));
+        $seen = [];
+        $dropped = 0;
+
+        $kept = $sources->filter(function (array $source) use ($cap, &$seen, &$dropped): bool {
+            $host = $this->recipeRouter->domainForUrl((string) ($source['url'] ?? ''));
+
+            if ($host === '') {
+                return true;
+            }
+
+            $seen[$host] = ($seen[$host] ?? 0) + 1;
+            $dropped += $seen[$host] > $cap ? 1 : 0;
+
+            return $seen[$host] <= $cap;
+        })->values();
+
+        if ($dropped > 0) {
+            $progress?->__invoke(sprintf(
+                'Отложил %d лишн(юю/их) страниц(у/ы) тех же магазинов: беру не больше %d с домена, чтобы не выглядеть перебором.',
+                $dropped,
+                $cap,
+            ));
+        }
+
+        return $kept;
     }
 
     /**

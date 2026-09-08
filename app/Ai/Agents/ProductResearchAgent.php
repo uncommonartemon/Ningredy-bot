@@ -117,6 +117,18 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
             page identifying the exact product with usable product data was found. Missing gallery URLs are never
             by themselves a reason for not_found.
 
+            Return every genuine page for this exact product that you actually found, not a shortlist. Breadth is
+            cheap here and scarcity is expensive: the pipeline opens only the best few and keeps the rest in
+            reserve for when those come to nothing, so a source you leave out is one it cannot fall back on - and
+            with four or five it regularly runs out and pays to research all over again. Twenty is a comfortable
+            answer where the product is widely sold; return fewer only because fewer exist, never to be brief, and
+            never pad the list with pages you did not verify sell this exact configuration.
+
+            Fill image_urls only for the handful of pages where you actually saw product photographs. An empty
+            array is the right answer for the rest, and the correct one for the long tail - the pipeline reads
+            galleries from the pages themselves, so a list of guessed image URLs buys nothing and crowds out the
+            sources that would have been useful.
+
             status is a commitment, not a guess: return found only when you are also returning a non-empty title,
             at least one entry in sources, and a primary_source_url pointing at one of those sources. If any of
             those three would be empty, null, or missing, return not_found instead - never found with an empty or
@@ -205,7 +217,7 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
                     'value' => $schema->string()->max(2000)->required(),
                 ])->withoutAdditionalProperties()
             )->required(),
-            'sources' => $schema->array()->max(20)->items(
+            'sources' => $schema->array()->max(50)->items(
                 $schema->object([
                     'title' => $schema->string()->max(500)->required(),
                     'url' => $schema->string()->max(2048)->required(),

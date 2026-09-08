@@ -119,6 +119,49 @@ class KnownShopsAndColourCostNothingTest extends TestCase
         $this->assertCount(2, $kept);
     }
 
+    public function test_one_shop_contributes_at_most_two_pages(): void
+    {
+        // Research returned four acer.com links once and the bot visited all
+        // four inside three minutes. They were never four chances - they fail
+        // together - and they look exactly like a scraper. The fallback search
+        // has had this rule since; the main queue, where researched cards
+        // actually go, did not.
+        $kept = $this->perHost([
+            ['url' => 'https://shop.example/p/1'],
+            ['url' => 'https://shop.example/p/2'],
+            ['url' => 'https://shop.example/p/3'],
+            ['url' => 'https://shop.example/p/4'],
+            ['url' => 'https://other.example/p/1'],
+        ]);
+
+        $this->assertSame(
+            ['https://shop.example/p/1', 'https://shop.example/p/2', 'https://other.example/p/1'],
+            array_column($kept, 'url'),
+        );
+    }
+
+    public function test_the_cap_counts_hosts_not_paths(): void
+    {
+        $kept = $this->perHost([
+            ['url' => 'https://shop.example/catalog/a/1'],
+            ['url' => 'https://shop.example/store/b/2'],
+            ['url' => 'https://shop.example/other/c/3'],
+        ]);
+
+        $this->assertCount(2, $kept);
+    }
+
+    /**
+     * @param  array<int, array<string, mixed>>  $sources
+     * @return array<int, array<string, mixed>>
+     */
+    private function perHost(array $sources): array
+    {
+        $method = new ReflectionMethod(ProductImageStorage::class, 'limitPerHost');
+
+        return $method->invoke(app(ProductImageStorage::class), new Collection($sources), null)->all();
+    }
+
     /**
      * @param  array<int, array<string, mixed>>  $sources
      * @return array<int, array<string, mixed>>
