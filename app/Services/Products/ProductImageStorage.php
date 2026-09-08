@@ -233,145 +233,15 @@ class ProductImageStorage
             Category::GALLERY_SEARCH_PLAYWRIGHT_FIRST => 'Стратегия категории: Playwright-first — сначала пытаюсь раскрыть полную галерею карточки.',
             default => 'Стратегия категории: автоматически — использую общий режим поиска фотографий.',
         });
-        $prioritizedSources = collect($this->sourcePriority->sortSources([
-            ...$cycleSources,
-            ...($draft->sources ?? []),
-        ], $draft->brand))
-            ->unique(fn (array $source): string => rtrim((string) ($source['url'] ?? ''), '/'))
-            ->values()
-            ->all();
-        // Historical reliability decides which source is selected before the
-        // cycle starts, but a failed HTML/Playwright probe during that same
-        // cycle must not immediately demote the chosen primary source before
-        // its already-known direct image URLs are downloaded and checked by
-        // Vision. Keep it first for this draft; only a real end-to-end gallery
-        // failure is allowed to advance to the remaining ranked sources.
-        if (is_string($draft->primary_source_url) && $draft->primary_source_url !== '') {
-            $primarySources = array_values(array_filter(
-                $prioritizedSources,
-                fn (array $source): bool => ($source['url'] ?? null) === $draft->primary_source_url,
-            ));
-            $otherSources = array_values(array_filter(
-                $prioritizedSources,
-                fn (array $source): bool => ($source['url'] ?? null) !== $draft->primary_source_url,
-            ));
-            $prioritizedSources = [...$primarySources, ...$otherSources];
-        }
-        $cardSources = collect($prioritizedSources)
-            ->filter(fn (mixed $source): bool => is_array($source)
-                && is_string($source['url'] ?? null)
-                && in_array($source['type'] ?? null, ['retailer', 'marketplace', 'manufacturer'], true)
-                // The same document test the fallback search has always applied.
-                // Research produces this list, and nothing filtered it: a search
-                // opened with a PDF catalogue as source #1 twice in one day
-                // (acerid.com's brochure, gzhls.at's datasheet), each time
-                // spending a fetch to be told it was not HTML.
-                && $this->candidateDiscovery->looksLikeHtmlProductPage($source['url'])
-                && ! $this->sourceExcludedForDraft($source['url'], $draft)
-                && ! $this->sourceExcludedByUrls($source['url'], $cycleExcludedSourceUrls))
-            ->values();
-
-        // Two filters that cost nothing, applied before anything knocks on a
-        // shop's door.
-        //
-        // The colour one first, because it can only ever remove: a listing that
-        // calls itself Silver when the operator asked for Gold is another
-        // variant's page, and opening it is a wasted request on a shop we are
-        // already trying not to annoy. It never confirms - half of all listings
-        // omit the colour entirely, and the word in a title can name a product
-        // line rather than a chassis. Vision still decides that, on frames.
-        $cardSources = $this->withoutContradictedColour($cardSources, $draft, $progress);
-        // Then the shops we already know how to open, moved to the front. This
-        // was decided inside preflight, which means it was decided after we had
-        // already spent a request on every candidate - while it follows from
-        // the host alone, and the recipes are per-domain now. Five recipes have
-        // been trained and not one has ever been reused; a search reaches them
-        // only by accident because nothing puts them first while it still costs
-        // nothing to do so.
-        $cardSources = $this->knownShopsFirst($cardSources);
-        $cardSources = $this->limitPerHost($cardSources, $progress);
-
-        if (config('product-images.source_preflight', true)) {
-            $progress?->__invoke('Быстро проверяю доступность карточек, CAPTCHA/WAF, статические фото и готовые рецепты до запуска Playwright.');
-            // Research may return dozens of candidates and each preflight is a
-            // real request. The ones past this budget keep their place in the
-            // queue and are opened only if the ones before them come to
-            // nothing - unchecked, not discarded.
-            $preflightBudget = max(1, (int) config('product-images.max_preflight_sources', 12));
-            $unchecked = $cardSources->slice($preflightBudget)->values();
-            $cardSources = $cardSources->take($preflightBudget)
-                ->map(function (array $source, int $index) use ($telegramUpdateId, $draft): array {
-                    $attemptCheckpoint = ProductSourceAttempt::query()->max('id') ?? 0;
-
-                    try {
-                        $preflight = $this->resolver->preflightSource($source, $telegramUpdateId);
-                    } finally {
-                        $this->associateAttemptsWithDraftSince($draft, $telegramUpdateId, $attemptCheckpoint);
-                    }
-
-                    return [
-                        ...$source,
-                        'image_urls' => array_values(array_unique([
-                            ...$this->cleanUrls($preflight['static_image_urls'] ?? []),
-                            ...$this->cleanUrls($source['image_urls'] ?? []),
-                        ])),
-                        '_preflight_blocked' => (bool) ($preflight['blocked'] ?? false),
-                        '_preflight_unavailable' => (bool) ($preflight['unavailable'] ?? false),
-                        '_preflight_active_recipe' => (bool) ($preflight['active_recipe'] ?? false),
-                        '_preflight_known_recipe_domain' => (bool) ($preflight['known_recipe_domain'] ?? false),
-                        // Set on a 401/403/429 or a detected JS/cookie gate:
-                        // the cheap HTTP fetch was refused, but a real
-                        // headless browser often gets through where it
-                        // can't - was computed and then never read by
-                        // anything downstream, so a bot-blocked official
-                        // source (e.g. a manufacturer's own store) silently
-                        // sank to the bottom on "zero evidence" exactly like
-                        // a genuinely irrelevant one, with nothing left to
-                        // tell them apart once ranked below a worse source
-                        // that merely fetched without erroring.
-                        '_preflight_browser_probe_required' => (bool) ($preflight['browser_probe_required'] ?? false),
-                        '_preflight_final_url' => (string) ($preflight['final_url'] ?? $source['url']),
-                        '_preflight_identity_evidence' => (string) ($preflight['identity_evidence'] ?? ''),
-                        '_preflight_is_primary' => rtrim((string) ($source['url'] ?? ''), '/')
-                            === rtrim((string) ($draft->primary_source_url ?? ''), '/'),
-                        '_preflight_index' => $index,
-                    ];
-                })
-                ->filter(fn (array $source): bool => ! $source['_preflight_blocked'] && ! $source['_preflight_unavailable'])
-                ->sortByDesc(fn (array $source): array => [
-                    $this->identityMatcher->supportsSource($draft, $source) ? 1 : 0,
-                    $source['_preflight_is_primary'] ? 1 : 0,
-                    $source['_preflight_active_recipe'] ? 1 : 0,
-                    $source['_preflight_known_recipe_domain'] ? 1 : 0,
-                    $source['_preflight_browser_probe_required'] ? 1 : 0,
-                    count($source['image_urls'] ?? []) >= $minimumCompleteGallerySize ? 1 : 0,
-                    -$source['_preflight_index'],
-                ])
-                ->values();
-            // Behind the checked ones, in the order research gave them. A
-            // source nobody looked at is not a source that failed.
-            $cardSources = $cardSources->concat($unchecked)->values();
-        }
-
-        // Trying the next already-known candidate page (source #2, #3...)
-        // is not the optional "reserve" - it's core behaviour, bounded only
-        // by the per-source cost/time budget checks inside the loop below.
-        // fallbackSourcesEnabled() controls a genuinely separate, costlier
-        // mechanism further down: the broad AI web search for sources this
-        // draft's own research never found at all (discoverCandidates()).
-
-        // Sources whose domain already has a usable recipe are tried before any
-        // training happens - see ProductSourcePriority::reuseFirstQueue() for
-        // why, and for which of them are worth queueing twice.
-        $sourceQueue = collect($this->sourcePriority->reuseFirstQueue($cardSources->all(), $activeRecipeOnly));
-        $reuseFirstCount = $sourceQueue->count() - $cardSources->count();
-
-        if ($reuseFirstCount > 0) {
-            $progress?->__invoke(
-                'Ниже по списку есть карточки с готовыми рецептами ('.$reuseFirstCount
-                    .'): пробую их до обучения новых.',
-            );
-        }
+        [$sourceQueue, $cardSources] = $this->buildSourceQueue(
+            $draft,
+            $cycleSources,
+            $cycleExcludedSourceUrls,
+            $activeRecipeOnly,
+            $minimumCompleteGallerySize,
+            $telegramUpdateId,
+            $progress,
+        );
 
         $selected = [];
         $chosenSource = null;
@@ -1465,6 +1335,181 @@ class ProductImageStorage
         }
 
         return $stored;
+    }
+
+    /**
+     * Which pages this search will open, and in what order.
+     *
+     * Everything from "here are the addresses research returned" to "here
+     * is the queue": ranking by past reliability, hoisting the draft's own
+     * primary source, dropping documents and pages this draft has already
+     * failed on, the two free filters (a colour the listing itself
+     * contradicts, and the shops we hold a recipe for), the per-host cap,
+     * the preflight budget, and finally the reuse-first ordering.
+     *
+     * Cut out of stage() as the first of several: at 1,273 lines that
+     * method is where a tab-name list could hide for a month, and this
+     * part of it answers one self-contained question with no state shared
+     * with the loop that follows. Behaviour is unchanged - the body is the
+     * same statements in the same order, and the suite is what says so.
+     *
+     * @param  array<int, array<string, mixed>>  $cycleSources
+     * @param  array<int, string>  $cycleExcludedSourceUrls
+     * @param  null|callable(string): void  $progress
+     * @return array{0: Collection<int, array<string, mixed>>, 1: Collection<int, array<string, mixed>>}
+     */
+    private function buildSourceQueue(
+        ProductDraft $draft,
+        array $cycleSources,
+        array $cycleExcludedSourceUrls,
+        bool $activeRecipeOnly,
+        int $minimumCompleteGallerySize,
+        ?int $telegramUpdateId,
+        ?callable $progress,
+    ): array {
+        $prioritizedSources = collect($this->sourcePriority->sortSources([
+            ...$cycleSources,
+            ...($draft->sources ?? []),
+        ], $draft->brand))
+            ->unique(fn (array $source): string => rtrim((string) ($source['url'] ?? ''), '/'))
+            ->values()
+            ->all();
+        // Historical reliability decides which source is selected before the
+        // cycle starts, but a failed HTML/Playwright probe during that same
+        // cycle must not immediately demote the chosen primary source before
+        // its already-known direct image URLs are downloaded and checked by
+        // Vision. Keep it first for this draft; only a real end-to-end gallery
+        // failure is allowed to advance to the remaining ranked sources.
+        if (is_string($draft->primary_source_url) && $draft->primary_source_url !== '') {
+            $primarySources = array_values(array_filter(
+                $prioritizedSources,
+                fn (array $source): bool => ($source['url'] ?? null) === $draft->primary_source_url,
+            ));
+            $otherSources = array_values(array_filter(
+                $prioritizedSources,
+                fn (array $source): bool => ($source['url'] ?? null) !== $draft->primary_source_url,
+            ));
+            $prioritizedSources = [...$primarySources, ...$otherSources];
+        }
+        $cardSources = collect($prioritizedSources)
+            ->filter(fn (mixed $source): bool => is_array($source)
+                && is_string($source['url'] ?? null)
+                && in_array($source['type'] ?? null, ['retailer', 'marketplace', 'manufacturer'], true)
+                // The same document test the fallback search has always applied.
+                // Research produces this list, and nothing filtered it: a search
+                // opened with a PDF catalogue as source #1 twice in one day
+                // (acerid.com's brochure, gzhls.at's datasheet), each time
+                // spending a fetch to be told it was not HTML.
+                && $this->candidateDiscovery->looksLikeHtmlProductPage($source['url'])
+                && ! $this->sourceExcludedForDraft($source['url'], $draft)
+                && ! $this->sourceExcludedByUrls($source['url'], $cycleExcludedSourceUrls))
+            ->values();
+
+        // Two filters that cost nothing, applied before anything knocks on a
+        // shop's door.
+        //
+        // The colour one first, because it can only ever remove: a listing that
+        // calls itself Silver when the operator asked for Gold is another
+        // variant's page, and opening it is a wasted request on a shop we are
+        // already trying not to annoy. It never confirms - half of all listings
+        // omit the colour entirely, and the word in a title can name a product
+        // line rather than a chassis. Vision still decides that, on frames.
+        $cardSources = $this->withoutContradictedColour($cardSources, $draft, $progress);
+        // Then the shops we already know how to open, moved to the front. This
+        // was decided inside preflight, which means it was decided after we had
+        // already spent a request on every candidate - while it follows from
+        // the host alone, and the recipes are per-domain now. Five recipes have
+        // been trained and not one has ever been reused; a search reaches them
+        // only by accident because nothing puts them first while it still costs
+        // nothing to do so.
+        $cardSources = $this->knownShopsFirst($cardSources);
+        $cardSources = $this->limitPerHost($cardSources, $progress);
+
+        if (config('product-images.source_preflight', true)) {
+            $progress?->__invoke('Быстро проверяю доступность карточек, CAPTCHA/WAF, статические фото и готовые рецепты до запуска Playwright.');
+            // Research may return dozens of candidates and each preflight is a
+            // real request. The ones past this budget keep their place in the
+            // queue and are opened only if the ones before them come to
+            // nothing - unchecked, not discarded.
+            $preflightBudget = max(1, (int) config('product-images.max_preflight_sources', 12));
+            $unchecked = $cardSources->slice($preflightBudget)->values();
+            $cardSources = $cardSources->take($preflightBudget)
+                ->map(function (array $source, int $index) use ($telegramUpdateId, $draft): array {
+                    $attemptCheckpoint = ProductSourceAttempt::query()->max('id') ?? 0;
+
+                    try {
+                        $preflight = $this->resolver->preflightSource($source, $telegramUpdateId);
+                    } finally {
+                        $this->associateAttemptsWithDraftSince($draft, $telegramUpdateId, $attemptCheckpoint);
+                    }
+
+                    return [
+                        ...$source,
+                        'image_urls' => array_values(array_unique([
+                            ...$this->cleanUrls($preflight['static_image_urls'] ?? []),
+                            ...$this->cleanUrls($source['image_urls'] ?? []),
+                        ])),
+                        '_preflight_blocked' => (bool) ($preflight['blocked'] ?? false),
+                        '_preflight_unavailable' => (bool) ($preflight['unavailable'] ?? false),
+                        '_preflight_active_recipe' => (bool) ($preflight['active_recipe'] ?? false),
+                        '_preflight_known_recipe_domain' => (bool) ($preflight['known_recipe_domain'] ?? false),
+                        // Set on a 401/403/429 or a detected JS/cookie gate:
+                        // the cheap HTTP fetch was refused, but a real
+                        // headless browser often gets through where it
+                        // can't - was computed and then never read by
+                        // anything downstream, so a bot-blocked official
+                        // source (e.g. a manufacturer's own store) silently
+                        // sank to the bottom on "zero evidence" exactly like
+                        // a genuinely irrelevant one, with nothing left to
+                        // tell them apart once ranked below a worse source
+                        // that merely fetched without erroring.
+                        '_preflight_browser_probe_required' => (bool) ($preflight['browser_probe_required'] ?? false),
+                        '_preflight_final_url' => (string) ($preflight['final_url'] ?? $source['url']),
+                        '_preflight_identity_evidence' => (string) ($preflight['identity_evidence'] ?? ''),
+                        '_preflight_is_primary' => rtrim((string) ($source['url'] ?? ''), '/')
+                            === rtrim((string) ($draft->primary_source_url ?? ''), '/'),
+                        '_preflight_index' => $index,
+                    ];
+                })
+                ->filter(fn (array $source): bool => ! $source['_preflight_blocked'] && ! $source['_preflight_unavailable'])
+                ->sortByDesc(fn (array $source): array => [
+                    $this->identityMatcher->supportsSource($draft, $source) ? 1 : 0,
+                    $source['_preflight_is_primary'] ? 1 : 0,
+                    $source['_preflight_active_recipe'] ? 1 : 0,
+                    $source['_preflight_known_recipe_domain'] ? 1 : 0,
+                    $source['_preflight_browser_probe_required'] ? 1 : 0,
+                    count($source['image_urls'] ?? []) >= $minimumCompleteGallerySize ? 1 : 0,
+                    -$source['_preflight_index'],
+                ])
+                ->values();
+            // Behind the checked ones, in the order research gave them. A
+            // source nobody looked at is not a source that failed.
+            $cardSources = $cardSources->concat($unchecked)->values();
+        }
+
+        // Trying the next already-known candidate page (source #2, #3...)
+        // is not the optional "reserve" - it's core behaviour, bounded only
+        // by the per-source cost/time budget checks inside the loop below.
+        // fallbackSourcesEnabled() controls a genuinely separate, costlier
+        // mechanism further down: the broad AI web search for sources this
+        // draft's own research never found at all (discoverCandidates()).
+
+        // Sources whose domain already has a usable recipe are tried before any
+        // training happens - see ProductSourcePriority::reuseFirstQueue() for
+        // why, and for which of them are worth queueing twice.
+        $sourceQueue = collect($this->sourcePriority->reuseFirstQueue($cardSources->all(), $activeRecipeOnly));
+        $reuseFirstCount = $sourceQueue->count() - $cardSources->count();
+
+        if ($reuseFirstCount > 0) {
+            $progress?->__invoke(
+                'Ниже по списку есть карточки с готовыми рецептами ('.$reuseFirstCount
+                    .'): пробую их до обучения новых.',
+            );
+        }
+
+        // The queue and the cards it was built from: one source below needs
+        // the addresses of every candidate, not the order they are opened in.
+        return [$sourceQueue, $cardSources];
     }
 
     private function gallerySearchStrategy(ProductDraft $draft): string
