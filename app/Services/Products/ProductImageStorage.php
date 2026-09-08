@@ -36,6 +36,7 @@ class ProductImageStorage
         private readonly ProductSearchCostBudget $costBudget,
         private readonly ProductSourceAttemptRecorder $attempts,
         private readonly ProductGalleryRecipeTrainer $recipeTrainer,
+        private readonly ProductGalleryRecipeRouter $recipeRouter,
     ) {}
 
     /** @param array<int, int> $replaceMediaIds */
@@ -270,9 +271,34 @@ class ProductImageStorage
                 && ! $this->sourceExcludedByUrls($source['url'], $cycleExcludedSourceUrls))
             ->values();
 
+        // Two filters that cost nothing, applied before anything knocks on a
+        // shop's door.
+        //
+        // The colour one first, because it can only ever remove: a listing that
+        // calls itself Silver when the operator asked for Gold is another
+        // variant's page, and opening it is a wasted request on a shop we are
+        // already trying not to annoy. It never confirms - half of all listings
+        // omit the colour entirely, and the word in a title can name a product
+        // line rather than a chassis. Vision still decides that, on frames.
+        $cardSources = $this->withoutContradictedColour($cardSources, $draft, $progress);
+        // Then the shops we already know how to open, moved to the front. This
+        // was decided inside preflight, which means it was decided after we had
+        // already spent a request on every candidate - while it follows from
+        // the host alone, and the recipes are per-domain now. Five recipes have
+        // been trained and not one has ever been reused; a search reaches them
+        // only by accident because nothing puts them first while it still costs
+        // nothing to do so.
+        $cardSources = $this->knownShopsFirst($cardSources);
+
         if (config('product-images.source_preflight', true)) {
             $progress?->__invoke('Быстро проверяю доступность карточек, CAPTCHA/WAF, статические фото и готовые рецепты до запуска Playwright.');
-            $cardSources = $cardSources
+            // Research may return dozens of candidates and each preflight is a
+            // real request. The ones past this budget keep their place in the
+            // queue and are opened only if the ones before them come to
+            // nothing - unchecked, not discarded.
+            $preflightBudget = max(1, (int) config('product-images.max_preflight_sources', 12));
+            $unchecked = $cardSources->slice($preflightBudget)->values();
+            $cardSources = $cardSources->take($preflightBudget)
                 ->map(function (array $source, int $index) use ($telegramUpdateId, $draft): array {
                     $attemptCheckpoint = ProductSourceAttempt::query()->max('id') ?? 0;
 
@@ -321,6 +347,9 @@ class ProductImageStorage
                     -$source['_preflight_index'],
                 ])
                 ->values();
+            // Behind the checked ones, in the order research gave them. A
+            // source nobody looked at is not a source that failed.
+            $cardSources = $cardSources->concat($unchecked)->values();
         }
 
         // Trying the next already-known candidate page (source #2, #3...)
@@ -2246,6 +2275,114 @@ class ProductImageStorage
     }
 
     /** @param array<int, mixed> $urls @return array<int, string> */
+    /**
+     * Shops we already know how to open, moved to the front.
+     *
+     * Derived from the host and the recipe library - one query, no request to
+     * anybody. It used to be decided inside preflight, which is to say after a
+     * request had already been spent on every candidate, and by then the order
+     * could no longer save any.
+     *
+     * Nothing is dropped: a shop with a recipe is a cheaper first try, not a
+     * better product, and the identity checks downstream are unchanged.
+     *
+     * @param  Collection<int, array<string, mixed>>  $sources
+     * @return Collection<int, array<string, mixed>>
+     */
+    private function knownShopsFirst(Collection $sources): Collection
+    {
+        $known = [];
+        // Partitioned rather than sorted. A sort by a key that is the same for
+        // every candidate still moves them: the first attempt reordered two
+        // equally-unknown shops, the slider card came first, the search
+        // finished on it and never opened the second - which is what the test
+        // for that behaviour caught. Partitioning cannot do that; each half
+        // keeps the order research gave it.
+        [$reusable, $rest] = $sources->partition(function (array $source) use (&$known): bool {
+            $url = (string) ($source['url'] ?? '');
+            $host = $this->recipeRouter->domainForUrl($url);
+
+            if ($host === '') {
+                return false;
+            }
+
+            return $known[$host] ??= $this->recipeRouter->domainHasActiveRecipe($url);
+        });
+
+        return $reusable->concat($rest)->values();
+    }
+
+    /**
+     * Candidates whose own words name a different colour than the one asked for.
+     *
+     * Free, and it only ever removes. A listing titled "Silver" when the
+     * operator asked for Gold is another variant's page, and opening it costs a
+     * request on a shop we are already trying not to annoy.
+     *
+     * It cannot confirm, and must not be read as confirming: half of all
+     * listings omit the colour, and the word in a title often names a product
+     * line rather than a chassis. Same asymmetry the identity check uses - a
+     * different name proves difference, an equal one proves nothing - and the
+     * colour a gallery actually shows is still decided by Vision on frames.
+     *
+     * @param  Collection<int, array<string, mixed>>  $sources
+     * @return Collection<int, array<string, mixed>>
+     */
+    private function withoutContradictedColour(Collection $sources, ProductDraft $draft, ?callable $progress): Collection
+    {
+        $wanted = $this->colourWords((string) $draft->color);
+
+        if ($wanted === []) {
+            return $sources;
+        }
+
+        $dropped = 0;
+        $kept = $sources->reject(function (array $source) use ($wanted, &$dropped): bool {
+            $said = $this->colourWords((string) ($source['title'] ?? ''));
+
+            // Says a colour, and none of them is one of ours.
+            $contradicts = $said !== [] && array_intersect($said, $wanted) === [];
+            $dropped += $contradicts ? 1 : 0;
+
+            return $contradicts;
+        })->values();
+
+        if ($dropped > 0) {
+            $progress?->__invoke(sprintf(
+                'Пропускаю %d карточк(и/у) другого цвета: в названии указан не %s. Ни одного запроса на них не потратил.',
+                $dropped,
+                trim((string) $draft->color),
+            ));
+        }
+
+        return $kept;
+    }
+
+    /**
+     * The colour words a piece of text names, if any.
+     *
+     * A small vocabulary rather than free text, because "Gold" has to match
+     * "gold" inside "14-inch Gold Edition" while "Rose Gold" must not pass for
+     * "Gold" - so each known word is looked for whole, and a compound colour is
+     * simply two words that both have to be there.
+     *
+     * @return array<int, string>
+     */
+    private function colourWords(string $text): array
+    {
+        $text = mb_strtolower($text);
+        $vocabulary = (array) config('product-images.colour_words', []);
+        $found = [];
+
+        foreach ($vocabulary as $word) {
+            if (preg_match('/(?<![\p{L}])'.preg_quote((string) $word, '/').'(?![\p{L}])/u', $text) === 1) {
+                $found[] = (string) $word;
+            }
+        }
+
+        return array_values(array_unique($found));
+    }
+
     private function cleanUrls(array $urls, ?string $variantHint = null): array
     {
         $limit = (int) config('product-images.download_limit', 20);

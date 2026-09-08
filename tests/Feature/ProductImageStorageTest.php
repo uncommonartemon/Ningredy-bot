@@ -2606,7 +2606,12 @@ class ProductImageStorageTest extends TestCase
             ->map(fn (int $index): string => 'https://93.184.216.35/slider-'.$index.'.jpg')
             ->all();
         $browser = $this->mock(BrowserProductGalleryExtractor::class);
-        $browser->shouldReceive('extract')->twice()->andReturnUsing(
+        // Once, not twice. The slider card is a shop we already hold a recipe
+        // for, and that is now read off the host before anything is opened, so
+        // the queue starts there instead of spending a visit on the static card
+        // first. The point of this test is unchanged and asserted below - the
+        // slider page wins - it just no longer costs a wasted request to prove.
+        $browser->shouldReceive('extract')->once()->andReturnUsing(
             fn (string $url): array => str_contains($url, '93.184.216.35') ? $slider : [],
         );
         $browser->shouldReceive('isConfirmedGalleryImage')

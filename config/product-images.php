@@ -52,6 +52,26 @@ return [
     // How many source pages one resolve pass may open, how many image URLs a
     // single page may yield, and how wide the resolver search goes overall.
     'max_sources_per_resolve' => 10,
+    // How many candidates get the cheap availability check before the queue is
+    // walked. Research may return dozens and each check is a real request to a
+    // shop; the ones past this budget keep their place and are opened only if
+    // the ones before them come to nothing. Unchecked is not rejected.
+    'max_preflight_sources' => (int) env('PRODUCT_IMAGE_MAX_PREFLIGHT_SOURCES', 12),
+    // Colour words a listing may name about itself. Used only to DROP a
+    // candidate whose title names a colour and none of them is the one asked
+    // for - never to confirm one, because half of all listings omit the colour
+    // and the word often names a product line rather than a chassis.
+    //
+    // Compound colours are the words they are made of: "rose" and "gold" both
+    // have to be present for rose gold, so asking for gold does not match a
+    // rose gold listing on the strength of one word.
+    'colour_words' => [
+        'black', 'white', 'silver', 'grey', 'gray', 'graphite', 'gold', 'rose',
+        'blue', 'navy', 'green', 'red', 'pink', 'purple', 'beige', 'bronze',
+        'copper', 'titanium', 'platinum', 'champagne', 'sand', 'cream', 'ivory',
+        'чёрный', 'черный', 'белый', 'серебристый', 'серый', 'графит', 'золотой',
+        'золотистый', 'розовый', 'синий', 'зелёный', 'зеленый', 'красный',
+    ],
     // How many pages from one host a single resolve pass may open. Research
     // routinely returns four links to the same manufacturer's shop; opening
     // all four is one shop asked four times in three minutes, which is both
