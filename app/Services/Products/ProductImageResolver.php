@@ -2,6 +2,7 @@
 
 namespace App\Services\Products;
 
+use App\Exceptions\ProductSourceHostDriftException;
 use App\Services\Ai\AiSettings;
 use App\Services\Ai\ProductSearchCostBudget;
 use App\Services\Ai\ProductSearchTimeBudget;
@@ -36,10 +37,26 @@ class ProductImageResolver
     /** @var array<string, array<string, mixed>> */
     private array $sourceContextsByImageUrl = [];
 
+    /**
+     * Keyed by page URL, unlike sourceContextsByImageUrl (keyed by image
+     * asset URL) - resolve() may run for a page whose gallery yields no new
+     * images at all (nothing to key an image-based lookup on), and the
+     * later specification-reconciliation step needs to look a page up by
+     * its own URL, which is all it has (ProductDraft.primary_source_url).
+     *
+     * @var array<string, string>
+     */
+    private array $specificationTextByPageUrl = [];
+
     /** @return array<string, mixed>|null */
     public function sourceContextForImage(string $imageUrl): ?array
     {
         return $this->sourceContextsByImageUrl[ProductImageStorage::normalizeCandidateUrl($imageUrl)] ?? null;
+    }
+
+    public function specificationTextForPage(string $pageUrl): ?string
+    {
+        return $this->specificationTextByPageUrl[ProductImageStorage::normalizeCandidateUrl($pageUrl)] ?? null;
     }
 
     /** @param array<string, mixed> $source @return array<string, mixed> */
@@ -57,6 +74,7 @@ class ProductImageResolver
             'browser_probe_required' => false,
             'final_url' => $url,
             'identity_evidence' => '',
+            'specification_text' => '',
         ];
 
         if ($url !== '' && ($pageRule = $this->pageRules->activeRuleFor($url))) {
@@ -110,6 +128,7 @@ class ProductImageResolver
                     $html = $response->body();
                     $result['final_url'] = $finalUrl;
                     $result['identity_evidence'] = $this->extractPageIdentityEvidence($html, $finalUrl);
+                    $result['specification_text'] = $this->extractPageSpecificationText($html, $finalUrl);
                     $result['static_image_urls'] = $this->extractPageImages($html, $finalUrl);
                 }
             }
@@ -147,6 +166,158 @@ class ProductImageResolver
         ]);
 
         return $result;
+    }
+
+    /**
+     * Fetches one specific page a specification-reconciliation agent asked
+     * for by URL (see App\Ai\Tools\FetchProductSourcePageText - the caller
+     * is responsible for confirming the REQUESTED URL is on an allowed host
+     * and checking the shared search budget before ever reaching this
+     * method) and returns whatever specs-oriented text it can find there,
+     * reusing the exact same safe-fetch machinery preflightSource() already
+     * uses. Never throws - a page that cannot be read returns an empty
+     * 'text', which the agent already treats as "no evidence either way",
+     * never as evidence of anything.
+     *
+     * Checking the REQUESTED url's host is not enough: a redirect (HTTP or,
+     * for the browser path, a navigation the click itself triggered) can
+     * land on a different host than the one that was actually validated. A
+     * request that drifted off the requested host returns 'blocked_reason'
+     * and an empty 'text' instead of silently handing over a different
+     * site's content as if it were this one's - 'final_url' says exactly
+     * where it actually ended up either way, so the caller can report the
+     * truth rather than staying silent about what happened.
+     *
+     * $telegramUpdateId is threaded into the browser call so its deadline
+     * comes from the same shared search-time budget as everything else in
+     * this request, not the tool's own unrelated default timeout.
+     *
+     * $openSelector, when given, means the content the agent needs is behind
+     * an in-page interaction (a "характеристики"/specifications tab) rather
+     * than reachable by plain HTTP at all - this always goes straight to a
+     * real browser session (BrowserProductGalleryExtractor::scoutAfterOpening())
+     * rather than trying HTTP first, since HTTP cannot click anything. Its
+     * own click either navigated to a different, unconfirmed product (caught
+     * by the same evidence-based check the trained gallery recipe's own
+     * clicks already answer to, not a URL/name guess) or stayed in place -
+     * 'click_outcome' reports which, so a click that silently failed or
+     * silently left the product is never reported as if it worked.
+     *
+     * $forceBrowser, when true and $openSelector is null, skips the plain-
+     * HTTP attempt even if it would return some non-empty text - the agent
+     * sets this when it already knows or suspects that text is too thin to
+     * be the real content (e.g. only a title, the rest rendered by
+     * JavaScript), rather than this method silently trusting "non-empty" as
+     * "sufficient", a distinction only the agent asking is positioned to
+     * judge.
+     *
+     * Absent either signal, a real browser session is still tried whenever
+     * plain HTTP found nothing usable at all - an empty body, an access
+     * gate, or non-HTML there is not proof the page has nothing on it, it is
+     * the normal signature of a Playwright-only source (PROJECT_STRATEGY.md's
+     * Playwright-first list). Either browser path also returns
+     * 'observed_controls' - real, structurally-stable selectors the page
+     * actually has, so a caller can hand an agent something to pick from
+     * for its next open_selector rather than something to guess.
+     *
+     * 'identity_evidence' is what THIS page itself says it is - the same
+     * generic, structural fingerprint (title/h1/meta/JSON-LD identifiers, or
+     * for the browser path the canonical/og:url/JSON-LD Product fields
+     * Playwright already reads) already used elsewhere to tell one product
+     * from another - never a name-similarity guess. Being on the right host
+     * does not mean this is the right product; this is handed to the caller
+     * so the same judgment source_identity_snippet already grounds can be
+     * applied here too, rather than trusting 'text' as confirmed just
+     * because it loaded.
+     *
+     * @return array{
+     *     text: string,
+     *     final_url: string,
+     *     via: 'none'|'http'|'browser',
+     *     identity_evidence: string,
+     *     observed_controls: array<int, array{selector: string, text: string}>,
+     *     click_outcome: ?array{selector: string, clicked: bool, changed: bool, selector_missing: bool, navigated_away: bool, navigated_away_reason: ?string},
+     *     blocked_reason: ?string,
+     * }
+     */
+    public function fetchAdditionalPageText(
+        string $url,
+        ?int $telegramUpdateId = null,
+        ?string $openSelector = null,
+        bool $forceBrowser = false,
+    ): array {
+        $empty = [
+            'text' => '', 'final_url' => $url, 'via' => 'none', 'identity_evidence' => '',
+            'observed_controls' => [], 'click_outcome' => null, 'blocked_reason' => null,
+        ];
+
+        if ($url === '' || ! $this->isPublicUrl($url) || $this->looksLikeNonHtmlDocumentUrl($url)) {
+            return $empty;
+        }
+
+        $requestedHost = strtolower((string) parse_url($url, PHP_URL_HOST));
+
+        if ($openSelector === null && ! $forceBrowser) {
+            try {
+                [$response, $finalUrl] = $this->fetch($url, confineToHost: $requestedHost);
+
+                if ($this->isHtmlResponse($response) && ! $this->looksLikeAccessGate($response->body())) {
+                    $text = $this->extractPageSpecificationText($response->body(), $finalUrl);
+
+                    if ($text !== '') {
+                        return [
+                            ...$empty,
+                            'text' => $text,
+                            'final_url' => $finalUrl,
+                            'via' => 'http',
+                            'identity_evidence' => $this->extractPageIdentityEvidence($response->body(), $finalUrl),
+                        ];
+                    }
+                }
+            } catch (ProductSourceHostDriftException $exception) {
+                // A hop already landed off the confined host - refused
+                // outright rather than tried again through the browser,
+                // which would only repeat the same redirect.
+                return [...$empty, 'final_url' => $exception->driftedUrl, 'blocked_reason' => 'redirected_off_host'];
+            } catch (Throwable) {
+                // Plain HTTP failed outright - still worth a real browser below.
+            }
+        }
+
+        try {
+            if ($openSelector !== null) {
+                $this->browser->scoutAfterOpening(
+                    $url,
+                    $openSelector,
+                    telegramUpdateId: $telegramUpdateId,
+                    confineNavigationToHost: $requestedHost,
+                );
+            } else {
+                $this->browser->scout($url, telegramUpdateId: $telegramUpdateId, confineNavigationToHost: $requestedHost);
+            }
+        } catch (Throwable) {
+            return $empty;
+        }
+
+        $finalUrl = $this->browser->lastProductPageUrl() ?? $url;
+
+        if (strtolower((string) parse_url($finalUrl, PHP_URL_HOST)) !== $requestedHost) {
+            return [...$empty, 'final_url' => $finalUrl, 'blocked_reason' => 'redirected_off_host'];
+        }
+
+        $identity = $this->browser->lastProductIdentity();
+
+        return [
+            'text' => (string) $this->browser->lastSpecificationText(),
+            'final_url' => $finalUrl,
+            'via' => 'browser',
+            'identity_evidence' => $identity !== null
+                ? mb_substr((string) json_encode($identity, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE), 0, 2000)
+                : '',
+            'observed_controls' => $this->browser->lastObservedControls(),
+            'click_outcome' => $this->browser->lastClickOutcome(),
+            'blocked_reason' => null,
+        ];
     }
 
     /**
@@ -263,6 +434,7 @@ class ProductImageResolver
             $browserImages = [];
             $failureKind = null;
             $identityEvidence = '';
+            $specificationText = '';
             $reportedSourceImages = collect(is_array($source['image_urls'] ?? null) ? $source['image_urls'] : [])
                 ->filter(fn (mixed $imageUrl): bool => is_string($imageUrl) && $this->isPublicUrl($imageUrl))
                 ->map(fn (string $imageUrl): string => ProductImageStorage::normalizeCandidateUrl($imageUrl))
@@ -282,6 +454,7 @@ class ProductImageResolver
                     } else {
                         $this->reputation->noteAcceptance($sourceUrl);
                         $identityEvidence = $this->extractPageIdentityEvidence($html, $finalUrl);
+                        $specificationText = $this->extractPageSpecificationText($html, $finalUrl);
                         foreach ($this->extractPageImages($html, $finalUrl) as $imageUrl) {
                             if ($this->isPublicUrl($imageUrl)) {
                                 $images[] = $imageUrl;
@@ -362,6 +535,17 @@ class ProductImageResolver
                     ->values()
                     ->all();
 
+                // Playwright saw the page actually rendered - a static fetch
+                // of the same URL sees only what shipped in the initial HTML,
+                // nothing for a JS-rendered specs tab, and an access-gate page
+                // for anything that outright needed a browser to pass. Prefer
+                // it over the static extract whenever Playwright produced one.
+                $browserSpecificationText = $this->browser->lastSpecificationText();
+
+                if (is_string($browserSpecificationText) && $browserSpecificationText !== '') {
+                    $specificationText = $browserSpecificationText;
+                }
+
                 if ($browserImages !== []) {
                     $accessGateDetected = false;
                     $failureKind = null;
@@ -372,6 +556,11 @@ class ProductImageResolver
                     // static originals collected before Playwright started.
                     $images = [...$previousSourceImages, ...$browserImages, ...$staticSourceImages];
                 }
+            }
+
+            if ($specificationText !== '') {
+                $this->specificationTextByPageUrl[ProductImageStorage::normalizeCandidateUrl($sourceUrl)] = $specificationText;
+                $this->specificationTextByPageUrl[ProductImageStorage::normalizeCandidateUrl($browserUrl)] = $specificationText;
             }
 
             if ($accessGateDetected && $browserImages === []) {
@@ -389,6 +578,7 @@ class ProductImageResolver
                     'title' => is_string($source['title'] ?? null) ? $source['title'] : null,
                     '_preflight_final_url' => $browserUrl,
                     '_preflight_identity_evidence' => $identityEvidence,
+                    '_preflight_specification_text' => $specificationText,
                 ];
             }
             if ($browserImages !== []) {
@@ -421,7 +611,11 @@ class ProductImageResolver
             }
         }
 
-        return array_slice($images, 0, $limit);
+        // Publication limits must not discard already verified gallery frames
+        // before download and language checks. Keep the old cap for raw URLs.
+        return array_values(array_filter($images, fn (string $url, int $index): bool => $index < $limit || $this->isConfirmedGalleryImage($url) || $this->isPartialGalleryImage($url),
+            ARRAY_FILTER_USE_BOTH,
+        ));
     }
 
     private function looksLikeNonHtmlDocumentUrl(string $url): bool
@@ -593,11 +787,28 @@ class ProductImageResolver
             ];
     }
 
-    private function fetch(string $url, ?string $refererUrl = null, bool $asDocument = true): array
-    {
+    /**
+     * $confineToHost, when given, is checked before EVERY request this
+     * makes - the first one and every redirect hop after it - not only
+     * compared against wherever the chain finally ends up: a caller relying
+     * only on a start-vs-end comparison would accept allowed-host ->
+     * other-host -> back-to-allowed-host, three real requests to a host it
+     * never approved, none of them visible in that comparison.
+     */
+    private function fetch(
+        string $url,
+        ?string $refererUrl = null,
+        bool $asDocument = true,
+        ?string $confineToHost = null,
+    ): array {
         for ($redirects = 0; $redirects <= 3; $redirects++) {
             if (! $this->isPublicUrl($url)) {
                 throw new \RuntimeException('Blocked non-public product source URL.');
+            }
+
+            if ($confineToHost !== null
+                && strtolower((string) parse_url($url, PHP_URL_HOST)) !== strtolower($confineToHost)) {
+                throw new ProductSourceHostDriftException($url);
             }
 
             // Many CDNs gate images by Referer against the *page* the photo
@@ -689,6 +900,90 @@ class ProductImageResolver
         }
 
         return Str::limit(Str::squish(implode(' ', array_unique($values))), 2500, '');
+    }
+
+    /**
+     * A far larger, specifications-oriented extract than
+     * extractPageIdentityEvidence()'s ~2500-character identity fingerprint -
+     * that one only ever captures title/h1/meta/JSON-LD identifiers, which
+     * rarely mention RAM/GPU/storage at all. Built once, while the page is
+     * already open, and persisted by the caller (see
+     * ProductSourcePageEvidence) so the later specification-reconciliation
+     * step never needs to re-fetch this same page itself - a fresh plain
+     * HTTP request at that later point would only ever see whatever a
+     * static fetch already saw here (or an access-gate page for anything
+     * that actually required Playwright), so re-fetching then could never
+     * recover more than capturing now already does.
+     */
+    private function extractPageSpecificationText(string $html, string $pageUrl): string
+    {
+        if ($html === '' || strlen($html) > 5_000_000) {
+            return '';
+        }
+
+        $previous = libxml_use_internal_errors(true);
+        $document = new DOMDocument;
+        $loaded = $document->loadHTML($html, LIBXML_NOERROR | LIBXML_NOWARNING | LIBXML_NONET);
+        libxml_clear_errors();
+        libxml_use_internal_errors($previous);
+
+        if (! $loaded) {
+            return '';
+        }
+
+        // application/ld+json scripts are excluded here specifically -
+        // real bug (2026-09-11): removing every <script> first and only then
+        // querying //script[@type="application/ld+json"] for structured
+        // data left nothing to find; the tag has to survive this pass to be
+        // read below.
+        foreach (['//script[not(@type="application/ld+json")]', '//style', '//noscript', '//nav', '//footer', '//header'] as $query) {
+            $xpath = new DOMXPath($document);
+
+            foreach (iterator_to_array($xpath->query($query) ?: []) as $node) {
+                $node->parentNode?->removeChild($node);
+            }
+        }
+
+        $xpath = new DOMXPath($document);
+        $parts = [];
+
+        foreach ($xpath->query('//table | //dl') ?: [] as $node) {
+            $text = trim(html_entity_decode(Str::squish($node->textContent), ENT_QUOTES | ENT_HTML5));
+
+            if ($text !== '') {
+                $parts[] = $text;
+            }
+        }
+
+        foreach ($xpath->query('//*[@itemprop]') ?: [] as $node) {
+            $name = $node->attributes?->getNamedItem('itemprop')?->nodeValue;
+            $value = trim(html_entity_decode(strip_tags($node->nodeValue), ENT_QUOTES | ENT_HTML5));
+
+            if (is_string($name) && $name !== '' && $value !== '') {
+                $parts[] = "{$name}: {$value}";
+            }
+        }
+
+        foreach ($xpath->query('//script[@type="application/ld+json"]') ?: [] as $node) {
+            $decoded = json_decode($node->nodeValue ?? '', true);
+
+            if (is_array($decoded)) {
+                $parts[] = Str::squish(json_encode($decoded, JSON_UNESCAPED_UNICODE) ?: '');
+            }
+        }
+
+        // Catch-all for div-based spec layouts the selectors above miss -
+        // only when they found nothing at all, not appended alongside them:
+        // a real spec table's text would otherwise be sent to the AI twice,
+        // wasting a good chunk of the size budget on a duplicate.
+        if ($parts === []) {
+            $body = $xpath->query('//body')?->item(0);
+            $parts[] = $body !== null
+                ? trim(html_entity_decode(Str::squish($body->textContent), ENT_QUOTES | ENT_HTML5))
+                : '';
+        }
+
+        return Str::limit(Str::squish(implode(' ', array_filter($parts))), 12_000, '');
     }
 
     /** @return array<int, string> */

@@ -76,45 +76,47 @@ class ProductGalleryRecipeTrainer
         string $trainingUrl,
         ?int $telegramUpdateId,
         ?callable $debug,
-    ): ?string {
+    ): array {
         if ((int) $recipe->success_count < 1) {
-            return null;
+            return ['status' => 'not_required', 'reason' => 'No previous successful recipe.'];
         }
 
-        $provenUrl = ProductSourceAttempt::query()
-            ->where('domain', $recipe->domain)
-            ->where('phase', 'active_recipe')
-            ->where('status', 'completed')
-            ->whereNotNull('product_url')
-            ->where('product_url', '!=', $trainingUrl)
-            ->latest('id')
-            ->value('product_url');
+        $provenUrl = app(ProductGalleryRecipeProof::class)->provenUrl($recipe, $trainingUrl);
 
         if (! is_string($provenUrl) || $provenUrl === '') {
-            return null;
+            return ['status' => 'not_required', 'reason' => 'No confirmed other page for this recipe body.'];
         }
 
-        // Never at the cost of the search itself: a regression check that eats
-        // the last of the budget turns a working repair into no photographs at
-        // all. Skipping it leaves the old behaviour, which is what happens
-        // today on every promotion.
+        // No unfinished control replay may replace the old working recipe.
+        // Current-page photographs remain available to the caller.
         if (! $this->timeBudget->canStart($telegramUpdateId, 40) || $this->costBudget->exceeded($telegramUpdateId)) {
-            return null;
+            return ['status' => 'interrupted', 'reason' => 'Insufficient budget for the control replay.'];
         }
 
         $debug?->__invoke('step', 'Проверяю починенный рецепт на прежде рабочей странице: '.$provenUrl);
 
         try {
-            $result = $this->browser->executeRecipe($provenUrl, $candidate, 20, null, $telegramUpdateId);
+            // The control page must not replace the current product's last URL,
+            // identity or specification text on the shared extractor.
+            $controlBrowser = clone $this->browser;
+            $result = $controlBrowser->executeRecipe($provenUrl, $candidate, 20, null, $telegramUpdateId);
         } catch (Throwable $exception) {
-            // The page itself failing - a timeout, a block - says nothing about
-            // the repair, and must not veto it.
-            return null;
+            // A timeout is not proof of another layout.
+            return ['status' => 'interrupted', 'reason' => $exception->getMessage()];
         }
 
+        $failure = trim((string) ($result['failure_kind'] ?? ''));
+        if ($result === []
+            || (($result['images'] ?? []) === [] && $failure === ''
+                && empty($result['diagnostics']) && empty($result['action_trace']))
+            || ($failure !== '' && $failure !== 'recipe_mismatch')
+            || data_get($result, 'diagnostics.partial') === true
+            || ! empty($result['error'])) {
+            return ['status' => 'interrupted', 'reason' => $failure ?: (string) ($result['error'] ?? 'Partial control replay.')];
+        }
         $validation = $this->resultValidator->validate($candidate, $result, countedOnThisPage: false);
 
-        return $validation['passed'] ? null : (string) $validation['reason'];
+        return ['status' => $validation['passed'] ? 'passed' : 'incompatible', 'reason' => $validation['reason']];
     }
 
     private function measureDownloadableFrames(array $urls, array $context, string $pageUrl, ?int $telegramUpdateId = null): array
@@ -234,7 +236,7 @@ class ProductGalleryRecipeTrainer
         try {
             $recipe = $this->recipeRouter->recipeForTraining(
                 $url,
-                reuseLegacyFallback: $trigger !== 'automatic_failure',
+                reuseLegacyFallback: ! in_array($trigger, ['automatic_failure', 'execution_recovery'], true),
             );
             $domainSettings = ProductSourceDomain::query()->firstOrCreate([
                 'domain' => ProductSourcePriority::host($url),
@@ -546,13 +548,19 @@ class ProductGalleryRecipeTrainer
             // Seeded as the first round's feedback, so round one is a repair
             // with evidence rather than a guess.
             $feedback = $repairFrom === [] ? null : [
-                'rejected_recipe' => $repairFrom['recipe'] ?? null,
-                'error' => 'This stored recipe stopped working on this page: '
+                'rejected_recipe' => ($repairFrom['mode'] ?? null) === 'execution_recovery' ? null : ($repairFrom['recipe'] ?? null),
+                'previous_recipe' => $repairFrom['recipe'] ?? null,
+                'mode' => $repairFrom['mode'] ?? 'recipe_repair',
+                'error' => (($repairFrom['mode'] ?? null) === 'execution_recovery'
+                    ? 'Execution was interrupted; recipe compatibility is unknown: '
+                    : 'This stored recipe stopped working on this page: ')
                     .($repairFrom['reason'] ?? 'unknown reason'),
                 'action_trace' => $repairFrom['action_trace'] ?? [],
                 'diagnostics' => $repairFrom['diagnostics'] ?? [],
                 'candidate_count' => count($repairFrom['images'] ?? []),
-                'instruction' => 'This recipe already works on other pages of this site. Repair the step that '
+                'instruction' => ($repairFrom['mode'] ?? null) === 'execution_recovery'
+                    ? 'Inspect the recorded failure. Choose whether to retry the existing plan unchanged or investigate and change it. An interrupted execution does not prove a selector mismatch.'
+                    : 'This recipe already works on other pages of this site. Repair the step that '
                     .'failed here rather than describing the gallery from scratch, and keep every step that '
                     .'still executed correctly - a replacement that only fits this page breaks the pages the '
                     .'recipe already opens.',
@@ -567,6 +575,7 @@ class ProductGalleryRecipeTrainer
             }
             $candidate = [];
             $candidateResult = [];
+            $observationFocusSelector = '';
             $candidateImages = [];
             $bestPartialImages = $oldImages;
             $bestPartialResult = $oldImages === [] ? [] : ['images' => $oldImages];
@@ -618,8 +627,16 @@ class ProductGalleryRecipeTrainer
             $stuckOnValidation = false;
             $agentAbandoned = false;
             $agentAbandonReason = null;
+            // False until a round actually reaches the structural validator -
+            // a round that fails earlier (an invalid recipe schema, a browser
+            // crash before any recipe ever ran) never had a traversal to call
+            // correct, so it must default to the same "not a genuine recipe
+            // mismatch, but not proven fine either" reading as false, not an
+            // undefined-variable warning.
+            $structuralTraversalOk = false;
 
             for ($attempt = 1; $safetyLimited ? $attempt <= $safetyRounds : true; $attempt++) {
+                $structuralTraversalOk = false;
                 $costExceeded = ! $safetyLimited && $this->costBudget->exceeded($telegramUpdateId);
 
                 if (! $this->timeBudget->canStart($telegramUpdateId, 30) || $costExceeded) {
@@ -642,7 +659,6 @@ class ProductGalleryRecipeTrainer
 
                     break;
                 }
-
 
                 // Field order matters for OpenAI's automatic prompt caching,
                 // which only discounts a request's longest prefix that is
@@ -674,7 +690,8 @@ class ProductGalleryRecipeTrainer
                     // A round that repeats the previous round's outcome gets the
                     // whole page back: the short version is an economy, and an
                     // economy must never be the reason the agent is stuck.
-                    'page' => $this->scoutForAgent($pageScout, $stagnantRounds > 0),
+                    'page' => $this->initialObservationForAgent($pageScout, $feedback, $stagnantRounds > 0),
+                    'screenshot_observation' => $candidateResult === [] ? 'initial_page' : 'latest_execution',
                     'execution_contract' => [
                         'browser_state' => 'fresh_page_load_for_every_recipe_execution',
                         'recipe_must_be_self_contained' => true,
@@ -748,7 +765,13 @@ class ProductGalleryRecipeTrainer
                             domainSettings: $domainSettings,
                             update: $update,
                             abandonSignal: $abandonSignal,
-                            visionImageUrls: $this->observedImageUrls($pageScout, $feedback),
+                            visionImageUrls: $this->observedImageUrls($pageScout, [
+                                'feedback' => $feedback,
+                                'latest_observation' => $candidateResult['post_interaction_scout'] ?? [],
+                            ]),
+                            initialPageObservation: $pageScout,
+                            latestPageObservation: $candidateResult['post_interaction_scout']['full_page_observation']
+                                ?? $candidateResult['post_interaction_scout'] ?? [],
                         )->prompt(
                             $prompt ?: '{}',
                             // The media type is not optional: without it the
@@ -842,7 +865,14 @@ class ProductGalleryRecipeTrainer
                 }
 
                 try {
-                    $candidate = $this->validateRecipe($response->toArray(), (string) ($pageScout['title'] ?? ''));
+                    $answer = $response->toArray();
+                    if (array_key_exists('observation_focus_selector', $answer)) {
+                        $selected = is_string($answer['observation_focus_selector'])
+                            ? trim($answer['observation_focus_selector']) : '';
+                        $observationFocusSelector = $selected !== '' && $this->safeSelector($selected) ? $selected : '';
+                    }
+                    unset($answer['observation_focus_selector']);
+                    $candidate = $this->validateRecipe($answer, (string) ($pageScout['title'] ?? ''));
 
                     if (($candidate['training_decision'] ?? 'propose_recipe') === 'abandon_page') {
                         // A terminal page verdict cannot silently discard an
@@ -984,7 +1014,13 @@ class ProductGalleryRecipeTrainer
                 }
 
                 $debug?->__invoke('step', "AI-тренер: проверяю рецепт, раунд {$roundLabel} · {$url}");
-                $candidateResult = $this->browser->executeRecipe($url, $candidate, 20, $debug, $telegramUpdateId, $context);
+                $executionContext = $context;
+                if ($observationFocusSelector !== '') {
+                    $executionContext['observation_focus_selector'] = $observationFocusSelector;
+                }
+                $candidateResult = $this->browser->executeRecipe($url, $candidate, 20, $debug, $telegramUpdateId, $executionContext);
+                // Never pair a new DOM observation with the old initial-page picture.
+                $pageImage = is_string($candidateResult['screenshot'] ?? null) ? $candidateResult['screenshot'] : null;
                 $abandonmentReviewPending = false;
                 $this->recordExecutionTrace(
                     $url,
@@ -1021,6 +1057,16 @@ class ProductGalleryRecipeTrainer
                     $candidateResult,
                     minimumSuccessCount: $contextMinimum > 0 ? $contextMinimum : null,
                 );
+                // Whether the TRAVERSAL was correct - the recipe reached as
+                // many distinct frames as the page structurally shows - is a
+                // separate fact from whether enough of them are big enough to
+                // publish, and it is captured here, before the size checks
+                // below get any chance to overwrite $validation. A page whose
+                // traversal is fine but whose photos are too small is not a
+                // broken recipe: recordFailure() below reads this, not
+                // $validation['passed'], to decide whether a domain's
+                // Playwright gets disabled over it.
+                $structuralTraversalOk = $validation['passed'];
                 // Only worth the bandwidth once the plan itself is sound: a
                 // recipe already going back for structural repair learns
                 // nothing extra from the size of frames it will not keep.
@@ -1042,11 +1088,28 @@ class ProductGalleryRecipeTrainer
                     && $downloadProbe['usable'] === 0
                     && $downloadProbe['unknown'] === 0;
 
-                // Use the validator's current-page target, not merely the
-                // category fallback. Unknown downloads are not bad images:
-                // only reject for size when even all unknown frames passing
-                // could not meet the target. Never extrapolate a sample rate.
-                $minimumGallery = max(1, (int) $validation['expected']);
+                // The catalog's own publish floor, not the page's structural
+                // target. A page proven to show seven photos still has to
+                // extract all seven to pass the traversal check above, but
+                // whether the RESULT is complete enough to publish is answered
+                // against what the catalog actually needs - so six correctly
+                // sized frames out of a structurally-confirmed seven, with a
+                // category minimum of three, is a complete result, not a
+                // shortfall. Unknown downloads are not bad images: only reject
+                // for size when even all unknown frames passing could not meet
+                // this floor. Never extrapolate a sample rate.
+                // The whole known gallery may legitimately be smaller than the
+                // publication minimum. Learn that working recipe without inventing frames.
+                $minimumGallery = max(1, min((int) $validation['min_success_count'], (int) $validation['expected']));
+                if ($structuralTraversalOk && count($candidateImages) < $minimumGallery) {
+                    $validation = [
+                        ...$validation,
+                        'passed' => false,
+                        'reason' => 'Traversal completed, but only '.count($candidateImages)
+                            .' frames passed browser image checks; publication needs '.$minimumGallery
+                            .'. Inspect rejected_candidates before deciding whether larger originals exist.',
+                    ];
+                }
                 $yieldsTooFewToPublish = $downloadProbe !== null
                     && $minimumGallery > $downloadProbe['usable'] + $downloadProbe['unknown'];
 
@@ -1084,8 +1147,18 @@ class ProductGalleryRecipeTrainer
                     ];
                 }
 
-                $promote = $validation['passed']
-                    && (count($oldImages) < 2 || count($candidateImages) >= count($oldImages));
+                // A candidate that legitimately passes its own validation used
+                // to still be refused for producing fewer raw URLs than the
+                // recipe it would replace - which blocks a genuine fix (fewer,
+                // larger, correctly-deduplicated photos; a product that today
+                // has fewer real variants) for a reason unrelated to whether it
+                // actually works. The real protection for the previous working
+                // recipe is the canary replay below: it re-runs this candidate
+                // on a page the old recipe is known to have opened, and only a
+                // demonstrated break there keeps the old version (or narrows
+                // the new one to its own page family). That is evidence about
+                // this candidate; a smaller number never was.
+                $promote = $validation['passed'];
                 $attempts[] = [
                     'attempt' => $attempt,
                     'download_probe' => $downloadProbe,
@@ -1167,7 +1240,7 @@ class ProductGalleryRecipeTrainer
                     // The initial page remains the replay starting point;
                     // this sanitized post-action snapshot is observation only.
                     'previous_attempt_observation' => is_array($postInteractionScout) && $postInteractionScout !== []
-                        ? $postInteractionScout
+                        ? $this->observationForAgent($postInteractionScout)
                         : null,
                     'instruction' => $postInteractionScoutUsable
                         ? 'The page field is the fresh initial page. previous_attempt_observation is the DOM revealed by the last execution and is diagnostic only. Return a complete recipe that replays all prerequisites from the fresh page before using newly revealed controls.'
@@ -1234,7 +1307,25 @@ class ProductGalleryRecipeTrainer
             }
 
             if (! $promote) {
-                $failureKind = $agentAbandoned ? $failureKind : 'recipe_mismatch';
+                if ($structuralTraversalOk) {
+                    // Source quality is not recipe incompatibility. Preserve
+                    // the previous version and do not publish an unproven one.
+                    $debug?->__invoke('warning', 'Обход выполнен, но пригодных кадров недостаточно; рабочий рецепт не отключаю.');
+
+                    return $bestPartialImages;
+                }
+                $failureKind = match (true) {
+                    $agentAbandoned => $failureKind,
+                    // The traversal itself was correct - it reached everything
+                    // the page structurally shows - and the only shortfall is
+                    // that not enough of those frames clear the catalog's own
+                    // publish floor. That is a fact about this source's
+                    // photographs, not evidence the recipe is wrong, so it
+                    // must not count toward disabling Playwright for the
+                    // whole domain the way a genuine selector mismatch does.
+                    $structuralTraversalOk => 'source_frames_too_small',
+                    default => 'recipe_mismatch',
+                };
                 $this->recordFailure(
                     $recipe,
                     new RuntimeException((string) $version->error),
@@ -1262,7 +1353,20 @@ class ProductGalleryRecipeTrainer
             // worked on, and a failure there keeps the version that works.
             $canary = $this->canaryFailure($recipe, $candidate, $url, $telegramUpdateId, $debug);
 
-            if ($canary !== null) {
+            $version->update(['result' => [...($version->result ?? []), 'control_replay' => $canary]]);
+            if ($canary['status'] === 'interrupted') {
+                $version->update([
+                    'status' => 'interrupted',
+                    'promoted_at' => null,
+                    'error' => 'Control replay did not finish: '.$canary['reason'],
+                ]);
+                $debug?->__invoke('warning', 'Контрольная проверка не завершилась; прежний рецепт сохранён, найденные фото не теряются.');
+
+                return $candidateImages;
+            }
+
+            if ($canary['status'] === 'incompatible') {
+                $canary = $canary['reason'];
                 // Two recipes, both correct, for two page families of one shop.
                 //
                 // The candidate opens the page in front of it and breaks the
@@ -1321,6 +1425,7 @@ class ProductGalleryRecipeTrainer
                         .'. Эта версия сохранена как отдельный рецепт для семейства страниц '
                         .$narrower->path_pattern.'.',
                 ]);
+                app(ProductGalleryRecipeProof::class)->remember($narrower, $url, $validation, $telegramUpdateId, $version->id);
                 $debug?->__invoke(
                     'done',
                     'Этот раздел сайта устроен иначе, чем остальной: рецепт магазина оставлен как есть, '
@@ -1352,6 +1457,7 @@ class ProductGalleryRecipeTrainer
                 'source_block_reason' => null,
                 'source_blocked_at' => null,
             ]);
+            app(ProductGalleryRecipeProof::class)->remember($recipe, $url, $validation, $telegramUpdateId, $version->id);
             $debug?->__invoke('done', 'AI-рецепт проверен и опубликован. Фото: '.count($candidateImages).'.');
 
             return $candidateImages;
@@ -1480,7 +1586,6 @@ class ProductGalleryRecipeTrainer
             fn (string $word): bool => mb_strlen($word) >= 3,
         )));
     }
-
 
     /**
      * A recipe is how to open a gallery, so it must not name the product.
@@ -1652,13 +1757,44 @@ class ProductGalleryRecipeTrainer
     /** @return array<string, mixed> */
     /**
      * Keep the Vision tool constrained to URLs the browser already exposed in
-     * the sanitized initial page or the previous post-interaction observation.
-     * Page content may influence the agent, but it cannot turn the tool into an
-     * arbitrary URL fetcher.
+     * the sanitized initial page or a post-interaction observation since -
+     * every one of them, old or new. Page content may influence the agent,
+     * but it cannot turn the tool into an arbitrary URL fetcher.
      *
+     * A size cap lived here twice and was wrong both times. The first shared
+     * one number between the page scout and this round's own findings,
+     * walked in that order, so a page whose initial DOM alone already
+     * reached the cap silently starved every observation this round's own
+     * clicks produced - the frame the agent most needed to send to Vision,
+     * reached only after a zoom or thumbnail click, was never in the list it
+     * was allowed to choose from. Giving each side its own independent cap
+     * instead still dropped an already-open 81st page frame for no reason.
+     * Neither number was protecting anything: this array is never
+     * serialized into a prompt (it exists only as this method's own
+     * validation set, checked by array lookup in InspectGalleryImages), so
+     * there was no size to trade one observation's evidence against
+     * another's for. Every URL either side has actually shown survives.
+     *
+     * This governs which URLs Vision may be asked about at all, not how
+     * much text the page/feedback themselves put in the prompt (trimmed
+     * separately by scoutForAgent()) and not how many URLs one Vision call
+     * may inspect (InspectGalleryImages' own schema caps that at four) -
+     * both stay exactly as they were.
+     *
+     * @param  array<string, mixed>  $pageScout
+     * @param  array<string, mixed>|null  $feedback
      * @return array<int, string>
      */
-    private function observedImageUrls(mixed ...$observations): array
+    private function observedImageUrls(array $pageScout, ?array $feedback): array
+    {
+        return array_values(array_unique([
+            ...$this->extractImageUrls($pageScout),
+            ...$this->extractImageUrls($feedback),
+        ]));
+    }
+
+    /** @return array<int, string> */
+    private function extractImageUrls(mixed $observation): array
     {
         $urls = [];
         $walk = function (mixed $value) use (&$walk, &$urls): void {
@@ -1674,15 +1810,11 @@ class ProductGalleryRecipeTrainer
                 $urls[] = $value;
             }
         };
-
-        foreach ($observations as $observation) {
-            $walk($observation);
-        }
+        $walk($observation);
 
         return collect($urls)
             ->map(fn (string $url): string => ProductImageStorage::normalizeCandidateUrl($url))
             ->unique()
-            ->take(80)
             ->values()
             ->all();
     }
@@ -1847,6 +1979,7 @@ class ProductGalleryRecipeTrainer
      * by failing to progress - see scoutForAgent().
      */
     private const AGENT_PAGE_LIST_LIMITS = [
+        'container_candidates' => 16,
         'image_candidates' => 20,
         'action_candidates' => 24,
         'fragments' => 16,
@@ -2060,6 +2193,9 @@ class ProductGalleryRecipeTrainer
             'recipe_mismatch', 'dom_unusable' => 'две полные тренировки рецепта не смогли получить галерею.',
             'agent_abandoned' => 'AI-тренер дважды сам решил, что дальнейшее обучение на этом URL бесперспективно.',
             'browser_timeout', 'browser_protocol' => 'три последовательные браузерные попытки завершились одинаковой ошибкой.',
+            // Not disabled by count() alone - see $disableAfter's default arm
+            // below - but named honestly on the rare path where it is.
+            'source_frames_too_small' => 'структура страницы открывается верно, но её фотографии остаются меньше публикуемого размера.',
             default => 'исчерпан безопасный бюджет повторных попыток.',
         };
         $error = $disable
@@ -2337,7 +2473,14 @@ class ProductGalleryRecipeTrainer
             'actions' => ['present', 'array', 'max:12'],
             'actions.*.kind' => ['required', 'in:click,click_each,click_until_no_change'],
             'actions.*.selector' => ['required', 'string', 'max:300'],
-            'actions.*.index' => ['required', 'integer', 'between:0,20'],
+            // index addresses ONE specific element among a selector's
+            // matches, not a repeat count - a page can reasonably have more
+            // than 20 elements matching a broad selector (real case,
+            // 2026-09-14: techbuy.com.au, selector "a", needed index 25/46).
+            // The actual safety ceiling belongs to limit/max_thumbnail_clicks/
+            // max_next_clicks below (how many actions run), never to which
+            // element one specific action addresses.
+            'actions.*.index' => ['required', 'integer', 'between:0,200'],
             'actions.*.limit' => ['required', 'integer', 'between:1,20'],
             'actions.*.wait_after_ms' => ['required', 'integer', 'between:50,1500'],
             'actions.*.when' => ['nullable', 'in:always,if_present'],
@@ -2714,6 +2857,30 @@ class ProductGalleryRecipeTrainer
         return $pageScout;
     }
 
+    private function initialObservationForAgent(array $initial, ?array $feedback, bool $complete): array
+    {
+        $focus = $feedback['previous_attempt_observation']['observation_focus'] ?? [];
+        if ($complete || ($focus['mode'] ?? null) !== 'focused') {
+            return $this->scoutForAgent($initial, $complete);
+        }
+
+        return [
+            'final_url' => $initial['final_url'] ?? null,
+            'title' => $initial['title'] ?? null,
+            'observation_omitted' => 'Initial page is stored on the server. Use ReadGalleryPageObservation(initial) '
+                .'for prerequisites or controls outside the focused latest observation. Every recipe still replays from this initial URL.',
+        ];
+    }
+
+    private function observationForAgent(array $observation): array
+    {
+        // The full snapshot stays in execution audit and is available as a tool,
+        // but must not be nested inside the supposedly focused paid prompt.
+        unset($observation['full_page_observation']);
+
+        return $observation;
+    }
+
     private function trainingProgressSignature(array $result): string
     {
         $images = collect(is_array($result['images'] ?? null) ? $result['images'] : [])
@@ -2743,6 +2910,19 @@ class ProductGalleryRecipeTrainer
         return hash('sha256', json_encode([
             'images' => $images,
             'layout_fingerprint' => $layoutFingerprint,
+            // A viewer may open and close before the final snapshot. Its
+            // observed controls and decoded sizes still count as new evidence.
+            'layer_observations' => collect($postInteractionScout['layer_observations'] ?? [])
+                ->filter(fn (mixed $layer): bool => is_array($layer))
+                ->map(fn (array $layer): array => [
+                    'layout' => app(ProductPageLayoutFingerprint::class)->make($layer),
+                    'sizes' => collect($layer['image_candidates'] ?? [])
+                        ->filter(fn (mixed $image): bool => is_array($image))
+                        ->map(fn (array $image): array => [
+                            (int) ($image['natural_width'] ?? 0),
+                            (int) ($image['natural_height'] ?? 0),
+                        ])->unique()->sort()->values()->all(),
+                ])->unique()->values()->all(),
             'transitions' => $transitions,
             'observed_gallery_count' => (int) data_get($result, 'diagnostics.observed_gallery_count', 0),
             'validated_candidates' => (int) data_get($result, 'diagnostics.validated_candidates', 0),

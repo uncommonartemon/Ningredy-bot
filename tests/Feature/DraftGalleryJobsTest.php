@@ -59,6 +59,57 @@ class DraftGalleryJobsTest extends TestCase
         $this->assertFalse(Cache::has("draft-gallery-restage:{$draft->id}:queued"));
     }
 
+    public function test_restage_job_reports_unfinished_reconciliation_instead_of_a_success_message(): void
+    {
+        // Regression: a real run reported "Галерея обновлена" (done) for a
+        // draft whose specifications were never actually checked against
+        // the newly chosen photo source - publishing stays blocked
+        // (ProductDraftWorkflow::approve()) but the operator was told the
+        // opposite. Mirrors the check ContinueDraftGallerySearch already
+        // makes before announcing success.
+        $draft = $this->draft();
+        $images = $this->mock(ProductImageStorage::class, function (MockInterface $mock) use ($draft): void {
+            $mock->shouldReceive('excludeCurrentDraftGallery')->once();
+            $mock->shouldReceive('stage')->once()->andReturnUsing(function () use ($draft): int {
+                // What a real stage() call leaves behind when photos were
+                // found but reconciliation against the chosen source did
+                // not complete.
+                $draft->update([
+                    'primary_source_url' => 'https://shop.example/product',
+                    'gallery_search_stop_reason' => 'specifications_unreconciled',
+                ]);
+
+                return 3;
+            });
+        });
+        $presenter = $this->mock(DraftTelegramPresenter::class);
+        $presenter->shouldReceive('sendReview')->once();
+
+        $capturedTexts = [];
+        $telegram = $this->mock(TelegramClient::class, function (MockInterface $mock) use (&$capturedTexts): void {
+            $mock->shouldReceive('sendMessage')
+                ->atLeast()->once()
+                ->andReturnUsing(function (string $chatId, string $text) use (&$capturedTexts): array {
+                    $capturedTexts[] = $text;
+
+                    return ['result' => ['message_id' => 10]];
+                });
+            $mock->shouldReceive('editMessageText')
+                ->zeroOrMoreTimes()
+                ->andReturnUsing(function (int|string $chatId, int $messageId, string $text) use (&$capturedTexts): array {
+                    $capturedTexts[] = $text;
+
+                    return ['ok' => true];
+                });
+        });
+
+        (new RestageDraftGalleryPhotos($draft->id, '100', $draft->telegram_update_id, $draft->telegram_update_id))->handle($images, $presenter, $telegram);
+
+        $combined = implode(' | ', $capturedTexts);
+        $this->assertStringContainsString('Сверка не завершена', $combined);
+        $this->assertStringNotContainsString('Галерея обновлена', $combined);
+    }
+
     public function test_top_up_job_appends_photos_without_replacing_the_gallery(): void
     {
         $draft = $this->draft();
@@ -150,6 +201,77 @@ class DraftGalleryJobsTest extends TestCase
                 && $job->telegramUpdateId === $continueUpdate->id
                 && $job->expectedDraftTelegramUpdateId === $draft->telegram_update_id,
         );
+    }
+
+    public function test_continue_job_does_not_queue_more_reconciliation_after_internal_recovery(): void
+    {
+        Queue::fake();
+        $draft = $this->draft();
+        $continueUpdate = TelegramUpdate::query()->create([
+            'update_id' => random_int(100_000, 999_999),
+            'telegram_user_id' => '1',
+            'chat_id' => '100',
+            'payload' => [],
+            'status' => 'completed',
+        ]);
+        $images = $this->mock(ProductImageStorage::class);
+        $images->shouldReceive('continueStage')
+            ->once()
+            ->andReturnUsing(function (ProductDraft $argument): int {
+                $argument->update([
+                    'gallery_status' => 'partial',
+                    'gallery_search_stop_reason' => 'specifications_unreconciled',
+                    'specifications_reconciliation_attempts' => 2,
+                ]);
+
+                return 3;
+            });
+        $presenter = $this->mock(DraftTelegramPresenter::class);
+        $presenter->shouldReceive('sendReview')->once();
+        $telegram = $this->telegramMock();
+
+        (new ContinueDraftGallerySearch($draft->id, '100', $continueUpdate->id, $draft->telegram_update_id))
+            ->handle($images, $presenter, $telegram);
+
+        Queue::assertNotPushed(ContinueDraftGallerySearch::class);
+    }
+
+    public function test_continue_job_stops_auto_chaining_a_reconciliation_retry_once_the_attempt_cap_is_reached(): void
+    {
+        // A repeat with no new data must not chain forever
+        // (PROJECT_STRATEGY.md's "no new observable progress" rule) - once
+        // the draft's own attempt counter reaches the cap, the job must
+        // report back and wait for a manual tap instead of re-queuing
+        // itself, the same way cost_budget/time_budget already do.
+        Queue::fake();
+        $draft = $this->draft();
+        $continueUpdate = TelegramUpdate::query()->create([
+            'update_id' => random_int(100_000, 999_999),
+            'telegram_user_id' => '1',
+            'chat_id' => '100',
+            'payload' => [],
+            'status' => 'completed',
+        ]);
+        $images = $this->mock(ProductImageStorage::class);
+        $images->shouldReceive('continueStage')
+            ->once()
+            ->andReturnUsing(function (ProductDraft $argument): int {
+                $argument->update([
+                    'gallery_status' => 'partial',
+                    'gallery_search_stop_reason' => 'specifications_unreconciled',
+                    'specifications_reconciliation_attempts' => 3,
+                ]);
+
+                return 3;
+            });
+        $presenter = $this->mock(DraftTelegramPresenter::class);
+        $presenter->shouldReceive('sendReview')->once();
+        $telegram = $this->telegramMock();
+
+        (new ContinueDraftGallerySearch($draft->id, '100', $continueUpdate->id, $draft->telegram_update_id))
+            ->handle($images, $presenter, $telegram);
+
+        Queue::assertNotPushed(ContinueDraftGallerySearch::class);
     }
 
     public function test_queued_gallery_job_cannot_mutate_a_reused_draft_id(): void

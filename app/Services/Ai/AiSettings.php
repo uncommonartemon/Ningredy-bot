@@ -261,6 +261,28 @@ class AiSettings
         AppSetting::put('ai.source_identity_agent_enabled', $enabled ? '1' : '0');
     }
 
+    /**
+     * Unlike sourceIdentityAgentEnabled(), turning this off does not
+     * substitute a safe fallback check - it simply pauses new
+     * reconciliations. A draft whose specifications were never actually
+     * checked against its chosen source is still not ready for publication
+     * while this is off, same as any other unavailable() outcome; there is
+     * no carve-out for the checker being disabled.
+     */
+    public function specificationReconciliationEnabled(): bool
+    {
+        $value = AppSetting::valueFor('ai.specification_reconciliation_enabled');
+
+        return $value === null
+            ? true
+            : filter_var($value, FILTER_VALIDATE_BOOLEAN);
+    }
+
+    public function saveSpecificationReconciliationEnabled(bool $enabled): void
+    {
+        AppSetting::put('ai.specification_reconciliation_enabled', $enabled ? '1' : '0');
+    }
+
     public function saveGalleryPreferPlaywrightFirst(bool $enabled): void
     {
         AppSetting::put('ai.gallery_prefer_playwright_first', $enabled ? '1' : '0');

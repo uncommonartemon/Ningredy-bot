@@ -35,6 +35,33 @@ class BrowserProductGalleryExtractor
      */
     private array $identityUnconfirmedImages = [];
 
+    /**
+     * The specification-oriented page text Playwright's own scout already
+     * captured for the most recent extract() call - a same-call side
+     * channel (reset at the top of extract(), read immediately after by the
+     * caller) rather than a public return value, because extract()'s own
+     * return type is the plain image URL list every existing caller already
+     * depends on.
+     */
+    private ?string $lastSpecificationText = null;
+
+    /** Same-call side channel as lastSpecificationText() - the page actually
+     * settled on after navigation/redirects, for a caller that needs to
+     * confirm it never left the host it was given. */
+    private ?string $lastProductPageUrl = null;
+
+    /** @var array<int, array{selector: string, text: string}> */
+    private array $lastObservedControls = [];
+
+    /** @var ?array{selector: string, clicked: bool, changed: bool, selector_missing: bool, navigated_away: bool, navigated_away_reason: ?string} */
+    private ?array $lastClickOutcome = null;
+
+    /** What the page said it is - canonical link, og:url, JSON-LD Product
+     * fields - the same evidence-based, dictionary-free identity used to
+     * decide whether an in-page click stayed on the product. Null when the
+     * page published none of it, which is unknown, not "same product". */
+    private ?array $lastProductIdentity = null;
+
     public function __construct(
         private readonly AiSettings $settings,
         private readonly ProductSearchTimeBudget $timeBudget,
@@ -58,6 +85,12 @@ class BrowserProductGalleryExtractor
         bool $forceInteractive = false,
         bool $activeRecipeOnly = false,
     ): array {
+        $this->lastSpecificationText = null;
+        $this->lastProductPageUrl = null;
+        $this->lastObservedControls = [];
+        $this->lastClickOutcome = null;
+        $this->lastProductIdentity = null;
+
         if (! $this->available($limit, $debug)) {
             return [];
         }
@@ -129,8 +162,24 @@ class BrowserProductGalleryExtractor
             // happening - so that success is not trusted here even when the
             // count alone looks sufficient.
             $selectorsMismatched = $this->recipeSelectorsMismatchPage($recipe->recipe ?? [], $result);
+            // A browser crash, an interrupted download or a technical
+            // navigation failure says nothing about whether the recipe's
+            // selectors still fit this page - it means the attempt to find
+            // out did not finish. Counting it the same as a genuine mismatch
+            // let one bad network moment count against a recipe that had
+            // done nothing wrong, on the very same counter that decides
+            // whether Playwright stays enabled for the whole domain.
+            $technicalFailureKind = trim((string) ($result['failure_kind'] ?? ''));
+            $executionFailed = $this->executionWasInterrupted($result);
+            // An empty selector snapshot from an unfinished page load is not
+            // proof that the store changed its layout.
+            if ($executionFailed) {
+                $selectorsMismatched = false;
+                $this->rememberPartialGalleryImages($images);
+            }
 
             if ($validation['passed'] && ! $selectorsMismatched) {
+                app(ProductGalleryRecipeProof::class)->remember($recipe, $url, $validation, $telegramUpdateId);
                 $this->rememberConfirmedGalleryImages($images);
                 $recipe->increment('success_count', 1, [
                     'last_success_at' => now(),
@@ -151,6 +200,12 @@ class BrowserProductGalleryExtractor
                         .($layoutChanged ? ' (layout fingerprint изменился)' : '')
                         .'; переобучаю специально под неё.',
                 );
+            } elseif ($executionFailed) {
+                $debug?->__invoke(
+                    'warning',
+                    'Технический сбой при исполнении рецепта для '.$host.' ('.$technicalFailureKind
+                        .'); найденное сохраняю, счётчик совместимости не трогаю.',
+                );
             } else {
                 $debug?->__invoke(
                     'warning',
@@ -159,14 +214,28 @@ class BrowserProductGalleryExtractor
                 );
             }
 
-            $recipe->increment('failure_count', 1, [
-                'last_failure_at' => now(),
-                'last_error' => $selectorsMismatched
-                    ? 'Recipe selectors matched nothing on this page (layout mismatch).'
-                    : $validation['reason'],
-            ]);
+            // A technical failure updates last_error/last_failure_kind for
+            // visibility but deliberately does not touch failure_count - that
+            // counter feeds recordFailure()'s domain-wide disable decision
+            // elsewhere, and one network hiccup must never count toward it
+            // the way a real, repeatable selector mismatch does.
+            if ($executionFailed) {
+                $recipe->update([
+                    'last_failure_at' => now(),
+                    'last_failure_kind' => $technicalFailureKind ?: 'execution_interrupted',
+                    'last_error' => 'Execution did not complete: '.($technicalFailureKind ?: 'interrupted').'. '
+                        .'Not counted as a recipe mismatch.',
+                ]);
+            } else {
+                $recipe->increment('failure_count', 1, [
+                    'last_failure_at' => now(),
+                    'last_error' => $selectorsMismatched
+                        ? 'Recipe selectors matched nothing on this page (layout mismatch).'
+                        : $validation['reason'],
+                ]);
+            }
 
-            $compatibleAttempt = $this->tryCompatibleDomainRecipes(
+            $compatibleAttempt = $executionFailed ? ['passed' => false, 'images' => []] : $this->tryCompatibleDomainRecipes(
                 $url,
                 $limit,
                 $minimumSuccessCount,
@@ -191,12 +260,26 @@ class BrowserProductGalleryExtractor
                 return $previousRecipeImages ?? $images;
             }
 
-            $debug?->__invoke('warning', 'Сохранённый рецепт перестал давать галерею; отправляю его агенту на ремонт.');
+            $debug?->__invoke('warning', $executionFailed
+                ? 'Исполнение оборвалось; передаю агенту причину и найденные кадры для выбора повтора или исправления.'
+                : 'Сохранённый рецепт перестал давать галерею; отправляю его агенту на ремонт.');
             $repairFrom = [
+                'mode' => $executionFailed ? 'execution_recovery' : 'recipe_repair',
+                'failure_kind' => $technicalFailureKind,
                 'recipe' => $recipe->recipe ?? [],
-                'reason' => $selectorsMismatched
-                    ? 'None of the recipe selectors matched anything on this page.'
-                    : ($validation['reason'] ?? 'unknown'),
+                'reason' => match (true) {
+                    $selectorsMismatched => 'None of the recipe selectors matched anything on this page.',
+                    // Told plainly rather than folded into the same wording a
+                    // genuine mismatch gets: this recipe is not accused of
+                    // anything here, only asked to look at what happened and
+                    // decide for itself whether a plain retry or an actual
+                    // change is warranted.
+                    $executionFailed => 'Execution did not complete ('.$technicalFailureKind
+                        .') before the gallery could be verified - this is not evidence the recipe itself is '
+                        .'wrong. Decide from the diagnostics/action_trace below whether the same plan is likely '
+                        .'to work on a retry or a real change is needed.',
+                    default => $validation['reason'] ?? 'unknown',
+                },
                 'action_trace' => $result['action_trace'] ?? [],
                 'diagnostics' => $result['diagnostics'] ?? [],
                 'images' => $images,
@@ -237,7 +320,7 @@ class BrowserProductGalleryExtractor
         $repairFrom ??= [];
         $images = app(ProductGalleryRecipeTrainer::class)->train(
             $url,
-            $recipe ? 'automatic_failure' : 'initial',
+            ($repairFrom['mode'] ?? null) === 'execution_recovery' ? 'execution_recovery' : ($recipe ? 'automatic_failure' : 'initial'),
             $debug,
             telegramUpdateId: $telegramUpdateId,
             context: $context,
@@ -436,6 +519,7 @@ class BrowserProductGalleryExtractor
                 $updates['last_observed_layout_fingerprint'] = $observedLayoutFingerprint;
             }
             $candidate->increment('success_count', 1, $updates);
+            app(ProductGalleryRecipeProof::class)->remember($candidate, $url, $validation, $telegramUpdateId);
             $this->recipeRouter->bindCompatiblePath($candidate, $url);
             $this->rememberConfirmedGalleryImages($images);
             $debug?->__invoke(
@@ -462,14 +546,105 @@ class BrowserProductGalleryExtractor
         return isset($this->partialGalleryImages[$this->galleryImageKey($url)]);
     }
 
+    public function lastSpecificationText(): ?string
+    {
+        return $this->lastSpecificationText;
+    }
+
+    /** The page actually settled on after navigation/redirects for the most
+     * recent scout()/scoutAfterOpening() call - null when unavailable. */
+    public function lastProductPageUrl(): ?string
+    {
+        return $this->lastProductPageUrl;
+    }
+
+    /**
+     * Visible, structurally-stable clickable/expandable controls observed on
+     * the most recent scout()/scoutAfterOpening() page - a generic
+     * definition (button/[role=tab]/[role=button]/[aria-expanded]/summary/
+     * a[href^="#"]), never a word list, so a caller can offer an agent real
+     * selectors to choose from instead of asking it to invent one from text.
+     *
+     * @return array<int, array{selector: string, text: string}>
+     */
+    public function lastObservedControls(): array
+    {
+        return $this->lastObservedControls;
+    }
+
+    /**
+     * What actually happened to the one selector scoutAfterOpening() was
+     * asked to click - null when scout() (no selector) was the last call.
+     *
+     * @return ?array{selector: string, clicked: bool, changed: bool, selector_missing: bool, navigated_away: bool, navigated_away_reason: ?string}
+     */
+    public function lastClickOutcome(): ?array
+    {
+        return $this->lastClickOutcome;
+    }
+
+    /** @return ?array<string, mixed> */
+    public function lastProductIdentity(): ?array
+    {
+        return $this->lastProductIdentity;
+    }
+
     /** @return array<string, mixed> */
     public function scout(
         string $url,
         ?callable $debug = null,
         ?int $telegramUpdateId = null,
         array $context = [],
+        ?string $confineNavigationToHost = null,
     ): array {
-        return $this->runScript($url, [], 20, true, $debug, $telegramUpdateId, $context);
+        $this->lastSpecificationText = null;
+        $this->lastProductPageUrl = null;
+        $this->lastObservedControls = [];
+        $this->lastClickOutcome = null;
+        $this->lastProductIdentity = null;
+
+        return $this->runScript($url, [], 20, true, $debug, $telegramUpdateId, $context, confineNavigationToHost: $confineNavigationToHost);
+    }
+
+    /**
+     * Same as scout(), but clicks one selector on the product page first -
+     * e.g. a "характеристики"/specifications tab that reveals content
+     * in-page rather than at a different URL - before reading
+     * lastSpecificationText(). Reuses pre_click_selectors, the same
+     * already-safe declarative mechanism a trained gallery recipe uses to
+     * clear a consent wall or open a viewer before collection: Playwright's
+     * own locator only ever finds and clicks an existing element on THIS
+     * product's page, and clickAndWaitForGalleryChange() already refuses any
+     * navigation that would leave it (see isAllowedProductNavigation() in
+     * the script) - so an unhelpful or malformed selector just matches
+     * nothing rather than doing anything unsafe.
+     *
+     * @return array<string, mixed>
+     */
+    public function scoutAfterOpening(
+        string $url,
+        string $selector,
+        ?callable $debug = null,
+        ?int $telegramUpdateId = null,
+        array $context = [],
+        ?string $confineNavigationToHost = null,
+    ): array {
+        $this->lastSpecificationText = null;
+        $this->lastProductPageUrl = null;
+        $this->lastObservedControls = [];
+        $this->lastClickOutcome = null;
+        $this->lastProductIdentity = null;
+
+        return $this->runScript(
+            $url,
+            ['pre_click_selectors' => [$selector]],
+            20,
+            true,
+            $debug,
+            $telegramUpdateId,
+            $context,
+            confineNavigationToHost: $confineNavigationToHost,
+        );
     }
 
     /** @return array<string, mixed> */
@@ -548,6 +723,18 @@ class BrowserProductGalleryExtractor
                 || str_contains($signal, 'err_spdy_protocol_error'));
     }
 
+    /**
+     * $confineNavigationToHost, when given, blocks only main-frame document
+     * navigation (the page itself moving to a different address - the
+     * initial load included) to any other host; every sub-resource request
+     * (images, scripts, stylesheets, XHR/fetch, fonts - a CDN on a
+     * different host from the page is completely normal) is unaffected
+     * regardless of its own host. Opt-in and null by default so every
+     * existing caller (extract(), executeRecipe(), the trainer's own
+     * scout()) keeps its current behaviour unchanged; only
+     * ProductImageResolver's re-read path sets it, confined to the one host
+     * it already validated the requested URL against.
+     */
     private function runScript(
         string $url,
         array $recipe,
@@ -557,6 +744,7 @@ class BrowserProductGalleryExtractor
         ?int $telegramUpdateId,
         array $context,
         bool $withoutHttp2 = false,
+        ?string $confineNavigationToHost = null,
     ): array {
         if (! $this->available($limit, $debug)) {
             return [];
@@ -606,6 +794,8 @@ class BrowserProductGalleryExtractor
             ], base_path(), [
                 'PRODUCT_GALLERY_RECIPE' => json_encode($recipe, JSON_UNESCAPED_SLASHES),
                 'PRODUCT_GALLERY_SCOUT_ONLY' => $scoutOnly ? '1' : '0',
+                'PRODUCT_GALLERY_OBSERVATION_FOCUS' => (string) ($context['observation_focus_selector'] ?? ''),
+                'PRODUCT_GALLERY_CONFINE_HOST' => $confineNavigationToHost ?? '',
                 'PRODUCT_GALLERY_DOM_WAIT_MS' => (string) config('product-images.browser_fallback.dom_wait_ms', 12000),
                 'PRODUCT_GALLERY_PROBE_TIMEOUT_MS' => (string) config('product-images.browser_fallback.image_probe_timeout_ms', 5000),
                 'PRODUCT_GALLERY_MINIMUM_WIDTH' => (string) max(100, min(4000, (int) (
@@ -638,7 +828,7 @@ class BrowserProductGalleryExtractor
                 if (! $withoutHttp2 && $this->looksLikeHttp2Failure(null, $error)) {
                     File::deleteDirectory($transferDirectory);
 
-                    return $this->retryOverHttp11($url, $recipe, $limit, $scoutOnly, $debug, $telegramUpdateId, $context);
+                    return $this->retryOverHttp11($url, $recipe, $limit, $scoutOnly, $debug, $telegramUpdateId, $context, $confineNavigationToHost);
                 }
 
                 if ($this->looksLikeSilentHost($error)) {
@@ -658,7 +848,7 @@ class BrowserProductGalleryExtractor
             if (! $withoutHttp2 && $this->looksLikeHttp2Failure($result, $process->getErrorOutput())) {
                 File::deleteDirectory($transferDirectory);
 
-                return $this->retryOverHttp11($url, $recipe, $limit, $scoutOnly, $debug, $telegramUpdateId, $context);
+                return $this->retryOverHttp11($url, $recipe, $limit, $scoutOnly, $debug, $telegramUpdateId, $context, $confineNavigationToHost);
             }
 
             // A connection accepted and then never answered used to be reported
@@ -689,7 +879,7 @@ class BrowserProductGalleryExtractor
                 ->filter(fn (mixed $image): bool => is_string($image)
                     && filter_var($image, FILTER_VALIDATE_URL) !== false
                     && in_array(parse_url($image, PHP_URL_SCHEME), ['http', 'https'], true))
-                ->unique()->take($limit)->values()->all();
+                ->unique()->when($scoutOnly || $recipe === [], fn ($urls) => $urls->take($limit))->values()->all();
 
             if (! $scoutOnly && collect($result['action_trace'] ?? [])->contains(
                 fn (mixed $action): bool => is_array($action)
@@ -705,8 +895,40 @@ class BrowserProductGalleryExtractor
             // Read from the page the browser was actually served, so a shop
             // that showed a robot check is slowed down before the next visit
             // rather than after the third one draws another.
-            $this->rememberAccessChallenge($url, is_array($result['scout'] ?? null) ? $result['scout'] : []);
+            $scout = is_array($result['scout'] ?? null) ? $result['scout'] : [];
+            $this->rememberAccessChallenge($url, $scout);
             $this->noteIdentityUnconfirmed($result, $debug);
+            $this->lastSpecificationText = is_string($scout['specification_text'] ?? null)
+                ? $scout['specification_text']
+                : null;
+            $this->lastProductPageUrl = is_string($result['product_page_url'] ?? null)
+                ? $result['product_page_url']
+                : null;
+            $this->lastProductIdentity = is_array($result['product_identity'] ?? null)
+                ? $result['product_identity']
+                : null;
+            $this->lastObservedControls = collect($scout['observed_controls'] ?? [])
+                ->filter(fn (mixed $control): bool => is_array($control)
+                    && is_string($control['selector'] ?? null) && $control['selector'] !== ''
+                    && is_string($control['text'] ?? null) && $control['text'] !== '')
+                ->map(fn (array $control): array => ['selector' => $control['selector'], 'text' => $control['text']])
+                ->values()
+                ->all();
+            // At most one entry: scoutAfterOpening() ever asks for a single
+            // selector, so the last (only) 'pre_click' trace entry is this
+            // call's own outcome, not a leftover from an earlier round.
+            $click = collect($result['action_trace'] ?? [])
+                ->last(fn (mixed $action): bool => is_array($action) && ($action['phase'] ?? null) === 'pre_click');
+            $this->lastClickOutcome = is_array($click) ? [
+                'selector' => (string) ($click['selector'] ?? ''),
+                'clicked' => (bool) ($click['clicked'] ?? false),
+                'changed' => (bool) ($click['changed'] ?? false),
+                'selector_missing' => (bool) ($click['selector_missing'] ?? false),
+                'navigated_away' => (bool) ($click['navigated_away'] ?? false),
+                'navigated_away_reason' => is_string($click['navigated_away_reason'] ?? null)
+                    ? $click['navigated_away_reason']
+                    : null,
+            ] : null;
 
             return $result;
         } catch (ProcessTimedOutException $exception) {
@@ -757,11 +979,12 @@ class BrowserProductGalleryExtractor
         ?callable $debug,
         ?int $telegramUpdateId,
         array $context,
+        ?string $confineNavigationToHost = null,
     ): array {
         $this->reputation->noteHttp11Downgrade($url);
         $debug?->__invoke('warning', 'Сайт разорвал соединение по HTTP/2; повторяю один раз по HTTP/1.1.');
 
-        $result = $this->runScript($url, $recipe, $limit, $scoutOnly, $debug, $telegramUpdateId, $context, true);
+        $result = $this->runScript($url, $recipe, $limit, $scoutOnly, $debug, $telegramUpdateId, $context, true, $confineNavigationToHost);
 
         if (trim((string) ($result['error'] ?? '')) !== '') {
             $debug?->__invoke('warning', 'По HTTP/1.1 сайт ответил так же; дело не в протоколе.');
@@ -884,8 +1107,8 @@ class BrowserProductGalleryExtractor
 
         $debug?->__invoke(
             'warning',
-            'Часть кадров снята со страницы, которую не удалось опознать: ни она, ни карточка не публикуют '
-                .'sku, canonical или og:url. Кадры оставляю, но подтверждёнными галерейными они не считаются - '
+            'После перехода не хватило сопоставимых данных, чтобы подтвердить тот же товар. '
+                .'Кадры оставляю, но подтверждёнными галерейными они не считаются - '
                 .'их проверит Vision наравне с остальными.',
         );
     }
@@ -938,6 +1161,17 @@ class BrowserProductGalleryExtractor
     private function galleryImageKey(string $url): string
     {
         return hash('sha256', ProductImageStorage::imageAssetKey($url));
+    }
+
+    private function executionWasInterrupted(array $result): bool
+    {
+        $kind = (string) ($result['failure_kind'] ?? '');
+
+        return in_array($kind, [
+            'browser_crash', 'browser_timeout', 'browser_process', 'browser_protocol',
+            'browser_unavailable', 'host_unreachable', 'host_refusing',
+            'download_interrupted', 'execution_interrupted',
+        ], true) || ($kind === '' && data_get($result, 'diagnostics.partial') === true);
     }
 
     /**

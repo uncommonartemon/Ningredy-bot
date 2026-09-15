@@ -35,6 +35,7 @@ use Illuminate\Support\Facades\Storage;
 use Laravel\Ai\Tools\Request;
 use Mockery;
 use Mockery\MockInterface;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 class ProcessTelegramMessageTest extends TestCase
@@ -154,6 +155,13 @@ class ProcessTelegramMessageTest extends TestCase
             'specifications' => [['key' => 'cpu', 'name' => 'Процессор', 'value' => 'Intel Core Ultra 9']],
             'sources' => [['title' => 'Amazon', 'url' => 'https://amazon.com/dp/EXACT', 'type' => 'marketplace']],
             'primary_source_url' => 'https://amazon.com/dp/EXACT',
+            // A genuinely ready draft: specifications already reconciled
+            // against this exact chosen source (ProductSpecificationReconciler)
+            // - without this, DraftTelegramPresenter's own reconciliationPending()
+            // check correctly treats an unset stamp as still-pending and
+            // this test's "ready" expectations (caption, button layout)
+            // below would never match.
+            'specifications_reconciled_source_url' => 'https://amazon.com/dp/EXACT',
             'image_urls' => [],
             'images_staged_at' => now(),
             'confidence' => 0.98,
@@ -854,7 +862,13 @@ class ProcessTelegramMessageTest extends TestCase
         Http::assertNothingSent();
     }
 
-    public function test_research_tool_creates_an_audited_pending_draft(): void
+    public static function cardAssemblyStates(): array
+    {
+        return ['ready' => [true], 'unfinished' => [false]];
+    }
+
+    #[DataProvider('cardAssemblyStates')]
+    public function test_research_tool_creates_an_audited_pending_draft(bool $ready): void
     {
         ProductResearchAgent::fake([[
             'status' => 'found',
@@ -883,8 +897,14 @@ class ProcessTelegramMessageTest extends TestCase
         $resolver = $this->mock(ProductImageResolver::class);
         $resolver->shouldNotReceive('resolve');
         $imageStorage = $this->mock(ProductImageStorage::class);
-        $imageStorage->shouldReceive('stage')->once()->andReturnUsing(function (ProductDraft $draft): int {
-            $draft->update(['images_staged_at' => now()]);
+        $imageStorage->shouldReceive('stage')->once()->andReturnUsing(function (ProductDraft $draft) use ($ready): int {
+            $draft->update([
+                'images_staged_at' => now(),
+                ...($ready ? [
+                    'description' => 'Final description from the selected photo source.',
+                    'specifications_reconciled_source_url' => $draft->primary_source_url,
+                ] : ['gallery_search_stop_reason' => 'specifications_unreconciled']),
+            ]);
 
             return 3;
         });
@@ -893,7 +913,13 @@ class ProcessTelegramMessageTest extends TestCase
         ])), true, flags: JSON_THROW_ON_ERROR);
 
         $this->assertTrue($result['ok']);
-        $this->assertSame('found', $result['status']);
+        $this->assertSame($ready ? 'found' : 'card_assembly_paused', $result['status']);
+        $this->assertSame($ready, $result['ready_for_approval']);
+        if ($ready) {
+            $this->assertSame('Final description from the selected photo source.', $result['description']);
+        } else {
+            $this->assertArrayNotHasKey('description', $result);
+        }
         $this->assertSame(3, $result['image_count']);
         $this->assertDatabaseHas('product_drafts', [
             'telegram_update_id' => $update->id,
@@ -1161,7 +1187,18 @@ class ProcessTelegramMessageTest extends TestCase
         $resolver = $this->mock(ProductImageResolver::class);
         $resolver->shouldNotReceive('resolve');
         $imageStorage = $this->mock(ProductImageStorage::class);
-        $imageStorage->shouldReceive('stage')->once()->andReturn(3);
+        // A real, successful stage() call reconciles specifications against
+        // the chosen source before returning - it does not just hand back a
+        // count. Only returning 3 here (no matching draft update) simulated
+        // a run that found photos but never actually finished the card, so
+        // ResearchProduct correctly reported card_assembly_paused - not a
+        // bug in the gate, an unrealistic fixture that skipped what stage()
+        // itself is now responsible for.
+        $imageStorage->shouldReceive('stage')->once()->andReturnUsing(function (ProductDraft $draft): int {
+            $draft->forceFill(['specifications_reconciled_source_url' => $draft->primary_source_url])->save();
+
+            return 3;
+        });
 
         $result = json_decode((new ResearchProduct($update, $resolver, imageStorage: $imageStorage))->handle(new Request([
             'query' => 'MSI Titan 18 HX AI A2XW',

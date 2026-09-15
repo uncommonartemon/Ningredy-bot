@@ -102,6 +102,21 @@ test('no comparable evidence is not a verdict', () => {
     assert.equal(sameProductIdentity({ identifiers: { sku: 'a' } }, { canonical: '/p/one' }), null);
 });
 
+test('different OpenGraph tab URLs are unknown, not a different-product verdict', () => {
+    const expected = { og_url: 'https://shop.example/laptop/specification', name: 'laptop a' };
+    const gallery = { og_url: 'https://shop.example/laptop/gallery', name: 'laptop a' };
+    assert.equal(sameProductIdentity(expected, gallery), null);
+    assert.equal(sameProductIdentity(expected, { ...gallery, name: 'laptop b' }), false);
+    assert.equal(sameProductIdentity(
+        { ...expected, identifiers: { sku: 'a' } },
+        { ...gallery, identifiers: { sku: 'b' } },
+    ), false);
+    assert.equal(sameProductIdentity(
+        { ...expected, canonical: 'https://shop.example/product/a' },
+        { ...gallery, canonical: 'https://shop.example/product/b' },
+    ), false);
+});
+
 test('what a page does not publish stays absent', async (t) => {
     const browser = await launch();
 

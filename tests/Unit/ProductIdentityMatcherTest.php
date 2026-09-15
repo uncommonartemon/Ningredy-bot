@@ -227,4 +227,284 @@ class ProductIdentityMatcherTest extends TestCase
 
         $this->assertTrue($matcher->supportsSource($draft, $source));
     }
+
+    public function test_an_agent_resolved_sku_can_confirm_a_source_when_the_operator_wrote_only_a_generic_request(): void
+    {
+        // Real production case (2026-09-10): the operator asked for "Lenovo
+        // LOQ 15 - Luna Grey", the research agent resolved the exact
+        // 83JE0013US onto the draft, and neither the operator's own words
+        // nor any reordered atomic part of that SKU appear in them - both
+        // the narrow (operator-typed) and, before this fix, the confirmation
+        // identifier lists came back empty. supportsSource() then refused
+        // every candidate page unconditionally, including one whose URL
+        // spelled the exact SKU out, and the search paid for a full second
+        // domain's training before a deferred Vision pass finally accepted
+        // the very gallery this check should have confirmed immediately.
+        $draft = new ProductDraft([
+            'telegram_update_id' => 456,
+            'title' => 'Lenovo LOQ 15IRX10 (83JE0013US) - Luna Grey',
+            'brand' => 'Lenovo',
+            'model' => 'LOQ 15IRX10 (83JE0013US)',
+            'specifications' => [
+                ['key' => 'sku', 'name' => 'SKU', 'value' => '83JE0013US'],
+            ],
+        ]);
+        $draft->setRelation('telegramUpdate', new TelegramUpdate([
+            'text' => 'Lenovo LOQ 15 - Luna Grey ищи',
+        ]));
+        $matcher = new ProductIdentityMatcher;
+
+        // The exact condition this covers, not a generalization: filtered
+        // down to only what the operator actually typed, there is nothing
+        // left to require.
+        $this->assertFalse($matcher->requiresExactIdentifier($draft));
+
+        $this->assertTrue($matcher->supportsSource($draft, [
+            'title' => 'Lenovo LOQ 15IRX10 83JE0013US 15.6" Gaming Laptop',
+            'url' => 'https://www.excaliberpc.com/818372/lenovo-loq-15irx10-83je0013us-15.6.html',
+        ]));
+        // Verification, not blind trust: a page that does not publish the
+        // resolved SKU at all still cannot be confirmed by it.
+        $this->assertFalse($matcher->supportsSource($draft, [
+            'title' => 'Gaming Laptop Deals This Week',
+            'url' => 'https://blog.example/best-gaming-laptop-deals',
+        ]));
+    }
+
+    public function test_an_agent_resolved_sku_still_cannot_reject_a_different_regional_card(): void
+    {
+        // The other half of the same fix: widening confirmation to the
+        // draft's own resolved identifiers must not also widen rejection.
+        // requiresExactIdentifier()/conflicts() keep using only what the
+        // operator actually typed, so an agent-inferred SKU here (regional,
+        // possibly not the only valid one) still cannot reject a page
+        // publishing a different one - the exact bug the surrounding
+        // requestedIdentifiers() comment already protects against.
+        $draft = new ProductDraft([
+            'telegram_update_id' => 457,
+            'title' => 'Lenovo LOQ 15IRX10 (83JE0013US) - Luna Grey',
+            'brand' => 'Lenovo',
+            'model' => 'LOQ 15IRX10 (83JE0013US)',
+            'specifications' => [
+                ['key' => 'sku', 'name' => 'SKU', 'value' => '83JE0013US'],
+            ],
+        ]);
+        $draft->setRelation('telegramUpdate', new TelegramUpdate([
+            'text' => 'Lenovo LOQ 15 - Luna Grey ищи',
+        ]));
+        $matcher = new ProductIdentityMatcher;
+
+        $this->assertFalse($matcher->conflicts(
+            $draft,
+            'https://shop.example/lenovo-loq-15irx10-83je002kus-different-region.html',
+        ));
+    }
+
+    public function test_a_shared_chassis_code_alone_is_plausible_but_not_an_exact_identifier_match(): void
+    {
+        // The concern raised after the 2026-09-10 live run: multiple SKUs of
+        // one laptop line share a chassis code ("LOQ 15IRX10"), so a page
+        // naming only that code - not the specific SKU - could otherwise
+        // grant the same wholesale-gallery trust as an exact match, even
+        // though it may describe a different RAM/GPU/storage configuration.
+        $draft = new ProductDraft([
+            'telegram_update_id' => 458,
+            'title' => 'Lenovo LOQ 15IRX10 (83JE0013US) - Luna Grey',
+            'brand' => 'Lenovo',
+            'model' => 'LOQ 15IRX10 (83JE0013US)',
+            'specifications' => [
+                ['key' => 'sku', 'name' => 'SKU', 'value' => '83JE0013US'],
+            ],
+        ]);
+        $draft->setRelation('telegramUpdate', new TelegramUpdate([
+            'text' => 'Lenovo LOQ 15 - Luna Grey ищи',
+        ]));
+        $matcher = new ProductIdentityMatcher;
+
+        $exactSource = [
+            'title' => 'Lenovo LOQ 15IRX10 83JE0013US 15.6" Gaming Laptop',
+            'url' => 'https://www.excaliberpc.com/818372/lenovo-loq-15irx10-83je0013us-15.6.html',
+        ];
+        $chassisOnlySource = [
+            'title' => 'Lenovo LOQ 15IRX10 Gaming Laptop - Other Configuration',
+            'url' => 'https://shop.example/lenovo-loq-15irx10-16gb-rtx4050',
+        ];
+
+        // The exact SKU is present verbatim: this is the cheap, no-judge path.
+        $this->assertTrue($matcher->confirmsExactIdentifier($draft, $exactSource));
+        // The chassis code alone is still a plausible lead (supportsSource
+        // stays true, used for ranking/fallback) ...
+        $this->assertTrue($matcher->supportsSource($draft, $chassisOnlySource));
+        // ... but it must not count as an exact, judge-free confirmation of
+        // this specific configuration.
+        $this->assertFalse($matcher->confirmsExactIdentifier($draft, $chassisOnlySource));
+    }
+
+    public function test_a_matching_model_does_not_confirm_a_page_naming_a_different_sku(): void
+    {
+        // Real reproduction (2026-09-11): model and sku live in separate
+        // draft fields, unlike the embedded-in-one-string case above. A page
+        // sharing the model verbatim but naming a different real sku is a
+        // different configuration, not a confirmed one - model must not
+        // stand in for sku once a dedicated identifier exists to disagree
+        // with it.
+        $draft = new ProductDraft([
+            'telegram_update_id' => 459,
+            'title' => 'Lenovo LOQ 15IRX10 - Luna Grey',
+            'brand' => 'Lenovo',
+            'model' => 'LOQ 15IRX10',
+            'specifications' => [
+                ['key' => 'sku', 'name' => 'SKU', 'value' => '83JE0013US'],
+            ],
+        ]);
+        $draft->setRelation('telegramUpdate', new TelegramUpdate([
+            'text' => 'Lenovo LOQ 15 - Luna Grey ищи',
+        ]));
+        $matcher = new ProductIdentityMatcher;
+
+        $this->assertFalse($matcher->confirmsExactIdentifier($draft, [
+            'title' => 'Lenovo LOQ 15IRX10 - SKU 83JE0099US',
+            'url' => 'https://shop.example/loq-15irx10-83je0099us',
+        ]));
+        $this->assertTrue($matcher->confirmsExactIdentifier($draft, [
+            'title' => 'Lenovo LOQ 15IRX10 - SKU 83JE0013US',
+            'url' => 'https://shop.example/loq-15irx10-83je0013us',
+        ]));
+    }
+
+    public function test_supports_a_raw_url_requires_the_dedicated_sku_not_the_shared_model_word(): void
+    {
+        // The word-level sibling of the two tests above: supports() takes a
+        // bare asset URL (no page title/text), so its strong-token pool
+        // cannot be one compacted whole string the way confirmsExactIdentifier()'s
+        // can - a real image URL keeps hyphens between words that page text
+        // does not. "15irx10" is still a strong token by the letter+digit
+        // test, but once a dedicated sku exists it must not stand in for it.
+        $draft = new ProductDraft([
+            'title' => 'Lenovo LOQ 15IRX10 (83JE0013US) - Luna Grey',
+            'brand' => 'Lenovo',
+            'model' => 'LOQ 15IRX10 (83JE0013US)',
+            'specifications' => [
+                ['key' => 'sku', 'name' => 'SKU', 'value' => '83JE0013US'],
+            ],
+        ]);
+        $matcher = new ProductIdentityMatcher;
+
+        $this->assertFalse($matcher->supports(
+            $draft,
+            'https://shop.example/loq-15irx10-other-config.jpg',
+        ));
+        $this->assertTrue($matcher->supports(
+            $draft,
+            'https://shop.example/loq-15irx10-83je0013us.jpg',
+        ));
+    }
+
+    public function test_a_different_sku_is_not_rescued_by_its_own_family_words_once_a_strong_check_exists(): void
+    {
+        // Real reproduction (2026-09-11): the strong-token check correctly
+        // fails on a genuinely different sku, but the old code then fell
+        // through unconditionally to the weak ">= 3 words" rule - and "loq",
+        // "15irx10", "luna", "grey" alone satisfied it without the sku ever
+        // being part of the count. Once the draft has a specific code to
+        // check, that check must be the whole answer for supports() too, the
+        // same way confirmsExactIdentifier() already treats it.
+        $draft = new ProductDraft([
+            'title' => 'Lenovo LOQ 15IRX10 (83JE0013US) - Luna Grey',
+            'brand' => 'Lenovo',
+            'model' => 'LOQ 15IRX10 (83JE0013US)',
+            'color' => 'Luna Grey',
+            'specifications' => [
+                ['key' => 'sku', 'name' => 'SKU', 'value' => '83JE0013US'],
+            ],
+        ]);
+        $matcher = new ProductIdentityMatcher;
+
+        $this->assertFalse($matcher->supports(
+            $draft,
+            'https://example.com/loq-15irx10-luna-grey-83je0099us.jpg',
+        ));
+        $this->assertTrue($matcher->supports(
+            $draft,
+            'https://example.com/loq-15irx10-luna-grey-83je0013us.jpg',
+        ));
+    }
+
+    public function test_a_longer_different_sku_does_not_confirm_the_requested_one_as_its_prefix(): void
+    {
+        // Real reproduction (2026-09-11): 83JE0013USX is a different, real,
+        // longer sku that happens to start with the requested one. A plain
+        // str_contains() on two fully compact()-ed strings cannot tell a
+        // whole match from the first few characters of a longer code, since
+        // compacting strips the very separators that would have marked
+        // where one code ends.
+        $draft = new ProductDraft([
+            'model' => 'LOQ 15IRX10 (83JE0013US)',
+            'specifications' => [
+                ['key' => 'sku', 'name' => 'SKU', 'value' => '83JE0013US'],
+            ],
+        ]);
+        $matcher = new ProductIdentityMatcher;
+
+        $this->assertFalse($matcher->confirmsExactIdentifier($draft, [
+            'title' => 'Some Other Configuration 83JE0013USX',
+            'url' => 'https://shop.example/83je0013usx',
+        ]));
+        $this->assertTrue($matcher->confirmsExactIdentifier($draft, [
+            'title' => 'Some Other Configuration 83JE0013US',
+            'url' => 'https://shop.example/83je0013us',
+        ]));
+    }
+
+    public function test_supports_does_not_confirm_a_longer_different_sku_as_its_prefix_either(): void
+    {
+        // The word-level sibling of the confirmsExactIdentifier() test above:
+        // supports() had its own, separate str_contains() call and needed
+        // the same boundary check independently. Real reproduction
+        // (2026-09-11): the strict check above already correctly rejects
+        // this url, but supports() still returned true and could outvote
+        // Vision's own exact_match=false through the source_supported
+        // OR-gate.
+        $draft = new ProductDraft([
+            'model' => 'LOQ 15IRX10 (83JE0013US)',
+            'specifications' => [
+                ['key' => 'sku', 'name' => 'SKU', 'value' => '83JE0013US'],
+            ],
+        ]);
+        $matcher = new ProductIdentityMatcher;
+
+        $this->assertFalse($matcher->supports(
+            $draft,
+            'https://shop.example/loq-15irx10-83je0013usx.jpg',
+        ));
+        $this->assertTrue($matcher->supports(
+            $draft,
+            'https://shop.example/loq-15irx10-83je0013us.jpg',
+        ));
+    }
+
+    public function test_supports_requires_every_strong_word_of_a_multi_part_model_not_just_one(): void
+    {
+        // Real reproduction (2026-09-11): no dedicated sku, so the model
+        // itself is the strong-token pool - but it splits into two
+        // independently strong words ("x1504va", "bq4485"), and the old
+        // contains() (any one word) let the shared "x1504va" chassis word
+        // alone confirm a url whose own suffix ("bq9999") openly named a
+        // different configuration than the requested "bq4485".
+        $draft = new ProductDraft([
+            'title' => 'ASUS Vivobook 15',
+            'brand' => 'ASUS',
+            'model' => 'X1504VA-BQ4485',
+        ]);
+        $matcher = new ProductIdentityMatcher;
+
+        $this->assertFalse($matcher->supports(
+            $draft,
+            'https://shop.example/asus-vivobook-15-x1504va-bq9999.jpg',
+        ));
+        $this->assertTrue($matcher->supports(
+            $draft,
+            'https://93.184.216.34/products/asus-vivobook-15-x1504va-bq4485',
+        ));
+    }
 }

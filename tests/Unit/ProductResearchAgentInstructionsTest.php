@@ -53,7 +53,7 @@ class ProductResearchAgentInstructionsTest extends TestCase
         $this->assertStringContainsString('category-specific gallery pipeline', $instructions);
         $this->assertStringContainsString('status is a commitment, not a guess', $instructions);
         $this->assertStringContainsString('never found with an empty or', $instructions);
-        $this->assertStringContainsString('target 6-10 exact HTML product', $instructions);
+        $this->assertStringContainsString('Twenty to forty genuine', $instructions);
         $this->assertStringContainsString('SKU/MPN/part number, EAN or UPC', $instructions);
         $this->assertStringContainsString('exact key sku, mpn, ean, upc, or', $instructions);
         $this->assertStringContainsString('category and product_type', $instructions);
@@ -107,5 +107,23 @@ class ProductResearchAgentInstructionsTest extends TestCase
         $this->assertSame($expectedSlugs, $schema['category']->toArray()['enum']);
         $this->assertNotContains('inactive-test-category', $schema['category']->toArray()['enum']);
         $this->assertArrayNotHasKey('clarification_question', $schema);
+    }
+
+    public function test_the_instructions_state_one_breadth_target_not_two(): void
+    {
+        // Two targets lived in this prompt at once: "target 6-10 exact HTML
+        // product pages" in the discovery paragraph and "20-40 genuine cards"
+        // in the image_urls one. Across fifty-one measured production runs the
+        // agent never returned more than ten sources - it read the smaller
+        // number and the raised schema/normalizer caps bought nothing. One
+        // target, stated once, or the next reader picks whichever it likes.
+        $instructions = (string) (new ProductResearchAgent)->instructions();
+
+        $this->assertStringContainsString('Twenty to forty genuine', $instructions);
+        $this->assertSame(
+            1,
+            preg_match_all('/\b(?:\d+\s*-\s*\d+|\w+ to \w+)\s+(?:exact|genuine)\b/i', $instructions),
+            'The instructions must name how many candidate pages to return exactly once.',
+        );
     }
 }

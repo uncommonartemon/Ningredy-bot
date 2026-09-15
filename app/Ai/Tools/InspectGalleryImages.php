@@ -7,6 +7,7 @@ use App\Models\AiRun;
 use App\Services\Ai\AiSettings;
 use App\Services\Ai\OpenAiHeavyOperationGate;
 use App\Services\Ai\ProductSearchTimeBudget;
+use App\Services\Products\ProductImageEncoder;
 use App\Services\Products\ProductImageResolver;
 use App\Services\Products\ProductImageStorage;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
@@ -18,6 +19,16 @@ use Throwable;
 
 class InspectGalleryImages implements Tool
 {
+    /**
+     * What the vision provider actually accepts. A URL's own extension is
+     * never proof of what the server sent - real case: a Lenovo product
+     * page linked *.png assets that now serve AVIF, and the raw bytes went
+     * to Vision unconverted six rounds running, each one failing the exact
+     * same "not a valid image" way while the agent was only ever told
+     * "Vision inspection was unavailable".
+     */
+    private const array VISION_ACCEPTED_MIME_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+
     /** @param array<int, string> $allowedImageUrls */
     public function __construct(
         private readonly array $allowedImageUrls,
@@ -33,7 +44,9 @@ class InspectGalleryImages implements Tool
             .'prominent in-image text uses a language other than English/Czech. This is observational: it never '
             .'selects, rejects, ranks, or proves an exact SKU. For an explicitly requested color, inspect several '
             .'informative views from the same candidate slider together; unclear detail views are not conflicts. '
-            .'Call again with another observed batch if needed.';
+            .'Call again with another observed batch if needed. A URL reported with retryable=false could not be '
+            .'converted into a format this tool accepts - never resubmit that exact URL unchanged; a different '
+            .'rendition of the same frame may still work.';
     }
 
     public function handle(Request $request): Stringable|string
@@ -71,21 +84,45 @@ class InspectGalleryImages implements Tool
             $download = $resolver->download($url, failureReason: $failureReason);
 
             if (! is_array($download)) {
-                $downloadErrors[] = ['url' => $url, 'reason' => $failureReason ?? 'download_failed'];
+                $downloadErrors[] = [
+                    'url' => $url,
+                    'reason' => $failureReason ?? 'download_failed',
+                    'retryable' => true,
+                ];
+
+                continue;
+            }
+
+            $prepared = $this->prepareForVision($download);
+
+            if ($prepared === null) {
+                $downloadErrors[] = [
+                    'url' => $url,
+                    'reason' => 'unsupported_image_format',
+                    'observed_format' => $download['mime_type'] ?? 'unknown',
+                    'retryable' => false,
+                    'note' => 'This exact URL could not be converted into a format Vision accepts - '
+                        .'do not resubmit it unchanged. A different rendition/URL for the same frame may work.',
+                ];
 
                 continue;
             }
 
             $attachments[] = Image::fromBase64(
-                base64_encode($download['bytes']),
-                $download['mime_type'],
+                base64_encode($prepared['bytes']),
+                $prepared['mime_type'],
             )->as('gallery-observation-'.(count($attachments) + 1))
                 ->withProviderOptions(['detail' => (string) config('product-images.gallery_agent_vision_detail', 'high')]);
             $inspectedUrls[] = $url;
         }
 
         if ($attachments === []) {
-            return $this->json(['ok' => false, 'error' => 'Observed images could not be downloaded.', 'downloads' => $downloadErrors]);
+            return $this->json([
+                'ok' => false,
+                'error' => 'None of the requested URLs produced an image Vision could inspect - see downloads for '
+                    .'the reason per URL and whether resubmitting it can help.',
+                'downloads' => $downloadErrors,
+            ]);
         }
 
         $settings = app(AiSettings::class);
@@ -144,10 +181,66 @@ class InspectGalleryImages implements Tool
             ]);
             report($exception);
 
+            // The full exception message is deliberately not echoed back -
+            // it can carry provider/request detail that does not belong in a
+            // tool result. Only a known, safe classification is: whether the
+            // provider still rejected a prepared image as not a valid image
+            // (residual - prepareForVision() already converts every format
+            // it can) versus a genuine transient failure worth retrying.
+            $imageRejected = str_contains(mb_strtolower($exception->getMessage()), 'valid image');
+
             return $this->json([
                 'ok' => false,
-                'error' => 'Vision inspection was unavailable; keep the gallery decision uncertain and use other evidence.',
+                'error' => $imageRejected
+                    ? 'The vision provider still rejected a prepared image as invalid. Do not resubmit these '
+                        .'exact URLs unchanged; a different rendition may work.'
+                    : 'Vision inspection was unavailable; keep the gallery decision uncertain and use other evidence.',
+                'retryable' => ! $imageRejected,
+                'inspected_urls' => $inspectedUrls,
             ]);
+        }
+    }
+
+    /**
+     * The vision provider's own accepted format list, not what a URL's
+     * extension claims. A candidate is re-encoded through GD when its actual
+     * bytes are something else (a *.png link that now serves AVIF is a real
+     * production case, not a hypothetical) rather than handed over as-is and
+     * left to fail identically every round.
+     *
+     * @param  array{bytes: string, mime_type?: string, width?: int, height?: int}  $download
+     * @return array{bytes: string, mime_type: string}|null
+     */
+    private function prepareForVision(array $download): ?array
+    {
+        $mimeType = (string) ($download['mime_type'] ?? '');
+
+        if (in_array($mimeType, self::VISION_ACCEPTED_MIME_TYPES, true)) {
+            return ['bytes' => $download['bytes'], 'mime_type' => $mimeType];
+        }
+
+        $encoder = app(ProductImageEncoder::class);
+        $width = (int) ($download['width'] ?? 0);
+        $height = (int) ($download['height'] ?? 0);
+
+        if ($width > 0 && $height > 0 && ! $encoder->isSafeToDecode($width, $height)) {
+            return null;
+        }
+
+        $decoded = @imagecreatefromstring($download['bytes']);
+
+        if ($decoded === false) {
+            return null;
+        }
+
+        try {
+            $converted = $encoder->toWebp($decoded);
+
+            return ['bytes' => $converted['bytes'], 'mime_type' => 'image/webp'];
+        } catch (Throwable) {
+            return null;
+        } finally {
+            imagedestroy($decoded);
         }
     }
 

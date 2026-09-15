@@ -1,12 +1,19 @@
 import dns from 'node:dns/promises';
 import net from 'node:net';
+import { captureGalleryScoutInPage } from './gallery-focus.mjs';
 import { existsSync } from 'node:fs';
 import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { chromium } from 'playwright-core';
 import { closeWithin, saveGalleryCheckpoint } from './gallery-checkpoint.mjs';
+import { observedGalleryRenditions, rememberGalleryLayer, selectGalleryFrames } from './gallery-observation.mjs';
 import {
     browserServerEndpointFile,
+    capturePageTextInPage,
+    captureObservedControlsInPage,
+    isNavigationRequestOffConfinedHost,
+    revealedCandidatesVisibilityInPage,
+    revealedContainerTextInPage,
     clearBlockingOverlays,
     EXCLUDED_GALLERY_CONTEXT_PATTERN_SOURCE,
     galleryCollectionTarget,
@@ -17,9 +24,11 @@ import {
     prioritizeCandidateRenditions,
     recipeActionOpensGallery,
     recipeActionPlanStatus,
+    recipeActionRequestedIndex,
     recipeActionShouldStop,
     readProductIdentityInPage,
     recipeActionTraversesGallery,
+    resolveRecipeActionTargetIndex,
     sameProductIdentity,
     settleLikeAReader,
     urlQualityScore,
@@ -31,6 +40,13 @@ import {
 const sourceUrl = process.argv[2];
 const limit = Math.max(1, Math.min(60, Number.parseInt(process.argv[3] || '20', 10)));
 const scoutOnly = process.env.PRODUCT_GALLERY_SCOUT_ONLY === '1';
+const observationFocusSelector = (process.env.PRODUCT_GALLERY_OBSERVATION_FOCUS || '').trim();
+// Opt-in only (empty by default): confines main-frame document navigation -
+// the page itself moving to a different address, the initial load included
+// - to this one host. Never applied to sub-resource requests (images,
+// scripts, stylesheets, XHR/fetch, fonts): a CDN on a different host from
+// the page is normal and must keep loading regardless of this setting.
+const confineNavigationToHost = (process.env.PRODUCT_GALLERY_CONFINE_HOST || '').trim().toLowerCase();
 const domWaitMs = Math.max(1000, Math.min(30000, Number.parseInt(
     process.env.PRODUCT_GALLERY_DOM_WAIT_MS || '12000',
     10,
@@ -432,6 +448,7 @@ const priorityImages = [];
 let learnedRecipe = {};
 let scout = {};
 let postInteractionScout = {};
+let layerObservations = [];
 const actionTrace = [];
 let navigationStatus = null;
 let screenshotPath = null;
@@ -536,13 +553,15 @@ const emitCrashResult = (error, failureKind = 'browser_crash') => {
         [...gathered, ...priorityImages, ...networkImages, ...payloadImages]
             .map((url) => normalizeImageCandidate(url, sourceUrl))
             .filter(Boolean),
-    )].slice(0, limit);
+    )];
 
     process.stdout.write(JSON.stringify({
         images: partialImages,
         scout,
         post_interaction_scout: postInteractionScout,
         action_trace: actionTrace,
+        product_page_url: productPageUrl,
+        product_identity: productIdentity,
         learned_recipe: learnedRecipe,
         error: String(error?.stack || error).slice(0, 1000),
         failure_kind: failureKind,
@@ -576,11 +595,19 @@ const imageUrlsFromText = (text) => {
 };
 
 await page.route('**/*', async (route) => {
-    if (await publicHttpUrl(route.request().url())) {
-        await route.continue();
-    } else {
+    const request = route.request();
+
+    if (!await publicHttpUrl(request.url())) {
         await route.abort('blockedbyclient');
+        return;
     }
+
+    if (isNavigationRequestOffConfinedHost(request, page.mainFrame(), confineNavigationToHost)) {
+        await route.abort('blockedbyclient');
+        return;
+    }
+
+    await route.continue();
 });
 
 page.on('response', (response) => {
@@ -1204,7 +1231,7 @@ const distinctCollectedAssets = () => new Set(
         .filter(Boolean)
         .map(imageAssetKey),
 ).size;
-const collectionTarget = galleryCollectionTarget(limit, 0);
+const collectionTarget = strictRecipe ? Number.POSITIVE_INFINITY : galleryCollectionTarget(limit, 0);
 const enoughCollected = () => new Set(
     gathered
         .map((url) => normalizeImageCandidate(url, sourceUrl))
@@ -1609,285 +1636,24 @@ const attemptExpandedGallery = async (skipExplicitSelectors = false) => {
     return clicked && (trace.changed === true || await expandedGalleryVisible());
 };
 
-const captureInteractionScout = async (scopeToMedia = false) => page.evaluate(({ excludedContextPatternSource, scopeToMedia }) => {
-    const excludedContextPattern = new RegExp(excludedContextPatternSource.replaceAll('\\\\', '\\'), 'i');
-    const semanticContext = (element) => {
-        const parts = [];
-        let current = element;
-
-        for (let depth = 0; current && depth < 8; depth++, current = current.parentElement) {
-            for (const attribute of [
-                'id', 'class', 'role', 'aria-label', 'title', 'data-testid',
-                'data-component-type', 'data-feature-name', 'data-cel-widget',
-            ]) {
-                const value = current.getAttribute?.(attribute);
-                if (value) parts.push(value);
-            }
-
-            if (current.matches?.('section,aside,[role="region"],[role="dialog"],dialog')) {
-                const heading = current.querySelector?.('h1,h2,h3,h4,[role="heading"]');
-                if (heading?.textContent) parts.push(heading.textContent.slice(0, 240));
-            }
-        }
-
-        return parts.join(' ').replace(/([a-z])([A-Z])/g, '$1 $2');
-    };
-    const excludedContext = (element) => excludedContextPattern.test(semanticContext(element));
-    const sanitize = (element) => {
-        const clone = element.cloneNode(true);
-
-        for (const node of [clone, ...clone.querySelectorAll('*')]) {
-            for (const attribute of [...node.attributes]) {
-                if (/^on/i.test(attribute.name) || ['style', 'nonce', 'integrity', 'srcset', 'data-srcset', 'data-bgset'].includes(attribute.name)) {
-                    node.removeAttribute(attribute.name);
-                }
-            }
-        }
-
-        // svg is never a gallery photo source in this pipeline (product
-        // photos are always <img src>/network requests, never inline paths)
-        // but a single star-rating or icon svg can be thousands of
-        // characters of path/gradient data - enough on its own to consume
-        // the whole per-fragment budget below before any of the actually
-        // useful text (captions, price, SKU) is reached.
-        for (const node of clone.querySelectorAll('script,style,noscript,iframe,object,embed,form,input,textarea,svg')) {
-            node.remove();
-        }
-
-        return clone.outerHTML.replace(/\s+/g, ' ').slice(0, 1600);
-    };
-    const visible = (element) => {
-        const rect = element.getBoundingClientRect();
-        const style = getComputedStyle(element);
-
-        return rect.width > 1 && rect.height > 1
-            && style.display !== 'none'
-            && style.visibility !== 'hidden';
-    };
-    const inViewport = (element) => {
-        const rect = element.getBoundingClientRect();
-
-        return visible(element)
-            && rect.bottom > 0
-            && rect.right > 0
-            && rect.top < innerHeight
-            && rect.left < innerWidth;
-    };
-    const attributeSelector = (element, name, value) =>
-        `${element.tagName.toLowerCase()}[${name}=${JSON.stringify(value)}]`;
-    const selectorFor = (element) => {
-        const id = element.getAttribute('id');
-
-        if (id && id.length <= 100) {
-            const selector = `#${CSS.escape(id)}`;
-
-            if (document.querySelectorAll(selector).length === 1) {
-                return selector;
-            }
-        }
-
-        for (const name of ['data-testid', 'data-test', 'data-selenium', 'data-qa', 'aria-label', 'name']) {
-            const value = element.getAttribute(name);
-
-            if (!value || value.length > 160) {
-                continue;
-            }
-
-            const selector = attributeSelector(element, name, value);
-
-            try {
-                if (document.querySelectorAll(selector).length > 0) {
-                    return selector;
-                }
-            } catch {
-                // Try the next stable attribute.
-            }
-        }
-
-        const classTokens = [...element.classList]
-            .filter((token) => token.length >= 3
-                && token.length <= 60
-                && !/^\d/.test(token)
-                && !/[a-f0-9]{8,}/i.test(token))
-            .slice(0, 2);
-
-        if (classTokens.length) {
-            return element.tagName.toLowerCase()+classTokens.map((token) => `.${CSS.escape(token)}`).join('');
-        }
-
-        return element.tagName.toLowerCase();
-    };
-    const rectFor = (element) => {
-        const rect = element.getBoundingClientRect();
-
-        return {
-            x: Math.round(rect.x),
-            y: Math.round(rect.y),
-            width: Math.round(rect.width),
-            height: Math.round(rect.height),
-        };
-    };
-    const mediaContainerSelector = [
-        '[class*=gallery i]', '[class*=thumbnail i]', '[class*=slider i]',
-        '[class*=carousel i]', '[class*=swiper i]', '[class*=zoom i]',
-        '[class*=product-image i]', '[class*=product-media i]', '[data-selenium*=media i]',
-    ].join(',');
-    // A later round already knows an interaction happened - scoping to the
-    // confirmed media container instead of re-scanning the whole page again
-    // (nav, footer, unrelated recommendation carousels that merely match
-    // one of the same loose keywords) keeps the growing per-round payload
-    // from ballooning (a real case: round 2's page snapshot grew from
-    // ~55KB to ~79KB instead of shrinking, because the newly opened
-    // viewer's controls were added on top of everything the first round
-    // already matched, not scoped down to it). Only applied when at least
-    // one match exists - an empty scoped set almost certainly means the
-    // heuristic container selector missed the real one on this page, not
-    // that nothing is there, so falling back to the unscoped list is safer
-    // than silently hiding the gallery from the next round's reasoning.
-    const scopeFilter = (list, isWithinMedia) => {
-        if (!scopeToMedia) {
-            return list;
-        }
-
-        const scoped = list.filter(isWithinMedia);
-
-        return scoped.length > 0 ? scoped : list;
-    };
-    const candidates = scopeFilter(
-        [...document.querySelectorAll([
-            '[data-old-hires]', '[data-zoom-image]', '[data-large_image]', '[data-full]', '[itemprop=image]',
-            '[class*=gallery i]', '[class*=thumbnail i]', '[class*=slider i]',
-            '[class*=carousel i]', '[class*=swiper i]', '[class*=zoom i]',
-            '[class*=product-image i]', '[class*=product-media i]', '[data-selenium*=media i]',
-            'button[aria-label*=next i]', 'button[aria-label*=image i]',
-        ].join(','))].filter((element) => !excludedContext(element)),
-        (element) => Boolean(element.closest(mediaContainerSelector)),
-    ).slice(0, 70);
-    const interactiveControlElements = [...document.querySelectorAll('button,a,[role=button]')]
-        .filter((element) => /\b(gallery|media|image|photo|thumbnail|carousel|slider|zoom|next|more)\b/i.test([
-            element.getAttribute('aria-label'),
-             element.getAttribute('title'),
-             element.getAttribute('class'),
-             element.getAttribute('data-selenium'),
-             element.getAttribute('href'),
-             element.textContent,
-        ].filter(Boolean).join(' ')))
-        .filter((element) => !excludedContext(element));
-    const interactiveControls = scopeFilter(
-        interactiveControlElements,
-        (element) => Boolean(element.closest(mediaContainerSelector)),
-    ).slice(0, 50)
-        .map(sanitize)
-        .filter(Boolean);
-    const actionCandidateObjects = [...document.querySelectorAll('button,a,[role=button],summary')]
-        .filter(visible)
-        .filter((element) => !excludedContext(element))
-        .map((element, documentIndex) => {
-            const selector = selectorFor(element);
-            const signal = [
-                element.getAttribute('aria-label'),
-                element.getAttribute('title'),
-                element.getAttribute('class'),
-                element.getAttribute('data-selenium'),
-                element.getAttribute('href'),
-                element.textContent,
-            ].filter(Boolean).join(' ');
-            const withinMedia = Boolean(element.closest(mediaContainerSelector));
-            const containsImage = Boolean(element.querySelector('img,picture'));
-            let selectorCount = 0;
-            let selectorIndex = 0;
-
-            try {
-                const selectorMatches = [...document.querySelectorAll(selector)];
-                selectorCount = selectorMatches.length;
-                selectorIndex = Math.max(0, selectorMatches.indexOf(element));
-            } catch {
-                // The AI still receives the element, but knows the selector is unusable.
-            }
-
-            return {
-                document_index: documentIndex,
-                selector,
-                selector_match_count: selectorCount,
-                selector_index: selectorIndex,
-                tag: element.tagName.toLowerCase(),
-                role: element.getAttribute('role') || null,
-                text: (element.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 180),
-                aria_label: (element.getAttribute('aria-label') || '').slice(0, 180),
-                title: (element.getAttribute('title') || '').slice(0, 180),
-                href: (element.getAttribute('href') || '').slice(0, 500),
-                disabled: element.matches(':disabled,[aria-disabled=true]'),
-                in_viewport: inViewport(element),
-                within_media: withinMedia,
-                contains_image: containsImage,
-                rect: rectFor(element),
-                relevance: (withinMedia ? 4 : 0)
-                    + (containsImage ? 2 : 0)
-                    + (inViewport(element) ? 1 : 0)
-                    + (/\b(gallery|media|image|photo|thumbnail|carousel|slider|zoom|next|more)\b/i.test(signal) ? 5 : 0),
-            };
-        });
-    const actionCandidates = scopeFilter(actionCandidateObjects, (candidate) => candidate.within_media)
-        .sort((left, right) => right.relevance - left.relevance || left.document_index - right.document_index)
-        .slice(0, 80)
-        .map(({ relevance, ...candidate }) => candidate);
-    const imageCandidateObjects = [...document.images].filter((element) => !excludedContext(element))
-        .map((element, documentIndex) => {
-            const dataAttributes = Object.fromEntries(
-                [...element.attributes]
-                    .filter((attribute) => /^data-/i.test(attribute.name)
-                        && /(src|image|zoom|large|full|hires|original)/i.test(attribute.name))
-                    .slice(0, 10)
-                    .map((attribute) => [attribute.name, attribute.value.slice(0, 500)]),
-            );
-            const parentControl = element.closest('button,a,[role=button]');
-            // A thumbnail button whose full-resolution URL is already a
-            // quoted literal inside its own onclick (real case: onclick=
-            // "window.changeMainImage('.../02.png', this)") needs no click
-            // at all - but the agent can only notice that if this URL is
-            // actually part of what it is shown, same reasoning as
-            // data_attributes below.
-            const parentControlOnclick = (parentControl?.getAttribute('onclick') || '').slice(0, 500) || null;
-
-            return {
-                document_index: documentIndex,
-                selector: selectorFor(element),
-                src: (element.getAttribute('src') || '').slice(0, 500),
-                current_src: (element.currentSrc || '').slice(0, 500),
-                alt: (element.getAttribute('alt') || '').slice(0, 180),
-                natural_width: element.naturalWidth || 0,
-                natural_height: element.naturalHeight || 0,
-                rendered: rectFor(element),
-                visible: visible(element),
-                in_viewport: inViewport(element),
-                within_media: Boolean(element.closest(mediaContainerSelector)),
-                parent_control_selector: parentControl ? selectorFor(parentControl) : null,
-                parent_control_onclick: parentControlOnclick,
-                data_attributes: dataAttributes,
-            };
-        });
-    const imageCandidates = scopeFilter(imageCandidateObjects, (candidate) => candidate.within_media)
-        .sort((left, right) =>
-            Number(right.within_media) - Number(left.within_media)
-            || (right.natural_width * right.natural_height) - (left.natural_width * left.natural_height))
-        .slice(0, 50);
-
-    return {
-        final_url: location.href,
-        title: document.title.slice(0, 500),
-        fragments: candidates.map(sanitize).filter(Boolean).slice(0, 32),
-        interactive_controls: interactiveControls,
-        action_candidates: actionCandidates,
-        image_candidates: imageCandidates,
-        page_geometry: {
-            viewport_width: innerWidth,
-            viewport_height: innerHeight,
-            document_width: document.documentElement.scrollWidth,
-            document_height: document.documentElement.scrollHeight,
-            visible_dialogs: [...document.querySelectorAll('[role=dialog],dialog[open]')].filter(visible).length,
-        },
-    };
-}, { excludedContextPatternSource: EXCLUDED_GALLERY_CONTEXT_PATTERN_SOURCE, scopeToMedia });
+const captureInteractionScout = async (afterInteraction = false) => {
+    const args = { excludedContextPatternSource: EXCLUDED_GALLERY_CONTEXT_PATTERN_SOURCE };
+    const wide = await page.evaluate(captureGalleryScoutInPage, {
+        ...args, rememberState: !afterInteraction || !observationFocusSelector,
+    });
+    if (!afterInteraction || !observationFocusSelector) return wide;
+    const focused = await page.evaluate(captureGalleryScoutInPage, {
+        ...args, focusSelector: observationFocusSelector, initialUrl: sourceUrl,
+    });
+    return { ...focused, full_page_observation: wide };
+};
+const observeGalleryLayer = async (action) => {
+    const observation = await captureInteractionScout(true).catch(() => null);
+    if (!observation) return;
+    layerObservations = rememberGalleryLayer(layerObservations, observation, action);
+    postInteractionScout = { ...observation, layer_observations: layerObservations };
+    checkpoint();
+};
 
 try {
     // Every visit used to begin on a deep product URL with an empty Referer, in
@@ -1940,6 +1706,9 @@ try {
     checkpoint('product_identity');
     productIdentity = await readProductIdentity().catch(() => null);
 
+    let openedSelector = null;
+    let openedBeforeVisibility = null;
+
     for (const selector of preClickSelectors) {
         if (leftProductPage) {
             break;
@@ -1948,7 +1717,35 @@ try {
         const control = page.locator(selector).first();
 
         if (await control.count().catch(() => 0)) {
-            await clickAndWaitForGalleryChange(control, { phase: 'pre_click', selector });
+            // Snapshotted before the click, not just read as "visible" after
+            // it: a candidate that was already visible beforehand (a
+            // sibling tab button, sitting right next to the panel this
+            // click actually reveals) must never be mistaken for the
+            // revealed content just because it happens to be non-empty and
+            // on-screen - only something that changed from hidden to
+            // visible is evidence this specific click actually did anything.
+            const beforeVisibility = await control.evaluate(revealedCandidatesVisibilityInPage).catch(() => null);
+            const opened = await clickAndWaitForGalleryChange(control, { phase: 'pre_click', selector });
+
+            // true only for a genuine click that did not navigate away
+            // (see clickAndWaitForGalleryChange's own return points) - the
+            // one case worth reading the revealed area for specifically.
+            if (opened) {
+                openedSelector = selector;
+                openedBeforeVisibility = beforeVisibility;
+            }
+        } else {
+            // A caller reading action_trace for this selector needs to tell
+            // "asked for something that never existed" apart from "existed
+            // but the click failed" - both looked identical (no trace entry
+            // at all) before this, which read as silence rather than a fact.
+            actionTrace.push({
+                phase: 'pre_click',
+                selector,
+                clicked: false,
+                changed: false,
+                selector_missing: true,
+            });
         }
     }
 
@@ -1957,25 +1754,54 @@ try {
 
     checkpoint('gallery_dom');
     scout = await captureInteractionScout();
-    const accessState = await page.evaluate((httpStatus) => {
-        const pageText = `${document.title}\n${document.body?.innerText || ''}`.slice(0, 20_000);
-        const accessSignals = [
-            ['captcha', /captcha|verify you are human|are you a robot|robot or human/i],
-            ['waf', /access denied|request blocked|security check|press\s*(?:and|&)\s*hold|cf-chl-/i],
-            ['traffic', /unusual traffic|automated requests|temporarily blocked/i],
-        ];
-        const matchedSignal = accessSignals.find(([, pattern]) => pattern.test(pageText));
-        const accessGateReason = httpStatus === 403
-            ? 'http_403'
-            : (matchedSignal?.[0] || null);
+    // capturePageTextInPage/captureObservedControlsInPage are shared,
+    // independently-tested functions (scripts/product-gallery-utils.mjs) -
+    // this is the same code a Node test drives directly against a fixture
+    // page, not a copy kept in sync by hand.
+    // Locator.evaluate() hands the already-resolved element to the
+    // callback - required here because openedSelector can be Playwright's
+    // own `>> nth=N` chaining syntax (captureObservedControlsInPage()'s own
+    // disambiguation for controls that share a selector), which
+    // document.querySelector() inside the page does not understand.
+    let revealedText = '';
 
-        return {
-            http_status: httpStatus,
-            access_gate: accessGateReason !== null,
-            access_gate_reason: accessGateReason,
-            rate_limited: httpStatus === 429,
-        };
-    }, navigationStatus);
+    if (openedSelector) {
+        try {
+            revealedText = await page.locator(openedSelector).first()
+                .evaluate(revealedContainerTextInPage, openedBeforeVisibility);
+        } catch {
+            // Selector no longer resolvable - fall through to whole-page text only.
+        }
+    }
+
+    const pageText = await page.evaluate(capturePageTextInPage, revealedText);
+    const accessSignals = [
+        ['captcha', /captcha|verify you are human|are you a robot|robot or human/i],
+        ['waf', /access denied|request blocked|security check|press\s*(?:and|&)\s*hold|cf-chl-/i],
+        ['traffic', /unusual traffic|automated requests|temporarily blocked/i],
+    ];
+    const matchedSignal = accessSignals.find(([, pattern]) => pattern.test(pageText));
+    const accessGateReason = navigationStatus === 403
+        ? 'http_403'
+        : (matchedSignal?.[0] || null);
+    const observedControls = accessGateReason === null
+        ? await page.evaluate(captureObservedControlsInPage)
+        : [];
+    const accessState = {
+        http_status: navigationStatus,
+        access_gate: accessGateReason !== null,
+        access_gate_reason: accessGateReason,
+        rate_limited: navigationStatus === 429,
+        // The page actually rendered to Chromium, unlike a static HTML
+        // fetch of the same URL - captured here (not returned separately
+        // later) because this is the one place the page is already open
+        // and pageText is already computed for the access-gate check
+        // above. Empty on a gate page: that text is a challenge screen,
+        // not product content, and must not be handed to a later step as
+        // if it were.
+        specification_text: accessGateReason === null ? pageText.slice(0, 12_000) : '',
+        observed_controls: observedControls,
+    };
     scout = { ...scout, ...accessState };
     scout.gallery_readiness = galleryReadiness;
     scout.observed_gallery_count = galleryReadiness.observed_count || 0;
@@ -2052,10 +1878,11 @@ try {
             // traversal control: a "next" arrow is one element on virtually any
             // site, so "advance three frames" executed exactly one click and the
             // remaining frames were never revealed (observed live on a B&H modal
-            // recipe that declared 4 frames and returned 3). targetIndex below
-            // already clamps to the last available element, so a multi-element
-            // selector still walks its elements while a single control is simply
-            // re-pressed.
+            // recipe that declared 4 frames and returned 3). requestedIndex below
+            // only counts upward per repetition when currentCount is a genuine
+            // multi-element strip, so a multi-element selector still walks its
+            // elements while a single control keeps addressing its sole match and
+            // is simply re-pressed.
             // How many controls this page has, asked of this page. A recipe
             // stores how to open and walk a gallery and nothing about its size:
             // one laptop has six photographs and the next has twelve, and a
@@ -2094,9 +1921,38 @@ try {
                     break;
                 }
 
-                const targetIndex = action.kind === 'click_each'
-                    ? Math.min(action.index + repetition, currentCount - 1)
-                    : Math.min(action.index, currentCount - 1);
+                // index addresses ONE specific element among currentCount
+                // matches - a request for an element that does not exist is
+                // reported as that fact, never silently redirected onto
+                // whichever element happens to be last (real case,
+                // 2026-09-14: techbuy.com.au asked for a selector's 46th
+                // match on a page that only had, say, 12 - clamping used to
+                // click the 12th, a control the recipe never named).
+                //
+                // click_each only counts repetition into that address when
+                // currentCount is an actual strip of distinct elements
+                // (> 1) - see recipeActionRequestedIndex() for why (a lone
+                // "next" arrow regression, 2026-09-14).
+                const requestedIndex = recipeActionRequestedIndex(action, repetition, currentCount);
+                const targetIndex = resolveRecipeActionTargetIndex(requestedIndex, currentCount);
+
+                if (targetIndex === null) {
+                    actionTrace.push({
+                        action: action.kind,
+                        phase: 'ai_action',
+                        selector: action.selector,
+                        action_index: actionIndex,
+                        repetition,
+                        purpose: action.purpose,
+                        clicked: false,
+                        changed: false,
+                        index_out_of_range: true,
+                        requested_index: requestedIndex,
+                        selector_match_count: currentCount,
+                    });
+                    break;
+                }
+
                 const target = locator.nth(targetIndex);
                 const controlSafety = await target.evaluate((element, { purpose, excludedContextPatternSource }) => {
                     const signal = [
@@ -2191,6 +2047,9 @@ try {
                 await collect();
                 const trace = actionTrace.at(-1) || {};
                 trace.expanded_gallery_visible_after = await expandedGalleryVisible();
+                if (clicked && action.kind === 'click' && !leftProductPage && !outOfTime()) {
+                    await observeGalleryLayer({ action_index: actionIndex, phase: 'click', selector: action.selector });
+                }
 
                 // A single control - a next arrow - has no count to read off the
                 // page, so it is pressed until the gallery stops yielding
@@ -2218,7 +2077,9 @@ try {
 
                 if (clicked && ['click', 'click_each'].includes(action.kind) && action.after_each_selector) {
                     const followupLocator = page.locator(action.after_each_selector);
-                    const followupLimit = Math.max(1, traversalCeiling(action.after_each_limit, 1));
+                    // Zoom is a finite action, not traversal of an unknown
+                    // number of photos. Execute the agent's requested count.
+                    const followupLimit = Math.max(1, Math.min(20, action.after_each_limit || 1));
 
                     for (let followupRepetition = 0; followupRepetition < followupLimit && !leftProductPage && !outOfTime(); followupRepetition++) {
                         const followupCount = await followupLocator.count().catch(() => 0);
@@ -2284,18 +2145,21 @@ try {
                         followupTrace.parent_repetition = repetition;
                         followupTrace.followup_repetition = followupRepetition;
                         followupTrace.expanded_gallery_visible_after = await expandedGalleryVisible();
+                        if (followupClicked && repetition === 0 && !leftProductPage && !outOfTime()) {
+                            await observeGalleryLayer({
+                                action_index: actionIndex, phase: 'after_each',
+                                selector: action.after_each_selector, followup_repetition: followupRepetition,
+                            });
+                        }
 
                         if (!followupClicked || followupTrace.changed !== true) {
                             break;
                         }
 
                         if (followupRepetition === followupLimit - 1) {
-                            // The declared limit ran out while the image was
-                            // still changing, so this page zooms further than
-                            // the recipe asks for. Recorded rather than guessed
-                            // at here: the training agent owns the number and
-                            // can raise it once it can see that it was short.
-                            followupTrace.after_each_truncated = true;
+                            // Completing the requested zoom count is not proof
+                            // that another zoom is required or even available.
+                            followupTrace.after_each_limit_reached = true;
                         }
                     }
                 }
@@ -2360,6 +2224,7 @@ try {
             await collect();
         }
         postInteractionScout = await captureInteractionScout(true).catch(() => ({}));
+        postInteractionScout.layer_observations = layerObservations;
         await collect();
         postInteractionScout.gallery_readiness = galleryReadiness;
         postInteractionScout.observed_gallery_count = galleryReadiness.observed_count || 0;
@@ -2426,7 +2291,7 @@ const galleryGoalReached = structurallyCompletedRecipe;
 const hasDirectBhImages = allCandidates.some((url) => new URL(url).hostname === 'static.bhphoto.com');
 const domKeys = new Set(domImages.map(imageAssetKey));
 const candidates = strictRecipe
-    ? [...new Set(domImages)]
+    ? observedGalleryRenditions(domImages, allCandidates)
     : (priorityDomImages.length >= 2
         ? priorityDomImages
         : (domImages.length >= 2
@@ -2470,8 +2335,8 @@ const probeImage = async (candidate) => {
         minHeight: minimumHeight,
     }).catch(() => ({ ok: false, url: candidate, reason: 'probe_failed' }));
 };
-const candidatesToProbe = prioritizeCandidateRenditions(candidates)
-    .slice(0, Math.max(30, limit * 3));
+const orderedCandidates = prioritizeCandidateRenditions(candidates);
+const candidatesToProbe = selectGalleryFrames(orderedCandidates, strictRecipe, Math.max(30, limit * 3));
 const probes = [];
 
 if (!scoutOnly) {
@@ -2485,7 +2350,12 @@ const validationFailures = [];
 
 for (const probe of probes) {
     if (!probe.ok) {
-        validationFailures.push({ url: probe.url, reason: probe.reason });
+        validationFailures.push({
+            url: probe.url, reason: probe.reason,
+            width: probe.width ?? null, height: probe.height ?? null,
+            minimum_width: minimumWidth, minimum_height: minimumHeight,
+            source: domKeys.has(imageAssetKey(normalize(probe.url) || probe.url)) ? 'recipe_dom' : 'network_or_payload',
+        });
         continue;
     }
 
@@ -2519,7 +2389,8 @@ for (const probe of probes) {
     }
 }
 
-const images = [...bestImages.values()].map((item) => item.url).slice(0, limit);
+const selectedImages = selectGalleryFrames([...bestImages.values()], strictRecipe, limit);
+const images = selectedImages.map((item) => item.url);
 const transferredImages = [];
 const transferFailures = [];
 
@@ -2535,7 +2406,8 @@ if (transferDirectory !== '') {
     checkpoint('screenshot');
     try {
         const path = join(transferDirectory, 'page.png');
-        await page.screenshot({ path, timeout: 5_000 });
+        const clip = postInteractionScout?.observation_focus?.screenshot_clip;
+        await page.screenshot({ path, timeout: 5_000, ...(clip ? { clip } : {}) });
         screenshotPath = path;
     } catch {
         // A screenshot is evidence, never a requirement.
@@ -2544,7 +2416,7 @@ if (transferDirectory !== '') {
 
 if (!scoutOnly && transferDirectory !== '') {
     checkpoint('image_transfer');
-    const selected = [...bestImages.values()].slice(0, limit);
+    const selected = selectedImages;
 
     for (let index = 0; index < selected.length; index += 4) {
         const batch = selected.slice(index, index + 4);
@@ -2614,12 +2486,15 @@ if (!crashResultEmitted) process.stdout.write(JSON.stringify({
     scout,
     post_interaction_scout: postInteractionScout,
     action_trace: actionTrace,
+    product_page_url: productPageUrl,
+    product_identity: productIdentity,
     learned_recipe: learnedRecipe,
     diagnostics: {
         dom_candidates: domImages.length,
         raw_dom_candidates: gathered.length,
         raw_dom_samples: [...new Set(gathered)].slice(0, 20),
         strict_recipe: strictRecipe,
+        partial: outOfTime(),
         excluded_gallery_contexts: [...new Set(excludedGalleryContexts)].slice(0, 20),
         payload_candidates: embeddedImages.length,
         network_candidates: requestedImages.length,
@@ -2629,13 +2504,13 @@ if (!crashResultEmitted) process.stdout.write(JSON.stringify({
         distinct_candidate_assets: new Set(candidates.map(imageAssetKey)).size,
         probed_candidates: probes.length,
         validated_candidates: images.length,
-        validated_image_evidence: [...bestImages.values()].slice(0, limit).map(({ url, width, height, source }) => ({
+        validated_image_evidence: selectedImages.map(({ url, width, height, source }) => ({
             url,
             width,
             height,
             source,
         })),
-        rejected_candidates: validationFailures.slice(0, 20),
+        rejected_candidates: strictRecipe ? validationFailures : validationFailures.slice(0, 20),
         observed_gallery_count: galleryReadiness.observed_count || 0,
         gallery_readiness: {
             thumbnail_count: galleryReadiness.thumbnail_count || 0,

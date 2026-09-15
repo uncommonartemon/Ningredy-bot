@@ -15,7 +15,6 @@ class ProductGalleryRecipeResultValidator
 
     public function __construct(private readonly AiSettings $settings) {}
 
-    /** @return array{passed: bool, expected: int, extracted: int, reason: string} */
     /**
      * @param  bool  $countedOnThisPage  Whether the recipe's expected_image_count
      *                                   describes the page being validated. It does
@@ -24,6 +23,7 @@ class ProductGalleryRecipeResultValidator
      *                                   is reused somewhere else - a laptop with
      *                                   seven photographs teaches nothing about how
      *                                   many the next laptop has.
+     * @return array{passed: bool, expected: int, extracted: int, reason: string, min_success_count: int}
      */
     public function validate(
         array $recipe,
@@ -31,6 +31,35 @@ class ProductGalleryRecipeResultValidator
         int $limit = 10,
         ?int $minimumSuccessCount = null,
         bool $countedOnThisPage = true,
+    ): array {
+        // The catalog's own publish floor, independent of how many photos
+        // this particular page structurally shows. validateStructure() below
+        // may require more than this (a page proven to show seven still
+        // needs seven to call the TRAVERSAL complete) - but how many of those
+        // extracted frames must actually be publishable-sized to call the
+        // RESULT usable is this number, not that one. Conflating the two used
+        // to fail a traversal that correctly found all seven frames, of which
+        // six were large enough to publish and the seventh was not, as if the
+        // recipe itself were broken - min_success_count is what lets a caller
+        // recognise six of seven as a complete, promotable result instead.
+        $minSuccessCount = min($limit, max(1, $minimumSuccessCount ?? $this->settings->galleryMinSuccessCount()));
+
+        $structure = $this->validateStructure($recipe, $result, $limit, $minimumSuccessCount, $countedOnThisPage);
+
+        return [
+            ...$structure,
+            'min_success_count' => $minSuccessCount,
+            'meets_image_minimum' => $structure['extracted'] >= $minSuccessCount,
+        ];
+    }
+
+    /** @return array{passed: bool, expected: int, extracted: int, reason: string} */
+    private function validateStructure(
+        array $recipe,
+        array $result,
+        int $limit,
+        ?int $minimumSuccessCount,
+        bool $countedOnThisPage,
     ): array {
         $images = collect($result['images'] ?? [])
             ->filter(fn (mixed $image): bool => is_string($image) && $image !== '')
@@ -47,7 +76,7 @@ class ProductGalleryRecipeResultValidator
             max(1, $minimumSuccessCount ?? $this->settings->galleryMinSuccessCount()),
         );
         $recipeExpected = $countedOnThisPage
-            ? max(0, min($limit, (int) ($recipe['expected_image_count'] ?? 0)))
+            ? max(0, (int) ($recipe['expected_image_count'] ?? 0))
             : 0;
         $observedGalleryCount = max(0, (int) data_get($result, 'diagnostics.observed_gallery_count', 0));
         $structuralCount = max(
@@ -70,12 +99,18 @@ class ProductGalleryRecipeResultValidator
         // cdw.com correctly and collected all six photographs was failed for
         // "extracted 6 of 7 required", the seven being another product's count
         // confirmed by a seventh image that was not part of the gallery.
-        $structuralTarget = match (true) {
-            ! $countedOnThisPage => $observedGalleryCount >= $minSuccessCount ? $observedGalleryCount : 0,
-            $recipeExpected >= $minSuccessCount && $structuralCount >= $minSuccessCount => min($recipeExpected, $structuralCount),
-            default => 0,
-        };
-        $targetCount = max($minSuccessCount, $structuralTarget);
+        // During training retain the agent's current-page estimate when DOM
+        // corroborates it; it may include frames not yet exposed by the viewer.
+        // Neither a smaller estimate nor a publication quota can hide frames
+        // already observed in this gallery. Reuse never imports an old count.
+        $corroboratedTrainingCount = $countedOnThisPage
+            && $recipeExpected >= $minSuccessCount && $structuralCount >= $minSuccessCount
+                ? min($recipeExpected, $structuralCount)
+                : 0;
+        $structuralTarget = max($observedGalleryCount, $corroboratedTrainingCount);
+        // A known two-frame gallery cannot owe a third frame to a publication quota.
+        // With no structural evidence retain the conservative fallback.
+        $targetCount = $structuralTarget > 0 ? $structuralTarget : $minSuccessCount;
 
         $galleryPresent = filter_var(
             $recipe['gallery_present'] ?? ($extracted > 1),
@@ -137,16 +172,25 @@ class ProductGalleryRecipeResultValidator
             return $this->failure($targetCount, $extracted, $incompleteActionPlan);
         }
 
-        $qualityGap = $this->unresolvedEnlargementControl($recipe, $result);
-        if ($qualityGap !== null) {
-            return $this->failure($targetCount, $extracted, $qualityGap);
-        }
+        // A decoded but undersized gallery frame proves collection, not
+        // publishability. Unknown downloads and unrelated page assets do not.
+        $rejections = collect(data_get($result, 'diagnostics.rejected_candidates', []))
+            ->filter(fn (mixed $item): bool => is_array($item)
+                && is_string($item['url'] ?? null) && filter_var($item['url'], FILTER_VALIDATE_URL))
+            ->groupBy(fn (array $item): string => ProductImageStorage::imageAssetKey($item['url']));
+        $rejectedFrameUrls = $rejections->filter(fn ($variants): bool => $variants->every(
+            fn (array $item): bool => ($item['source'] ?? null) === 'recipe_dom'
+                && ($item['reason'] ?? null) === 'dimensions_below_minimum'
+                && (int) ($item['width'] ?? 0) > 0 && (int) ($item['height'] ?? 0) > 0,
+        ))->map(fn ($variants): string => $variants->first()['url']);
+        $collected = $images->concat($rejectedFrameUrls)
+            ->unique(fn (string $url): string => ProductImageStorage::imageAssetKey($url))->count();
 
-        if ($extracted < $targetCount) {
+        if ($collected < $targetCount) {
             return $this->failure(
                 $targetCount,
                 $extracted,
-                'Gallery incomplete: extracted '.$extracted.' of '.$targetCount.' required images.',
+                'Gallery incomplete: collected '.$collected.' of '.$targetCount.' required frames; '.$extracted.' technically usable.',
             );
         }
 
@@ -154,7 +198,10 @@ class ProductGalleryRecipeResultValidator
             'passed' => true,
             'expected' => $targetCount,
             'extracted' => $extracted,
-            'reason' => 'Gallery complete: extracted '.$extracted.' of '.$targetCount.' required images.',
+            'collected' => $collected,
+            'rejected_frames' => $collected - $extracted,
+            'quality_observation' => $this->unresolvedEnlargementControl($recipe, $result),
+            'reason' => 'Gallery traversal complete: collected '.$collected.' of '.$targetCount.' required frames; '.$extracted.' technically usable.',
         ];
     }
 

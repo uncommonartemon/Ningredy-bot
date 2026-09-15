@@ -61,12 +61,44 @@ class ProductIdentityMatcher
             return false;
         }
 
-        // Strong signal: a real model/SKU code (letters+digits mixed, or a
-        // distinctive standalone number) is specific enough to trust alone.
-        if (collect($tokens)->contains(
-            fn (string $token): bool => $this->isStrongToken($token) && str_contains($source, $token)
-        )) {
-            return true;
+        // Strong signal: a real code (letters+digits mixed, or a
+        // distinctive standalone number) is specific enough to trust alone -
+        // but only when it comes from a dedicated sku/mpn/ean/upc/gtin
+        // specification, when the draft has one. The same reproduction that
+        // exactIdentifierCandidates() exists for applies here word-by-word
+        // instead of whole-string (a raw asset URL keeps hyphens/underscores
+        // between words that page text does not, so this pool cannot be
+        // collapsed to one compacted string the way that one is): "15irx10"
+        // out of "LOQ 15IRX10" is a strong token by the same letter+digit
+        // test, but it is the chassis code a whole family of different skus
+        // shares, not evidence of this specific configuration.
+        $strongTokens = collect($this->strongTokenPool($draft))
+            ->filter(fn (string $token): bool => $this->isStrongToken($token));
+
+        // Once there is a specific code to check, that check is the whole
+        // answer - a URL naming a different sku from the same family must
+        // not be rescued by the weaker word-corroboration rule below. Real
+        // reproduction (2026-09-11): requested sku 83JE0013US, evidence url
+        // ".../loq-15irx10-luna-grey-83je0099us.jpg" - a genuinely different
+        // sku - still cleared the old unconditional fall-through because
+        // "loq", "15irx10", "luna" and "grey" alone satisfied the >= 3 rule,
+        // none of them ever having been the identifier that mattered. The
+        // weaker rule below is reserved for drafts with no specific code to
+        // check in the first place (see the test below this one).
+        // Real reproduction (2026-09-11): requested sku 83JE0013US, evidence
+        // url ".../loq-15irx10-83je0013usx.jpg" - a different, longer real
+        // sku that merely starts with the requested one - matched as a plain
+        // substring. containsWholeIdentifier() is the same boundary-aware
+        // check confirmsExactIdentifier() already needed for exactly this
+        // shape of bug; a raw asset URL still keeps real separators (compact()
+        // is deliberately not used here, see above), so it applies the same
+        // way. Second reproduction, same date: requested model X1504VA-BQ4485
+        // (no dedicated sku), evidence url ".../x1504va-bq9999.jpg" - every()
+        // instead of contains() below, because requiring only one strong
+        // token let the shared "x1504va" chassis word alone confirm a URL
+        // whose own "bq9999" openly disagreed with the requested "bq4485".
+        if ($strongTokens->isNotEmpty()) {
+            return $strongTokens->every(fn (string $token): bool => $this->containsWholeIdentifier($source, $token));
         }
 
         // Weak signal: plain words only count when several independently
@@ -82,6 +114,39 @@ class ProductIdentityMatcher
     public function supportsSource(ProductDraft $draft, array $source): bool
     {
         return $this->matchesRequestedIdentifier($draft, $this->compact($this->sourceEvidence($source)));
+    }
+
+    /**
+     * The strict tier of supportsSource(): true only when the evidence
+     * contains a whole settled value (model, or a dedicated sku/mpn/ean/
+     * upc/gtin specification) - never merely one of its own decomposed
+     * fragments. "83JE0013US" counts, whether it arrived as its own
+     * specification or embedded inside "LOQ 15IRX10 (83JE0013US)".
+     * "15IRX10" alone - the chassis code an entire family of different SKUs
+     * shares - never does on its own, because it is only ever a fragment of
+     * a larger settled value, not a whole one.
+     *
+     * A source that only reaches supportsSource() through such a fragment
+     * is a plausible match, not a confirmed one: the caller is expected to
+     * let ProductSourceIdentityJudge weigh the same evidence on meaning
+     * (including what the operator actually asked for) before granting
+     * wholesale-gallery trust, exactly as it already does when the literal
+     * check cannot decide for another reason. Reserved for the decision of
+     * whether one configuration was confirmed - conflictsMemoryConfiguration()
+     * and conflictsSource() remain the way a source is ruled out.
+     */
+    public function confirmsExactIdentifier(ProductDraft $draft, array $source): bool
+    {
+        // Deliberately not compact() here, unlike every other caller of
+        // sourceEvidence() - compact() strips every separator, which also
+        // erases the one thing this specific check needs to tell a real
+        // boundary from the middle of a longer, different code (see
+        // containsWholeIdentifier()). Str::lower(Str::ascii(urldecode()))
+        // is the same normalization compact() does before stripping.
+        return $this->matchesExactIdentifier(
+            $draft,
+            Str::lower(Str::ascii(urldecode($this->sourceEvidence($source)))),
+        );
     }
 
     /** @param array<string, mixed> $source */
@@ -114,17 +179,122 @@ class ProductIdentityMatcher
             return false;
         }
 
-        if (collect($this->requestedIdentifiers($draft))->contains(
+        // Confirming a source is verification, not the same claim as
+        // requiring one: it checks the draft's own resolved identifiers
+        // (model/sku/mpn/ean/upc/gtin) against this source's actual page
+        // evidence, whether or not the operator typed that value themselves.
+        // An agent's choice is never trusted on its own here - the source
+        // still has to publish it - this only widens which value is allowed
+        // to do the confirming, from "the operator's own words" to "what the
+        // draft actually settled on". requiresExactIdentifier() and
+        // conflictingIdentifier() deliberately keep the narrower,
+        // operator-typed-only set: an agent-inferred regional SKU must still
+        // never reject a different, equally valid regional card the way an
+        // operator-typed one legitimately can.
+        if (collect($this->confirmationIdentifierCandidates($draft))->contains(
             fn (string $identifier): bool => str_contains($compactEvidence, $identifier),
         )) {
             return true;
         }
 
-        return collect($this->requestedIdentifierPartGroups($draft))->contains(
+        return collect($this->confirmationIdentifierPartGroups($draft))->contains(
             fn (array $parts): bool => collect($parts)->every(
                 fn (string $part): bool => str_contains($compactEvidence, $part),
             ),
         );
+    }
+
+    private function matchesExactIdentifier(ProductDraft $draft, string $evidence): bool
+    {
+        if ($evidence === '') {
+            return false;
+        }
+
+        return collect($this->exactIdentifierCandidates($draft))->contains(
+            fn (string $identifier): bool => $this->containsWholeIdentifier($evidence, $identifier),
+        );
+    }
+
+    /**
+     * A plain str_contains() on two fully compact()-ed strings accepts a
+     * needle that is only a fragment of a longer, different code, because
+     * stripping every separator on both sides also erases the one thing
+     * that told them apart. Real reproduction (2026-09-11): requested sku
+     * 83JE0013US, evidence naming 83JE0013USX - a different, longer real
+     * sku - matched as a plain substring once both were compacted.
+     *
+     * $evidence here is deliberately only lowercased/ascii/url-decoded, not
+     * compact()-ed, so real separators survive as real word boundaries;
+     * $identifier is still the already-compact()-ed candidate (its own
+     * internal separators, if it has any - "MC7A4LL/A" - must stay
+     * optional, exactly as before, to match a page that renders them as
+     * "mc7a4ll_a" or "mc7a4lla"). The pattern below allows any run of
+     * non-alphanumeric characters between the identifier's own characters
+     * for that reason, but requires a real non-alphanumeric character (or
+     * the string's own edge) immediately outside the whole match - "83je0013us"
+     * inside "...loq 15irx10 83je0013us 15.6\"..." still matches (a space
+     * on both sides), but inside "...83je0013usx..." does not (no
+     * separator before the trailing x).
+     */
+    private function containsWholeIdentifier(string $evidence, string $identifier): bool
+    {
+        if ($identifier === '') {
+            return false;
+        }
+
+        $pattern = '/(?<![a-z0-9])'
+            .implode('[^a-z0-9]*', array_map(
+                fn (string $char): string => preg_quote($char, '/'),
+                str_split($identifier),
+            ))
+            .'(?![a-z0-9])/';
+
+        return preg_match($pattern, $evidence) === 1;
+    }
+
+    /**
+     * Every value the draft actually settled on, whole - never one of its
+     * own decomposed pieces, and never the free-text model field when a
+     * dedicated sku/mpn/ean/upc/gtin specification also exists to be more
+     * specific than it.
+     *
+     * Real reproduction (2026-09-11): model "LOQ 15IRX10" and sku
+     * "83JE0013US" on the draft, a page naming the same "LOQ 15IRX10" model
+     * but sku "83JE0099US" - a different real configuration. Model and sku
+     * are not interchangeable exact evidence: a page can legitimately share
+     * the broader model while naming an entirely different specific
+     * product, and trusting model as sufficient on its own reopened exactly
+     * the gap a shared chassis/family fragment already had to be kept out
+     * of - just carried in a separate field instead of embedded in one
+     * string. A specification tagged sku/mpn/ean/upc/gtin is never a family
+     * name or a value with alternatives by the research agent's own
+     * contract (see ProductResearchAgent's instructions), so its whole
+     * compacted form is trusted as exact on its face; model only stands in
+     * for one when the draft has no dedicated identifier at all (e.g. a
+     * part number the agent settled the whole model field on, with no
+     * separate sku).
+     *
+     * @return array<int, string>
+     */
+    private function exactIdentifierCandidates(ProductDraft $draft): array
+    {
+        $dedicated = collect($draft->specifications ?? [])
+            ->filter(fn (mixed $item): bool => is_array($item) && in_array($item['key'] ?? null, [
+                'sku', 'mpn', 'ean', 'upc', 'gtin',
+            ], true))
+            ->map(fn (array $item): string => (string) ($item['value'] ?? ''))
+            ->filter(fn (string $value): bool => trim($value) !== '');
+
+        $values = $dedicated->isNotEmpty()
+            ? $dedicated
+            : collect([$draft->model])->filter(fn (mixed $value): bool => is_string($value) && trim($value) !== '');
+
+        return $values
+            ->map(fn (string $value): string => $this->compact($value))
+            ->filter(fn (string $value): bool => $value !== '')
+            ->unique()
+            ->values()
+            ->all();
     }
 
     public function requiresExactIdentifier(ProductDraft $draft): bool
@@ -378,26 +548,37 @@ class ProductIdentityMatcher
     }
 
     /**
-     * One group per operator-mentioned identifier value, each group being
-     * every distinguishing atomic part of that one value (so "MacBook Air 15
-     * (M4)" becomes ["macbook","air","15","m4"], not a single merged
-     * string) - see matchesRequestedIdentifier() for why this needs to be
-     * order-independent.
+     * Every identifier candidate the draft actually settled on - the
+     * operator's own words plus whatever model/sku/mpn/ean/upc/gtin the
+     * research agent resolved onto the draft - unfiltered by whether the
+     * operator's raw text happened to contain it. Used only for confirming a
+     * source (matchesRequestedIdentifier()): the source's own page evidence
+     * still has to contain the value for that to count as anything, so this
+     * is what to check against, not proof by itself.
+     *
+     * @return array<int, string>
+     */
+    private function confirmationIdentifierCandidates(ProductDraft $draft): array
+    {
+        return $this->requestedRawValues($draft)
+            ->flatMap(fn (string $value): array => $this->identifierCandidates($value))
+            ->unique()
+            ->values()
+            ->all();
+    }
+
+    /**
+     * The reordering-tolerant counterpart of confirmationIdentifierCandidates():
+     * one group per settled identifier value, each group being every
+     * distinguishing atomic part of that one value (so "MacBook Air 15 (M4)"
+     * becomes ["macbook","air","15","m4"], not a single merged string) - see
+     * matchesRequestedIdentifier() for why this needs to be order-independent.
      *
      * @return array<int, array<int, string>>
      */
-    private function requestedIdentifierPartGroups(ProductDraft $draft): array
+    private function confirmationIdentifierPartGroups(ProductDraft $draft): array
     {
-        $rawValues = $this->requestedRawValues($draft);
-        $requestCompact = $this->requestCompact($draft);
-
-        if ($requestCompact !== null) {
-            $rawValues = $rawValues->filter(
-                fn (string $value): bool => str_contains($requestCompact, $this->compact($value)),
-            );
-        }
-
-        return $rawValues
+        return $this->requestedRawValues($draft)
             ->map(fn (string $value): array => $this->atomicParts($value))
             ->filter(fn (array $parts): bool => count($parts) >= 2)
             ->values()
@@ -488,7 +669,7 @@ class ProductIdentityMatcher
     /** @return array<int, string> */
     private function tokens(ProductDraft $draft): array
     {
-        return collect([
+        return $this->wordTokens([
             $draft->model,
             $draft->title,
             $draft->color,
@@ -496,7 +677,35 @@ class ProductIdentityMatcher
                 ->filter(fn (mixed $item): bool => is_array($item) && in_array($item['key'] ?? null, ['model', 'mpn', 'color'], true))
                 ->map(fn (array $item): string => (string) ($item['value'] ?? ''))
                 ->all(),
-        ])
+        ]);
+    }
+
+    /**
+     * The word-level pool supports() may trust a single strong token from:
+     * a dedicated sku/mpn/ean/upc/gtin specification when the draft has one,
+     * falling back to the free-text model only when it does not - the same
+     * priority exactIdentifierCandidates() already gives them, applied word
+     * by word instead of to one whole compacted value (see supports() for
+     * why a raw asset URL cannot use the whole-string form).
+     *
+     * @return array<int, string>
+     */
+    private function strongTokenPool(ProductDraft $draft): array
+    {
+        $dedicated = collect($draft->specifications ?? [])
+            ->filter(fn (mixed $item): bool => is_array($item) && in_array($item['key'] ?? null, [
+                'sku', 'mpn', 'ean', 'upc', 'gtin',
+            ], true))
+            ->map(fn (array $item): string => (string) ($item['value'] ?? ''))
+            ->filter(fn (string $value): bool => trim($value) !== '');
+
+        return $this->wordTokens($dedicated->isNotEmpty() ? $dedicated->all() : [$draft->model]);
+    }
+
+    /** @param iterable<mixed> $values @return array<int, string> */
+    private function wordTokens(iterable $values): array
+    {
+        return collect($values)
             ->flatMap(fn (mixed $value): array => preg_split('/[^a-z0-9]+/', Str::lower(Str::ascii((string) $value))) ?: [])
             ->filter(fn (string $token): bool => strlen($token) >= 3 && ! in_array($token, self::GENERIC_WORDS, true))
             ->unique()

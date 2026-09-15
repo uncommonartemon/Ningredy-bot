@@ -69,6 +69,7 @@ class ProductDraftsTable
                         'cost_budget' => 'Денежный лимит',
                         'time_budget' => 'Временной лимит',
                         'exhausted' => 'Источники исчерпаны',
+                        'specifications_unreconciled' => 'Характеристики не сверены',
                         default => '—',
                     })
                     ->toggleable(),
@@ -102,10 +103,17 @@ class ProductDraftsTable
                     ->color('success')
                     ->requiresConfirmation()
                     ->visible(fn (ProductDraft $record): bool => $record->status === 'pending_review')
-                    ->disabled(fn (ProductDraft $record): bool => ! $record->media()->exists())
-                    ->tooltip(fn (ProductDraft $record): ?string => $record->media()->exists()
-                        ? null
-                        : 'Нельзя опубликовать черновик без пригодных фото.')
+                    ->disabled(fn (ProductDraft $record): bool => ! $record->media()->exists()
+                        || self::specificationsUnreconciled($record))
+                    ->tooltip(function (ProductDraft $record): ?string {
+                        if (! $record->media()->exists()) {
+                            return 'Нельзя опубликовать черновик без пригодных фото.';
+                        }
+
+                        return self::specificationsUnreconciled($record)
+                            ? 'Характеристики ещё не сверены с источником выбранных фото.'
+                            : null;
+                    })
                     ->action(function (ProductDraft $record): void {
                         app(ProductDraftWorkflow::class)->approve($record, auth()->user());
                         Notification::make()->title('Черновик опубликован как товар')->success()->send();
@@ -127,5 +135,17 @@ class ProductDraftsTable
                     EditAction::make(),
                 ]),
             ]);
+    }
+
+    /**
+     * Mirrors the same two-column comparison ProductDraftWorkflow::approve()
+     * itself enforces (see UnreconciledDraftSpecificationsException) - kept
+     * here only to disable the button up front with a helpful tooltip
+     * instead of the operator discovering it via a thrown exception.
+     */
+    private static function specificationsUnreconciled(ProductDraft $record): bool
+    {
+        return trim((string) $record->primary_source_url) !== ''
+            && $record->specifications_reconciled_source_url !== $record->primary_source_url;
     }
 }

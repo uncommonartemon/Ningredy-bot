@@ -75,14 +75,27 @@ class RestageDraftGalleryPhotos implements ShouldQueue
             $images->excludeCurrentDraftGallery($draft);
             $progress->step('Ищу другие фото без прежних источников и дублей', 1080);
             $stored = $images->stage($draft, fn (string $message) => $progress->info($message), $this->telegramUpdateId);
+            $fresh = $draft->fresh('media');
 
-            if ($stored > 0) {
+            // stage() can settle on a new photo source whose specifications
+            // were never checked against it (ProductImageStorage::
+            // reconcileSpecifications()) - reporting this as "done" would
+            // tell the operator the card is ready when publishing is still
+            // blocked (ProductDraftWorkflow::approve()). Mirrors
+            // ContinueDraftGallerySearch's own check.
+            $reconciliationPending = $fresh->gallery_search_stop_reason === 'specifications_unreconciled'
+                || (trim((string) $fresh->primary_source_url) !== ''
+                    && $fresh->specifications_reconciled_source_url !== $fresh->primary_source_url);
+
+            if ($reconciliationPending) {
+                $progress->failed('Сверка не завершена', 'Фото сохранены; публикация пока недоступна.');
+            } elseif ($stored > 0) {
                 $progress->done("Галерея обновлена, фото: {$stored}");
             } else {
                 $progress->done('Поиск завершён: других фото не нашлось, прежняя галерея сохранена.');
             }
 
-            $presenter->sendReview($telegram, $this->chatId, $draft->fresh('media'));
+            $presenter->sendReview($telegram, $this->chatId, $fresh);
         } finally {
             Cache::forget("draft-gallery-restage:{$this->draftId}:queued");
         }

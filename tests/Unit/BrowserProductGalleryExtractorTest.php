@@ -8,6 +8,7 @@ use App\Services\Ai\ProductSearchTimeBudget;
 use App\Services\Products\BrowserProductGalleryExtractor;
 use App\Services\Products\BrowserProductImageTransferStore;
 use App\Services\Products\HostReputation;
+use App\Services\Products\ProductGalleryRecipeProof;
 use App\Services\Products\ProductGalleryRecipeResultValidator;
 use App\Services\Products\ProductGalleryRecipeRouter;
 use App\Services\Products\ProductGalleryRecipeTrainer;
@@ -19,6 +20,25 @@ use Tests\TestCase;
 class BrowserProductGalleryExtractorTest extends TestCase
 {
     use RefreshDatabase;
+
+    public function test_two_frame_gallery_does_not_retrain_for_a_three_photo_publication_minimum(): void
+    {
+        config(['product-images.browser_fallback.enabled' => true]);
+        $this->mock(ProductGalleryRecipeTrainer::class)->shouldNotReceive('train');
+        $recipe = ProductGalleryRecipe::create(['domain' => 'two.example', 'path_pattern' => '*',
+            'status' => 'active', 'failure_count' => 0, 'recipe' => [
+                'collect_selectors' => ['#photos img'], 'gallery_present' => true, 'content_confirmed_product' => true,
+            ]]);
+        $urls = ['https://cdn.example/a.jpg', 'https://cdn.example/b.jpg'];
+        $browser = $this->extractorReturning(['images' => $urls, 'diagnostics' => [
+            'observed_gallery_count' => 2, 'validated_candidates' => 2,
+        ]]);
+        $this->assertSame($urls, $browser->extract('https://two.example/b', context: ['minimum_verified_images' => 3]));
+        $this->assertSame(0, $recipe->fresh()->failure_count);
+        $this->assertSame('active', $recipe->fresh()->status);
+        $this->assertSame('https://two.example/b',
+            app(ProductGalleryRecipeProof::class)->provenUrl($recipe, 'https://two.example/a'));
+    }
 
     public function test_vision_first_does_not_train_when_the_domain_has_no_active_recipe(): void
     {
@@ -319,5 +339,137 @@ class BrowserProductGalleryExtractorTest extends TestCase
         $method->setAccessible(true);
 
         return $method->invoke(app(BrowserProductGalleryExtractor::class), $recipe, $result);
+    }
+
+    public function test_normal_search_sends_crash_to_diagnosis_without_trying_other_recipes_or_declaring_mismatch(): void
+    {
+        config(['product-images.browser_fallback.enabled' => true]);
+        $recipe = ProductGalleryRecipe::create([
+            'domain' => 'recovery.example', 'path_pattern' => '*', 'status' => 'active',
+            'success_count' => 2, 'failure_count' => 0,
+            'recipe' => ['gallery_present' => true, 'content_confirmed_product' => true,
+                'collect_selectors' => ['.gallery img']],
+        ]);
+        $this->mock(ProductGalleryRecipeTrainer::class)->shouldReceive('train')->once()
+            ->andReturnUsing(function (...$arguments) use ($recipe): array {
+                $this->assertSame('execution_recovery', $arguments[1]);
+                $feedback = $arguments['repairFrom'] ?? $arguments[9];
+                $this->assertSame('execution_recovery', $feedback['mode']);
+                $this->assertSame('browser_timeout', $feedback['failure_kind']);
+                $this->assertSame(0, $recipe->fresh()->failure_count);
+
+                return [];
+            });
+        $events = [];
+        $this->extractorReturning([
+            'images' => [],
+            // The page died before selectors could be meaningfully observed.
+            'learned_recipe' => ['collect_selectors' => [], 'actions' => []],
+            'failure_kind' => 'browser_timeout', 'diagnostics' => ['partial' => true],
+        ])->extract('https://recovery.example/product', debug: function ($level, $message) use (&$events): void {
+            $events[] = $message;
+        });
+        $this->assertSame('active', $recipe->fresh()->status);
+        $this->assertSame(0, $recipe->fresh()->failure_count);
+        $this->assertStringNotContainsString('перестал давать', implode(' ', $events));
+        $this->assertStringNotContainsString('без LLM проверяю', implode(' ', $events));
+    }
+
+    public function test_a_browser_execution_failure_does_not_damage_recipe_compatibility_health(): void
+    {
+        // A browser crash or an interrupted execution says nothing about
+        // whether the recipe's own selectors still fit the page - it means
+        // the attempt to find out did not finish. It must not be counted the
+        // same as a genuine mismatch on the counter that decides whether
+        // Playwright stays enabled for the whole domain.
+        config()->set('product-images.browser_fallback.enabled', true);
+        $recipe = ProductGalleryRecipe::query()->create([
+            'domain' => 'browser-crash.example',
+            'path_pattern' => '*',
+            'status' => 'active',
+            'success_count' => 4,
+            'failure_count' => 1,
+            'recipe' => [
+                'gallery_present' => true,
+                'content_confirmed_product' => true,
+                'expected_image_count' => 5,
+                'collect_selectors' => ['.product-gallery img'],
+                'actions' => [],
+            ],
+        ]);
+
+        $images = $this->extractorReturning([
+            'images' => ['https://cdn.example/partial-before-crash.jpg'],
+            'learned_recipe' => [
+                'collect_selectors' => ['.product-gallery img'],
+                'thumbnail_selectors' => [],
+                'actions' => [],
+            ],
+            'diagnostics' => ['validated_candidates' => 1],
+            'failure_kind' => 'browser_timeout',
+        ])->extract(
+            'https://browser-crash.example/product/current-model',
+            10,
+            activeRecipeOnly: true,
+        );
+
+        $recipe->refresh();
+        $this->assertSame(['https://cdn.example/partial-before-crash.jpg'], $images, 'Whatever was found before the failure is preserved.');
+        $this->assertSame(1, $recipe->failure_count, 'A technical execution failure must not increment the compatibility counter.');
+        $this->assertSame(4, $recipe->success_count);
+        $this->assertSame('browser_timeout', $recipe->last_failure_kind);
+        $this->assertStringContainsString('Not counted as a recipe mismatch', (string) $recipe->last_error);
+        $this->assertSame('active', $recipe->status, 'The recipe stays active - this was not evidence against it.');
+    }
+
+    public function test_an_active_recipe_trains_once_and_is_then_reused_on_a_different_product_untrained(): void
+    {
+        // The live 2026-09-10 run trained a fresh recipe on microless.com for
+        // one Lenovo draft; it never exercised what a SAVED, already-active
+        // recipe does for a second, different product on that same shop -
+        // repeating the same product would not prove that either. This does:
+        // a recipe already active from an earlier product is applied to a
+        // completely different one, and the training agent is never asked.
+        config()->set('product-images.browser_fallback.enabled', true);
+        $recipe = ProductGalleryRecipe::query()->create([
+            'domain' => 'reusable-shop.example',
+            'path_pattern' => '*',
+            'status' => 'active',
+            'success_count' => 3,
+            'recipe' => [
+                'gallery_present' => true,
+                'content_confirmed_product' => true,
+                'collect_selectors' => ['.product-gallery img'],
+                'actions' => [],
+            ],
+        ]);
+        $this->mock(ProductGalleryRecipeTrainer::class)->shouldNotReceive('train');
+        $secondProductImages = [
+            'https://cdn.example/second-product-front.jpg',
+            'https://cdn.example/second-product-side.jpg',
+            'https://cdn.example/second-product-detail.jpg',
+        ];
+        $extractor = $this->extractorReturning([
+            'images' => $secondProductImages,
+            'learned_recipe' => [
+                'collect_selectors' => ['.product-gallery img'],
+                'thumbnail_selectors' => [],
+                'actions' => [],
+            ],
+            'diagnostics' => ['validated_candidates' => 3, 'observed_gallery_count' => 3],
+        ]);
+
+        $images = $extractor->extract(
+            'https://reusable-shop.example/products/a-completely-different-second-laptop',
+            10,
+        );
+
+        $this->assertSame($secondProductImages, $images);
+        $this->assertSame(
+            4,
+            $recipe->fresh()->success_count,
+            'Reuse on a new product increments the same shop recipe - it is not a retrain, and no new recipe row is created.',
+        );
+        $this->assertDatabaseCount('product_gallery_recipes', 1);
     }
 }

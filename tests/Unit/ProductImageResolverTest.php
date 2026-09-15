@@ -6,11 +6,15 @@ use App\Services\Ai\AiSettings;
 use App\Services\Products\BrowserProductGalleryExtractor;
 use App\Services\Products\ProductImageResolver;
 use App\Services\Products\ProductSourcePageRules;
+use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
+use Mockery\MockInterface;
 use Tests\TestCase;
 
 class ProductImageResolverTest extends TestCase
 {
+    use RefreshDatabase;
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -23,6 +27,21 @@ class ProductImageResolverTest extends TestCase
             ->shouldReceive('activeRuleFor')
             ->byDefault()
             ->andReturnNull();
+    }
+
+    public function test_full_confirmed_gallery_survives_a_small_caller_limit(): void
+    {
+        Http::fake(['https://93.184.216.34/product' => Http::response(
+            '<html><title>Product</title><body>Product gallery</body></html>',
+            200, ['Content-Type' => 'text/html'],
+        )]);
+        $frames = array_map(fn ($n) => 'https://93.184.216.34/gallery/frame-'.$n.'.jpg', range(1, 13));
+        $browser = $this->mockBrowser();
+        $browser->shouldReceive('extract')->once()->andReturn($frames);
+        $browser->shouldReceive('isConfirmedGalleryImage')->andReturn(true);
+        $browser->shouldReceive('isPartialGalleryImage')->andReturn(false);
+        $result = app(ProductImageResolver::class)->resolve([['url' => 'https://93.184.216.34/product']], 4);
+        $this->assertSame($frames, $result);
     }
 
     public function test_it_extracts_absolute_and_relative_product_metadata_images(): void
@@ -127,7 +146,7 @@ class ProductImageResolverTest extends TestCase
                 ['Content-Type' => 'text/html'],
             ),
         ]);
-        $browser = $this->mock(BrowserProductGalleryExtractor::class);
+        $browser = $this->mockBrowser();
         $browser->shouldReceive('extract')
             ->once()
             ->with('https://93.184.216.34/javascript-product', 5, null, null, [
@@ -162,7 +181,7 @@ class ProductImageResolverTest extends TestCase
                 ['Content-Type' => 'text/html'],
             ),
         ]);
-        $browser = $this->mock(BrowserProductGalleryExtractor::class);
+        $browser = $this->mockBrowser();
         $browser->shouldReceive('extract')
             ->once()
             ->with(
@@ -203,7 +222,7 @@ class ProductImageResolverTest extends TestCase
                 </div></body></html>
                 HTML, 200, ['Content-Type' => 'text/html']),
         ]);
-        $this->mock(BrowserProductGalleryExtractor::class)->shouldReceive('extract')->andReturn([]);
+        $this->mockBrowser()->shouldReceive('extract')->andReturn([]);
 
         $images = app(ProductImageResolver::class)->resolve([
             ['url' => 'https://93.184.216.34/product'],
@@ -234,7 +253,7 @@ class ProductImageResolverTest extends TestCase
                 ['Content-Type' => 'image/jpeg'],
             ),
         ]);
-        $this->mock(BrowserProductGalleryExtractor::class)
+        $this->mockBrowser()
             ->shouldNotReceive('extract');
 
         $images = app(ProductImageResolver::class)->resolve([
@@ -254,7 +273,7 @@ class ProductImageResolverTest extends TestCase
                 200,
             ),
         ]);
-        $browser = $this->mock(BrowserProductGalleryExtractor::class);
+        $browser = $this->mockBrowser();
         $browser->shouldReceive('extract')
             ->once()
             ->with('https://93.184.216.34/headerless-product', 5, null, null, [
@@ -287,7 +306,7 @@ class ProductImageResolverTest extends TestCase
         $settings = $this->mock(AiSettings::class);
         $settings->shouldReceive('galleryBrowserMode')
             ->andReturn(AiSettings::GALLERY_BROWSER_OFF);
-        $browser = $this->mock(BrowserProductGalleryExtractor::class);
+        $browser = $this->mockBrowser();
         $browser->shouldNotReceive('extract');
 
         $images = app(ProductImageResolver::class)->resolve([
@@ -312,10 +331,12 @@ class ProductImageResolverTest extends TestCase
         $settings = $this->mock(AiSettings::class);
         $settings->shouldReceive('galleryBrowserMode')
             ->andReturn(AiSettings::GALLERY_BROWSER_ALWAYS);
-        $browser = $this->mock(BrowserProductGalleryExtractor::class);
+        $browser = $this->mockBrowser();
         $browser->shouldReceive('extract')
             ->once()
             ->andReturn(['https://93.184.216.34/browser.jpg']);
+        $browser->shouldReceive('isConfirmedGalleryImage')->andReturn(false);
+        $browser->shouldReceive('isPartialGalleryImage')->andReturn(false);
 
         $images = app(ProductImageResolver::class)->resolve([
             ['url' => 'https://93.184.216.34/product'],
@@ -337,7 +358,7 @@ class ProductImageResolverTest extends TestCase
                 ['Content-Type' => 'text/html'],
             ),
         ]);
-        $browser = $this->mock(BrowserProductGalleryExtractor::class);
+        $browser = $this->mockBrowser();
         $browser->shouldReceive('extract')->once()->andReturn([]);
         $events = [];
 
@@ -398,5 +419,68 @@ class ProductImageResolverTest extends TestCase
         $this->assertSame([
             'https://images.samsung.com/is/image/samsung/product?%241164_776_PNG%24=',
         ], $images);
+    }
+
+    public function test_preflight_captures_specification_text_from_a_static_spec_table(): void
+    {
+        Http::fake(['https://93.184.216.34/product' => Http::response(
+            '<html><title>Test Laptop</title><body>'
+            .'<nav>Home / Laptops</nav>'
+            .'<table><tr><td>RAM</td><td>32 GB</td></tr><tr><td>GPU</td><td>RTX 4060</td></tr></table>'
+            .'<footer>Copyright 2026</footer>'
+            .'</body></html>',
+            200,
+            ['Content-Type' => 'text/html'],
+        )]);
+
+        $result = app(ProductImageResolver::class)->preflightSource(['url' => 'https://93.184.216.34/product']);
+
+        $this->assertStringContainsString('RAM', $result['specification_text']);
+        $this->assertStringContainsString('32 GB', $result['specification_text']);
+        $this->assertStringContainsString('RTX 4060', $result['specification_text']);
+        // Stripped before capture, not just decoration on the page.
+        $this->assertStringNotContainsString('Copyright', $result['specification_text']);
+    }
+
+    public function test_preflight_specification_text_survives_from_json_ld_not_just_visible_tables(): void
+    {
+        // Real bug (2026-09-11): every <script> was stripped before the
+        // later query for application/ld+json content ran, so structured
+        // data - the one place many real product pages actually state a
+        // spec explicitly - was always discarded before it could be read.
+        Http::fake(['https://93.184.216.34/product' => Http::response(
+            '<html><head><script type="application/ld+json">'
+            .'{"@type":"Product","name":"Test Laptop","gpu":"RTX 4090"}'
+            .'</script></head><body><h1>Test Laptop</h1></body></html>',
+            200,
+            ['Content-Type' => 'text/html'],
+        )]);
+
+        $result = app(ProductImageResolver::class)->preflightSource(['url' => 'https://93.184.216.34/product']);
+
+        $this->assertStringContainsString('RTX 4090', $result['specification_text']);
+    }
+
+    public function test_preflight_specification_text_is_empty_when_the_page_never_opens(): void
+    {
+        Http::fake(['https://93.184.216.34/gone' => Http::response('', 404)]);
+
+        $result = app(ProductImageResolver::class)->preflightSource(['url' => 'https://93.184.216.34/gone']);
+
+        $this->assertSame('', $result['specification_text']);
+    }
+
+    /**
+     * lastSpecificationText() is a same-call side channel read unconditionally
+     * whenever the browser extractor runs at all, independent of whether it
+     * found any images - every test mocking extract() needs it stubbed too,
+     * or Mockery's strict mock throws on the unexpected call.
+     */
+    private function mockBrowser(): MockInterface
+    {
+        $browser = $this->mock(BrowserProductGalleryExtractor::class);
+        $browser->shouldReceive('lastSpecificationText')->andReturn(null)->byDefault();
+
+        return $browser;
     }
 }

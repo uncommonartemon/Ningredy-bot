@@ -20,6 +20,7 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Storage;
+use ReflectionMethod;
 use Tests\TestCase;
 
 class TelegramInteractivePanelTest extends TestCase
@@ -281,6 +282,86 @@ class TelegramInteractivePanelTest extends TestCase
             return in_array("draft:add:{$draft->id}", $callbacks, true)
                 && ! in_array("draft:source-hint:{$draft->id}", $callbacks, true);
         });
+    }
+
+    public function test_an_unreconciled_specifications_note_warns_in_the_same_caption_an_admin_approves_from(): void
+    {
+        // Structured column, not a Filament-only free-text field - nobody
+        // approves drafts in Filament, Telegram is. A warning that never
+        // reaches this caption is not a review signal, it is a note nobody
+        // will ever read.
+        $draft = $this->pendingDraftWithMedia();
+        $draft->update([
+            'gallery_status' => 'partial',
+            'gallery_search_stop_reason' => 'specifications_unreconciled',
+            'specifications_reconciled_source_url' => null,
+        ]);
+
+        $caption = (new ReflectionMethod(DraftTelegramPresenter::class, 'caption'))
+            ->invoke(app(DraftTelegramPresenter::class), $draft->fresh(), '');
+
+        $this->assertStringContainsString('сверка не завершена', $caption);
+        $this->assertStringNotContainsString('готов к добавлению', $caption);
+        $this->assertStringNotContainsString('полный цикл завершён', $caption);
+        foreach (['specifications_unreconciled', 'time_budget', 'cost_budget', null] as $reason) {
+            $draft->update(['gallery_search_stop_reason' => $reason]);
+            $markup = (new ReflectionMethod(DraftTelegramPresenter::class, 'controlMarkup'))
+                ->invoke(app(DraftTelegramPresenter::class), $draft->fresh());
+            $callbacks = collect($markup['inline_keyboard'])->flatten(1)->pluck('callback_data')->all();
+            $this->assertNotContains("draft:add:{$draft->id}", $callbacks);
+            if (in_array($reason, ['time_budget', 'cost_budget'], true)) {
+                $this->assertContains("draft:continue-search:{$draft->id}", $callbacks);
+            } else {
+                $this->assertNotContains("draft:continue-search:{$draft->id}", $callbacks);
+            }
+            $this->assertContains("draft:reject:{$draft->id}", $callbacks);
+        }
+    }
+
+    public function test_a_normal_partial_gallery_does_not_add_the_reconciliation_warning(): void
+    {
+        $draft = $this->pendingDraftWithMedia();
+        $draft->update(['gallery_status' => 'partial', 'gallery_search_stop_reason' => 'exhausted']);
+        $caption = (new ReflectionMethod(DraftTelegramPresenter::class, 'caption'))
+            ->invoke(app(DraftTelegramPresenter::class), $draft->fresh(), '');
+        $this->assertStringContainsString('готов к добавлению', $caption);
+    }
+
+    public function test_unfinished_card_sends_only_search_status_without_album_or_manual_reconciliation_button(): void
+    {
+        Queue::fake();
+        $draft = $this->pendingDraftWithMedia();
+        $draft->update(['specifications_reconciled_source_url' => null,
+            'gallery_search_stop_reason' => 'specifications_unreconciled']);
+
+        app(DraftTelegramPresenter::class)->sendReview(app(TelegramClient::class), '98765', $draft);
+
+        Http::assertNotSent(fn (ClientRequest $request): bool => str_ends_with($request->url(), '/sendMediaGroup'));
+        Http::assertSent(function (ClientRequest $request) use ($draft): bool {
+            $markup = $request['reply_markup'] ?? [];
+            $markup = is_string($markup) ? json_decode($markup, true) : $markup;
+            $buttons = collect($markup['inline_keyboard'] ?? [])->flatten(1);
+
+            return str_contains((string) $request['text'], 'Поиск #'.$draft->id.' не завершён')
+                && ! str_contains((string) $request['text'], 'готов к добавлению')
+                && $buttons->pluck('callback_data')->all() === ["draft:reject:{$draft->id}"];
+        });
+        $this->assertSame(3, $draft->media()->count());
+        Queue::assertNothingPushed();
+    }
+
+    public function test_a_normal_partial_gallery_keeps_its_existing_warning_behavior(): void
+    {
+        $draft = $this->pendingDraftWithMedia();
+        $draft->update([
+            'gallery_status' => 'partial',
+            'gallery_search_stop_reason' => 'exhausted',
+        ]);
+
+        $caption = (new ReflectionMethod(DraftTelegramPresenter::class, 'caption'))
+            ->invoke(app(DraftTelegramPresenter::class), $draft->fresh(), '');
+
+        $this->assertStringNotContainsString('Характеристики ещё сверяются с источником фото', $caption);
     }
 
     public function test_enhance_button_opens_numbered_draft_photo_selection(): void
@@ -988,6 +1069,7 @@ class TelegramInteractivePanelTest extends TestCase
             'specifications' => [],
             'sources' => [['title' => 'Amazon', 'url' => 'https://amazon.com/dp/EXACT', 'type' => 'marketplace']],
             'primary_source_url' => 'https://amazon.com/dp/EXACT',
+            'specifications_reconciled_source_url' => 'https://amazon.com/dp/EXACT',
             'image_urls' => [],
             'images_staged_at' => now(),
             'confidence' => 0.95,

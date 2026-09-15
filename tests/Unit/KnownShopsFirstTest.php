@@ -2,7 +2,10 @@
 
 namespace Tests\Unit;
 
+use App\Models\ProductDraft;
 use App\Models\ProductGalleryRecipe;
+use App\Services\Products\ProductGalleryRecipeRouter;
+use App\Services\Products\ProductImageResolver;
 use App\Services\Products\ProductImageStorage;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Collection;
@@ -21,6 +24,42 @@ use Tests\TestCase;
 class KnownShopsFirstTest extends TestCase
 {
     use RefreshDatabase;
+
+    public function test_only_first_batch_is_preflighted_and_unchecked_tail_survives(): void
+    {
+        config(['product-images.source_preflight' => true, 'product-images.max_preflight_sources' => 4]);
+        $sources = array_map(fn ($n) => [
+            'url' => 'https://shop'.$n.'.example/product', 'title' => 'Notebook', 'type' => 'retailer',
+        ], range(1, 9));
+        $this->mock(ProductImageResolver::class)
+            ->shouldReceive('preflightSource')->times(4)->andReturn([]);
+        $draft = new ProductDraft(['sources' => $sources, 'title' => 'Notebook']);
+        [$queue, $cards] = (new ReflectionMethod(ProductImageStorage::class, 'buildSourceQueue'))
+            ->invoke(app(ProductImageStorage::class), $draft, [], [], false, 3, null, null);
+        $this->assertCount(9, $cards);
+        $this->assertCount(9, $queue);
+        $this->assertSame(4, $cards->filter(fn ($source) => array_key_exists('_preflight_index', $source))->count());
+        $this->assertSame($sources[8]['url'], $cards->last()['url']);
+    }
+
+    public function test_matching_recipe_precedes_another_layout_on_a_known_domain(): void
+    {
+        $router = app(ProductGalleryRecipeRouter::class);
+        $exactUrl = 'https://known.example/notebooks/model-123';
+        ProductGalleryRecipe::create([
+            'domain' => 'known.example', 'path_pattern' => $router->pathPatternForUrl($exactUrl),
+            'status' => 'active', 'recipe' => ['collect_selectors' => ['.gallery img']],
+        ]);
+        $order = $this->knownFirst([
+            ['url' => 'https://unknown.example/product'],
+            ['url' => 'https://known.example/phones/item-456'],
+            ['url' => $exactUrl],
+        ]);
+        $this->assertSame($exactUrl, $order[0]['url']);
+        $this->assertSame('matching_active_recipe', $order[0]['_queue_reason']);
+        $this->assertSame('known_recipe_domain', $order[1]['_queue_reason']);
+        $this->assertSame('unfamiliar_domain', $order[2]['_queue_reason']);
+    }
 
     public function test_a_shop_we_can_already_open_goes_first(): void
     {
@@ -68,7 +107,7 @@ class KnownShopsFirstTest extends TestCase
         $this->assertSame('https://first.example/p/1', $order[0]['url']);
     }
 
-    public function test_one_shop_contributes_at_most_two_pages(): void
+    public function test_extra_pages_are_deferred_not_deleted(): void
     {
         // Research returned four acer.com links once and the bot visited all
         // four inside three minutes. They were never four chances - they fail
@@ -84,7 +123,7 @@ class KnownShopsFirstTest extends TestCase
         ]);
 
         $this->assertSame(
-            ['https://shop.example/p/1', 'https://shop.example/p/2', 'https://other.example/p/1'],
+            ['https://shop.example/p/1', 'https://shop.example/p/2', 'https://other.example/p/1', 'https://shop.example/p/3', 'https://shop.example/p/4'],
             array_column($kept, 'url'),
         );
     }
@@ -97,7 +136,7 @@ class KnownShopsFirstTest extends TestCase
             ['url' => 'https://shop.example/other/c/3'],
         ]);
 
-        $this->assertCount(2, $kept);
+        $this->assertCount(3, $kept);
     }
 
     /**

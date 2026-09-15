@@ -14,6 +14,27 @@ class OpenAiHeavyOperationGate
 
     public const string COOLDOWN_KEY = 'ai:openai-heavy-operation-cooldown-until';
 
+    /**
+     * How many OpenAI heavy operations this PHP process is already inside,
+     * on this same call stack. Not per-instance: this class is resolved
+     * fresh from the container on every call site, so instance state would
+     * not survive from an outer run() to a nested one.
+     *
+     * The gallery trainer holds the lock for the whole duration of its own
+     * prompt() call - including the provider's own tool-calling loop inside
+     * it. When that loop invokes InspectGalleryImages, that tool's handler
+     * calls run() again, for the same 'openai' provider, before the outer
+     * call has returned. A second Cache::lock() for the same key has a
+     * fresh random owner and cannot see that the process asking is the one
+     * already holding it, so it would block on its own outer call and time
+     * out - reproduced locally with no real AI request involved. This
+     * counter is what lets that nested call skip re-acquiring: it does not
+     * touch the distributed lock at all, so a different worker process
+     * (whose own copy of this counter starts at zero) still blocks on it
+     * exactly as before.
+     */
+    private static int $depth = 0;
+
     /** @param (Closure(int): void)|null $sleeper */
     public function __construct(private readonly ?Closure $sleeper = null) {}
 
@@ -38,6 +59,15 @@ class OpenAiHeavyOperationGate
             return $operation();
         }
 
+        // Already serialized by an outer run() further up this same call
+        // stack - see the property doc above. Running directly here is what
+        // a call already inside that outer critical section is entitled to;
+        // it is never reached by an unrelated call in a fresh process/stack,
+        // which starts at depth 0 and takes the real lock below instead.
+        if (self::$depth > 0) {
+            return $this->executeGuarded($operation);
+        }
+
         $this->waitForCooldown($onWait);
         $lock = Cache::lock(self::LOCK_KEY, max(60, $operationTimeoutSeconds + 60));
 
@@ -49,17 +79,7 @@ class OpenAiHeavyOperationGate
                     // cooldown while this worker was waiting for the lock.
                     $this->waitForCooldown($onWait);
 
-                    try {
-                        return $operation();
-                    } catch (Throwable $exception) {
-                        $retryAfter = app(AiErrorPresenter::class)->retryAfterSeconds($exception);
-
-                        if ($retryAfter !== null || $this->isRateLimit($exception)) {
-                            $this->cooldown($retryAfter ?? 30);
-                        }
-
-                        throw $exception;
-                    }
+                    return $this->executeGuarded($operation);
                 },
             );
         } catch (LockTimeoutException $exception) {
@@ -67,6 +87,39 @@ class OpenAiHeavyOperationGate
                 'OpenAI heavy operation queue timed out while waiting for the previous request.',
                 previous: $exception,
             );
+        }
+    }
+
+    /**
+     * Run one already-serialized operation, tracking this process's own
+     * reentrancy depth around it so a nested run() call further down this
+     * same stack can see it never needs the distributed lock a second time.
+     * The increment/decrement is symmetric under every exit path (normal
+     * return, thrown exception) so one failed nested call can never leave a
+     * later, unrelated top-level call in the same long-lived queue worker
+     * process mistakenly believing it is still inside someone else's lock.
+     *
+     * @template T
+     *
+     * @param  Closure(): T  $operation
+     * @return T
+     */
+    private function executeGuarded(Closure $operation): mixed
+    {
+        self::$depth++;
+
+        try {
+            return $operation();
+        } catch (Throwable $exception) {
+            $retryAfter = app(AiErrorPresenter::class)->retryAfterSeconds($exception);
+
+            if ($retryAfter !== null || $this->isRateLimit($exception)) {
+                $this->cooldown($retryAfter ?? 30);
+            }
+
+            throw $exception;
+        } finally {
+            self::$depth--;
         }
     }
 

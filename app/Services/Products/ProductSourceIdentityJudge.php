@@ -16,11 +16,16 @@ use Throwable;
  * match cannot resolve on its own - see ProductSourceIdentityAgent's
  * docblock for the real case (a B&H Photo Video listing for the exact
  * requested Apple SKU, rejected only because its URL ordered the same words
- * differently than the requested model string). Every failure mode here
- * (disabled, no budget, AI error, invalid response) degrades to 'uncertain'
- * - the same outcome ProductIdentityMatcher's own rejection already
- * produced before this class existed - so a problem with this optional
- * enhancement can never crash or block the broader search.
+ * differently than the requested model string).
+ *
+ * Every failure mode that means the AI was never actually consulted
+ * (disabled, no budget, nothing to check, a technical/AI error, an invalid
+ * response) returns 'unavailable', not 'uncertain' - a caller that would
+ * reject a source on an explicit operator identifier the AI genuinely
+ * judged too ambiguous to confirm must not apply that same rejection to a
+ * question that was simply never asked. 'uncertain' is reserved for the AI
+ * actually having looked and said so; the caller decides what each means,
+ * but only 'uncertain' is evidence of anything.
  */
 class ProductSourceIdentityJudge
 {
@@ -33,13 +38,13 @@ class ProductSourceIdentityJudge
     public function judge(ProductDraft $draft, array $source, ?int $telegramUpdateId): string
     {
         if (! $this->settings->sourceIdentityAgentEnabled()) {
-            return 'uncertain';
+            return 'unavailable';
         }
 
         $updateId = $telegramUpdateId ?? $draft->telegram_update_id;
 
         if (! $this->timeBudget->canStart($updateId, 10)) {
-            return 'uncertain';
+            return 'unavailable';
         }
 
         $identifiers = collect($draft->specifications ?? [])
@@ -57,10 +62,22 @@ class ProductSourceIdentityJudge
             ->implode(' ');
 
         if (trim((string) $draft->model) === '' && $identifiers === []) {
-            return 'uncertain';
+            return 'unavailable';
         }
 
+        $originalOperatorRequest = $draft->relationLoaded('telegramUpdate')
+            ? $draft->telegramUpdate?->text
+            : $draft->telegramUpdate()->value('text');
         $payload = [
+            // What the operator actually asked for, not only what research
+            // settled on. A page naming a different specific configuration
+            // than requested_model/requested_identifiers is not automatically
+            // a conflict when the operator never specified that far - this is
+            // what lets the agent tell "the operator wanted red and got
+            // black" apart from "the operator only said the product line, and
+            // research happened to settle on one SKU of several that would
+            // equally have satisfied the request".
+            'original_operator_request' => is_string($originalOperatorRequest) ? $originalOperatorRequest : null,
             'requested_model' => $draft->model,
             'requested_identifiers' => $identifiers,
             'requested_color' => $draft->color,
@@ -114,7 +131,7 @@ class ProductSourceIdentityJudge
             ]);
             report($exception);
 
-            return 'uncertain';
+            return 'unavailable';
         }
     }
 }

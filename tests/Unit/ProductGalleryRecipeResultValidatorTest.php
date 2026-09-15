@@ -10,6 +10,23 @@ class ProductGalleryRecipeResultValidatorTest extends TestCase
 {
     use RefreshDatabase;
 
+    public function test_publication_quota_never_hides_missing_observed_frames(): void
+    {
+        $validator = app(ProductGalleryRecipeResultValidator::class);
+        $recipe = ['gallery_present' => true, 'content_confirmed_product' => true, 'expected_image_count' => 2];
+        $result = ['images' => ['https://cdn.example/a.jpg', 'https://cdn.example/b.jpg'],
+            'diagnostics' => ['observed_gallery_count' => 7]];
+        $validation = $validator->validate($recipe, $result, minimumSuccessCount: 3);
+        $this->assertFalse($validation['passed']);
+        $this->assertSame(7, $validation['expected']);
+        $result['diagnostics']['observed_gallery_count'] = 2;
+        $validation = $validator->validate($recipe, $result, minimumSuccessCount: 3);
+        $this->assertTrue($validation['passed']);
+        $this->assertFalse($validation['meets_image_minimum']);
+        unset($result['diagnostics']['observed_gallery_count']);
+        $this->assertFalse($validator->validate($recipe, $result, minimumSuccessCount: 3)['passed']);
+    }
+
     public function test_every_thumbnail_this_page_shows_is_owed_a_press(): void
     {
         // The silent half of the same bug. A recipe trained where the gallery
@@ -201,11 +218,11 @@ class ProductGalleryRecipeResultValidatorTest extends TestCase
         );
 
         $this->assertFalse($result['passed']);
-        $this->assertSame(10, $result['expected']);
+        $this->assertSame(13, $result['expected']);
         $this->assertSame(5, $result['extracted']);
     }
 
-    public function test_ten_of_thirteen_structurally_observed_frames_is_complete_at_global_limit(): void
+    public function test_publication_limit_does_not_prove_completion_of_thirteen_frame_gallery(): void
     {
         $result = app(ProductGalleryRecipeResultValidator::class)->validate(
             ['gallery_present' => true, 'content_confirmed_product' => true, 'expected_image_count' => 13],
@@ -215,8 +232,8 @@ class ProductGalleryRecipeResultValidatorTest extends TestCase
             ],
         );
 
-        $this->assertTrue($result['passed']);
-        $this->assertSame(10, $result['expected']);
+        $this->assertFalse($result['passed']);
+        $this->assertSame(13, $result['expected']);
         $this->assertSame(10, $result['extracted']);
     }
 
@@ -233,7 +250,7 @@ class ProductGalleryRecipeResultValidatorTest extends TestCase
 
     public function test_large_observed_gallery_does_not_raise_the_publication_limit_or_accept_missing_frames(): void
     {
-        foreach ([5 => false, 10 => true] as $extracted => $passed) {
+        foreach ([5 => false, 10 => false] as $extracted => $passed) {
             $result = app(ProductGalleryRecipeResultValidator::class)->validate(
                 ['gallery_present' => true, 'content_confirmed_product' => true, 'expected_image_count' => 999],
                 [
@@ -243,7 +260,7 @@ class ProductGalleryRecipeResultValidatorTest extends TestCase
             );
 
             $this->assertSame($passed, $result['passed']);
-            $this->assertSame(10, $result['expected']);
+            $this->assertSame(999, $result['expected']);
             $this->assertSame($extracted, $result['extracted']);
         }
     }
@@ -401,7 +418,7 @@ class ProductGalleryRecipeResultValidatorTest extends TestCase
         );
 
         $this->assertTrue($result['passed']);
-        $this->assertSame(10, $result['expected']);
+        $this->assertSame(16, $result['expected']);
     }
 
     public function test_a_single_arrow_pressed_once_cannot_pass_a_multi_frame_traversal(): void
@@ -580,7 +597,7 @@ class ProductGalleryRecipeResultValidatorTest extends TestCase
         $this->assertStringContainsString('Browser execution was partial', $result['reason']);
     }
 
-    public function test_observed_zoom_control_rejects_low_resolution_thumbnail_traversal_without_after_each(): void
+    public function test_zoom_label_is_an_observation_not_proof_of_a_broken_recipe(): void
     {
         $result = app(ProductGalleryRecipeResultValidator::class)->validate(
             [
@@ -603,10 +620,11 @@ class ProductGalleryRecipeResultValidatorTest extends TestCase
                     'title' => 'Zoom plus',
                 ]]],
             ],
+            minimumSuccessCount: 2,
         );
 
-        $this->assertFalse($result['passed']);
-        $this->assertStringContainsString('after_each_selector', $result['reason']);
+        $this->assertTrue($result['passed']);
+        $this->assertStringContainsString('after_each_selector', $result['quality_observation']);
     }
 
     public function test_unprobed_urls_cannot_publish_a_recipe(): void
@@ -838,6 +856,47 @@ class ProductGalleryRecipeResultValidatorTest extends TestCase
             'changed' => $changed,
             'selector_match_count' => 1,
         ];
+    }
+
+    public function test_rejected_small_gallery_frame_proves_collection_but_not_publishability(): void
+    {
+        $images = $this->images(6);
+        $result = app(ProductGalleryRecipeResultValidator::class)->validate(
+            ['gallery_present' => true, 'content_confirmed_product' => true],
+            ['images' => $images, 'diagnostics' => [
+                'strict_recipe' => true,
+                'observed_gallery_count' => 7,
+                'validated_image_evidence' => array_map(fn ($url) => ['url' => $url, 'source' => 'recipe_dom'], $images),
+                'rejected_candidates' => [[
+                    'url' => 'https://example.com/seventh.jpg', 'source' => 'recipe_dom',
+                    'reason' => 'dimensions_below_minimum', 'width' => 300, 'height' => 200,
+                ]],
+            ]],
+            countedOnThisPage: false,
+        );
+        $this->assertTrue($result['passed'], $result['reason']);
+        $this->assertSame(7, $result['collected']);
+        $this->assertSame(6, $result['extracted']);
+        $this->assertSame(1, $result['rejected_frames']);
+    }
+
+    public function test_unknown_or_foreign_or_duplicate_rejections_do_not_fill_a_missing_frame(): void
+    {
+        foreach ([
+            ['url' => 'https://example.com/seventh.jpg', 'source' => 'network_or_payload', 'reason' => 'dimensions_below_minimum'],
+            ['url' => 'https://example.com/seventh.jpg', 'source' => 'recipe_dom', 'reason' => 'probe_timeout'],
+            ['url' => $this->images(6)[0], 'source' => 'recipe_dom', 'reason' => 'dimensions_below_minimum'],
+        ] as $rejection) {
+            $result = app(ProductGalleryRecipeResultValidator::class)->validate(
+                ['gallery_present' => true, 'content_confirmed_product' => true],
+                ['images' => $this->images(6), 'diagnostics' => [
+                    'observed_gallery_count' => 7,
+                    'rejected_candidates' => [[...$rejection, 'width' => 300, 'height' => 200]],
+                ]],
+                countedOnThisPage: false,
+            );
+            $this->assertFalse($result['passed']);
+        }
     }
 
     private function images(int $count): array

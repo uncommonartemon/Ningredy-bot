@@ -96,7 +96,10 @@ class ContinueDraftGallerySearch implements ShouldBeUniqueUntilProcessing, Shoul
                 },
             );
             $previousCount = $draft->media()->count();
-            $progress->step('Продолжаю Playwright-поиск с места остановки', 1680);
+            $reconciliationOnly = $draft->gallery_confirmed_sufficient
+                && trim((string) $draft->primary_source_url) !== ''
+                && $draft->specifications_reconciled_source_url !== $draft->primary_source_url;
+            $progress->step($reconciliationOnly ? 'Повторяю сверку карточки с источником фото' : 'Продолжаю Playwright-поиск с места остановки', 1680);
             $stored = $images->continueStage(
                 $draft,
                 fn (string $message) => $progress->info($message),
@@ -111,7 +114,10 @@ class ContinueDraftGallerySearch implements ShouldBeUniqueUntilProcessing, Shoul
             // leaving the user to press "продолжить" again for every round.
             // cost_budget/time_budget means that allowance really is gone,
             // so this is where the chain has to stop and report back.
-            if ($fresh->gallery_status !== 'complete' && $fresh->gallery_search_stop_reason === 'exhausted') {
+            // Card assembly already recovered in stage(), before delivery.
+            // Do not multiply its bounded retries through another queue chain.
+            if ($fresh->gallery_status !== 'complete'
+                && $fresh->gallery_search_stop_reason === 'exhausted') {
                 Cache::put(
                     "draft-gallery-continue:{$this->draftId}:queued",
                     true,
@@ -125,7 +131,14 @@ class ContinueDraftGallerySearch implements ShouldBeUniqueUntilProcessing, Shoul
                 return;
             }
 
-            if ($stored > 0) {
+            $reconciliationPending = $fresh->gallery_search_stop_reason === 'specifications_unreconciled'
+                || (trim((string) $fresh->primary_source_url) !== ''
+                    && $fresh->specifications_reconciled_source_url !== $fresh->primary_source_url);
+            if ($reconciliationPending) {
+                $progress->failed('Сверка не завершена', 'Фото сохранены; публикация пока недоступна.');
+            } elseif ($reconciliationOnly) {
+                $progress->done("Карточка сверена с источником; сохранены фото: {$fresh->media->count()}");
+            } elseif ($stored > 0) {
                 $progress->done("Продолжение завершено: галерея обновлена, фото: {$fresh->media->count()}");
             } else {
                 $progress->done("Продолжение завершено: новых фото нет, сохранены прежние {$previousCount}");

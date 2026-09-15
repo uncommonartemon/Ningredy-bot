@@ -24,10 +24,14 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
 
     public const int MAX_OUTPUT_TOKENS = 16_000;
 
+    public const int MAX_SOURCES = 50;
+
     // Real production AiRun activity logs show successful research using
-    // 2-11 web searches (avg ~6); 12 leaves a small buffer over the observed
+    // 0-13 web searches (median ~7); 12 leaves a small buffer over the observed
     // working maximum without letting one response run away to dozens of
-    // calls. See PROJECT_STRATEGY.md's Web Search section.
+    // calls. The provider treats it as a soft bound rather than a hard one:
+    // three of fifty-one measured runs finished on 13. See PROJECT_STRATEGY.md's
+    // Web Search section.
     public const int MAX_WEB_SEARCH_CALLS = 12;
 
     /**
@@ -88,8 +92,8 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
             specifications. Never alter an explicit full model number, part number, or SKU. If no exact product
             matching the hard specifications can be verified, return not_found.
 
-            Before opening galleries, use Web Search as broad source discovery: target 6-10 exact HTML product
-            pages on different domains when available. Search the explicit model, SKU/MPN/part number, EAN or UPC
+            Before opening galleries, use Web Search as broad source discovery across every domain that
+            genuinely sells this exact configuration. Search the explicit model, SKU/MPN/part number, EAN or UPC
             first; then search the exact configuration in several languages/regions. Do not confuse a serial number
             of one physical unit with a reusable catalog identifier. First choose one exact current configuration,
             then require every candidate to match that SKU or the same CPU, GPU, RAM, storage, display, condition,
@@ -118,16 +122,19 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
             by themselves a reason for not_found.
 
             Return every genuine page for this exact product that you actually found, not a shortlist. Breadth is
-            cheap here and scarcity is expensive: the pipeline opens only the best few and keeps the rest in
+            useful here: the pipeline opens only the best few and keeps the rest in
             reserve for when those come to nothing, so a source you leave out is one it cannot fall back on - and
-            with four or five it regularly runs out and pays to research all over again. Twenty is a comfortable
-            answer where the product is widely sold; return fewer only because fewer exist, never to be brief, and
+            with four or five it regularly runs out and pays to research all over again. Twenty to forty genuine
+            cards across different shops is the working target where the product is widely sold; return fewer
+            only because fewer exist, never to be brief, and
             never pad the list with pages you did not verify sell this exact configuration.
 
             Fill image_urls only for the handful of pages where you actually saw product photographs. An empty
             array is the right answer for the rest, and the correct one for the long tail - the pipeline reads
             galleries from the pages themselves, so a list of guessed image URLs buys nothing and crowds out the
-            sources that would have been useful.
+            sources that would have been useful. Search both broadly and on supplied proven domains. Never spend
+            repeated searches solely to reach a count, invent sources, or relax exact configuration/color
+            requirements.
 
             status is a commitment, not a guess: return found only when you are also returning a non-empty title,
             at least one entry in sources, and a primary_source_url pointing at one of those sources. If any of
@@ -217,7 +224,7 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
                     'value' => $schema->string()->max(2000)->required(),
                 ])->withoutAdditionalProperties()
             )->required(),
-            'sources' => $schema->array()->max(50)->items(
+            'sources' => $schema->array()->max(self::MAX_SOURCES)->items(
                 $schema->object([
                     'title' => $schema->string()->max(500)->required(),
                     'url' => $schema->string()->max(2048)->required(),

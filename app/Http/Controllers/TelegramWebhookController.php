@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Exceptions\LowResolutionDraftMediaException;
 use App\Exceptions\MissingDraftMediaException;
+use App\Exceptions\UnreconciledDraftSpecificationsException;
 use App\Exceptions\UnverifiedDraftMediaException;
 use App\Jobs\ContinueDraftGallerySearch;
 use App\Jobs\ProcessDraftPhotoActions;
@@ -479,6 +480,18 @@ class TelegramWebhookController extends Controller
             $update->update(['status' => 'completed', 'error' => null, 'processed_at' => now()]);
 
             return;
+        } catch (UnreconciledDraftSpecificationsException $exception) {
+            // An old approval button is not consent to start another paid check.
+            // Refresh the controls even if Telegram's short-lived toast expired.
+            try {
+                $this->telegram->answerCallbackQuery($callbackId, 'Поиск ещё не подготовил готовую карточку. Товар не добавлен.');
+            } catch (Throwable $callbackError) {
+                report($callbackError);
+            }
+            $this->draftPresenter->sendReview($this->telegram, $chatId, $draft);
+            $update->update(['status' => 'completed', 'error' => null, 'processed_at' => now()]);
+
+            return;
         } catch (\RuntimeException $exception) {
             $this->telegram->answerCallbackQuery($callbackId, mb_substr($exception->getMessage(), 0, 180));
             $this->telegram->sendMessage($chatId, '⚠️ '.$exception->getMessage());
@@ -951,7 +964,9 @@ class TelegramWebhookController extends Controller
             return;
         }
 
-        $resumable = in_array($draft->gallery_search_stop_reason, ['cost_budget', 'time_budget', 'exhausted'], true)
+        $resumable = in_array($draft->gallery_search_stop_reason, [
+            'cost_budget', 'time_budget', 'exhausted', 'specifications_unreconciled',
+        ], true)
             || $draft->images_staged_at === null;
 
         if (! $resumable) {

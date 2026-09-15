@@ -179,9 +179,16 @@ class ProductImageVisionVerifier
             $pageContext = is_array($candidate['page_source_context'] ?? null)
                 ? $candidate['page_source_context']
                 : null;
+            // The exact tier only - a shared family/chassis fragment must
+            // not grant source_identity_confirmed here either. Upstream
+            // (ProductImageStorage) may have already overwritten this flag
+            // with its own judge-backed, source-level decision (stage()'s
+            // main per-source loop does); the || below preserves that, but
+            // this local, judge-free fallback must not hand it out on a
+            // weaker basis than upstream required.
             $pageIdentityConfirmed = $pageContext !== null
                 && ! $this->identityMatcher->conflictsSource($draft, $pageContext)
-                && $this->identityMatcher->supportsSource($draft, $pageContext);
+                && $this->identityMatcher->confirmsExactIdentifier($draft, $pageContext);
 
             return [
                 ...$candidate,

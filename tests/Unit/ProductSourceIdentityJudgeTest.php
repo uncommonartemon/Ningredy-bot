@@ -27,7 +27,7 @@ class ProductSourceIdentityJudgeTest extends TestCase
         ])->id;
     }
 
-    public function test_it_returns_uncertain_without_calling_the_agent_when_disabled(): void
+    public function test_it_returns_unavailable_without_calling_the_agent_when_disabled(): void
     {
         app(AiSettings::class)->saveSourceIdentityAgentEnabled(false);
         ProductSourceIdentityAgent::fake(fn (): array => [
@@ -40,11 +40,11 @@ class ProductSourceIdentityJudgeTest extends TestCase
 
         $result = app(ProductSourceIdentityJudge::class)->judge($draft, ['url' => 'https://example.com/x'], null);
 
-        $this->assertSame('uncertain', $result);
+        $this->assertSame('unavailable', $result);
         $this->assertSame(0, AiRun::query()->count());
     }
 
-    public function test_it_returns_uncertain_without_calling_the_agent_when_the_draft_has_no_identifier(): void
+    public function test_it_returns_unavailable_without_calling_the_agent_when_the_draft_has_no_identifier(): void
     {
         ProductSourceIdentityAgent::fake(fn (): array => [
             'match' => 'confirmed',
@@ -56,7 +56,7 @@ class ProductSourceIdentityJudgeTest extends TestCase
 
         $result = app(ProductSourceIdentityJudge::class)->judge($draft, ['url' => 'https://example.com/x'], null);
 
-        $this->assertSame('uncertain', $result);
+        $this->assertSame('unavailable', $result);
         $this->assertSame(0, AiRun::query()->count());
     }
 
@@ -107,7 +107,7 @@ class ProductSourceIdentityJudgeTest extends TestCase
         $this->assertSame('conflicting', $result);
     }
 
-    public function test_an_invalid_agent_response_degrades_to_uncertain_and_records_a_failed_ai_run(): void
+    public function test_an_invalid_agent_response_degrades_to_unavailable_and_records_a_failed_ai_run(): void
     {
         ProductSourceIdentityAgent::fake(fn (): array => [
             'match' => 'not-a-real-option',
@@ -119,7 +119,7 @@ class ProductSourceIdentityJudgeTest extends TestCase
 
         $result = app(ProductSourceIdentityJudge::class)->judge($draft, ['url' => 'https://example.com/x'], $this->telegramUpdateId());
 
-        $this->assertSame('uncertain', $result);
+        $this->assertSame('unavailable', $result);
         $this->assertSame('failed', AiRun::query()->first()->status);
     }
 }

@@ -98,7 +98,7 @@ class UnconfirmedIdentityIsNotTrustedTest extends TestCase
 
         $this->assertNotEmpty(array_filter(
             $messages,
-            fn (string $message): bool => str_contains($message, 'не удалось опознать'),
+            fn (string $message): bool => str_contains($message, 'не хватило сопоставимых данных'),
         ));
     }
 

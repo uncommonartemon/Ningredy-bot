@@ -13,7 +13,8 @@ class ProductDraft extends Model
         'reviewed_by_telegram_user_id', 'rejection_reason', 'requested_by_telegram_user_id',
         'approved_product_id', 'approved_variant_id',
         'title', 'brand', 'model', 'product_type', 'category', 'color', 'description', 'research_notes', 'specifications',
-        'sources', 'primary_source_url', 'official_source_url', 'image_urls',
+        'sources', 'primary_source_url', 'specifications_reconciled_source_url',
+        'specifications_reconciliation_attempts', 'gallery_confirmed_sufficient', 'official_source_url', 'image_urls',
         'excluded_gallery_source_urls', 'excluded_gallery_image_urls', 'excluded_gallery_hashes',
         'telegram_review_chat_id', 'telegram_review_message_ids', 'telegram_review_has_media', 'telegram_review_caption',
         'telegram_control_message_ids', 'telegram_review_finalized_at',
@@ -29,12 +30,63 @@ class ProductDraft extends Model
             'excluded_gallery_hashes' => 'array',
             'telegram_review_message_ids' => 'array',
             'telegram_review_has_media' => 'boolean',
+            'gallery_confirmed_sufficient' => 'boolean',
             'telegram_control_message_ids' => 'array',
             'telegram_review_finalized_at' => 'datetime',
             'confidence' => 'decimal:4',
             'reviewed_at' => 'datetime',
             'images_staged_at' => 'datetime',
         ];
+    }
+
+    /**
+     * True only for the duration of ProductImageStorage's own reconciliation
+     * writes (see withReconciliationWrite()). Ordinarily, a save that also
+     * sets specifications_reconciled_source_url in the very same call
+     * (isDirty on that column) is exempt below - that is what a save
+     * confirming a NEW source looks like. It is not what a save
+     * re-confirming the SAME source again looks like: the column's value
+     * does not change, so isDirty on it is false even though this genuinely
+     * is a reconciliation write - this flag is the exemption for exactly
+     * that case, one only ProductImageStorage's own trusted call sites set.
+     */
+    private static bool $writingReconciliation = false;
+
+    /** @param \Closure(): mixed $callback */
+    public static function withReconciliationWrite(\Closure $callback): mixed
+    {
+        static::$writingReconciliation = true;
+
+        try {
+            return $callback();
+        } finally {
+            static::$writingReconciliation = false;
+        }
+    }
+
+    /**
+     * A reconciliation confirmation is a claim about ONE exact set of card
+     * values against ONE exact source - a matching source_url alone does
+     * not mean the values it was confirmed against are still the ones on
+     * the draft. Any save that changes what was actually confirmed outside
+     * ProductImageStorage's own reconciliation write - a manual edit, a
+     * hint - invalidates the stamp rather than leaving it pointing at
+     * values that no longer match what it once verified.
+     */
+    protected static function booted(): void
+    {
+        static::saving(function (ProductDraft $draft): void {
+            if (static::$writingReconciliation || $draft->isDirty('specifications_reconciled_source_url')) {
+                return;
+            }
+
+            $confirmedFields = ['title', 'model', 'color', 'description', 'specifications'];
+
+            if (collect($confirmedFields)->contains(fn (string $field): bool => $draft->isDirty($field))) {
+                $draft->specifications_reconciled_source_url = null;
+                $draft->specifications_reconciliation_attempts = 0;
+            }
+        });
     }
 
     public function telegramUpdate(): BelongsTo

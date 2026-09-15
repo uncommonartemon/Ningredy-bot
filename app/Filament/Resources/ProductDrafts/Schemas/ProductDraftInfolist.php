@@ -59,6 +59,7 @@ class ProductDraftInfolist
                                 'cost_budget' => 'Денежный лимит',
                                 'time_budget' => 'Временной лимит',
                                 'exhausted' => 'Источники исчерпаны',
+                                'specifications_unreconciled' => 'Характеристики не сверены',
                                 default => '—',
                             })
                             ->placeholder('—'),

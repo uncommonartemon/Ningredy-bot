@@ -4,6 +4,7 @@ namespace App\Services\Products;
 
 use App\Exceptions\LowResolutionDraftMediaException;
 use App\Exceptions\MissingDraftMediaException;
+use App\Exceptions\UnreconciledDraftSpecificationsException;
 use App\Exceptions\UnverifiedDraftMediaException;
 use App\Jobs\StoreProductImages;
 use App\Models\AttributeDefinition;
@@ -69,6 +70,21 @@ class ProductDraftWorkflow
             $minimumHeight > 0
                 ? "Черновик содержит фото меньше {$minimumWidth}×{$minimumHeight}px и не может быть опубликован. Сначала замените фотографии."
                 : "Черновик содержит фото шириной меньше {$minimumWidth}px и не может быть опубликован. Высота не ограничена. Сначала замените фотографии.",
+        );
+        // The card's specifications, sources, and photos must describe one
+        // exact configuration (PROJECT_STRATEGY.md, "Единый источник
+        // карточки") - a photo source chosen after the operator's request
+        // did not pin an exact SKU can genuinely be a different, still-
+        // suitable configuration than whatever specifications research
+        // originally wrote down, and ProductSpecificationReconciler is what
+        // checks the two actually agree. Independent of gallery_status: a
+        // 'partial' gallery is already publishable today, so this has to
+        // gate on its own persisted fact, not on that column.
+        throw_if(
+            trim((string) $draft->primary_source_url) !== ''
+                && $draft->specifications_reconciled_source_url !== $draft->primary_source_url,
+            UnreconciledDraftSpecificationsException::class,
+            'Характеристики черновика не сверены с источником выбранных фотографий — публикация невозможна, пока сверка не завершится.',
         );
 
         try {

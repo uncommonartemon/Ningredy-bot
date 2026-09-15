@@ -36,9 +36,9 @@ class ProductSourceAttemptsTable
                 TextColumn::make('phase')->label('Этап')->badge(),
                 TextColumn::make('action')->label('Действие')->searchable(),
                 TextColumn::make('status')->label('Статус')->badge()->color(fn (string $state): string => match ($state) {
-                    'completed', 'success' => 'success',
+                    'completed', 'success', 'complete' => 'success',
                     'partial', 'skipped' => 'warning',
-                    'failed', 'blocked' => 'danger',
+                    'failed', 'blocked', 'interrupted' => 'danger',
                     default => 'info',
                 }),
                 TextColumn::make('decision')->label('Решение')->placeholder('—')->toggleable(),
@@ -46,9 +46,9 @@ class ProductSourceAttemptsTable
                 TextColumn::make('duration_ms')->label('мс')->numeric()->placeholder('—')->toggleable(),
                 TextColumn::make('message')->label('Итог')->limit(80)->tooltip(fn ($record): ?string => $record->message),
                 TextColumn::make('telegramUpdate.id')
-                    ->label('Telegram update')
+                    ->label('Запрос #')
                     ->placeholder('—')
-                    ->toggleable(isToggledHiddenByDefault: true),
+                    ->toggleable(),
                 TextColumn::make('recipeVersion.id')
                     ->label('Версия рецепта')
                     ->placeholder('—')
@@ -56,6 +56,7 @@ class ProductSourceAttemptsTable
             ])
             ->filters([
                 SelectFilter::make('actor')->options([
+                    'server' => 'Сервер',
                     'web_search' => 'Web Search',
                     'html' => 'HTML',
                     'html_resolver' => 'HTML resolver',
@@ -66,6 +67,9 @@ class ProductSourceAttemptsTable
                     'system' => 'Система',
                 ]),
                 SelectFilter::make('status')->options([
+                    'running' => 'В процессе',
+                    'interrupted' => 'Прервано',
+                    'complete' => 'Полный результат',
                     'completed' => 'Выполнено',
                     'success' => 'Успех',
                     'partial' => 'Частично',
@@ -73,6 +77,12 @@ class ProductSourceAttemptsTable
                     'failed' => 'Ошибка',
                     'blocked' => 'Заблокировано',
                 ]),
+                Filter::make('telegram_update_id')
+                    ->schema([TextInput::make('value')->label('ID запроса Telegram')->numeric()])
+                    ->query(fn (Builder $query, array $data): Builder => $query->when(
+                        filled($data['value'] ?? null),
+                        fn (Builder $q) => $q->where('telegram_update_id', $data['value']),
+                    )),
                 Filter::make('domain')
                     ->schema([TextInput::make('value')->label('Домен')])
                     ->query(fn (Builder $query, array $data): Builder => $query->when(

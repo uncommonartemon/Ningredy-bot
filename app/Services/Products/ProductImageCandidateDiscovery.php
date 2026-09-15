@@ -24,6 +24,13 @@ class ProductImageCandidateDiscovery
 
     private bool $terminalFailure = false;
 
+    /** Unopened pages awaiting the caller's verdict on the previous gallery. */
+    private array $pendingSources = [];
+
+    private ?string $pendingSearchKey = null;
+
+    private bool $yieldedGallery = false;
+
     public function __construct(
         private readonly ProductImageResolver $resolver,
         private readonly WikimediaImageSearch $wikimedia,
@@ -66,9 +73,15 @@ class ProductImageCandidateDiscovery
         // measure time budget and AI-cost attribution against a search that
         // already ended, making canStart() report zero time left immediately.
         $telegramUpdateId ??= $draft->telegram_update_id;
+        $searchKey = $draft->id.':'.$telegramUpdateId;
+        if ($this->pendingSearchKey !== $searchKey) {
+            $this->pendingSources = [];
+            $this->pendingSearchKey = $searchKey;
+        }
         $this->sourcePagesByImageUrl = [];
         $this->sourceContextsByImageUrl = [];
         $this->terminalFailure = false;
+        $this->yieldedGallery = false;
         $excludedUrls = collect($excludedUrls)
             ->filter(fn (mixed $url): bool => is_string($url) && $url !== '')
             ->unique()
@@ -80,16 +93,31 @@ class ProductImageCandidateDiscovery
                 ->pluck('url')
                 ->all()
             : [];
-        $excludedSourceUrls = collect([
+        $pendingExcludedSourceUrls = collect([
             ...($draft->excluded_gallery_source_urls ?? []),
             ...$additionalExcludedSourceUrls,
-            ...$knownDraftSourceUrls,
             ...array_map(fn (string $domain): string => 'https://'.$domain, $this->sourcePriority->blockedDomains()),
         ])
             ->filter(fn (mixed $url): bool => is_string($url) && $url !== '')
             ->unique()
             ->values()
             ->all();
+        $excludedSourceUrls = array_values(array_unique([...$pendingExcludedSourceUrls, ...$knownDraftSourceUrls]));
+        if ($this->pendingSources !== []) {
+            $pending = array_values(array_filter(
+                $this->pendingSources,
+                fn (array $source): bool => ! $this->sourceExcluded((string) ($source['url'] ?? ''), $pendingExcludedSourceUrls),
+            ));
+            $this->pendingSources = [];
+            if ($pending !== []) {
+                // No new paid Web Search until its already found pages have
+                // had a chance. The caller still performs download and Vision.
+                return $this->withoutExcluded(
+                    $this->resolveSourcesIndividually($pending, $draft, $progress, $telegramUpdateId),
+                    $excludedUrls,
+                );
+            }
+        }
         $sources = array_values(array_filter(
             $this->imageSources($this->sourcePriority->sortSources($draft->sources ?? [], $draft->brand)),
             fn (array $source): bool => ! $this->sourceExcluded((string) ($source['url'] ?? ''), $excludedSourceUrls),
@@ -107,6 +135,10 @@ class ProductImageCandidateDiscovery
             $preferredUrls,
             fn (string $url): bool => $this->looksLikeCatalogImage($url),
         ));
+
+        if ($this->yieldedGallery) {
+            return $preferredUrls;
+        }
 
         if (count($directCatalogUrls) >= (int) config('product-images.public_source_target', 6)) {
             return $directCatalogUrls;
@@ -507,7 +539,7 @@ class ProductImageCandidateDiscovery
         $activeRecipeOnly = $categoryStrategy === Category::GALLERY_SEARCH_VISION_FIRST;
         $resolveLimit = (int) config('product-images.resolve_limit', 16);
 
-        foreach ($sources as $source) {
+        foreach (array_values($sources) as $sourceIndex => $source) {
             $pageUrl = is_string($source['url'] ?? null) ? $source['url'] : null;
 
             if (! $pageUrl) {
@@ -618,6 +650,16 @@ class ProductImageCandidateDiscovery
             }
 
             $resolved = [...$resolved, ...$pageImages];
+            if (count(array_filter(
+                $pageImages,
+                fn (string $url): bool => $this->resolver->isConfirmedGalleryImage($url),
+            )) >= $minimumVerifiedImages) {
+                // Structural confirmation is not final acceptance. Yield to
+                // download/Vision now; retain unopened pages if those fail.
+                $this->pendingSources = array_slice(array_values($sources), $sourceIndex + 1);
+                $this->yieldedGallery = true;
+                break;
+            }
         }
 
         return array_values(array_unique($resolved));
@@ -657,6 +699,7 @@ class ProductImageCandidateDiscovery
             ...$source,
             'url' => (string) ($preflight['final_url'] ?? $source['url']),
             '_preflight_identity_evidence' => $evidence,
+            '_preflight_specification_text' => trim((string) ($preflight['specification_text'] ?? '')),
         ];
     }
 
@@ -695,14 +738,14 @@ class ProductImageCandidateDiscovery
                     ->sort(fn (array $left, array $right): int => ($right['gallery_rank'] <=> $left['gallery_rank'])
                         ?: ($left['index'] <=> $right['index'])
                     )
-                    ->take($perSourceLimit)
+                    ->take($group->max('gallery_rank') === 2 ? $group->count() : $perSourceLimit)
                     ->values(),
             ])
             ->sort(fn (array $left, array $right): int => ($right['gallery_rank'] <=> $left['gallery_rank'])
                 ?: ($left['first_index'] <=> $right['first_index'])
             )
             ->flatMap(fn (array $group) => $group['items'])
-            ->take($globalLimit)
+            ->filter(fn (array $item, int $index): bool => $item['gallery_rank'] === 2 || $index < $globalLimit)
             ->pluck('url')
             ->values()
             ->all();

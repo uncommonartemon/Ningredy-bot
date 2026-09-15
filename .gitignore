@@ -50,3 +50,7 @@ Thumbs.db
 # Browser sessions kept per host so a second visit is not another stranger.
 storage/app/browser-sessions/
 storage/app/browser-profiles/
+
+# Per-run gallery extraction checkpoints/screenshots from real Playwright
+# sessions - runtime debugging state, never project code.
+/storage/framework/product-gallery-browser/

@@ -2,6 +2,7 @@
 
 namespace App\Services\Products;
 
+use App\Ai\Agents\ProductResearchAgent;
 use Illuminate\Support\Str;
 
 class ProductResearchResponseNormalizer
@@ -102,7 +103,7 @@ class ProductResearchResponseNormalizer
             ->filter()
             ->unique('url')
             ->sortBy(fn (array $source): int => $source['url'] === $primaryUrl ? 0 : 1)
-            ->take(20)
+            ->take(ProductResearchAgent::MAX_SOURCES)
             ->values()
             ->all();
     }

@@ -74,6 +74,25 @@ return [
         'timeout' => (int) env('AI_PRODUCT_SOURCE_IDENTITY_TIMEOUT', 20),
     ],
 
+    'product_specification_reconciliation' => [
+        'provider' => 'openai',
+        'model' => env('AI_PRODUCT_SPECIFICATION_RECONCILIATION_MODEL', 'gpt-5.4-mini'),
+        // Real production runs (2026-09-14, draft #5) hit exactly this
+        // ceiling twice in a row - cURL error 28 at ~30000ms/~30016ms, the
+        // model still generating when our own client gave up - burning the
+        // shared search budget on a guaranteed-empty result instead of
+        // actually getting an answer. This call has tools (HasTools, up to
+        // MaxSteps(3) round trips, one of which can launch a full
+        // Playwright browser session) and a non-trivial structured output
+        // (the whole card), closer in shape to product_image_discovery's
+        // 75s or product_image_upscale's 90s above than to the
+        // tool-free, single-verdict product_source_identity judge's 20s -
+        // 30s was never enough for what this call actually does.
+        // ProductSearchTimeBudget::timeoutFor() still caps this at however
+        // much shared search time actually remains when that is tighter.
+        'timeout' => (int) env('AI_PRODUCT_SPECIFICATION_RECONCILIATION_TIMEOUT', 90),
+    ],
+
     'gallery_recipe_training' => [
         'provider' => 'openai',
         'model' => env('AI_GALLERY_RECIPE_TRAINING_MODEL', 'gpt-5.4'),

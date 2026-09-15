@@ -400,17 +400,15 @@ test('uses browser-valid quoted attribute selectors for non-photo media', () => 
     assert.match(extractor, /\[class\*="360" i\]/);
 });
 
-test('scopes the post-interaction scout to the confirmed media container, not the initial one', () => {
-    // A later round already knows an interaction happened - re-scanning the
-    // whole page again (not just the opened gallery/viewer) is why a real
-    // round 2 payload grew instead of shrinking (~55KB -> ~79KB). The
-    // initial, pre-interaction scout call must stay unscoped (nothing has
-    // opened yet); only the post-interaction one should pass scopeToMedia.
+test('initial scout stays broad and post-interaction focus is explicitly selected', () => {
+    // Browser behaviour is exercised in gallery-focus.test.mjs; this guards wiring.
     const extractor = readFileSync(new URL('../../scripts/extract-product-gallery.mjs', import.meta.url), 'utf8');
 
     assert.match(extractor, /scout = await captureInteractionScout\(\);/);
     assert.match(extractor, /postInteractionScout = await captureInteractionScout\(true\)/);
-    assert.match(extractor, /const scopeFilter = \(list, isWithinMedia\) => \{/);
+    assert.ok(extractor.includes('if (!afterInteraction || !observationFocusSelector) return wide'));
+    assert.ok(extractor.includes('focusSelector: observationFocusSelector'));
+    assert.ok(extractor.includes('full_page_observation: wide'));
 });
 
 test('counts Swiper data-image frames and declared product gallery size', () => {
@@ -547,7 +545,9 @@ test('respects the explicit action plan and keeps the automatic opener only for 
 
     assert.ok(actionFallback >= 0 && actionFallback < actionTraversal);
     assert.match(extractor, /!expandedGalleryAttempted && priorViewerOpenAction && actionTraversesGallery/);
-    assert.match(extractor, /strictRecipe\s*\? \[\.\.\.new Set\(domImages\)\]/);
+    // The matching-asset helper admits observed originals, not unrelated
+    // network images; its provenance boundary has a behavioral regression.
+    assert.match(extractor, /strictRecipe\s*\? observedGalleryRenditions\(domImages, allCandidates\)/);
     assert.match(extractor, /source: domKeys\.has\(key\) \? 'recipe_dom'/);
     assert.ok(legacyFallback >= 0 && legacyFallback < legacyTraversal);
     assert.match(extractor, /includePageFallbacks: !strictRecipe/);
@@ -561,7 +561,7 @@ test('sanitize strips inline svg from DOM fragments sent to the AI trainer', () 
     // (photos are always <img src>/network requests) but enough on its own
     // to consume the whole 1600-char per-fragment budget before any of the
     // actually useful text (captions, price, SKU) is reached.
-    const extractor = readFileSync(new URL('../../scripts/extract-product-gallery.mjs', import.meta.url), 'utf8');
+    const extractor = readFileSync(new URL('../../scripts/gallery-focus.mjs', import.meta.url), 'utf8');
     const sanitizeStart = extractor.indexOf('const sanitize = (element) => {');
     const sanitizeEnd = extractor.indexOf('const visible = (element) => {', sanitizeStart);
     const sanitizeBody = extractor.slice(sanitizeStart, sanitizeEnd);
@@ -620,7 +620,12 @@ test('normalizes the safe ordered AI action plan and rejects executable selector
         {
             kind: 'click',
             selector: 'button[data-gallery]',
-            index: 20,
+            // index addresses one specific element, not a repeat count - it
+            // is no longer clamped down to 20 here (that used to silently
+            // retarget a legitimately higher request onto a different
+            // element); resolveRecipeActionTargetIndex() is what checks it
+            // against the page's actual match count at click time.
+            index: 99,
             limit: 1,
             wait_after_ms: 1500,
             purpose: 'Open the gallery',

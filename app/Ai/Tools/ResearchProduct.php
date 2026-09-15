@@ -243,7 +243,7 @@ class ResearchProduct implements Tool
                 'specifications.*.key' => ['required', 'string', 'max:100', 'regex:/^[a-z0-9_]+$/'],
                 'specifications.*.name' => ['required', 'string', 'max:255'],
                 'specifications.*.value' => ['required', 'string', 'max:2000'],
-                'sources' => ['present', 'array', 'max:20'],
+                'sources' => ['present', 'array', 'max:'.ProductResearchAgent::MAX_SOURCES],
                 'sources.*.title' => ['required', 'string', 'max:500'],
                 'sources.*.url' => ['required', 'url:http,https', 'max:2048'],
                 'sources.*.type' => ['nullable', 'in:manufacturer,retailer,marketplace,review,database,web'],
@@ -351,8 +351,10 @@ class ResearchProduct implements Tool
             $reportedSources = $data['sources'];
             $data['sources'] = $sourcePriority->sortSources($reportedSources, $data['brand']);
             $attemptRecorder = app(ProductSourceAttemptRecorder::class);
+            $blockedSourceCount = 0;
             foreach ($reportedSources as $source) {
                 $blocked = $sourcePriority->isBlockedUrl((string) $source['url']);
+                $blockedSourceCount += (int) $blocked;
                 $attemptRecorder->record([
                     'telegram_update_id' => $this->update->id,
                     'product_url' => $source['url'],
@@ -364,6 +366,26 @@ class ResearchProduct implements Tool
                     'output' => $source,
                 ]);
             }
+            $researchSummary = 'Запрос #'.$this->update->id.': исследование — '.$data['status']
+                .'; найдено адресов: '.count($reportedSources).', исключено по бану домена: '.$blockedSourceCount
+                .', передано дальше: '.count($data['sources']).'. Это кандидаты, ещё не проверенные галереи.';
+            $attemptRecorder->record([
+                'telegram_update_id' => $this->update->id,
+                'product_url' => $data['primary_source_url'] ?? '',
+                'actor' => 'server', 'phase' => 'product_research', 'action' => 'research_summary',
+                'status' => 'completed', 'decision' => $data['status'], 'message' => $researchSummary,
+                'output' => [
+                    'reported_count' => count($reportedSources), 'domain_blocked_count' => $blockedSourceCount,
+                    'remaining_count' => count($data['sources']),
+                    'query' => $query, 'ai_run_id' => $run->id,
+                    'web_search_calls' => count($webSearchItems),
+                    'usage' => $response->usage->toArray(),
+                    'research_notes' => $data['research_notes'] ?? null,
+                    'selected_product' => array_intersect_key($data, array_flip(['title', 'brand', 'model', 'color', 'specifications'])),
+                    'sources' => $data['sources'],
+                ],
+            ]);
+            $progress->info($researchSummary);
 
             if ($data['status'] === 'found') {
                 Validator::make($data, [
@@ -422,6 +444,7 @@ class ResearchProduct implements Tool
                 if ($reason !== '') {
                     $notFound['reason'] = mb_substr($reason, 0, 2000);
                 }
+                $progress->done('Исследование завершено: подходящий товар не подтверждён. Запрос #'.$this->update->id);
 
                 return $this->json($notFound);
             }
@@ -591,6 +614,24 @@ class ResearchProduct implements Tool
             $result['image_count'] = $imageCount;
             $draft->refresh();
             $sourceUrl = trim((string) $draft->primary_source_url);
+            if ($draft->gallery_search_stop_reason === 'specifications_unreconciled'
+                || ($sourceUrl !== '' && $draft->specifications_reconciled_source_url !== $draft->primary_source_url)) {
+                $progress->failed('Сборка карточки не завершена', 'Фото сохранены. Готовой карточки для подтверждения пока нет.');
+
+                return $this->json([
+                    'ok' => true, 'status' => 'card_assembly_paused',
+                    'draft_id' => $draft->id, 'image_count' => $imageCount,
+                    'ready_for_approval' => false,
+                    'stop_reason' => $draft->gallery_search_stop_reason,
+                    'message' => 'Поиск не завершил сборку согласованной карточки. Не предлагать принятие или отдельную ручную сверку.',
+                ]);
+            }
+            // Assembly may have corrected the initial research values. Return
+            // the final card, not the obsolete pre-gallery snapshot.
+            $result = [...$result, ...$draft->only([
+                'title', 'model', 'color', 'description', 'specifications',
+                'sources', 'primary_source_url', 'image_urls',
+            ]), 'ready_for_approval' => true];
             $progress->done(
                 '3/3 · черновик #'.$draft->id.' готов, фото: '.$imageCount
                 .($sourceUrl !== '' ? "\n🔗 {$sourceUrl}" : ''),
@@ -599,6 +640,13 @@ class ResearchProduct implements Tool
             return $this->json($result);
         } catch (Throwable $exception) {
             $errors = app(AiErrorPresenter::class);
+            app(ProductSourceAttemptRecorder::class)->record([
+                'telegram_update_id' => $this->update->id,
+                'actor' => 'server', 'phase' => 'product_pipeline', 'action' => 'pipeline_exception',
+                'status' => 'interrupted', 'decision' => 'exception',
+                'message' => mb_substr($exception->getMessage(), 0, 5000),
+                'output' => ['ai_run_id' => $run->id, 'exception_class' => $exception::class],
+            ]);
 
             if ($errors->present($exception)['retryable']) {
                 $retryAfter = $errors->retryAfterSeconds($exception);
@@ -640,7 +688,7 @@ class ResearchProduct implements Tool
             'specifications.*.key' => ['required', 'string', 'max:100', 'regex:/^[a-z0-9_]+$/'],
             'specifications.*.name' => ['required', 'string', 'max:255'],
             'specifications.*.value' => ['required', 'string', 'max:2000'],
-            'sources' => ['present', 'array', 'max:20'],
+            'sources' => ['present', 'array', 'max:'.ProductResearchAgent::MAX_SOURCES],
             'sources.*.title' => ['required', 'string', 'max:500'],
             'sources.*.url' => ['required', 'url:http,https', 'max:2048'],
             'sources.*.type' => ['nullable', 'in:manufacturer,retailer,marketplace,review,database,web'],

@@ -195,6 +195,10 @@ export const sameProductIdentity = (expected, landed) => {
 
     for (const key of ['canonical', 'og_url']) {
         if (expected[key] && landed[key]) {
+            // OpenGraph commonly describes the current tab, not a canonical
+            // product identity. Different tab URLs are inconclusive, not a
+            // conflict. Typed identifiers above still reject a different SKU.
+            if (key === 'og_url' && expected[key] !== landed[key]) continue;
             return expected[key] === landed[key];
         }
     }
@@ -205,6 +209,331 @@ export const sameProductIdentity = (expected, landed) => {
     }
 
     return null;
+};
+
+/**
+ * Whether one Playwright request (from page.route()'s callback) should be
+ * refused because it is a main-frame document navigation - the page itself
+ * moving to a different address, the very first load included - to a host
+ * other than confineHost. Applies to nothing else: a falsy confineHost (the
+ * default - opt-in only), a non-navigation request (images, scripts,
+ * stylesheets, XHR/fetch, fonts - a CDN on a different host from the page
+ * is completely normal), or a navigation inside a sub-frame/iframe all
+ * return false, unaffected. Blocked before the request is ever sent, not
+ * detected afterward from wherever the page ended up - the one property
+ * that actually stops allowed-host -> other-host -> back-to-allowed-host,
+ * three requests none of which a start-vs-end comparison alone would catch.
+ *
+ * @param {{isNavigationRequest?: () => boolean, frame?: () => unknown, url: () => string}} request
+ * @param {unknown} mainFrame
+ * @param {string} confineHost
+ */
+export const isNavigationRequestOffConfinedHost = (request, mainFrame, confineHost) => {
+    if (!confineHost) {
+        return false;
+    }
+
+    if (typeof request.isNavigationRequest === 'function' && !request.isNavigationRequest()) {
+        return false;
+    }
+
+    if (typeof request.frame === 'function' && request.frame() !== mainFrame) {
+        return false;
+    }
+
+    try {
+        return new URL(request.url()).hostname.toLowerCase() !== confineHost;
+    } catch {
+        // Not a parseable http(s) URL - refused, not guessed at.
+        return true;
+    }
+};
+
+// Same generic definition everywhere a page's clickable/expandable controls
+// are found - no name/word list, so a "характеристики" tab is found exactly
+// as readily as any other.
+export const OBSERVED_CONTROL_SELECTOR = 'button, [role="tab"], [role="button"], [aria-expanded], summary, a[href^="#"]';
+
+/**
+ * Real, currently-visible clickable controls on the page, each with a
+ * selector guaranteed to resolve to that ONE element and nothing else.
+ *
+ * id/data-testid/aria-controls/name/class are tried in that order, but none
+ * of them are unique by construction - three tabs sharing one class
+ * ("Описание"/"Характеристики"/"Отзывы" all `<button class="tab-btn">`) used
+ * to collapse into one indistinguishable selector, silently dropping every
+ * tab but the first found in DOM order from the result and leaving no way
+ * to ask for one of the others specifically. Whichever attribute is tried,
+ * its match count against THIS document is checked: more than one match
+ * appends Playwright's own `>> nth=N` (this element's own index within that
+ * match set) so the returned selector always resolves to exactly the
+ * element it was read from, shared class or not.
+ */
+export const captureObservedControlsInPage = () => {
+    const isVisible = (element) => {
+        const rect = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+
+        return rect.width > 1 && rect.height > 1
+            && style.display !== 'none'
+            && style.visibility !== 'hidden';
+    };
+    const uniqueSelector = (candidate, element) => {
+        let matches;
+
+        try {
+            matches = [...document.querySelectorAll(candidate)];
+        } catch {
+            return null;
+        }
+
+        if (matches.length === 0) {
+            return null;
+        }
+
+        if (matches.length === 1) {
+            return candidate;
+        }
+
+        const index = matches.indexOf(element);
+
+        return index === -1 ? null : `${candidate} >> nth=${index}`;
+    };
+    const stableSelectorFor = (element) => {
+        const id = element.getAttribute('id');
+        const candidates = [];
+
+        if (id && id.length <= 100) {
+            candidates.push(`#${CSS.escape(id)}`);
+        }
+
+        for (const name of ['data-testid', 'data-test', 'data-selenium', 'data-qa', 'aria-controls', 'name']) {
+            const value = element.getAttribute(name);
+
+            if (value && value.length <= 160) {
+                candidates.push(`${element.tagName.toLowerCase()}[${name}=${JSON.stringify(value)}]`);
+            }
+        }
+
+        const classTokens = [...element.classList]
+            .filter((token) => token.length >= 3
+                && token.length <= 60
+                && !/^\d/.test(token)
+                && !/[a-f0-9]{8,}/i.test(token))
+            .slice(0, 2);
+
+        if (classTokens.length) {
+            candidates.push(element.tagName.toLowerCase() + classTokens.map((token) => `.${CSS.escape(token)}`).join(''));
+        }
+
+        for (const candidate of candidates) {
+            const resolved = uniqueSelector(candidate, element);
+
+            if (resolved) {
+                return resolved;
+            }
+        }
+
+        return null;
+    };
+    const seenSelectors = new Set();
+
+    return [...document.querySelectorAll(
+        'button, [role="tab"], [role="button"], [aria-expanded], summary, a[href^="#"]',
+    )]
+        .filter(isVisible)
+        .map((element) => ({
+            selector: stableSelectorFor(element),
+            text: (element.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 120),
+        }))
+        .filter(({ selector, text }) => {
+            if (!selector || !text || seenSelectors.has(selector)) {
+                return false;
+            }
+
+            seenSelectors.add(selector);
+
+            return true;
+        })
+        .slice(0, 20);
+};
+
+/**
+ * The structural candidates revealedContainerTextInPage() considers for one
+ * specific clicked element, their current visibility and text - meant
+ * to be called once BEFORE the click (via Locator.evaluate()) so its result
+ * can be handed to revealedContainerTextInPage() afterward as the baseline
+ * to compare against. The snapshot uses DOM node identity, not list order.
+ * Only its numeric ID leaves the page; node references and text stay in a
+ * WeakMap until the next snapshot replaces it. Both functions run through
+ * Locator.evaluate(), which serializes and re-runs a function's own source
+ * in the page with no access to anything outside it.
+ *
+ * @return {number} Page-local snapshot ID, not a list of visibility flags.
+ */
+export const revealedCandidatesVisibilityInPage = (element) => {
+    const isVisible = (node) => {
+        if (!node) {
+            return false;
+        }
+
+        const rect = node.getBoundingClientRect();
+        const style = getComputedStyle(node);
+
+        return rect.width > 1 && rect.height > 1
+            && style.display !== 'none'
+            && style.visibility !== 'hidden';
+    };
+    const followingSiblings = (node) => {
+        const siblings = [];
+        let current = node?.nextElementSibling || null;
+
+        while (current) {
+            siblings.push(current);
+            current = current.nextElementSibling;
+        }
+
+        return siblings;
+    };
+    const controlsId = element.getAttribute('aria-controls');
+    const candidates = [
+        controlsId ? document.getElementById(controlsId) : null,
+        element.closest('[role="tabpanel"], [role="region"]'),
+        ...followingSiblings(element),
+        ...followingSiblings(element.parentElement),
+        element.parentElement,
+    ];
+
+    const key = Symbol.for('ningredy.revealed-panel-snapshot');
+    const id = (globalThis[key]?.id || 0) + 1;
+    const nodes = new WeakMap();
+    for (const node of candidates) {
+        if (node) nodes.set(node, { visible: isVisible(node), text: (node.innerText || '').trim() });
+    }
+    // Keep DOM identity locally, not array positions; only an ID crosses evaluate().
+    // One snapshot per page, replaced before the next sequential click.
+    globalThis[key] = { id, nodes };
+    return id;
+};
+
+/**
+ * The specific area a just-clicked control revealed, read off the element
+ * ITSELF (meant for Locator.evaluate(), which hands the already-resolved
+ * DOM node to the callback) rather than a selector string re-parsed by
+ * document.querySelector() inside the page - the selector
+ * captureObservedControlsInPage() returns can be Playwright's own
+ * `>> nth=N` chaining syntax when disambiguation was needed, which the
+ * DOM's own querySelector does not understand and throws on; passing the
+ * element Playwright already resolved sidesteps that entirely.
+ *
+ * beforeVisibility is revealedCandidatesVisibilityInPage()'s own result for
+ * this SAME element, captured immediately BEFORE the click. Required for
+ * every candidate past the first two (see explicitLinkCount below) - a
+ * confirmed real case: three tabs "Описание"/"Характеристики"/"Отзывы" in a
+ * row, opening the middle one. Its own next sibling in document order is
+ * not its panel, it is the NEXT TAB'S OWN BUTTON - visible, non-empty, and
+ * completely unrelated to this click, since tab buttons are always visible
+ * whether just clicked or not. Being visible and non-empty is true of every
+ * such candidate permanently. A new node, a visibility transition or a
+ * text change is evidence; unchanged furniture is not. aria-controls and an
+ * explicit [role="tabpanel"/"region"] ancestor are exempt from that
+ * requirement: an author-declared link to the panel already IS the
+ * explicit evidence pointed at in the follow-up ("использовать явную связь
+ * с панелью либо наблюдаемое раскрытие/изменение после клика" - either
+ * counts, not only the second). Missing beforeVisibility entirely (an older
+ * caller, or the snapshot itself failed) disables every candidate that
+ * would otherwise need it, rather than falling back to the old, disproven
+ * "visible and non-empty" guess.
+ *
+ * Candidates, in order: aria-controls target; nearest [role="tabpanel"]/
+ * [role="region"] ancestor - deliberately NOT a bare <section>/<article>,
+ * which routinely wraps an entire tab GROUP rather than the one panel just
+ * opened; every one of the clicked element's own following siblings, in
+ * document order; the same walk over the PARENT's following siblings; and
+ * only then the parent outright. DOM identity matches these candidates to
+ * the snapshot even when siblings were inserted, removed or reordered.
+ */
+export const revealedContainerTextInPage = (element, beforeVisibility) => {
+    const isVisible = (node) => {
+        if (!node) {
+            return false;
+        }
+
+        const rect = node.getBoundingClientRect();
+        const style = getComputedStyle(node);
+
+        return rect.width > 1 && rect.height > 1
+            && style.display !== 'none'
+            && style.visibility !== 'hidden';
+    };
+    const followingSiblings = (node) => {
+        const siblings = [];
+        let current = node?.nextElementSibling || null;
+
+        while (current) {
+            siblings.push(current);
+            current = current.nextElementSibling;
+        }
+
+        return siblings;
+    };
+    const controlsId = element.getAttribute('aria-controls');
+    const candidates = [
+        controlsId ? document.getElementById(controlsId) : null,
+        element.closest('[role="tabpanel"], [role="region"]'),
+        ...followingSiblings(element),
+        ...followingSiblings(element.parentElement),
+        element.parentElement,
+    ];
+    // The first two are an explicit, author-declared link to the panel -
+    // trusted on visibility alone. Every candidate after them is a
+    // structural guess and must have actually changed.
+    const explicitLinkCount = 2;
+    const snapshot = globalThis[Symbol.for('ningredy.revealed-panel-snapshot')];
+    const hasSnapshot = beforeVisibility != null && snapshot?.id === beforeVisibility;
+
+    for (let index = 0; index < candidates.length; index += 1) {
+        const candidate = candidates[index];
+
+        if (!isVisible(candidate)) {
+            continue;
+        }
+
+        const text = (candidate.innerText || '').trim();
+        if (index >= explicitLinkCount) {
+            if (!hasSnapshot) {
+                continue;
+            }
+
+            const previous = snapshot.nodes.get(candidate);
+            if (previous?.visible && previous.text === text) {
+                // Already visible with unchanged text - permanent page
+                // furniture (another tab's own button, standing content),
+                // not something this click revealed.
+                continue;
+            }
+        }
+
+        if (text !== '') {
+            return text;
+        }
+    }
+
+    return '';
+};
+
+/**
+ * The page's text, with revealedText (see revealedContainerTextInPage(),
+ * computed separately and passed in as a plain string - never a selector)
+ * hoisted to the front - not just concatenated, since a long, unrelated
+ * description ahead of the revealed area used to push it past the fixed
+ * head-truncation every caller applies (specification_text is capped,
+ * deliberately, to keep the payload bounded) and the reveal was lost even
+ * though the click itself worked. Passing '' (nothing clicked, an ordinary
+ * read) is exactly the previous whole-page behaviour.
+ */
+export const capturePageTextInPage = (revealedText) => {
+    return `${document.title}\n${revealedText || ''}\n${document.body?.innerText || ''}`.slice(0, 20_000);
 };
 
 
@@ -485,6 +814,74 @@ const safeRecipeSelector = (selector) => typeof selector === 'string'
     && selector.length <= 300
     && !/(?:javascript:|https?:|file:|xpath|script\b|iframe\b)/i.test(selector);
 
+// An address, not a number to be rescued: -1, "bad" and 1.5 are not "close
+// enough" to a real index, they are not an index at all. parseInt() would
+// happily turn each into a plausible-looking one (0, 0, 1) by reading
+// however many leading digits it can find, which is a substitution with
+// extra steps - so this accepts only a value that already, exactly, is a
+// non-negative integer (or a string of nothing but digits), and returns
+// null for anything else instead of guessing what was meant.
+const strictNonNegativeIndex = (value) => {
+    if (Number.isInteger(value) && value >= 0) {
+        return value;
+    }
+
+    if (typeof value === 'string' && /^\d+$/.test(value.trim())) {
+        return Number.parseInt(value, 10);
+    }
+
+    return null;
+};
+
+/**
+ * Which specific match of a selector one recipe action should click -
+ * index is the ADDRESS of one particular element, not a repeat count, and
+ * clamping a requested index down to whatever is available used to click a
+ * different, unintended element instead (real case, 2026-09-14:
+ * techbuy.com.au asked for a selector's 46th match; clamping clicked its
+ * 20th - a control the recipe never actually named).
+ *
+ * Returns the requested index unchanged when that many matches actually
+ * exist, or null when they do not - null means "nothing to click", never
+ * "click the closest one instead". The caller must report a null result as
+ * the fact it is (requested index vs. matches found), not paper over it
+ * with a substitute click. This includes a malformed requestedIndex itself
+ * (-1, "bad", 1.5): none of those are a real address either, and are
+ * rejected the same way an address that is real but absent from the page
+ * would be, never coerced into one that happens to exist.
+ */
+export const resolveRecipeActionTargetIndex = (requestedIndex, matchCount) => {
+    const index = strictNonNegativeIndex(requestedIndex);
+
+    if (index === null || !Number.isInteger(matchCount) || matchCount < 1) {
+        return null;
+    }
+
+    return index < matchCount ? index : null;
+};
+
+/**
+ * Which index a single click_each/click repetition should even ask for,
+ * before resolveRecipeActionTargetIndex() checks whether it exists. A real
+ * strip of distinct elements (currentCount > 1) is walked one new element
+ * per repetition, so repetition is added to index. A single control - one
+ * "next" arrow, currentCount staying 1 for as long as it stays alone - has
+ * nothing to add repetition to: it is the same element on every press, so
+ * repetition must NOT change which index is requested.
+ *
+ * Regression, 2026-09-14: adding repetition unconditionally (regardless of
+ * currentCount) asked a lone arrow's second press for index 1, which never
+ * existed on a page with exactly one match, ending a real carousel walk
+ * after a single frame. currentCount is read fresh on every repetition by
+ * the caller, so a control that starts alone and later reveals a real
+ * strip correctly switches to walking it.
+ */
+export const recipeActionRequestedIndex = (action, repetition, currentCount) => (
+    action.kind === 'click_each' && currentCount > 1
+        ? action.index + repetition
+        : action.index
+);
+
 // AI can choose the browser sequence, but only through this small,
 // deterministic action language. Invalid or over-budget steps disappear
 // before Playwright sees them; no JavaScript, typing, form submission or
@@ -493,12 +890,30 @@ export const normalizeRecipeActions = (actions) => (Array.isArray(actions) ? act
     .slice(0, 12)
     .filter((action) => action && typeof action === 'object'
         && SAFE_RECIPE_ACTION_KINDS.has(action.kind)
-        && safeRecipeSelector(action.selector))
+        && safeRecipeSelector(action.selector)
+        // A bad kind or selector already drops the whole action rather
+        // than being coerced into a safe-looking one; index gets the same
+        // treatment now instead of the one field still being repaired
+        // (-1, "bad" and 1.5 used to quietly become 0, 0 and 1).
+        && strictNonNegativeIndex(action.index) !== null)
     .map((action) => {
         const normalized = {
             kind: action.kind,
             selector: action.selector.trim(),
-            index: Math.max(0, Math.min(20, Number.parseInt(action.index || '0', 10) || 0)),
+            // index addresses ONE specific element among the selector's
+            // matches, not a repeat count - clamping it to 20 used to
+            // silently retarget a legitimately higher request (a broad
+            // selector's 46th match, a real case) onto a completely
+            // different element (its 20th). An upper clamp here would be
+            // that exact same bug: whether the requested index actually
+            // exists among the page's current matches is resolved at
+            // click time (resolveRecipeActionTargetIndex()), which
+            // reports a miss rather than substituting another element -
+            // a value with no matching element simply resolves to null
+            // there, so there is nothing left for a ceiling to guard.
+            // A malformed value never reaches here at all: the filter
+            // above already dropped the action.
+            index: strictNonNegativeIndex(action.index),
             limit: Math.max(1, Math.min(20, Number.parseInt(action.limit || '1', 10) || 1)),
             wait_after_ms: Math.max(50, Math.min(1500, Number.parseInt(action.wait_after_ms || '250', 10) || 250)),
             purpose: typeof action.purpose === 'string' ? action.purpose.slice(0, 200) : '',

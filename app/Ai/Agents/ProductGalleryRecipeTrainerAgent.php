@@ -9,6 +9,7 @@ use App\Ai\Tools\GetProductSearchIntent;
 use App\Ai\Tools\GetRecipeHealth;
 use App\Ai\Tools\GetSourceAttemptHistory;
 use App\Ai\Tools\InspectGalleryImages;
+use App\Ai\Tools\ReadGalleryPageObservation;
 use App\Models\ProductGalleryRecipe;
 use App\Models\ProductGalleryRecipeVersion;
 use App\Models\ProductSourceDomain;
@@ -53,6 +54,8 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
         private readonly ?GalleryTrainingAbandonSignal $abandonSignal = null,
         /** @var array<int, string> */
         private readonly array $visionImageUrls = [],
+        private readonly array $initialPageObservation = [],
+        private readonly array $latestPageObservation = [],
     ) {}
 
     public function tools(): iterable
@@ -62,6 +65,7 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
         }
 
         $tools = [
+            new ReadGalleryPageObservation($this->initialPageObservation, $this->latestPageObservation),
             new GetSourceAttemptHistory(
                 $this->url,
                 $this->domain,
@@ -335,7 +339,7 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
             - click_until_no_change: click the same matched element up to limit and stop when DOM/network
               gallery state no longer changes.
             Numeric fields have hard accepted ranges and a value outside them throws the whole recipe away
-            for that round, however good its selectors are: index 0-20, limit 1-20, wait_after_ms and
+            for that round, however good its selectors are: index 0-200, limit 1-20, wait_after_ms and
             after_each_wait_after_ms 50-1500, after_each_limit 1-20, max_thumbnail_clicks 0-20,
             max_next_clicks 0-15, wait_after_click_ms 50-1000. The selector lists are bounded too, and were
             not written down here until a recipe was thrown away for a ninth exclusion nobody had told the
@@ -432,7 +436,25 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
             ])->required(),
             'when' => $schema->string()->enum(['always', 'if_present'])->required(),
             'selector' => $schema->string()->max(300)->required(),
-            'index' => $schema->integer()->min(0)->max(20)->required(),
+            // Real production case (2026-09-14, techbuy.com.au): a broad
+            // selector ("a") legitimately needing its 25th/46th match
+            // rejected outright here as "must be between 0 and 20", wasting
+            // a whole training round on an otherwise-executable recipe.
+            // index addresses ONE specific element among a selector's
+            // matches, not a repeat count - the real enforcement previously
+            // sat in ProductGalleryRecipeTrainer::recipeValidationRules()
+            // ('actions.*.index', also widened to 0-200) and in
+            // normalizeRecipeActions()/the click loop in
+            // extract-product-gallery.mjs, both of which used to silently
+            // retarget an out-of-range index onto a different element
+            // instead of reporting the mismatch. All of those now agree on
+            // this same 200 sanity bound against malformed data; whether
+            // the requested index actually exists among the page's current
+            // matches is resolved at click time
+            // (resolveRecipeActionTargetIndex() in
+            // scripts/product-gallery-utils.mjs), which reports a miss
+            // rather than substituting another element.
+            'index' => $schema->integer()->min(0)->max(200)->required(),
             'limit' => $schema->integer()->min(1)->max(20)->required(),
             'wait_after_ms' => $schema->integer()->min(50)->max(1500)->required(),
             'after_each_selector' => $schema->string()->max(300)->nullable()->required(),
@@ -445,6 +467,14 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
             'training_decision' => $schema->string()->enum([
                 'propose_recipe', 'abandon_page',
             ])->required(),
+            'observation_focus_selector' => $schema->string()->max(300)->required()->description(
+                'Observation only, not a recipe step: choose one observed gallery/viewer container by CSS '
+                .'selector (optional >> nth=N). No particular class name is required. Empty means whole-page '
+                .'overview. The next round shows this area plus outside overlays; missing/ambiguous/hidden '
+                .'containers and navigation restore the broad view. ReadGalleryPageObservation retrieves '
+                .'the stored initial/latest broad snapshot immediately without a browser run. '
+                .'A newly opened viewer outside the container is an observation, not proof of gallery identity.',
+            ),
             'page_kind' => $schema->string()->enum([
                 'product_card',
                 'product_family_landing',

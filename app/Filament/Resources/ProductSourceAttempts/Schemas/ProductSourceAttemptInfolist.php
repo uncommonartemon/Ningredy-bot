@@ -15,6 +15,9 @@ class ProductSourceAttemptInfolist
 
         return $schema->components([
             TextEntry::make('id')->label('#'),
+            TextEntry::make('telegram_update_id')->label('Запрос Telegram #')->placeholder('—'),
+            TextEntry::make('product_draft_id')->label('Черновик #')->placeholder('—'),
+            TextEntry::make('product_gallery_recipe_version_id')->label('Версия рецепта #')->placeholder('—'),
             TextEntry::make('created_at')->label('Время')->dateTime('d.m.Y H:i:s'),
             TextEntry::make('product_url')->label('Страница')->url(fn ($record): string => $record->product_url)->openUrlInNewTab()->copyable()->columnSpanFull(),
             TextEntry::make('actor')->label('Исполнитель')->badge(),

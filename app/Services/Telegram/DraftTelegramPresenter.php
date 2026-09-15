@@ -21,6 +21,26 @@ class DraftTelegramPresenter
         string $usageFootnote = '',
     ): void {
         $draft->load('media');
+        if ($this->reconciliationPending($draft)) {
+            // A stopped search is not an approval-ready product album.
+            // Clearing Telegram messages does not delete the saved files.
+            $this->messageLifecycle->clearForRefresh($telegram, $draft);
+            $budgetStopped = in_array($draft->gallery_search_stop_reason, ['cost_budget', 'time_budget'], true);
+            $reason = match ($draft->gallery_search_stop_reason) {
+                'cost_budget' => 'Денежный лимит поиска достигнут.',
+                'time_budget' => 'Время поиска закончилось.',
+                default => 'Не удалось завершить проверку карточки по выбранному источнику после автоматического восстановления.',
+            };
+            $text = "⏸ Поиск #{$draft->id} не завершён: {$draft->title}\n"
+                .$reason."\nНайденные фото сохранены: {$draft->media->count()}. Товар не отправлен на подтверждение."
+                .($budgetStopped ? "\nПродолжение выдаст новый бюджет поиска." : '')
+                .$usageFootnote;
+            $this->messageLifecycle->replaceControlMessage(
+                $telegram, $draft, $chatId, $text, $this->controlMarkup($draft),
+            );
+
+            return;
+        }
         $paths = $draft->media
             ->sortBy([
                 ['is_primary', 'desc'],
@@ -155,6 +175,19 @@ class DraftTelegramPresenter
             ]];
         }
 
+        if ($this->reconciliationPending($draft)) {
+            $rows = [];
+            if (in_array($draft->gallery_search_stop_reason, ['cost_budget', 'time_budget'], true)) {
+                $rows[] = [[
+                    'text' => '▶️ Продолжить поиск (+$'.number_format(app(AiSettings::class)->maxSearchCostUsd(), 2).')',
+                    'callback_data' => "draft:continue-search:{$draft->id}",
+                ]];
+            }
+            $rows[] = [['text' => '✖ Отменить', 'callback_data' => "draft:reject:{$draft->id}"]];
+
+            return ['inline_keyboard' => $rows];
+        }
+
         // The publishing action gets its own row: it used to sit shoulder to
         // shoulder with the irreversible "Отменить", which is the one mis-tap
         // on this card that costs a whole search.
@@ -166,10 +199,12 @@ class DraftTelegramPresenter
             ],
         ];
 
-        if (in_array($draft->gallery_search_stop_reason, ['cost_budget', 'time_budget', 'exhausted'], true)) {
-            $label = $draft->gallery_search_stop_reason === 'exhausted'
-                ? '▶️ Продолжить поиск'
-                : '▶️ Продолжить поиск (+$'.number_format(app(AiSettings::class)->maxSearchCostUsd(), 2).')';
+        if (in_array($draft->gallery_search_stop_reason, ['cost_budget', 'time_budget', 'exhausted', 'specifications_unreconciled'], true)) {
+            $label = match ($draft->gallery_search_stop_reason) {
+                'exhausted' => '▶️ Продолжить поиск',
+                'specifications_unreconciled' => '🔁 Повторить сверку характеристик',
+                default => '▶️ Продолжить поиск (+$'.number_format(app(AiSettings::class)->maxSearchCostUsd(), 2).')',
+            };
             $rows[] = [[
                 'text' => $label,
                 'callback_data' => "draft:continue-search:{$draft->id}",
@@ -210,7 +245,10 @@ class DraftTelegramPresenter
             return false;
         }
 
-        if ($draft->gallery_status === 'partial') {
+        // A 'partial' status caused solely by outstanding specification
+        // reconciliation is not an extraction shortfall - retraining with a
+        // hint would not touch the actual outstanding problem.
+        if ($draft->gallery_status === 'partial' && $draft->gallery_search_stop_reason !== 'specifications_unreconciled') {
             return true;
         }
 
@@ -285,6 +323,13 @@ class DraftTelegramPresenter
         );
     }
 
+    private function reconciliationPending(ProductDraft $draft): bool
+    {
+        return $draft->gallery_search_stop_reason === 'specifications_unreconciled'
+            || (trim((string) $draft->primary_source_url) !== ''
+                && $draft->specifications_reconciled_source_url !== $draft->primary_source_url);
+    }
+
     private function caption(ProductDraft $draft, string $usageFootnote): string
     {
         $specifications = collect($draft->specifications)->take(6)
@@ -297,16 +342,29 @@ class DraftTelegramPresenter
             ->implode("\n");
         $galleryCount = $draft->media()->count();
         $primarySourceUrl = trim((string) $draft->primary_source_url);
-        $partialNotice = $draft->gallery_status === 'partial'
+        $reconciliationPending = $this->reconciliationPending($draft);
+        $partialNotice = $draft->gallery_status === 'partial' && ! $reconciliationPending
             ? 'Частичный успех: полный цикл завершён, сохранены лучшие доступные проверенные фото.'
             : null;
-        $usageFootnote = ($partialNotice ? PHP_EOL.$partialNotice : '').$usageFootnote;
+        // A structured column, not a string match against gallery_notes'
+        // free text - this must reach the same Telegram message an admin
+        // actually approves from, and "Добавить в каталог" is genuinely
+        // blocked (ProductDraftWorkflow::approve()) while this is true, not
+        // merely advisory.
+        $identityNotice = $reconciliationPending
+            ? 'Сверка с источником фото не завершена. Фото сохранены, публикация недоступна. Можно повторить сверку или отменить черновик.'
+            : null;
+        $usageFootnote = ($partialNotice ? PHP_EOL.$partialNotice : '')
+            .($identityNotice ? PHP_EOL.$identityNotice : '')
+            .$usageFootnote;
         $footer = implode("\n", array_filter([
             "📷 Фото: {$galleryCount}",
             $primarySourceUrl !== '' ? "🔗 Источник: {$primarySourceUrl}" : null,
         ]));
         $header = implode("\n", array_filter([
-            "🆕 Черновик #{$draft->id} готов к добавлению",
+            $reconciliationPending
+                ? "⏸ Черновик #{$draft->id}: сверка не завершена"
+                : "🆕 Черновик #{$draft->id} готов к добавлению",
             "🏷 {$draft->title}",
             implode(' · ', array_filter([$draft->brand, $draft->model, $draft->color])),
         ]));

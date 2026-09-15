@@ -2,6 +2,7 @@
 
 namespace Tests\Unit;
 
+use App\Ai\Agents\ProductResearchAgent;
 use App\Services\Products\ProductResearchResponseNormalizer;
 use Tests\TestCase;
 
@@ -11,7 +12,7 @@ class ProductResearchResponseNormalizerTest extends TestCase
     {
         $primaryUrl = 'https://www.amazon.com/dp/EXACT';
         $officialUrl = 'https://www.msi.com/Desktop/EXACT';
-        $sources = collect(range(1, 25))
+        $sources = collect(range(1, 60))
             ->map(fn (int $index): array => [
                 'title' => "Store {$index}",
                 'url' => "https://store{$index}.example/product",
@@ -40,7 +41,7 @@ class ProductResearchResponseNormalizerTest extends TestCase
         ]);
 
         $this->assertCount(10, $data['image_urls']);
-        $this->assertCount(20, $data['sources']);
+        $this->assertCount(ProductResearchAgent::MAX_SOURCES, $data['sources']);
         $this->assertSame($primaryUrl, $data['sources'][0]['url']);
         $this->assertSame('https://store1.example/product', $data['sources'][1]['url']);
         $this->assertSame([], $data['sources'][1]['image_urls']);

@@ -28,6 +28,8 @@ use App\Services\Products\ProductImageStorage;
 use App\Services\Products\ProductImageVisionVerifier;
 use App\Services\Products\ProductPhotoManager;
 use App\Services\Products\ProductSourceIdentityJudge;
+use App\Services\Products\ProductSpecificationReconciler;
+use App\Services\Products\SpecificationReconciliationOutcome;
 use App\Services\Products\WikimediaImageSearch;
 use GdImage;
 use Illuminate\Filesystem\FilesystemAdapter;
@@ -36,6 +38,7 @@ use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Storage;
+use Mockery\MockInterface;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
@@ -52,6 +55,68 @@ class ProductImageStorageTest extends TestCase
         // height 0 (automatic/no minimum).
         AppSetting::put('ai.image_minimum_width', '500');
         AppSetting::put('ai.image_minimum_height', '500');
+
+        // Specification reconciliation is a real, separate concern with its
+        // own dedicated tests (search for "Reconciliation" in this file) -
+        // defaulted here to a no-op success so the ~100 other tests in this
+        // file, none of which ever crawl a real page for real spec text, are
+        // not all forced to mock it individually just to keep asserting
+        // gallery_status === 'complete'. Any test that needs to exercise the
+        // real interaction overrides this with its own $this->mock(...).
+        $this->mock(ProductSpecificationReconciler::class)
+            ->shouldReceive('reconcile')
+            ->andReturnUsing(fn (ProductDraft $draft, array $source): SpecificationReconciliationOutcome => SpecificationReconciliationOutcome::alreadyReconciled($source['url'] ?? null))
+            ->byDefault();
+    }
+
+    public function test_cycle_audit_keeps_the_original_exception_and_records_interruption(): void
+    {
+        Storage::fake('public');
+        Http::preventStrayRequests();
+        [, , $draft] = $this->records();
+        $failure = new \RuntimeException('audit-test interruption');
+        try {
+            app(ProductImageStorage::class)->stage($draft, function () use ($failure): void {
+                throw $failure;
+            });
+            $this->fail('The original exception must propagate.');
+        } catch (\RuntimeException $caught) {
+            $this->assertSame($failure, $caught);
+        }
+        $start = ProductSourceAttempt::where('action', 'cycle_started')->firstOrFail();
+        $finish = ProductSourceAttempt::where('action', 'cycle_finished')->firstOrFail();
+        $this->assertSame('interrupted', $finish->status);
+        $this->assertSame($draft->telegram_update_id, $finish->telegram_update_id);
+        $this->assertSame($start->id, $finish->output['cycle_start_attempt_id']);
+        $this->assertSame(0, $finish->output['saved_file_count']);
+        $this->assertSame('audit-test interruption', $finish->output['exception_message']);
+        Http::assertNothingSent();
+    }
+
+    public function test_queue_audit_reports_filters_and_counts_without_opening_sources(): void
+    {
+        config(['product-images.source_preflight' => false]);
+        Http::preventStrayRequests();
+        [, , $draft] = $this->records();
+        $draft->update(['sources' => [
+            ['url' => 'https://shop.example/manual.pdf', 'type' => 'manufacturer'],
+            ['url' => 'https://shop.example/review', 'type' => 'review'],
+            ['url' => 'https://shop.example/product', 'type' => 'retailer'],
+        ]]);
+        $messages = [];
+        [$queue] = (new \ReflectionMethod(ProductImageStorage::class, 'buildSourceQueue'))->invoke(
+            app(ProductImageStorage::class), $draft, [], [], false, 3, $draft->telegram_update_id,
+            function (string $message) use (&$messages): void {
+                $messages[] = $message;
+            },
+        );
+        $this->assertCount(1, $queue);
+        $this->assertEqualsCanonicalizing(['non_html_document', 'not_product_card_type'],
+            ProductSourceAttempt::where('action', 'filter_candidate')->pluck('decision')->all());
+        $summary = ProductSourceAttempt::where('action', 'queue_summary')->firstOrFail();
+        $this->assertSame(1, $summary->output['card_count']);
+        $this->assertContains($summary->message, $messages);
+        Http::assertNothingSent();
     }
 
     public function test_it_stores_up_to_five_local_images_for_a_laptop_and_only_deletes_them_with_the_product(): void
@@ -1259,6 +1324,10 @@ class ProductImageStorageTest extends TestCase
         $staged = $storage->stage($draft->fresh());
 
         $this->assertSame(3, $staged);
+        $audit = ProductSourceAttempt::where('action', 'cycle_finished')->latest('id')->firstOrFail();
+        $this->assertSame(3, $audit->output['saved_file_count']);
+        $this->assertSame($draft->id, $audit->product_draft_id);
+        $this->assertSame($draft->fresh()->gallery_status, $audit->status);
         $this->assertSame(0, $product->media()->count());
         $this->assertSame(3, $draft->media()->count());
         $this->assertNotNull($draft->fresh()->images_staged_at);
@@ -1544,6 +1613,15 @@ class ProductImageStorageTest extends TestCase
     {
         Storage::fake('public');
         config()->set('product-images.max_images_by_type.memory', 3);
+        // A real judge call would identify "Kingston" as a different brand
+        // from the requested "OWC" - a genuine conflicting verdict, not the
+        // technical unavailability (no fake registered) that used to reach
+        // this same rejection by accident. Only a real 'conflicting' or a
+        // real 'uncertain' still rejects an explicit exact-sku request;
+        // 'unavailable' (the judge never actually ran) must not.
+        $this->mock(ProductSourceIdentityJudge::class)
+            ->shouldReceive('judge')
+            ->andReturn('conflicting');
         ProductImageVisionAgent::fake(fn (string $prompt, $attachments): array => [
             'images' => $attachments->keys()->map(fn (int $index): array => [
                 'index' => $index + 1,
@@ -1611,7 +1689,8 @@ class ProductImageStorageTest extends TestCase
         // permanently unreachable - the sibling test above
         // (test_staging_never_opens_a_foreign_card_when_an_exact_sku_was_requested)
         // proves this exact same source is normally rejected when the judge
-        // is not mocked to override it.
+        // genuinely finds it conflicting, and this one proves 'confirmed'
+        // overrides that same literal rejection the other way.
         Storage::fake('public');
         config()->set('product-images.max_images_by_type.memory', 3);
         ProductImageVisionAgent::fake(fn (string $prompt, $attachments): array => [
@@ -1664,6 +1743,372 @@ class ProductImageStorageTest extends TestCase
         $this->assertSame('https://93.184.216.34/products/kingston-256gb', $draft->fresh()->primary_source_url);
     }
 
+    public function test_a_shared_chassis_code_alone_is_confirmed_through_the_judge_not_the_literal_check(): void
+    {
+        // Real production case (2026-09-10): the operator asked only for
+        // "Lenovo LOQ 15 - Luna Grey", research settled on one specific SKU
+        // (83JE0013US) of several sold under that chassis code, and a source
+        // page naming only "LOQ 15IRX10" - not that specific SKU - used to
+        // either fail to confirm at all (no operator-typed identifier to
+        // require it) or, after widening confirmation to the draft's own
+        // resolved SKU, wrongly confirm outright on the shared chassis
+        // fragment alone. Neither is right: the judge is asked, and its
+        // verdict (given the original operator request, not just the
+        // resolved SKU) decides.
+        Storage::fake('public');
+        config()->set('product-images.max_images_by_type.laptop', 3);
+        ProductImageVisionAgent::fake(fn (string $prompt, $attachments): array => [
+            'images' => $attachments->keys()->map(fn (int $index): array => [
+                'index' => $index + 1,
+                'exact_match' => true,
+                'color_match' => true,
+                'publishable' => true,
+                'kind' => 'product',
+                'view' => 'front',
+                'gallery_rank' => $index + 1,
+                'score' => 98,
+                'reason' => 'Matches the requested laptop line.',
+            ])->all(),
+        ])->preventStrayPrompts();
+        Http::fake(function (Request $request) {
+            if ($request->url() === 'https://93.184.216.36/products/loq-15irx10-other-config') {
+                return Http::response('<html></html>', 200, ['Content-Type' => 'text/html']);
+            }
+
+            preg_match('/photo-(\d+)/', $request->url(), $match);
+
+            return Http::response($this->jpeg((int) ($match[1] ?? 1)), 200, ['Content-Type' => 'image/jpeg']);
+        });
+        $judgeCalls = [];
+        $this->mock(ProductSourceIdentityJudge::class)
+            ->shouldReceive('judge')
+            ->once()
+            ->withArgs(function ($draft, array $source) use (&$judgeCalls): bool {
+                $judgeCalls[] = $source;
+
+                return true;
+            })
+            ->andReturn('confirmed');
+        [, , $draft] = $this->records();
+        $draft->update([
+            'product_type' => 'laptop',
+            'title' => 'Lenovo LOQ 15IRX10 (83JE0013US) - Luna Grey',
+            'brand' => 'Lenovo',
+            'model' => 'LOQ 15IRX10 (83JE0013US)',
+            'specifications' => [
+                ['key' => 'sku', 'name' => 'SKU', 'value' => '83JE0013US'],
+            ],
+            'image_urls' => [],
+            'sources' => [[
+                'title' => 'Lenovo LOQ 15IRX10 Gaming Laptop - 16GB RTX 4050',
+                'url' => 'https://93.184.216.36/products/loq-15irx10-other-config',
+                'type' => 'retailer',
+                'image_urls' => [
+                    'https://93.184.216.36/photo-1.jpg',
+                    'https://93.184.216.36/photo-2.jpg',
+                    'https://93.184.216.36/photo-3.jpg',
+                ],
+            ]],
+        ]);
+        $draft->telegramUpdate()->update(['text' => 'Lenovo LOQ 15 - Luna Grey ищи']);
+
+        $stored = app(ProductImageStorage::class)->stage($draft->fresh());
+
+        $this->assertSame(3, $stored);
+        $this->assertSame(
+            'https://93.184.216.36/products/loq-15irx10-other-config',
+            $draft->fresh()->primary_source_url,
+        );
+        // Autonomously accepting a different, still-suitable configuration
+        // is intended when the operator did not pin an exact sku - but the
+        // specifications already saved on this draft describe whatever
+        // research originally settled on, never re-verified against this
+        // specific page. That must not be silently presented as a
+        // fully-confirmed match.
+        $this->assertStringContainsString(
+            'не подтверждает дословно точный SKU/модель черновика',
+            (string) $draft->fresh()->gallery_notes,
+        );
+        $this->assertNotEmpty($judgeCalls, 'The shared chassis code alone must not skip the judge.');
+    }
+
+    public function test_a_shared_chassis_code_alone_does_not_pass_vision_review_without_a_real_match(): void
+    {
+        // Sibling of the test above, but isolates the OTHER path to
+        // publication: Vision's own 'exact_match: false' plus the
+        // 'source_supported' OR-fallback. That fallback is meant to trust
+        // page-level text corroboration when Vision's photo-only judgement
+        // cannot tell - but downloadCandidates() precomputes that same
+        // per-candidate flag from ProductIdentityMatcher::supportsSource()
+        // (the loose, fragment-level tier), not confirmsExactIdentifier(),
+        // and ProductImageVisionVerifier only ORs its own stricter local
+        // check on top of whatever this precomputed flag already says. A
+        // page naming only the shared "LOQ 15IRX10" chassis code - never the
+        // dedicated SKU - must not let every photo through on that alone
+        // once Vision itself found no exact match either.
+        Storage::fake('public');
+        config()->set('product-images.max_images_by_type.laptop', 3);
+        ProductImageVisionAgent::fake(fn (string $prompt, $attachments): array => [
+            'images' => $attachments->keys()->map(fn (int $index): array => [
+                'index' => $index + 1,
+                'exact_match' => false,
+                'color_match' => true,
+                'publishable' => true,
+                'kind' => 'product',
+                'view' => 'front',
+                'gallery_rank' => $index + 1,
+                'score' => 98,
+                'reason' => 'Looks like the requested laptop line, but this specific configuration is not confirmed.',
+            ])->all(),
+        ])->preventStrayPrompts();
+        Http::fake(function (Request $request) {
+            if ($request->url() === 'https://93.184.216.36/products/loq-15irx10-other-config') {
+                return Http::response('<html></html>', 200, ['Content-Type' => 'text/html']);
+            }
+
+            preg_match('/photo-(\d+)/', $request->url(), $match);
+
+            return Http::response($this->jpeg((int) ($match[1] ?? 1)), 200, ['Content-Type' => 'image/jpeg']);
+        });
+        $this->mock(ProductSourceIdentityJudge::class)
+            ->shouldReceive('judge')
+            ->once()
+            ->andReturn('unavailable');
+        // downloadCandidates() attaches each downloaded image's own page
+        // context (title/url of the page it came from) via
+        // ProductImageResolver/ProductImageCandidateDiscovery, normally
+        // populated by actually crawling that page. Stubbed here to the same
+        // chassis-only title used above, so the candidate-building step is
+        // forced through the exact branch under test instead of silently
+        // short-circuiting on a null context. Wraps the real, container-built
+        // instance (rather than Laravel's partialMock(), which constructs a
+        // fresh Mockery subclass without the real constructor args and
+        // crashes the moment any other real method touches an unrelated
+        // readonly dependency) so every other method keeps its genuine
+        // behaviour.
+        $realCandidateDiscovery = app(ProductImageCandidateDiscovery::class);
+        $candidateDiscoveryMock = \Mockery::mock($realCandidateDiscovery)->makePartial();
+        $candidateDiscoveryMock->shouldReceive('sourceContextForImage')->andReturn([
+            'url' => 'https://93.184.216.36/products/loq-15irx10-other-config',
+            'title' => 'Lenovo LOQ 15IRX10 Gaming Laptop - 16GB RTX 4050',
+        ]);
+        $this->instance(ProductImageCandidateDiscovery::class, $candidateDiscoveryMock);
+        [, , $draft] = $this->records();
+        $draft->update([
+            'product_type' => 'laptop',
+            'title' => 'Lenovo LOQ 15IRX10 (83JE0013US) - Luna Grey',
+            'brand' => 'Lenovo',
+            'model' => 'LOQ 15IRX10 (83JE0013US)',
+            'specifications' => [
+                ['key' => 'sku', 'name' => 'SKU', 'value' => '83JE0013US'],
+            ],
+            'image_urls' => [],
+            'sources' => [[
+                'title' => 'Lenovo LOQ 15IRX10 Gaming Laptop - 16GB RTX 4050',
+                'url' => 'https://93.184.216.36/products/loq-15irx10-other-config',
+                'type' => 'retailer',
+                'image_urls' => [
+                    'https://93.184.216.36/photo-1.jpg',
+                    'https://93.184.216.36/photo-2.jpg',
+                    'https://93.184.216.36/photo-3.jpg',
+                ],
+            ]],
+        ]);
+        $draft->telegramUpdate()->update(['text' => 'Lenovo LOQ 15 - Luna Grey ищи']);
+
+        $stored = app(ProductImageStorage::class)->stage($draft->fresh());
+
+        $this->assertSame(0, $stored);
+    }
+
+    public function test_topping_up_a_draft_does_not_trust_a_shared_chassis_code_alone_either(): void
+    {
+        // stage()'s own per-source loop overwrites downloadCandidates()'s
+        // per-image source_identity_confirmed with its own already-judged,
+        // source-level decision before Vision ever sees it - so the sibling
+        // test above passes even though it never fixed downloadCandidates()
+        // itself. topUpDraftMedia() has no such loop: it never calls the
+        // judge and never overwrites that flag, so whatever
+        // downloadCandidates() computed reaches Vision's source_supported
+        // OR-gate completely unfiltered. If downloadCandidates() ever grants
+        // it on the loose, fragment-level supportsSource() tier instead of
+        // confirmsExactIdentifier(), this is the path that lets it through.
+        Storage::fake('public');
+        config()->set('product-images.max_images_by_type.laptop', 3);
+        ProductImageVisionAgent::fake(fn (string $prompt, $attachments): array => [
+            'images' => $attachments->keys()->map(fn (int $index): array => [
+                'index' => $index + 1,
+                'exact_match' => false,
+                'color_match' => true,
+                'publishable' => true,
+                'kind' => 'product',
+                'view' => 'front',
+                'gallery_rank' => $index + 1,
+                'score' => 98,
+                'reason' => 'Looks like the requested laptop line, but this specific configuration is not confirmed.',
+            ])->all(),
+        ])->preventStrayPrompts();
+        Http::fake(function (Request $request) {
+            preg_match('/photo-(\d+)/', $request->url(), $match);
+
+            return Http::response($this->jpeg((int) ($match[1] ?? 1)), 200, ['Content-Type' => 'image/jpeg']);
+        });
+        $realCandidateDiscovery = app(ProductImageCandidateDiscovery::class);
+        $candidateDiscoveryMock = \Mockery::mock($realCandidateDiscovery)->makePartial();
+        $candidateDiscoveryMock->shouldReceive('sourceContextForImage')->andReturn([
+            'url' => 'https://93.184.216.36/products/loq-15irx10-other-config',
+            'title' => 'Lenovo LOQ 15IRX10 Gaming Laptop - 16GB RTX 4050',
+        ]);
+        $this->instance(ProductImageCandidateDiscovery::class, $candidateDiscoveryMock);
+        [, , $draft] = $this->records();
+        $source = [
+            'title' => 'Lenovo LOQ 15IRX10 Gaming Laptop - 16GB RTX 4050',
+            'url' => 'https://93.184.216.36/products/loq-15irx10-other-config',
+            'type' => 'retailer',
+            'image_urls' => [
+                'https://93.184.216.36/photo-1.jpg',
+                'https://93.184.216.36/photo-2.jpg',
+                'https://93.184.216.36/photo-3.jpg',
+            ],
+        ];
+        $draft->update([
+            'status' => 'pending_review',
+            'product_type' => 'laptop',
+            'title' => 'Lenovo LOQ 15IRX10 (83JE0013US) - Luna Grey',
+            'brand' => 'Lenovo',
+            'model' => 'LOQ 15IRX10 (83JE0013US)',
+            'specifications' => [
+                ['key' => 'sku', 'name' => 'SKU', 'value' => '83JE0013US'],
+            ],
+            'image_urls' => [],
+            'sources' => [$source],
+            'primary_source_url' => $source['url'],
+        ]);
+
+        $stored = app(ProductImageStorage::class)->topUpDraftMedia($draft->fresh());
+
+        $this->assertSame(0, $stored);
+    }
+
+    public function test_an_uncertain_judge_verdict_proceeds_without_wholesale_trust_when_operator_did_not_pin_a_sku(): void
+    {
+        // The other half of the same fix: when the operator did not specify
+        // an exact SKU, a judge verdict of 'uncertain' must not be read as a
+        // mismatch (it is not evidence of anything) and must not silently
+        // grant wholesale trust either - it demotes to the ordinary
+        // per-frame path instead of being rejected outright.
+        Storage::fake('public');
+        $this->mock(ProductSourceIdentityJudge::class)
+            ->shouldReceive('judge')
+            ->once()
+            ->andReturn('uncertain');
+        [, , $draft] = $this->records();
+        $draft->update([
+            'product_type' => 'laptop',
+            'title' => 'Lenovo LOQ 15IRX10 (83JE0013US) - Luna Grey',
+            'brand' => 'Lenovo',
+            'model' => 'LOQ 15IRX10 (83JE0013US)',
+            'specifications' => [
+                ['key' => 'sku', 'name' => 'SKU', 'value' => '83JE0013US'],
+            ],
+            'image_urls' => [],
+            'sources' => [[
+                'title' => 'Lenovo LOQ 15IRX10 Gaming Laptop',
+                'url' => 'https://93.184.216.37/products/loq-15irx10-ambiguous',
+                'type' => 'retailer',
+                'image_urls' => [],
+            ]],
+        ]);
+        $draft->telegramUpdate()->update(['text' => 'Lenovo LOQ 15 - Luna Grey ищи']);
+
+        app(ProductImageStorage::class)->stage($draft->fresh());
+
+        $this->assertDatabaseHas('product_source_attempts', [
+            'product_draft_id' => $draft->id,
+            'action' => 'validate_product_identity',
+            'decision' => 'proceed_without_wholesale_confirmation',
+        ]);
+        $this->assertDatabaseMissing('product_source_attempts', [
+            'product_draft_id' => $draft->id,
+            'decision' => 'reject_unconfirmed_identifier',
+        ]);
+    }
+
+    public function test_a_genuinely_uncertain_judge_verdict_still_rejects_an_explicit_sku_request(): void
+    {
+        // The operator typed the exact sku themselves this time - a real
+        // 'uncertain' verdict (the AI looked and could not tell) does not
+        // outrank that explicit ask, unlike the sibling test below where the
+        // judge was never actually consulted at all.
+        $this->mock(ProductSourceIdentityJudge::class)
+            ->shouldReceive('judge')
+            ->once()
+            ->andReturn('uncertain');
+        [, , $draft] = $this->records();
+        $draft->update([
+            'product_type' => 'memory',
+            'title' => 'OWC 256GB DDR4-3200 RDIMM 3R2D42R4256S',
+            'brand' => 'OWC',
+            'model' => '3R2D42R4256S',
+            'image_urls' => [],
+            'sources' => [[
+                'title' => 'Generic 256GB memory module',
+                'url' => 'https://93.184.216.38/products/generic-256gb',
+                'type' => 'retailer',
+                'image_urls' => [],
+            ]],
+        ]);
+        $draft->telegramUpdate()->update(['text' => 'OWC 256GB DDR4-3200 RDIMM 3R2D42R4256S ищи']);
+
+        app(ProductImageStorage::class)->stage($draft->fresh());
+
+        $this->assertDatabaseHas('product_source_attempts', [
+            'product_draft_id' => $draft->id,
+            'action' => 'validate_product_identity',
+            'decision' => 'reject_unconfirmed_identifier',
+        ]);
+    }
+
+    public function test_a_technically_unavailable_judge_does_not_reject_an_explicit_sku_request(): void
+    {
+        // Same explicit sku request as above, but this time the judge could
+        // not actually be consulted (disabled, no budget, a technical
+        // failure) rather than having genuinely looked and stayed uncertain.
+        // "Could not check" must not be read as "checked and it does not
+        // match" - the source is not rejected on this alone.
+        $this->mock(ProductSourceIdentityJudge::class)
+            ->shouldReceive('judge')
+            ->once()
+            ->andReturn('unavailable');
+        [, , $draft] = $this->records();
+        $draft->update([
+            'product_type' => 'memory',
+            'title' => 'OWC 256GB DDR4-3200 RDIMM 3R2D42R4256S',
+            'brand' => 'OWC',
+            'model' => '3R2D42R4256S',
+            'image_urls' => [],
+            'sources' => [[
+                'title' => 'Generic 256GB memory module',
+                'url' => 'https://93.184.216.39/products/generic-256gb',
+                'type' => 'retailer',
+                'image_urls' => [],
+            ]],
+        ]);
+        $draft->telegramUpdate()->update(['text' => 'OWC 256GB DDR4-3200 RDIMM 3R2D42R4256S ищи']);
+
+        app(ProductImageStorage::class)->stage($draft->fresh());
+
+        $this->assertDatabaseHas('product_source_attempts', [
+            'product_draft_id' => $draft->id,
+            'action' => 'validate_product_identity',
+            'decision' => 'proceed_without_wholesale_confirmation',
+        ]);
+        $this->assertDatabaseMissing('product_source_attempts', [
+            'product_draft_id' => $draft->id,
+            'decision' => 'reject_unconfirmed_identifier',
+        ]);
+    }
+
     public function test_cost_limit_is_checked_after_current_source_finishes_before_next_source_starts(): void
     {
         Storage::fake('public');
@@ -1674,7 +2119,7 @@ class ProductImageStorageTest extends TestCase
             return $crossed;
         });
         $costBudget->shouldReceive('limit')->andReturn(0.50);
-        $browser = $this->mock(BrowserProductGalleryExtractor::class);
+        $browser = $this->mockBrowser();
         $browser->shouldReceive('extract')->once()->andReturnUsing(function () use (&$crossed): array {
             $crossed = true;
 
@@ -1731,7 +2176,7 @@ class ProductImageStorageTest extends TestCase
         $gallery = collect(range(1, 10))
             ->map(fn (int $index): string => 'https://93.184.216.34/gallery-'.$index.'.jpg')
             ->all();
-        $browser = $this->mock(BrowserProductGalleryExtractor::class);
+        $browser = $this->mockBrowser();
         $browser->shouldReceive('extract')->once()->andReturn($gallery);
         $browser->shouldReceive('isConfirmedGalleryImage')
             ->andReturnUsing(fn (string $url): bool => str_contains($url, '/gallery-'));
@@ -1825,7 +2270,7 @@ class ProductImageStorageTest extends TestCase
         $gallery = collect(range(1, 5))
             ->map(fn (int $index): string => 'https://93.184.216.36/gallery-'.$index.'.jpg')
             ->all();
-        $browser = $this->mock(BrowserProductGalleryExtractor::class);
+        $browser = $this->mockBrowser();
         $browser->shouldReceive('extract')->once()->andReturn($gallery);
         $browser->shouldReceive('isConfirmedGalleryImage')
             ->andReturnUsing(fn (string $url): bool => str_contains($url, '/gallery-'));
@@ -1917,7 +2362,7 @@ class ProductImageStorageTest extends TestCase
         $gallery = collect(range(1, 5))
             ->map(fn (int $index): string => 'https://93.184.216.36/gallery-'.$index.'.jpg')
             ->all();
-        $browser = $this->mock(BrowserProductGalleryExtractor::class);
+        $browser = $this->mockBrowser();
         $browser->shouldReceive('extract')->once()->andReturn($gallery);
         $browser->shouldReceive('isConfirmedGalleryImage')
             ->andReturnUsing(fn (string $url): bool => str_contains($url, '/gallery-'));
@@ -2024,7 +2469,7 @@ class ProductImageStorageTest extends TestCase
         $gallery = collect(range(1, 5))
             ->map(fn (int $index): string => 'https://93.184.216.36/gallery-'.$index.'.jpg')
             ->all();
-        $browser = $this->mock(BrowserProductGalleryExtractor::class);
+        $browser = $this->mockBrowser();
         $browser->shouldReceive('extract')->once()->andReturn($gallery);
         $browser->shouldReceive('isConfirmedGalleryImage')
             ->andReturnUsing(fn (string $url): bool => str_contains($url, '/gallery-'));
@@ -2130,7 +2575,7 @@ class ProductImageStorageTest extends TestCase
         $gallery = collect(range(1, 5))
             ->map(fn (int $index): string => 'https://93.184.216.36/gallery-'.$index.'.jpg')
             ->all();
-        $browser = $this->mock(BrowserProductGalleryExtractor::class);
+        $browser = $this->mockBrowser();
         $browser->shouldReceive('extract')->times($fallback ? 0 : 1)->andReturn($gallery);
         $browser->shouldReceive('isConfirmedGalleryImage')
             ->andReturnUsing(fn (string $url): bool => str_contains($url, '/gallery-'));
@@ -2357,7 +2802,7 @@ class ProductImageStorageTest extends TestCase
         // The continuation: the check can run now, and nothing else may be
         // needed - no browser, no downloads, no sources.
         GalleryTextLanguageAgent::fake(fn (): array => ['foreign_text_frames' => [], 'reason' => 'Чисто.']);
-        $browser = $this->mock(BrowserProductGalleryExtractor::class);
+        $browser = $this->mockBrowser();
         $browser->shouldNotReceive('extract');
         $browser->shouldNotReceive('executeRecipe');
 
@@ -2419,7 +2864,7 @@ class ProductImageStorageTest extends TestCase
         $gallery = collect(range(1, 5))
             ->map(fn (int $index): string => 'https://93.184.216.37/feature-'.$index.'.jpg')
             ->all();
-        $browser = $this->mock(BrowserProductGalleryExtractor::class);
+        $browser = $this->mockBrowser();
         $browser->shouldReceive('extract')->once()->andReturn($gallery);
         $browser->shouldReceive('isConfirmedGalleryImage')
             ->andReturnUsing(fn (string $url): bool => str_contains($url, '/feature-'));
@@ -2563,7 +3008,7 @@ class ProductImageStorageTest extends TestCase
                 'Content-Type' => 'image/jpeg',
             ]);
         });
-        $browser = $this->mock(BrowserProductGalleryExtractor::class);
+        $browser = $this->mockBrowser();
         $browser->shouldReceive('extract')
             ->once()
             ->withArgs(fn (...$arguments): bool => end($arguments) === true)
@@ -2605,7 +3050,7 @@ class ProductImageStorageTest extends TestCase
         $slider = collect(range(1, 3))
             ->map(fn (int $index): string => 'https://93.184.216.35/slider-'.$index.'.jpg')
             ->all();
-        $browser = $this->mock(BrowserProductGalleryExtractor::class);
+        $browser = $this->mockBrowser();
         // Once, not twice. The slider card is a shop we already hold a recipe
         // for, and that is now read off the host before anything is opened, so
         // the queue starts there instead of spending a visit on the static card
@@ -3056,8 +3501,16 @@ class ProductImageStorageTest extends TestCase
                 : 'https://loose.example/product/other',
         );
 
+        // Specification reconciliation is not what this test is about - no
+        // page text was ever captured through this fully mocked resolver, so
+        // without this the real reconciler would correctly (but irrelevantly
+        // to this test's own purpose) leave the gallery 'partial'.
+        $this->mock(ProductSpecificationReconciler::class)
+            ->shouldReceive('reconcile')
+            ->andReturn(SpecificationReconciliationOutcome::alreadyReconciled($exactPage));
+
         $downloaded = [];
-        $resolver = $this->mock(ProductImageResolver::class);
+        $resolver = $this->mockResolver();
         $resolver->shouldReceive('sourceContextForImage')->andReturn(null)->byDefault();
         $resolver->shouldReceive('isConfirmedGalleryImage')->andReturnUsing(
             fn (string $url): bool => str_contains($url, 'confirmed-'),
@@ -3121,7 +3574,7 @@ class ProductImageStorageTest extends TestCase
         ProductImageVisionAgent::fake()->preventStrayPrompts();
 
         $completedUrl = 'https://example.com/products/completed-source';
-        $resolver = $this->mock(ProductImageResolver::class);
+        $resolver = $this->mockResolver();
         $resolver->shouldNotReceive('resolve');
         $resolver->shouldNotReceive('download');
 
@@ -3160,7 +3613,7 @@ class ProductImageStorageTest extends TestCase
         ProductImageVisionAgent::fake()->preventStrayPrompts();
 
         $incompleteUrl = 'https://example.com/products/incomplete-source';
-        $resolver = $this->mock(ProductImageResolver::class);
+        $resolver = $this->mockResolver();
         $resolver->shouldReceive('resolve')->once()->andReturn([]);
         $resolver->shouldNotReceive('download');
 
@@ -3789,7 +4242,7 @@ class ProductImageStorageTest extends TestCase
             'image_urls' => [],
             'page_urls' => [],
         ]])->preventStrayPrompts();
-        $resolver = $this->mock(ProductImageResolver::class);
+        $resolver = $this->mockResolver();
         $resolver->shouldReceive('isConfirmedGalleryImage')->andReturn(false)->byDefault();
         $resolver->shouldReceive('isPartialGalleryImage')->andReturn(false)->byDefault();
         $resolver->shouldReceive('resolve')
@@ -3830,7 +4283,7 @@ class ProductImageStorageTest extends TestCase
             'image_urls' => [],
             'page_urls' => [],
         ]])->preventStrayPrompts();
-        $resolver = $this->mock(ProductImageResolver::class);
+        $resolver = $this->mockResolver();
         $resolver->shouldReceive('isConfirmedGalleryImage')->andReturn(false)->byDefault();
         $resolver->shouldReceive('isPartialGalleryImage')->andReturn(false)->byDefault();
         $resolver->shouldReceive('resolve')
@@ -3860,7 +4313,7 @@ class ProductImageStorageTest extends TestCase
             'image_urls' => ['https://dlcdnwebimgs.asus.com/gain/exact-product/w800'],
             'page_urls' => [],
         ]])->preventStrayPrompts();
-        $resolver = $this->mock(ProductImageResolver::class);
+        $resolver = $this->mockResolver();
         $resolver->shouldReceive('sourceContextForImage')->andReturn(null)->byDefault();
         $resolver->shouldReceive('isConfirmedGalleryImage')->andReturn(false)->byDefault();
         $resolver->shouldReceive('isPartialGalleryImage')->andReturn(false)->byDefault();
@@ -3995,7 +4448,7 @@ class ProductImageStorageTest extends TestCase
             ]),
             'https://93.184.216.41/blocked-official.html' => Http::response('Forbidden', 403),
         ]);
-        $browser = $this->mock(BrowserProductGalleryExtractor::class);
+        $browser = $this->mockBrowser();
         $browser->shouldReceive('extract')->andReturn([]);
         $browser->shouldReceive('isConfirmedGalleryImage')->andReturn(false);
         $browser->shouldReceive('isPartialGalleryImage')->andReturn(false);
@@ -4040,7 +4493,7 @@ class ProductImageStorageTest extends TestCase
         AppSetting::put('ai.fallback_sources_enabled', '0');
         ProductImageVisionAgent::fake()->preventStrayPrompts();
 
-        $resolver = $this->mock(ProductImageResolver::class);
+        $resolver = $this->mockResolver();
         $resolver->shouldReceive('resolve')
             ->twice()
             ->withArgs(function (
@@ -4093,7 +4546,7 @@ class ProductImageStorageTest extends TestCase
         $primaryUrl = 'https://primary.example/products/lenovo-test';
         $secondaryUrl = 'https://secondary.example/products/lenovo-test';
         $opened = [];
-        $resolver = $this->mock(ProductImageResolver::class);
+        $resolver = $this->mockResolver();
         $resolver->shouldReceive('preflightSource')->twice()->andReturnUsing(
             function (array $source) use ($primaryUrl): array {
                 $staticUrls = $source['url'] === $primaryUrl
@@ -4365,7 +4818,7 @@ class ProductImageStorageTest extends TestCase
             ->map(fn (int $index): string => "https://loose.example/2000x2000/feature-{$index}.jpg")
             ->all();
 
-        $resolver = $this->mock(ProductImageResolver::class);
+        $resolver = $this->mockResolver();
         $resolver->shouldReceive('isConfirmedGalleryImage')->andReturnUsing(
             fn (string $url): bool => str_contains($url, 'exact.example'),
         );
@@ -4390,7 +4843,7 @@ class ProductImageStorageTest extends TestCase
             ->all();
         $downloaded = [];
 
-        $resolver = $this->mock(ProductImageResolver::class);
+        $resolver = $this->mockResolver();
         $resolver->shouldReceive('sourceContextForImage')->andReturn(null)->byDefault();
         $resolver->shouldReceive('isConfirmedGalleryImage')->andReturn(true);
         $resolver->shouldReceive('isPartialGalleryImage')->andReturn(false)->byDefault();
@@ -4471,7 +4924,7 @@ class ProductImageStorageTest extends TestCase
         $confirmedUrl = 'https://static.bhphoto.com/images/images1600x1600/1757069749_1899207.jpg';
         Http::fake([$confirmedUrl => Http::response('Not Found', 404)]);
 
-        $browser = $this->mock(BrowserProductGalleryExtractor::class);
+        $browser = $this->mockBrowser();
         $browser->shouldReceive('isConfirmedGalleryImage')->andReturnUsing(fn (string $url): bool => $url === $confirmedUrl);
         $browser->shouldReceive('isPartialGalleryImage')->andReturn(false);
 
@@ -4521,7 +4974,7 @@ class ProductImageStorageTest extends TestCase
         $confirmedUrl = 'https://static.bhphoto.com/images/images1600x1600/1757069749_1899207.jpg';
         Http::fake([$confirmedUrl => Http::response('Not Found', 404)]);
 
-        $browser = $this->mock(BrowserProductGalleryExtractor::class);
+        $browser = $this->mockBrowser();
         $browser->shouldReceive('isConfirmedGalleryImage')->andReturnUsing(fn (string $url): bool => $url === $confirmedUrl);
         $browser->shouldReceive('isPartialGalleryImage')->andReturn(false);
 
@@ -4566,7 +5019,7 @@ class ProductImageStorageTest extends TestCase
         imagedestroy($tiny);
         Http::fake([$confirmedUrl => Http::response($tinyBytes, 200, ['Content-Type' => 'image/jpeg'])]);
 
-        $browser = $this->mock(BrowserProductGalleryExtractor::class);
+        $browser = $this->mockBrowser();
         $browser->shouldReceive('isConfirmedGalleryImage')->andReturnUsing(fn (string $url): bool => $url === $confirmedUrl);
         $browser->shouldReceive('isPartialGalleryImage')->andReturn(false);
 
@@ -4668,7 +5121,7 @@ class ProductImageStorageTest extends TestCase
         $wrongImages = collect(range(1, 5))
             ->map(fn (int $index): string => 'https://cdn.example/db1095cl/'.$index.'.jpg')
             ->all();
-        $resolver = $this->mock(ProductImageResolver::class);
+        $resolver = $this->mockResolver();
         $resolver->shouldReceive('resolve')->once()->andReturn($wrongImages);
         $resolver->shouldReceive('sourceContextForImage')->andReturn([
             'url' => $redirectedPage,
@@ -4713,9 +5166,10 @@ class ProductImageStorageTest extends TestCase
             'https://cdn.example/ah0097nr/side.jpg',
             'https://cdn.example/ah0097nr/back.jpg',
         ];
-        $resolver = $this->mock(ProductImageResolver::class);
+        $resolver = $this->mockResolver();
         $resolver->shouldReceive('resolve')->once()->andReturn($images);
         $resolver->shouldReceive('sourceContextForImage')->andReturn(null)->byDefault();
+        $resolver->shouldReceive('isConfirmedGalleryImage')->andReturn(false);
 
         [, , $draft] = $this->records();
         $draft->telegramUpdate()->update(['text' => 'HP OMEN MAX 16-ah0097nr ищи']);
@@ -4779,7 +5233,7 @@ class ProductImageStorageTest extends TestCase
         )->byDefault();
 
         $downloaded = [];
-        $resolver = $this->mock(ProductImageResolver::class);
+        $resolver = $this->mockResolver();
         $resolver->shouldReceive('sourceContextForImage')->andReturn(null)->byDefault();
         $resolver->shouldReceive('isConfirmedGalleryImage')->andReturnUsing(
             fn (string $url): bool => str_contains($url, 'exact-cdn'),
@@ -4883,12 +5337,488 @@ class ProductImageStorageTest extends TestCase
         ]);
     }
 
+    public function test_a_reconciliation_failure_does_not_lose_already_found_photos(): void
+    {
+        Storage::fake('public');
+        config()->set('product-images.max_images_by_type.laptop', 3);
+        ProductImageVisionAgent::fake(fn (string $prompt, $attachments): array => [
+            'images' => $attachments->keys()->map(fn (int $index): array => [
+                'index' => $index + 1,
+                'exact_match' => true,
+                'color_match' => true,
+                'publishable' => true,
+                'kind' => 'product',
+                'view' => 'front',
+                'gallery_rank' => $index + 1,
+                'score' => 98,
+                'reason' => 'Matches the requested laptop.',
+            ])->all(),
+        ])->preventStrayPrompts();
+        Http::fake(function (Request $request) {
+            if ($request->url() === 'https://93.184.216.36/products/exact-laptop') {
+                return Http::response('<html></html>', 200, ['Content-Type' => 'text/html']);
+            }
+
+            preg_match('/photo-(\d+)/', $request->url(), $match);
+
+            return Http::response($this->jpeg((int) ($match[1] ?? 1)), 200, ['Content-Type' => 'image/jpeg']);
+        });
+        $this->mock(ProductSpecificationReconciler::class)
+            ->shouldReceive('reconcile')
+            ->twice()
+            ->andReturn(SpecificationReconciliationOutcome::unavailable('no_evidence'));
+        [, , $draft] = $this->records();
+        $draft->update([
+            'product_type' => 'laptop',
+            'title' => 'Exact Laptop',
+            'model' => 'Exact Laptop',
+            'specifications' => [['key' => 'sku', 'name' => 'SKU', 'value' => 'EXACT-1']],
+            'image_urls' => [],
+            'sources' => [[
+                'title' => 'Exact Laptop EXACT-1',
+                'url' => 'https://93.184.216.36/products/exact-laptop',
+                'type' => 'retailer',
+                'image_urls' => [
+                    'https://93.184.216.36/photo-1.jpg',
+                    'https://93.184.216.36/photo-2.jpg',
+                    'https://93.184.216.36/photo-3.jpg',
+                ],
+            ]],
+        ]);
+        $draft->telegramUpdate()->update(['text' => 'Exact Laptop EXACT-1 ищи']);
+
+        $stored = app(ProductImageStorage::class)->stage($draft->fresh());
+
+        $this->assertSame(3, $stored);
+        $this->assertSame(3, $draft->media()->count());
+        $this->assertSame('partial', $draft->fresh()->gallery_status);
+        $this->assertSame('specifications_unreconciled', $draft->fresh()->gallery_search_stop_reason);
+        $this->assertNull($draft->fresh()->specifications_reconciled_source_url);
+    }
+
+    public function test_a_budget_exhausted_reconciliation_failure_maps_to_the_non_auto_chaining_stop_reason(): void
+    {
+        // Point 3 of the agreed scope: exhausting the whole shared search
+        // budget must stop automatic retries the same way it already does
+        // for the ordinary search - 'specifications_unreconciled' auto-
+        // chains (bounded only by its own attempt counter), cost_budget/
+        // time_budget never do. Exercised directly against the private
+        // mapping method: a full stage() run would need the shared
+        // ProductSearchCostBudget to say "not exceeded" during the search
+        // itself and "exceeded" only for this one later check, which is
+        // exactly the internal decision this test is isolating.
+        $this->mock(ProductSearchCostBudget::class)->shouldReceive('exceeded')->andReturn(true);
+        [, , $draft] = $this->records();
+        $draft->update(['primary_source_url' => 'https://shop.example/product']);
+        $method = new \ReflectionMethod(ProductImageStorage::class, 'reconciliationCardFields');
+
+        $result = $method->invoke(
+            app(ProductImageStorage::class),
+            $draft->fresh(),
+            SpecificationReconciliationOutcome::unavailable('budget_exhausted'),
+            'https://shop.example/product',
+            null,
+        );
+
+        $this->assertSame('cost_budget', $result['stop_reason']);
+        $this->assertSame([], $result['fields']);
+    }
+
+    public function test_a_time_budget_exhausted_reconciliation_failure_maps_to_time_budget_specifically(): void
+    {
+        $this->mock(ProductSearchCostBudget::class)->shouldReceive('exceeded')->andReturn(false);
+        [, , $draft] = $this->records();
+        $draft->update(['primary_source_url' => 'https://shop.example/product']);
+        $method = new \ReflectionMethod(ProductImageStorage::class, 'reconciliationCardFields');
+
+        $result = $method->invoke(
+            app(ProductImageStorage::class),
+            $draft->fresh(),
+            SpecificationReconciliationOutcome::unavailable('budget_exhausted'),
+            'https://shop.example/product',
+            null,
+        );
+
+        $this->assertSame('time_budget', $result['stop_reason']);
+    }
+
+    public function test_a_non_budget_reconciliation_failure_accumulates_the_attempt_counter_for_the_same_source(): void
+    {
+        [, , $draft] = $this->records();
+        $draft->update([
+            'primary_source_url' => 'https://shop.example/product',
+            'specifications_reconciliation_attempts' => 1,
+        ]);
+        $method = new \ReflectionMethod(ProductImageStorage::class, 'reconciliationCardFields');
+
+        $result = $method->invoke(
+            app(ProductImageStorage::class),
+            $draft->fresh(),
+            SpecificationReconciliationOutcome::unavailable('no_evidence'),
+            'https://shop.example/product',
+            null,
+        );
+
+        $this->assertSame('specifications_unreconciled', $result['stop_reason']);
+        $this->assertSame(2, $result['fields']['specifications_reconciliation_attempts']);
+    }
+
+    public function test_new_evidence_found_this_attempt_does_not_count_toward_the_attempt_cap(): void
+    {
+        // Point 2 of the follow-up audit: work that genuinely finds
+        // something new must not be capped the same way as a repeat of the
+        // exact same failed attempt.
+        [, , $draft] = $this->records();
+        $draft->update([
+            'primary_source_url' => 'https://shop.example/product',
+            'specifications_reconciliation_attempts' => 2,
+        ]);
+        $method = new \ReflectionMethod(ProductImageStorage::class, 'reconciliationCardFields');
+
+        $result = $method->invoke(
+            app(ProductImageStorage::class),
+            $draft->fresh(),
+            SpecificationReconciliationOutcome::unavailable('technical_error', madeProgress: true),
+            'https://shop.example/product',
+            null,
+        );
+
+        $this->assertSame('specifications_unreconciled', $result['stop_reason']);
+        $this->assertSame(1, $result['fields']['specifications_reconciliation_attempts']);
+    }
+
+    public function test_a_reconciliation_failure_against_a_genuinely_new_source_resets_the_attempt_counter(): void
+    {
+        [, , $draft] = $this->records();
+        $draft->update([
+            'primary_source_url' => 'https://shop.example/old-product',
+            'specifications_reconciliation_attempts' => 2,
+        ]);
+        $method = new \ReflectionMethod(ProductImageStorage::class, 'reconciliationCardFields');
+
+        $result = $method->invoke(
+            app(ProductImageStorage::class),
+            $draft->fresh(),
+            SpecificationReconciliationOutcome::unavailable('no_evidence'),
+            'https://shop.example/new-product',
+            null,
+        );
+
+        $this->assertSame(1, $result['fields']['specifications_reconciliation_attempts']);
+    }
+
+    public function test_specification_reconciliation_is_not_repeated_for_an_already_reconciled_source(): void
+    {
+        Storage::fake('public');
+        config()->set('product-images.max_images_by_type.laptop', 3);
+        ProductImageVisionAgent::fake(fn (string $prompt, $attachments): array => [
+            'images' => $attachments->keys()->map(fn (int $index): array => [
+                'index' => $index + 1,
+                'exact_match' => true,
+                'color_match' => true,
+                'publishable' => true,
+                'kind' => 'product',
+                'view' => 'front',
+                'gallery_rank' => $index + 1,
+                'score' => 98,
+                'reason' => 'Matches the requested laptop.',
+            ])->all(),
+        ])->preventStrayPrompts();
+        Http::fake(function (Request $request) {
+            if ($request->url() === 'https://93.184.216.39/products/exact-laptop') {
+                return Http::response('<html></html>', 200, ['Content-Type' => 'text/html']);
+            }
+
+            preg_match('/photo-(\d+)/', $request->url(), $match);
+
+            return Http::response($this->jpeg((int) ($match[1] ?? 1)), 200, ['Content-Type' => 'image/jpeg']);
+        });
+        // The mocked reconciler itself already encodes memoization (that is
+        // its own unit-tested contract) - what this test proves is that
+        // stage() calls it once per round with the same source, not that it
+        // is skipped structurally by ProductImageStorage itself.
+        $this->mock(ProductSpecificationReconciler::class)
+            ->shouldReceive('reconcile')
+            ->once()
+            ->andReturn(SpecificationReconciliationOutcome::reconciled(
+                'https://93.184.216.39/products/exact-laptop',
+                'Exact Laptop',
+                'Exact Laptop',
+                null,
+                'Exact laptop description.',
+                [['key' => 'sku', 'name' => 'SKU', 'value' => 'EXACT-1']],
+                'Подтверждено.',
+            ));
+        [, , $draft] = $this->records();
+        $draft->update([
+            'product_type' => 'laptop',
+            'title' => 'Exact Laptop',
+            'model' => 'Exact Laptop',
+            'specifications' => [['key' => 'sku', 'name' => 'SKU', 'value' => 'EXACT-1']],
+            'image_urls' => [],
+            'sources' => [[
+                'title' => 'Exact Laptop EXACT-1',
+                'url' => 'https://93.184.216.39/products/exact-laptop',
+                'type' => 'retailer',
+                'image_urls' => [
+                    'https://93.184.216.39/photo-1.jpg',
+                    'https://93.184.216.39/photo-2.jpg',
+                    'https://93.184.216.39/photo-3.jpg',
+                ],
+            ]],
+        ]);
+        $draft->telegramUpdate()->update(['text' => 'Exact Laptop EXACT-1 ищи']);
+
+        $stored = app(ProductImageStorage::class)->stage($draft->fresh());
+
+        $this->assertSame(3, $stored);
+        $this->assertSame('complete', $draft->fresh()->gallery_status);
+        $this->assertSame(
+            'https://93.184.216.39/products/exact-laptop',
+            $draft->fresh()->specifications_reconciled_source_url,
+        );
+    }
+
+    public function test_resuming_outstanding_reconciliation_does_not_repeat_search_or_training(): void
+    {
+        Storage::fake('public');
+        $this->mock(ProductSpecificationReconciler::class)
+            ->shouldReceive('reconcile')
+            ->once()
+            ->andReturn(SpecificationReconciliationOutcome::reconciled(
+                'https://93.184.216.36/products/exact-laptop',
+                'Exact Laptop',
+                'Exact Laptop',
+                null,
+                'Exact laptop description.',
+                [['key' => 'sku', 'name' => 'SKU', 'value' => 'EXACT-1']],
+                'Подтверждено.',
+            ));
+        // No Http::fake() registered at all - if stage() tried to re-open
+        // the source or re-run discovery, the real HTTP client would either
+        // hit the network or Laravel's Http facade would throw, either of
+        // which fails this test.
+        [, , $draft] = $this->records();
+        $draft->update([
+            'product_type' => 'laptop',
+            'specifications' => [['key' => 'sku', 'name' => 'SKU', 'value' => 'EXACT-1']],
+            'image_urls' => [],
+            'sources' => [],
+            'primary_source_url' => 'https://93.184.216.36/products/exact-laptop',
+            'gallery_status' => 'partial',
+            'gallery_confirmed_sufficient' => true,
+            'gallery_search_stop_reason' => 'specifications_unreconciled',
+            'images_staged_at' => now(),
+        ]);
+        foreach (range(1, 3) as $position) {
+            $path = "drafts/{$draft->id}/photo-{$position}.webp";
+            Storage::disk('public')->put($path, "photo-{$position}");
+            $draft->media()->create([
+                'disk' => 'public',
+                'path' => $path,
+                'source_url' => "https://93.184.216.36/photo-{$position}.jpg",
+                'role' => $position === 1 ? 'primary' : 'secondary',
+                'mime_type' => 'image/webp',
+                'checksum' => hash('sha256', "photo-{$position}"),
+                'verification_status' => 'source_verified',
+                'sort_order' => $position - 1,
+                'is_primary' => $position === 1,
+            ]);
+        }
+
+        $stored = app(ProductImageStorage::class)->stage($draft->fresh());
+
+        $this->assertSame(3, $stored);
+        $this->assertSame('complete', $draft->fresh()->gallery_status);
+        $this->assertNull($draft->fresh()->gallery_search_stop_reason);
+        $this->assertSame(
+            'https://93.184.216.36/products/exact-laptop',
+            $draft->fresh()->specifications_reconciled_source_url,
+        );
+    }
+
+    public function test_resuming_still_retries_reconciliation_when_the_stop_reason_was_cost_budget(): void
+    {
+        // Regression test for the exact gap GPT found: a reconciliation
+        // attempt that failed specifically because the shared search budget
+        // was exhausted is recorded as 'cost_budget' (so it does not
+        // auto-chain, same as the ordinary search's own budget stop) - the
+        // trigger for resuming reconciliation must not be tied to the
+        // literal stop-reason string, or this exact continuation falls
+        // through to a full, unnecessary re-search instead.
+        Storage::fake('public');
+        $this->mock(ProductSpecificationReconciler::class)
+            ->shouldReceive('reconcile')
+            ->once()
+            ->andReturn(SpecificationReconciliationOutcome::reconciled(
+                'https://93.184.216.36/products/exact-laptop',
+                'Exact Laptop',
+                'Exact Laptop',
+                null,
+                'Exact laptop description.',
+                [['key' => 'sku', 'name' => 'SKU', 'value' => 'EXACT-1']],
+                'Подтверждено.',
+            ));
+        // No Http::fake() registered at all - if stage() tried to re-open
+        // the source or re-run discovery, the real HTTP client would either
+        // hit the network or Laravel's Http facade would throw, either of
+        // which fails this test.
+        [, , $draft] = $this->records();
+        $draft->update([
+            'product_type' => 'laptop',
+            'specifications' => [['key' => 'sku', 'name' => 'SKU', 'value' => 'EXACT-1']],
+            'image_urls' => [],
+            'sources' => [],
+            'primary_source_url' => 'https://93.184.216.36/products/exact-laptop',
+            'gallery_status' => 'partial',
+            'gallery_confirmed_sufficient' => true,
+            'gallery_search_stop_reason' => 'cost_budget',
+            'images_staged_at' => now(),
+        ]);
+        foreach (range(1, 3) as $position) {
+            $path = "drafts/{$draft->id}/photo-{$position}.webp";
+            Storage::disk('public')->put($path, "photo-{$position}");
+            $draft->media()->create([
+                'disk' => 'public',
+                'path' => $path,
+                'source_url' => "https://93.184.216.36/photo-{$position}.jpg",
+                'role' => $position === 1 ? 'primary' : 'secondary',
+                'mime_type' => 'image/webp',
+                'checksum' => hash('sha256', "photo-{$position}"),
+                'verification_status' => 'source_verified',
+                'sort_order' => $position - 1,
+                'is_primary' => $position === 1,
+            ]);
+        }
+
+        $stored = app(ProductImageStorage::class)->stage($draft->fresh());
+
+        $this->assertSame(3, $stored);
+        $this->assertSame('complete', $draft->fresh()->gallery_status);
+        $this->assertNull($draft->fresh()->gallery_search_stop_reason);
+        $this->assertSame(
+            'https://93.184.216.36/products/exact-laptop',
+            $draft->fresh()->specifications_reconciled_source_url,
+        );
+    }
+
+    public function test_resuming_reconciliation_is_not_triggered_by_media_count_alone(): void
+    {
+        // Regression test for the exact gap GPT found: resumeOutstandingReconciliation()
+        // must trust the gallery's own persisted completeness fact
+        // (gallery_confirmed_sufficient), not re-derive "is the gallery
+        // done" from however many media rows happen to exist right now -
+        // rows can meet or exceed any reasonable minimum for reasons
+        // unrelated to an actual, finished verification (e.g. left over
+        // from a run that never reached its own conclusion). Without the
+        // stored fact, this path could declare the draft complete on one
+        // reconciliation success alone, never having actually confirmed the
+        // gallery itself was done.
+        Storage::fake('public');
+        $this->mock(ProductSpecificationReconciler::class)->shouldNotReceive('reconcile');
+        [, , $draft] = $this->records();
+        $draft->update([
+            'primary_source_url' => 'https://93.184.216.36/products/exact-laptop',
+            'specifications_reconciled_source_url' => null,
+            'gallery_confirmed_sufficient' => false,
+        ]);
+        foreach (range(1, 5) as $position) {
+            $path = "drafts/{$draft->id}/photo-{$position}.webp";
+            Storage::disk('public')->put($path, "photo-{$position}");
+            $draft->media()->create([
+                'disk' => 'public',
+                'path' => $path,
+                'source_url' => "https://93.184.216.36/photo-{$position}.jpg",
+                'role' => $position === 1 ? 'primary' : 'secondary',
+                'mime_type' => 'image/webp',
+                'checksum' => hash('sha256', "photo-{$position}"),
+                'verification_status' => 'source_verified',
+                'sort_order' => $position - 1,
+                'is_primary' => $position === 1,
+            ]);
+        }
+
+        $method = new \ReflectionMethod(ProductImageStorage::class, 'resumeOutstandingReconciliation');
+        $result = $method->invoke(app(ProductImageStorage::class), $draft->fresh(), null, null);
+
+        $this->assertNull($result);
+    }
+
+    public function test_resumed_interrupted_verification_still_reconciles_specifications_before_declaring_complete(): void
+    {
+        // Regression test for the gap this feature closed: this path used to
+        // flip gallery_status straight to 'complete' with zero reconciliation
+        // attempt at all, since it never had a $chosenSource of its own.
+        Storage::fake('public');
+        $this->mock(ProductSpecificationReconciler::class)
+            ->shouldReceive('reconcile')
+            ->twice()
+            ->andReturn(SpecificationReconciliationOutcome::unavailable('no_evidence'));
+        [, , $draft] = $this->records();
+        $draft->update([
+            'specifications' => [['key' => 'sku', 'name' => 'SKU', 'value' => 'EXACT-1']],
+            'image_urls' => [],
+            'sources' => [],
+            'primary_source_url' => 'https://93.184.216.36/products/exact-laptop',
+        ]);
+        foreach (range(1, 3) as $position) {
+            $path = "drafts/{$draft->id}/pending-{$position}.webp";
+            Storage::disk('public')->put($path, $this->jpeg($position));
+            $draft->media()->create([
+                'disk' => 'public',
+                'path' => $path,
+                'source_url' => "https://93.184.216.36/photo-{$position}.jpg",
+                'role' => $position === 1 ? 'primary' : 'secondary',
+                'mime_type' => 'image/webp',
+                'checksum' => hash('sha256', 'pending-'.$position),
+                'verification_status' => 'pending',
+                'sort_order' => $position - 1,
+                'is_primary' => $position === 1,
+            ]);
+        }
+        GalleryTextLanguageAgent::fake(fn (): array => ['foreign_text_frames' => [], 'reason' => null])
+            ->preventStrayPrompts();
+
+        $stored = app(ProductImageStorage::class)->stage($draft->fresh());
+
+        $this->assertSame(3, $stored);
+        $this->assertSame('partial', $draft->fresh()->gallery_status);
+        $this->assertSame('specifications_unreconciled', $draft->fresh()->gallery_search_stop_reason);
+    }
+
     private function invokeNormalizeCandidateUrl(string $url): string
     {
         $method = new \ReflectionMethod(ProductImageStorage::class, 'normalizeCandidateUrl');
         $method->setAccessible(true);
 
         return $method->invoke(app(ProductImageStorage::class), $url);
+    }
+
+    /**
+     * lastSpecificationText() is a same-call side channel read unconditionally
+     * whenever the browser extractor runs at all, independent of whether it
+     * found any images - every test mocking extract() needs it stubbed too,
+     * or Mockery's strict mock throws on the unexpected call.
+     */
+    private function mockBrowser(): MockInterface
+    {
+        $browser = $this->mock(BrowserProductGalleryExtractor::class);
+        $browser->shouldReceive('lastSpecificationText')->andReturn(null)->byDefault();
+
+        return $browser;
+    }
+
+    /**
+     * specificationTextForPage() is read unconditionally whenever stage()
+     * reconciles specifications against a chosen source - every test that
+     * fully mocks ProductImageResolver needs it stubbed too.
+     */
+    private function mockResolver(): MockInterface
+    {
+        $resolver = $this->mock(ProductImageResolver::class);
+        $resolver->shouldReceive('specificationTextForPage')->andReturn(null)->byDefault();
+
+        return $resolver;
     }
 
     /** @return array{Product, ProductVariant, ProductDraft} */
