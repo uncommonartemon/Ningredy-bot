@@ -2,7 +2,10 @@
 
 namespace App\Filament\Resources\Products\RelationManagers;
 
+use App\Filament\Schemas\ProductPhotoUpload;
 use App\Models\ProductMedia;
+use App\Services\Products\ProductMediaUploader;
+use Filament\Actions\Action;
 use Filament\Actions\BulkActionGroup;
 use Filament\Actions\CreateAction;
 use Filament\Actions\DeleteAction;
@@ -10,7 +13,6 @@ use Filament\Actions\DeleteBulkAction;
 use Filament\Actions\EditAction;
 use Filament\Actions\ViewAction;
 use Filament\Forms\Components\DateTimePicker;
-use Filament\Forms\Components\FileUpload;
 use Filament\Forms\Components\Hidden;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\Textarea;
@@ -46,19 +48,12 @@ class MediaRelationManager extends RelationManager
                 ->schema([
                     Hidden::make('type')->default('image'),
                     Hidden::make('disk')->default('public'),
-                    FileUpload::make('path')
+                    ProductPhotoUpload::make('path')
                         ->label('Файл на сервере')
-                        ->disk('public')
                         ->directory('products/uploads')
-                        ->visibility('public')
-                        ->image()
-                        ->acceptedFileTypes(['image/jpeg', 'image/png', 'image/webp', 'image/avif'])
-                        ->maxSize(8192)
-                        ->imageEditor()
                         ->previewable()
                         ->openable()
                         ->downloadable()
-                        ->imagePreviewHeight('240')
                         ->required(fn (Get $get): bool => blank($get('url')))
                         ->columnSpanFull(),
                     TextInput::make('url')
@@ -98,6 +93,7 @@ class MediaRelationManager extends RelationManager
                         ->label('Проверка')
                         ->options([
                             'verified' => 'Проверено Vision',
+                            'source_verified' => 'Подтверждено источником',
                             'manual' => 'Подтверждено вручную',
                             'unverified' => 'Не проверено',
                             'rejected' => 'Отклонено',
@@ -190,7 +186,8 @@ class MediaRelationManager extends RelationManager
                     ->sortable(),
             ])
             ->headerActions([
-                CreateAction::make()->label('Добавить фото'),
+                $this->uploadPhotosAction(),
+                CreateAction::make()->label('Добавить фото по ссылке'),
             ])
             ->recordActions([
                 ViewAction::make(),
@@ -205,7 +202,19 @@ class MediaRelationManager extends RelationManager
             ->emptyStateHeading('Фотографий пока нет')
             ->emptyStateDescription('Добавьте локальный файл или внешний URL.')
             ->emptyStateActions([
-                CreateAction::make()->label('Добавить фото'),
+                $this->uploadPhotosAction(),
             ]);
+    }
+
+    private function uploadPhotosAction(): Action
+    {
+        return Action::make('uploadPhotos')
+            ->label('Загрузить фотографии')
+            ->icon('heroicon-o-arrow-up-tray')
+            ->schema([ProductPhotoUpload::multiple()->required()])
+            ->action(function (array $data): void {
+                app(ProductMediaUploader::class)->upload($this->getOwnerRecord(), $data['new_photos']);
+            })
+            ->successNotificationTitle('Фотографии добавлены');
     }
 }

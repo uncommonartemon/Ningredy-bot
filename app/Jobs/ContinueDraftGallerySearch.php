@@ -96,9 +96,7 @@ class ContinueDraftGallerySearch implements ShouldBeUniqueUntilProcessing, Shoul
                 },
             );
             $previousCount = $draft->media()->count();
-            $reconciliationOnly = $draft->gallery_confirmed_sufficient
-                && trim((string) $draft->primary_source_url) !== ''
-                && $draft->specifications_reconciled_source_url !== $draft->primary_source_url;
+            $reconciliationOnly = $draft->gallery_confirmed_sufficient && $draft->reconciliationPending();
             $progress->step($reconciliationOnly ? 'Повторяю сверку карточки с источником фото' : 'Продолжаю Playwright-поиск с места остановки', 1680);
             $stored = $images->continueStage(
                 $draft,
@@ -131,10 +129,7 @@ class ContinueDraftGallerySearch implements ShouldBeUniqueUntilProcessing, Shoul
                 return;
             }
 
-            $reconciliationPending = $fresh->gallery_search_stop_reason === 'specifications_unreconciled'
-                || (trim((string) $fresh->primary_source_url) !== ''
-                    && $fresh->specifications_reconciled_source_url !== $fresh->primary_source_url);
-            if ($reconciliationPending) {
+            if ($fresh->reconciliationPending()) {
                 $progress->failed('Сверка не завершена', 'Фото сохранены; публикация пока недоступна.');
             } elseif ($reconciliationOnly) {
                 $progress->done("Карточка сверена с источником; сохранены фото: {$fresh->media->count()}");

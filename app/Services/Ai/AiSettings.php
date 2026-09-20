@@ -262,12 +262,17 @@ class AiSettings
     }
 
     /**
-     * Unlike sourceIdentityAgentEnabled(), turning this off does not
-     * substitute a safe fallback check - it simply pauses new
-     * reconciliations. A draft whose specifications were never actually
-     * checked against its chosen source is still not ready for publication
-     * while this is off, same as any other unavailable() outcome; there is
-     * no carve-out for the checker being disabled.
+     * A real off switch: while this is off, no reconciliation runs AND
+     * nothing withholds a draft for the absence of one - see
+     * ProductDraft::reconciliationPending(), the single place every gate
+     * asks.
+     *
+     * It used to mean only the first half. Turning the checker off stopped
+     * the stamp from ever being written while seven gates went on demanding
+     * it, so every draft with a photo source was blocked for ever, with no
+     * way back. Withholding a finished card because our own checker is
+     * switched off punishes the operator for our configuration, and the
+     * escape hatch has to actually be one.
      */
     public function specificationReconciliationEnabled(): bool
     {

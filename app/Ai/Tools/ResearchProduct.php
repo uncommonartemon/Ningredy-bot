@@ -614,8 +614,7 @@ class ResearchProduct implements Tool
             $result['image_count'] = $imageCount;
             $draft->refresh();
             $sourceUrl = trim((string) $draft->primary_source_url);
-            if ($draft->gallery_search_stop_reason === 'specifications_unreconciled'
-                || ($sourceUrl !== '' && $draft->specifications_reconciled_source_url !== $draft->primary_source_url)) {
+            if ($draft->reconciliationPending()) {
                 $progress->failed('Сборка карточки не завершена', 'Фото сохранены. Готовой карточки для подтверждения пока нет.');
 
                 return $this->json([

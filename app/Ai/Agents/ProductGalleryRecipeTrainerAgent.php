@@ -335,20 +335,34 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
             strictly in array order and may contain only:
             - click: click one matched element at index; limit is unused for this kind but the field is
               still required by the schema, so always set it to 1;
-            - click_each: click consecutive matched elements starting at index, up to limit;
-            - click_until_no_change: click the same matched element up to limit and stop when DOM/network
-              gallery state no longer changes.
+            - click_each: visit the CURRENT page's matched controls, or repeatedly press a single arrow;
+            - click_until_no_change: repeatedly press one control until the current gallery ends.
+            - hover: reveal hover-dependent media without clicking;
+            - scroll_into_view: reveal a lazy element or its container without clicking.
+            gallery_scope_selector may name the observed product gallery container with arbitrary class
+            names. Its non-purchasing controls are eligible without English gallery keywords. Never choose
+            the whole body: the scope must identify this product's actual media area.
+            Determine how completion can be observed BEFORE proposing traversal. active_image_selector
+            selects the currently displayed product image (not the thumbnail strip); position_selector may
+            select its live counter. Use empty strings if unavailable. These selectors must work on other
+            products without embedding this product's URL, frame count or image filename. A disabled arrow,
+            a completed current thumbnail strip, or return to the initial frame after actual movement
+            provides completion evidence. No progress, loading timeout or a safety ceiling is NOT completion:
+            inspect the returned reason and observations, change the plan or request wider evidence.
+            Full-resolution URLs already present within the verified product gallery need no clicks:
+            return actions=[] and precise collect_selectors/attributes; this is a reusable recipe too.
+            Opening a viewer is preferred when needed for missing frames or better resolution, not ritual.
+            frame_observations lists real embedded documents with frame_selectors paths. Top-level
+            frame_selectors chooses the document for collection; each action.frame_selectors chooses where
+            THAT control lives ([] means the main page). Opening a parent modal may precede entering its
+            iframe. Use only observed paths, and keep product identity tied to the parent product page.
             Numeric fields have hard accepted ranges and a value outside them throws the whole recipe away
             for that round, however good its selectors are: index 0-200, limit 1-20, wait_after_ms and
             after_each_wait_after_ms 50-1500, after_each_limit 1-20, max_thumbnail_clicks 0-20,
-            max_next_clicks 0-15, wait_after_click_ms 50-1000. The selector lists are bounded too, and were
-            not written down here until a recipe was thrown away for a ninth exclusion nobody had told the
-            agent about: actions 12, collect_selectors 12, exclude_selectors 20, thumbnail_selectors 12,
-            pre_click_selectors 5, open_selectors 5, next_selectors 5, attributes 12. An overlong selector
-            or attribute list is trimmed to its bound rather than rejected, so the excess is simply lost - put
-            the entries that matter first. actions is the exception: it is a plan, and dropping its last step
-            would change what runs, so an overlong one is refused outright. A page that needs a longer settle than 1500ms
-            must be handled with an extra action or a click_until_no_change, never by exceeding the bound.
+            max_next_clicks 0-15, wait_after_click_ms 50-1000. There are at most 12 actions and 12 attributes;
+            selector lists have no count quota. Numeric traversal limits are resource guards, not the number
+            of photos learned from this product. The runner separately waits for image loading within its
+            remaining deadline; never repeat a click merely to wait for a slow photo.
             Every action must also return after_each_selector, after_each_limit and after_each_wait_after_ms.
             Set all three to null normally. When selecting each thumbnail resets a nested zoom/enlargement state,
             put that already-observed zoom control in after_each_selector on the click_each action. The runner will
@@ -432,9 +446,10 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
             ->items($schema->string()->max(300))->required();
         $actions = $schema->array()->max(12)->items($schema->object([
             'kind' => $schema->string()->enum([
-                'click', 'click_each', 'click_until_no_change',
+                'click', 'click_each', 'click_until_no_change', 'hover', 'scroll_into_view',
             ])->required(),
             'when' => $schema->string()->enum(['always', 'if_present'])->required(),
+            'frame_selectors' => $selectors(),
             'selector' => $schema->string()->max(300)->required(),
             // Real production case (2026-09-14, techbuy.com.au): a broad
             // selector ("a") legitimately needing its 25th/46th match
@@ -493,6 +508,10 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
             'actions' => $actions,
             'pre_click_selectors' => $selectors(),
             'collect_selectors' => $selectors(),
+            'active_image_selector' => $schema->string()->max(300)->required(),
+            'position_selector' => $schema->string()->max(300)->required(),
+            'gallery_scope_selector' => $schema->string()->max(300)->required(),
+            'frame_selectors' => $selectors(),
             'thumbnail_selectors' => $selectors(),
             'open_selectors' => $selectors(),
             'next_selectors' => $selectors(),

@@ -10,6 +10,22 @@ class ProductGalleryRecipeResultValidatorTest extends TestCase
 {
     use RefreshDatabase;
 
+    public function test_explicit_incomplete_traversal_cannot_pass_by_count_or_unchanged_click(): void
+    {
+        $recipe = ['gallery_present' => true, 'content_confirmed_product' => true,
+            'actions' => [['kind' => 'click_each', 'selector' => '#next', 'limit' => 1]]];
+        $result = ['images' => $this->images(3), 'diagnostics' => ['observed_gallery_count' => 3],
+            'action_trace' => [['action' => 'click_each', 'action_index' => 0, 'clicked' => true,
+                'changed' => false, 'selector_match_count' => 1, 'traversal_complete' => false,
+                'traversal_stop_reason' => 'media_wait_timeout']]];
+        $validation = app(ProductGalleryRecipeResultValidator::class)->validate($recipe, $result);
+        $this->assertFalse($validation['passed']);
+        $this->assertStringContainsString('media_wait_timeout', $validation['reason']);
+        $result['action_trace'][0]['traversal_complete'] = true;
+        $result['action_trace'][0]['traversal_stop_reason'] = 'returned_to_first_frame';
+        $this->assertTrue(app(ProductGalleryRecipeResultValidator::class)->validate($recipe, $result)['passed']);
+    }
+
     public function test_publication_quota_never_hides_missing_observed_frames(): void
     {
         $validator = app(ProductGalleryRecipeResultValidator::class);

@@ -145,7 +145,6 @@ class ProductDraftsTable
      */
     private static function specificationsUnreconciled(ProductDraft $record): bool
     {
-        return trim((string) $record->primary_source_url) !== ''
-            && $record->specifications_reconciled_source_url !== $record->primary_source_url;
+        return $record->reconciliationPending();
     }
 }

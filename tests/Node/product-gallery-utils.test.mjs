@@ -539,7 +539,7 @@ test('deduplicates UUID filename renditions and keeps the larger rendition', () 
 test('respects the explicit action plan and keeps the automatic opener only for legacy traversal', () => {
     const extractor = readFileSync(new URL('../../scripts/extract-product-gallery.mjs', import.meta.url), 'utf8');
     const actionFallback = extractor.indexOf('await attemptExpandedGallery(priorViewerOpenAction)');
-    const actionTraversal = extractor.indexOf('const locator = page.locator(action.selector)', actionFallback);
+    const actionTraversal = extractor.indexOf('const locator = actionDocument.locator(action.selector)', actionFallback);
     const legacyFallback = extractor.indexOf('await attemptExpandedGallery();');
     const legacyTraversal = extractor.indexOf('const thumbnails = thumbnailSelectors.length', legacyFallback);
 
@@ -630,6 +630,7 @@ test('normalizes the safe ordered AI action plan and rejects executable selector
             wait_after_ms: 1500,
             purpose: 'Open the gallery',
             when: 'always',
+            frame_selectors: [],
         },
         {
             kind: 'click_each',
@@ -639,6 +640,7 @@ test('normalizes the safe ordered AI action plan and rejects executable selector
             wait_after_ms: 150,
             purpose: 'Visit each photo',
             when: 'always',
+            frame_selectors: [],
             after_each_selector: 'button[data-zoom-plus]',
             after_each_limit: 20,
             after_each_wait_after_ms: 50,

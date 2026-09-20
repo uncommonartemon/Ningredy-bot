@@ -38,7 +38,7 @@ class LowResolutionDraftApprovalTest extends TestCase
         ]);
     }
 
-    public function test_approval_automatically_queues_restage_when_a_photo_is_below_the_current_limit(): void
+    public function test_approval_blocks_low_resolution_without_automatically_paying_for_replacements(): void
     {
         $sourceUpdate = TelegramUpdate::query()->create([
             'update_id' => 3090,
@@ -107,11 +107,10 @@ class LowResolutionDraftApprovalTest extends TestCase
             'status' => 'completed',
             'error' => null,
         ]);
-        Queue::assertPushed(RestageDraftGalleryPhotos::class, fn (RestageDraftGalleryPhotos $job): bool => $job->draftId === $draft->id && $job->telegramUpdateId > 0
-        );
+        Queue::assertNotPushed(RestageDraftGalleryPhotos::class);
         Queue::assertNotPushed(StoreProductImages::class);
         Http::assertSent(fn (ClientRequest $request): bool => str_ends_with($request->url(), '/sendMessage')
-            && str_contains((string) $request['text'], 'Автоматически ищу замену'));
+            && str_contains((string) $request['text'], 'Фото не проходят'));
     }
 
     public function test_a_frame_whose_verification_never_ran_cannot_be_published_by_the_button(): void
@@ -186,15 +185,13 @@ class LowResolutionDraftApprovalTest extends TestCase
         $this->assertSame('pending_review', $draft->fresh()->status);
         $this->assertDatabaseMissing('products', ['title' => 'Unverified Laptop']);
         Queue::assertNotPushed(StoreProductImages::class);
-        // Not a quality problem, and the operator is told the difference: the
-        // check itself did not run, so the search continues rather than
-        // hunting for replacements for a photograph nothing is wrong with.
-        Queue::assertPushed(RestageDraftGalleryPhotos::class);
+        // A failed check is explained without turning publication into paid work.
+        Queue::assertNotPushed(RestageDraftGalleryPhotos::class);
         Http::assertSent(fn (ClientRequest $request): bool => str_ends_with($request->url(), '/sendMessage')
             && str_contains((string) $request['text'], 'Проверка фотографий не состоялась'));
     }
 
-    public function test_approval_automatically_queues_restage_when_the_draft_has_no_photos(): void
+    public function test_approval_blocks_missing_photos_without_starting_another_search(): void
     {
         $sourceUpdate = TelegramUpdate::query()->create([
             'update_id' => 3190,
@@ -249,8 +246,7 @@ class LowResolutionDraftApprovalTest extends TestCase
             'status' => 'completed',
             'error' => null,
         ]);
-        Queue::assertPushed(RestageDraftGalleryPhotos::class, fn (RestageDraftGalleryPhotos $job): bool => $job->draftId === $draft->id && $job->telegramUpdateId > 0
-        );
+        Queue::assertNotPushed(RestageDraftGalleryPhotos::class);
         Queue::assertNotPushed(StoreProductImages::class);
         Http::assertSent(fn (ClientRequest $request): bool => str_ends_with($request->url(), '/sendMessage')
             && str_contains((string) $request['text'], 'нет фотографий'));

@@ -24,6 +24,34 @@ class RecipeMustNotNameTheProductTest extends TestCase
 {
     private const DELL_TITLE = 'Notebook Dell 14 Premium da 14 pollici | Dell Italia';
 
+    public function test_generic_document_title_does_not_hide_the_observed_product_heading(): void
+    {
+        $this->expectException(InvalidGalleryRecipeException::class);
+        (new ReflectionMethod(ProductGalleryRecipeTrainer::class, 'validateRecipe'))->invoke(
+            app(ProductGalleryRecipeTrainer::class),
+            ['gallery_present' => true, 'content_confirmed_product' => true,
+                'expected_image_count' => 8, 'expected_count_evidence' => 'Current thumbnails',
+                'collect_selectors' => ['div[aria-label="Nitro 16 Gaming Laptop - AN16-41-R3ZV"] img'],
+                'attributes' => ['src'], 'confidence' => 0.9, 'reason' => 'Product gallery'],
+            'Acer Store: | Acer Store – US',
+            ['Nitro 16 Gaming Laptop - AN16-41-R3ZV'],
+        );
+    }
+
+    public function test_opener_and_frame_paths_are_checked_as_well(): void
+    {
+        foreach ([['open_selectors' => ['img[alt="Notebook Dell 14 Premium"]']],
+            ['frame_selectors' => ['iframe[title="Notebook Dell 14 Premium"]']],
+            ['actions' => [['selector' => '#next', 'frame_selectors' => ['iframe[title="Notebook Dell 14 Premium"]']]]]] as $recipe) {
+            try {
+                $this->guard($recipe, self::DELL_TITLE);
+                $this->fail('Product-specific selector was missed.');
+            } catch (InvalidGalleryRecipeException $exception) {
+                $this->assertSame(['selector_names_the_product'], $exception->ruleSignature);
+            }
+        }
+    }
+
     public function test_a_selector_built_from_the_product_name_is_rejected(): void
     {
         $this->expectException(InvalidGalleryRecipeException::class);

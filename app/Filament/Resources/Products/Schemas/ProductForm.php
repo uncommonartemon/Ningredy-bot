@@ -2,6 +2,7 @@
 
 namespace App\Filament\Resources\Products\Schemas;
 
+use App\Filament\Schemas\ProductPhotoUpload;
 use Filament\Forms\Components\DateTimePicker;
 use Filament\Forms\Components\Repeater;
 use Filament\Forms\Components\Select;
@@ -23,7 +24,7 @@ class ProductForm
         return $schema
             ->columns(1)
             ->components([
-                Grid::make(3)
+                Grid::make(['default' => 1, 'lg' => 3])
                     ->schema([
                         Group::make([
                             Section::make('Товар')->schema([
@@ -34,17 +35,17 @@ class ProductForm
                                 ])->required(),
                                 Textarea::make('description')->label('Описание')->rows(6)->columnSpanFull(),
                             ])->columns(2),
-                        ])->columnSpan(2),
+                        ])->columnSpan(['default' => 1, 'lg' => 2]),
 
                         Group::make([
                             Section::make('Публикация')->schema([
                                 Select::make('status')->label('Статус')->options([
                                     'published' => 'Опубликован', 'draft' => 'Черновик', 'archived' => 'Архив',
-                                ])->required(),
+                                ])->default('draft')->required(),
                                 Toggle::make('is_active')->label('Показывать в каталоге')->default(true),
                                 Toggle::make('is_featured')->label('Рекомендуемый'),
                                 DateTimePicker::make('published_at')->label('Дата публикации'),
-                                TextInput::make('sort_order')->label('Порядок')->numeric()->minValue(0),
+                                TextInput::make('sort_order')->label('Порядок')->integer()->minValue(0)->default(0),
                             ]),
                             Section::make('Категория и бренд')->schema([
                                 Select::make('category_id')->label('Категория')->relationship('category', 'name')->searchable()->preload()->required(),
@@ -75,15 +76,15 @@ class ProductForm
                             TextInput::make('color')->label('Цвет'),
                             Select::make('condition')->label('Состояние')->options([
                                 'new' => 'Новый', 'used' => 'Б/у', 'refurbished' => 'Восстановленный',
-                            ])->required(),
+                            ])->default('new')->required(),
                             Select::make('stock_status')->label('Наличие')->options([
                                 'unknown' => 'Уточнить', 'in_stock' => 'В наличии', 'out_of_stock' => 'Нет', 'preorder' => 'Предзаказ',
-                            ])->required(),
+                            ])->default('unknown')->required(),
                             TextInput::make('price')->label('Цена')->numeric()->minValue(0),
                             TextInput::make('compare_at_price')->label('Старая цена')->numeric()->minValue(0),
                             TextInput::make('currency')->label('Валюта')->default('CZK')->length(3),
-                            TextInput::make('quantity')->label('Количество')->numeric()->minValue(0),
-                            TextInput::make('warranty_months')->label('Гарантия, месяцев')->numeric()->minValue(0),
+                            TextInput::make('quantity')->label('Количество')->integer()->minValue(0),
+                            TextInput::make('warranty_months')->label('Гарантия, месяцев')->integer()->minValue(0),
                             Toggle::make('is_default')->label('Основной вариант'),
                             Toggle::make('is_active')->label('Активен')->default(true),
                             Repeater::make('attributes')->relationship()->label('Характеристики')->schema([
@@ -92,8 +93,10 @@ class ProductForm
                                 TextInput::make('value')->label('Значение')->required(),
                                 TextInput::make('numeric_value')->label('Число')->numeric(),
                                 TextInput::make('unit')->label('Единица'),
-                            ])->columns(5)->defaultItems(0)->columnSpanFull(),
-                        ])->columns(4)->defaultItems(1)->columnSpanFull(),
+                            ])->columns(['md' => 2, 'xl' => 5])->defaultItems(0)->addActionLabel('Добавить характеристику')->columnSpanFull(),
+                        ])->columns(['md' => 2, 'xl' => 4])->defaultItems(1)
+                            ->itemLabel(fn (array $state): string => ($state['name'] ?? '') ?: (($state['sku'] ?? '') ?: 'Новая конфигурация'))
+                            ->addActionLabel('Добавить конфигурацию')->collapsible()->columnSpanFull(),
                     ])
                     ->columnSpanFull(),
 
@@ -107,10 +110,16 @@ class ProductForm
                                 'manufacturer' => 'Производитель', 'retailer' => 'Магазин', 'review' => 'Обзор', 'web' => 'Сайт',
                             ])->default('web'),
                             TextInput::make('confidence')->label('Уверенность')->numeric()->minValue(0)->maxValue(1),
-                        ])->columns(5)->defaultItems(0)->columnSpanFull(),
+                        ])->columns(['md' => 2, 'xl' => 5])->defaultItems(0)->addActionLabel('Добавить источник')->columnSpanFull(),
                     ])
                     ->columnSpanFull()
                     ->collapsed(),
+                Section::make('Добавить фотографии')
+                    ->description(fn (string $operation): string => $operation === 'create'
+                        ? 'Фотографии сохранятся вместе с товаром. После создания можно изменить главную фотографию и порядок галереи.'
+                        : 'Файлы сохраняются при сохранении товара. Существующая галерея редактируется в таблице «Фотографии» ниже.')
+                    ->schema([ProductPhotoUpload::multiple()->dehydrated(false)])
+                    ->columnSpanFull(),
             ]);
     }
 }

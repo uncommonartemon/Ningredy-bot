@@ -24,6 +24,8 @@ use App\Models\TelegramUpdate;
 use App\Services\Products\ProductDraftWorkflow;
 use App\Services\Products\ProductGalleryRecipeRouter;
 use App\Services\Products\ProductSourcePriority;
+use App\Services\Telegram\DraftTelegramActionConfirmation;
+use App\Services\Telegram\DraftTelegramInteractionState;
 use App\Services\Telegram\DraftTelegramPresenter;
 use App\Services\Telegram\TelegramClient;
 use Illuminate\Http\JsonResponse;
@@ -98,6 +100,14 @@ class TelegramWebhookController extends Controller
             return response()->json(['ok' => true]);
         }
 
+        if (($hasVoice || $hasPhoto) && $chatId !== null
+            && in_array(app(DraftTelegramInteractionState::class)->get((string) $chatId, (string) $telegramUserId)['kind'] ?? '', ['source_hint', 'new_search'], true)) {
+            $this->telegram->sendMessage((string) $chatId, 'Сейчас ожидаю текст для выбранного черновика. Напишите его текстом или нажмите «Отменить ввод». Фото и голос не отправлены в новый поиск.');
+            $this->markCommandProcessed($update);
+
+            return response()->json(['ok' => true]);
+        }
+
         if ($hasVoice && $chatId !== null) {
             TranscribeTelegramVoice::dispatch($update->id)->afterCommit();
 
@@ -120,7 +130,7 @@ class TelegramWebhookController extends Controller
             return response()->json(['ok' => true]);
         }
 
-        if ($this->handlePendingSourceHint(trim($text), (string) $chatId, $update)) {
+        if ($this->handlePendingDraftInput(trim($text), (string) $chatId, $update)) {
             return response()->json(['ok' => true]);
         }
 
@@ -174,6 +184,7 @@ class TelegramWebhookController extends Controller
         }
 
         if (preg_match('/^\/new(?:@\w+)?$/iu', $text) === 1) {
+            app(DraftTelegramInteractionState::class)->clear($chatId, $telegramUserId);
             TelegramChatState::query()->where('chat_id', $chatId)->delete();
             $this->telegram->sendMessage($chatId, 'Контекст диалога очищен. Начинаем с чистого листа.', $this->mainKeyboard());
             $this->markCommandProcessed($update);
@@ -182,6 +193,7 @@ class TelegramWebhookController extends Controller
         }
 
         if (preg_match('/^\/reset(?:@\w+)?$/iu', $text) === 1 || $text === '🔄 Сброс') {
+            app(DraftTelegramInteractionState::class)->clear($chatId, $telegramUserId);
             // A ProcessTelegramMessage job whose update already shows processed_at
             // returns immediately without doing anything (see the job's handle()) -
             // this is enough to neutralize a stuck/queued job even if the worker
@@ -263,7 +275,151 @@ class TelegramWebhookController extends Controller
         $chatId = (string) data_get($callback, 'message.chat.id');
         $messageId = data_get($callback, 'message.message_id');
 
-        if ($this->rejectStaleDraftCallback($data, $callbackId, $chatId, $messageId, $update)) {
+        if (preg_match('/^draft:open:(\d+):(\d+)$/', $data, $open) === 1) {
+            $draft = ProductDraft::query()->find((int) $open[1]);
+            if (! $draft || (int) $draft->telegram_update_id !== (int) $open[2]
+                || ! $this->draftBelongsToContext($draft, $update) || $draft->status !== 'pending_review') {
+                $this->telegram->answerCallbackQuery($callbackId, 'Черновик недоступен или уже обработан.');
+            } elseif ($this->draftHasQueuedWork($draft->id)) {
+                $this->telegram->answerCallbackQuery($callbackId, 'Этот черновик сейчас обрабатывается. Дождитесь результата.');
+            } else {
+                app(DraftTelegramInteractionState::class)->clear($chatId, (string) $update->telegram_user_id);
+                $this->telegram->answerCallbackQuery($callbackId, 'Открываю актуальную карточку.');
+                $this->draftPresenter->clearForSearchContinuation($this->telegram, $draft);
+                $this->draftPresenter->sendReview($this->telegram, $chatId, $draft);
+            }
+            $this->markCommandProcessed($update);
+
+            return;
+        }
+
+        $isConfirmation = preg_match('/^draft:confirm:(\d+):([A-Za-z0-9]{12})$/', $data, $confirmation) === 1;
+        $checkedData = $isConfirmation ? "draft:review:{$confirmation[1]}" : $data;
+        if ($this->rejectStaleDraftCallback($checkedData, $callbackId, $chatId, $messageId, $update)) {
+            return;
+        }
+        if (preg_match('/^draft:[a-z-]+:(\d+)/', $data, $target) === 1
+            && $this->draftHasQueuedWork((int) $target[1])) {
+            $this->telegram->answerCallbackQuery($callbackId, 'Этот черновик уже обрабатывается. Повторное действие не запущено.');
+            $this->markCommandProcessed($update);
+
+            return;
+        }
+
+        $confirmed = false;
+        $confirmedHint = null;
+        $confirmedQuery = null;
+        if ($isConfirmation) {
+            $state = app(DraftTelegramInteractionState::class)->consume($chatId, (string) $update->telegram_user_id, $confirmation[2]);
+            $draft = ProductDraft::query()->find((int) $confirmation[1]);
+            if (! $state || ($state['kind'] ?? '') !== 'confirmation' || ! $draft
+                || $draft->status !== 'pending_review'
+                || $state['draft_id'] !== $draft->id || (int) $state['generation'] !== (int) $draft->telegram_update_id) {
+                $this->telegram->answerCallbackQuery($callbackId, 'Подтверждение устарело. Откройте действие заново.');
+                $this->markCommandProcessed($update);
+
+                return;
+            }
+            $data = $state['callback'];
+            $terms = app(DraftTelegramActionConfirmation::class)->describe($data);
+            if ($terms && ($state['budget'] ?? null) !== $terms['budget']) {
+                $this->telegram->answerCallbackQuery($callbackId, 'Бюджет изменился. Откройте действие заново.');
+                $this->markCommandProcessed($update);
+
+                return;
+            }
+            $confirmedHint = $state['hint'] ?? null;
+            $confirmedQuery = $state['query'] ?? null;
+            $update->update([
+                'text' => $data,
+                'payload' => [...($update->payload ?? []), 'draft_action_confirmation' => [
+                    'action' => $data, 'draft_id' => $draft->id, 'generation' => $state['generation'],
+                    'budget' => $state['budget'] ?? null, 'input_update_id' => $state['input_update_id'] ?? null,
+                ]],
+            ]);
+            $confirmed = true;
+        } elseif (str_starts_with($data, 'draft:')) {
+            app(DraftTelegramInteractionState::class)->clear($chatId, (string) $update->telegram_user_id);
+        }
+
+        if (! $confirmed && ($terms = app(DraftTelegramActionConfirmation::class)->describe($data))) {
+            $draftId = (int) explode(':', $data)[2];
+            $draft = ProductDraft::query()->find($draftId);
+            if ($draft && $draft->status === 'pending_review') {
+                $this->requestDraftActionConfirmation($draft, $update, $data);
+                $this->telegram->answerCallbackQuery($callbackId, 'Проверьте действие перед запуском.');
+            } else {
+                $this->telegram->answerCallbackQuery($callbackId, 'Черновик недоступен.');
+            }
+            $this->markCommandProcessed($update);
+
+            return;
+        }
+
+        if (preg_match('/^draft:edit:(\d+)$/', $data, $edit) === 1) {
+            $draft = ProductDraft::query()->find((int) $edit[1]);
+            if ($draft?->status === 'pending_review') {
+                $this->draftPresenter->sendEditMenu($this->telegram, $chatId, $draft);
+            }
+            $this->telegram->answerCallbackQuery($callbackId, 'Выберите, что исправить.');
+            $this->markCommandProcessed($update);
+
+            return;
+        }
+
+        if (preg_match('/^draft:query:(\d+)$/', $data, $query) === 1) {
+            $draft = ProductDraft::query()->find((int) $query[1]);
+            if ($draft?->status === 'pending_review') {
+                app(DraftTelegramInteractionState::class)->remember($chatId, (string) $update->telegram_user_id, $draft, 'new_search');
+                $this->draftPresenter->sendInputPrompt($this->telegram, $chatId, $draft,
+                    'Напишите полный уточнённый запрос: какой товар, цвет или комплектация нужны. Не только «другой цвет». Это новый поиск, а не ручная правка старых характеристик. Перед запуском покажу бюджет и попрошу подтверждение. Ввод действует 10 минут.');
+            }
+            $this->telegram->answerCallbackQuery($callbackId, 'Жду уточнённый запрос текстом.');
+            $this->markCommandProcessed($update);
+
+            return;
+        }
+
+        if (preg_match('/^draft:new-search:(\d+)$/', $data) === 1 && $confirmed) {
+            if (! is_string($confirmedQuery) || trim($confirmedQuery) === '') {
+                $this->telegram->answerCallbackQuery($callbackId, 'Нет уточнённого запроса. Введите его заново.');
+                $this->markCommandProcessed($update);
+
+                return;
+            }
+            $update->update([
+                'text' => 'Найди в интернете товар и подготовь новый черновик: '.$confirmedQuery,
+                'status' => 'received', 'processed_at' => null,
+                'payload' => [...($update->payload ?? []), 'draft_revision' => [
+                    'draft_id' => $state['draft_id'], 'generation' => $state['generation'],
+                    'query' => $confirmedQuery, 'input_update_id' => $state['input_update_id'] ?? null,
+                    'confirmed_budget' => $state['budget'],
+                ]],
+            ]);
+            ProcessTelegramMessage::dispatch($update->id, freshConversation: true);
+            $this->telegram->answerCallbackQuery($callbackId, 'Новый поиск поставлен в очередь.');
+            $this->draftPresenter->sendControls($this->telegram, $chatId, $draft);
+            $this->telegram->sendMessage($chatId, "🔎 Уточнённый поиск поставлен в очередь. Черновик #{$draft->id} сохранён без изменений.");
+
+            return;
+        }
+
+        if (preg_match('/^draft:reject:(\d+)$/', $data, $reject) === 1 && ! $confirmed) {
+            $draft = ProductDraft::query()->find((int) $reject[1]);
+            if ($draft && $draft->status === 'pending_review') {
+                $state = app(DraftTelegramInteractionState::class)->remember($chatId, (string) $update->telegram_user_id, $draft, 'confirmation', ['callback' => $data]);
+                $this->draftPresenter->sendActionConfirmation($this->telegram, $chatId, $draft, $state['token'],
+                    'Отклонить черновик?', 'Товар не будет добавлен. Для исправления результата вернитесь назад — новый поиск сейчас не запускается.', 'Да, отклонить');
+                $this->telegram->answerCallbackQuery($callbackId, 'Подтвердите отклонение.');
+                $this->markCommandProcessed($update);
+
+                return;
+            }
+        }
+
+        if (preg_match('/^draft:input-cancel:(\d+)$/', $data, $cancelInput) === 1) {
+            $this->handleDraftReview((int) $cancelInput[1], $callbackId, $chatId, $update);
+
             return;
         }
 
@@ -323,6 +479,7 @@ class TelegramWebhookController extends Controller
                 callbackId: $callbackId,
                 chatId: $chatId,
                 update: $update,
+                hint: $confirmedHint,
             );
 
             return;
@@ -459,24 +616,13 @@ class TelegramWebhookController extends Controller
                 ? $this->draftWorkflow->approve($draft, telegramReviewerId: $update->telegram_user_id)
                 : null;
         } catch (LowResolutionDraftMediaException|MissingDraftMediaException|UnverifiedDraftMediaException $exception) {
-            $queuedKey = "draft-gallery-restage:{$draft->id}:queued";
-
-            if (Cache::add($queuedKey, true, now()->addMinutes(35))) {
-                $this->draftPresenter->clearControls($this->telegram, $draft, $chatId);
-                RestageDraftGalleryPhotos::dispatch($draft->id, $chatId, $update->id, $draft->telegram_update_id);
-                $message = match (true) {
-                    $exception instanceof MissingDraftMediaException => 'В черновике нет фотографий. Автоматически продолжаю поиск через источники категории, Playwright и Vision; после поиска пришлю обновлённый черновик для проверки.',
-                    // Not a quality problem: the check itself did not run, so
-                    // the same continuation is what these frames are owed.
-                    $exception instanceof UnverifiedDraftMediaException => 'Проверка фотографий не состоялась технически, поэтому публиковать их нельзя. Автоматически продолжаю поиск и проверку; после этого пришлю обновлённый черновик.',
-                    default => 'Фото черновика не проходят текущий порог качества. Автоматически ищу замену через резервные источники и Vision; после поиска пришлю обновлённый черновик для проверки.',
-                };
-            } else {
-                $message = 'Замена неподходящих фотографий этого черновика уже выполняется.';
-            }
-
-            $this->telegram->answerCallbackQuery($callbackId, mb_substr($message, 0, 180));
-            $this->telegram->sendMessage($chatId, '🔄 '.$message);
+            $message = match (true) {
+                $exception instanceof MissingDraftMediaException => 'В черновике нет фотографий.',
+                $exception instanceof UnverifiedDraftMediaException => 'Проверка фотографий не состоялась. Публикация пока недоступна.',
+                default => 'Фото не проходят текущий порог качества.',
+            };
+            $this->telegram->answerCallbackQuery($callbackId, 'Товар не добавлен. Дополнительный поиск не запущен.');
+            $this->draftPresenter->sendApprovalProblem($this->telegram, $chatId, $draft, $message);
             $update->update(['status' => 'completed', 'error' => null, 'processed_at' => now()]);
 
             return;
@@ -559,6 +705,13 @@ class TelegramWebhookController extends Controller
 
         if (! $draft) {
             return false;
+        }
+
+        if (! $this->draftBelongsToContext($draft, $update)) {
+            $this->telegram->answerCallbackQuery($callbackId, 'Эта карточка относится к другому чату или оператору.');
+            $this->markCommandProcessed($update);
+
+            return true;
         }
 
         $trackedMessageIds = collect($draft->telegram_control_message_ids ?? [])
@@ -829,13 +982,10 @@ class TelegramWebhookController extends Controller
             return;
         }
 
-        Cache::put(self::pendingSourceHintKey($chatId), $draft->id, now()->addMinutes(10));
+        app(DraftTelegramInteractionState::class)->remember($chatId, (string) $update->telegram_user_id, $draft, 'source_hint');
         $this->telegram->answerCallbackQuery($callbackId, 'Опишите проблему следующим сообщением.');
-        $this->draftPresenter->clearControls($this->telegram, $draft, $chatId);
-        $this->telegram->sendMessage(
-            $chatId,
-            "✏️ Черновик #{$draft->id}: опишите одним следующим сообщением, что не так с источником или фото (например: «на странице таблица с разными моделями» или «путает цвет корпуса»). Я передам это AI перед переобучением. Действует 10 минут.",
-        );
+        $this->draftPresenter->sendInputPrompt($this->telegram, $chatId, $draft,
+            'Опишите одним текстовым сообщением, что не так со сбором фото. Подсказка будет передана тренеру. Действует 10 минут.');
         $update->update(['status' => 'completed', 'processed_at' => now()]);
     }
 
@@ -912,11 +1062,6 @@ class TelegramWebhookController extends Controller
         );
         $this->draftPresenter->sendControls($this->telegram, $chatId, $draft);
         $update->update(['status' => 'completed', 'processed_at' => now()]);
-    }
-
-    private static function pendingSourceHintKey(string $chatId): string
-    {
-        return "draft-source-hint-await:{$chatId}";
     }
 
     private function handleDraftRestageGallery(
@@ -1173,10 +1318,11 @@ class TelegramWebhookController extends Controller
             return;
         }
 
-        $lines = $drafts->map(fn (ProductDraft $draft): string => "#{$draft->id} · {$draft->title} · {$draft->status}");
+        $lines = $drafts->map(fn (ProductDraft $draft): string => "#{$draft->id} · {$draft->title} · ".match ($draft->status) {
+            'pending_review' => 'ожидает решения', 'approved' => 'добавлен', 'rejected' => 'отклонён', default => 'обрабатывается',
+        });
         $buttons = $drafts->where('status', 'pending_review')->map(fn (ProductDraft $draft): array => [
-            ['text' => "➕ Добавить #{$draft->id}", 'callback_data' => "draft:add:{$draft->id}"],
-            ['text' => "✖ Отклонить #{$draft->id}", 'callback_data' => "draft:reject:{$draft->id}"],
+            ['text' => "Открыть #{$draft->id}", 'callback_data' => "draft:open:{$draft->id}:{$draft->telegram_update_id}"],
         ])->values()->all();
         $this->telegram->sendMessage($chatId, "Последние черновики:\n\n".$lines->implode("\n"),
             $buttons ? ['inline_keyboard' => $buttons] : $this->mainKeyboard());
@@ -1221,42 +1367,46 @@ class TelegramWebhookController extends Controller
      * Consumes a pending "💬 Переобучить с подсказкой" prompt (see
      * handleDraftSourceHintPrompt) - the next plain-text message in that chat
      * is the operator's hint, not a new product search, so it must never
-     * reach ServerAssistantAgent. Returns false (untouched) when nothing is
+     * reach ServerAssistantAgent without explicit confirmation. Returns false when nothing is
      * pending, so the caller falls through to the normal AI dispatch.
      */
-    private function handlePendingSourceHint(string $text, string $chatId, TelegramUpdate $update): bool
+    private function handlePendingDraftInput(string $text, string $chatId, TelegramUpdate $update): bool
     {
-        $draftId = Cache::pull(self::pendingSourceHintKey($chatId));
-
-        if (! is_int($draftId)) {
+        $states = app(DraftTelegramInteractionState::class);
+        $state = $states->get($chatId, (string) $update->telegram_user_id);
+        if (! $state || ! in_array($state['kind'], ['source_hint', 'new_search'], true)) {
             return false;
         }
+        $state = $states->consume($chatId, (string) $update->telegram_user_id, $state['token']);
+        if (! $state) {
+            $this->markCommandProcessed($update);
 
-        $draft = ProductDraft::query()->find($draftId);
+            return true;
+        }
 
-        if (! $draft || $draft->status !== 'pending_review' || blank($draft->primary_source_url)) {
-            $this->telegram->sendMessage($chatId, 'Черновик, для которого ждал подсказку, уже недоступен. Подсказка не использована.');
+        $draft = ProductDraft::query()->find($state['draft_id']);
+
+        if (! $draft || $draft->status !== 'pending_review' || ($state['kind'] === 'source_hint' && blank($draft->primary_source_url))
+            || (int) $draft->telegram_update_id !== (int) $state['generation'] || ! $this->draftBelongsToContext($draft, $update)) {
+            $this->telegram->sendMessage($chatId, 'Черновик, для которого ожидался текст, уже изменён или недоступен. Новый поиск не запущен.');
             $update->update(['status' => 'ignored', 'processed_at' => now()]);
 
             return true;
         }
 
-        $queuedKey = "draft-gallery-retrain:{$draft->id}:queued";
-
-        if (! Cache::add($queuedKey, true, now()->addMinutes(35))) {
-            $this->telegram->sendMessage($chatId, 'Переобучение этого источника уже идёт. Подсказка не использована.');
-            $update->update(['status' => 'ignored', 'processed_at' => now()]);
+        $isQuery = $state['kind'] === 'new_search';
+        $limit = $isQuery ? 4000 : 1000;
+        if (mb_strlen($text) > $limit) {
+            $states->remember($chatId, (string) $update->telegram_user_id, $draft, $state['kind']);
+            $this->telegram->sendMessage($chatId, "Текст слишком длинный: максимум {$limit} символов. Сократите его — ничего не запущено.");
+            $this->markCommandProcessed($update);
 
             return true;
         }
-
-        $hint = mb_substr($text, 0, 1000);
-        TrainDraftGalleryRecipe::dispatch($draft->id, $update->id, $chatId, $hint, $draft->telegram_update_id);
+        $this->requestDraftActionConfirmation($draft, $update,
+            $isQuery ? "draft:new-search:{$draft->id}" : "draft:source-retrain:{$draft->id}",
+            [$isQuery ? 'query' : 'hint' => $text, 'input_update_id' => $update->id]);
         $update->update(['status' => 'completed', 'processed_at' => now()]);
-        $this->telegram->sendMessage(
-            $chatId,
-            "🧠 Черновик #{$draft->id}: запускаю переобучение источника с вашей подсказкой. Старый рецепт и фото останутся, пока новый не пройдёт проверку.",
-        );
 
         return true;
     }
@@ -1264,5 +1414,39 @@ class TelegramWebhookController extends Controller
     private function markCommandProcessed(TelegramUpdate $update): void
     {
         $update->update(['status' => 'command', 'processed_at' => now()]);
+    }
+
+    private function requestDraftActionConfirmation(ProductDraft $draft, TelegramUpdate $update, string $callback, array $extra = []): void
+    {
+        $terms = app(DraftTelegramActionConfirmation::class)->describe($callback);
+        $state = app(DraftTelegramInteractionState::class)->remember((string) $update->chat_id, (string) $update->telegram_user_id,
+            $draft, 'confirmation', [...$extra, 'callback' => $callback, 'budget' => $terms['budget']]);
+        $preview = $extra['query'] ?? $extra['hint'] ?? null;
+        $description = $terms['description'].($preview !== null ? "\n\nВаш текст:\n".mb_substr($preview, 0, 2000)
+            .(mb_strlen($preview) > 2000 ? "\n… (показано начало; будет передан весь ваш текст)" : '') : '');
+        $this->draftPresenter->sendActionConfirmation($this->telegram, (string) $update->chat_id, $draft,
+            $state['token'], $terms['title'], $description, $terms['label']);
+    }
+
+    private function draftHasQueuedWork(int $draftId): bool
+    {
+        // Use the same markers that the existing jobs clear on completion/failure.
+        // No new persistent lock or independent timeout is introduced by the UI.
+        foreach (['draft-gallery-retrain', 'draft-gallery-restage', 'draft-gallery-continue', 'draft-gallery-topup', 'draft-photo-actions'] as $operation) {
+            if (Cache::has("{$operation}:{$draftId}:queued")) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function draftBelongsToContext(ProductDraft $draft, TelegramUpdate $update): bool
+    {
+        $owner = (string) $draft->requested_by_telegram_user_id;
+        $chat = (string) ($draft->telegramUpdate?->chat_id ?: $draft->telegram_review_chat_id);
+
+        return ($owner === '' || $owner === (string) $update->telegram_user_id)
+            && ($chat === '' || $chat === (string) $update->chat_id);
     }
 }

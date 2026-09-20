@@ -39,7 +39,17 @@ class ProductSpecificationReconciliationAgent implements Agent, HasStructuredOut
 {
     use Promptable;
 
-    public const int MAX_OUTPUT_TOKENS = 4_000;
+    // Real production failure (2026-09-15, draft #10, MSI Raider 18 HX AI):
+    // gpt-5-mini spent 3,712 of a 4,000 token cap on its own hidden reasoning
+    // before writing a single output field, so the response was cut off
+    // completely empty and every required field failed validation
+    // ("overall_status is required (and 5 more errors)") - twice in a row,
+    // stopping recovery on a technical artefact that had nothing to do with
+    // the actual page or product. Every sibling agent doing comparable
+    // reasoning-plus-structured-output work (the recipe trainer, the gallery
+    // preflight, image Vision) already runs at 8,000 or more for this exact
+    // reason.
+    public const int MAX_OUTPUT_TOKENS = 8_000;
 
     /**
      * $sourceHost is optional/nullable so direct, unscoped construction

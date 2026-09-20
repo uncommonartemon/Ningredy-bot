@@ -97,6 +97,57 @@ class DraftTelegramPresenter
         );
     }
 
+    public function sendActionConfirmation(TelegramClient $telegram, string $chatId, ProductDraft $draft, string $token, string $title, string $description, string $label): array
+    {
+        return $this->messageLifecycle->replaceControlMessage($telegram, $draft, $chatId,
+            "{$title}\nЧерновик #{$draft->id}: {$draft->title}\n\n{$description}", ['inline_keyboard' => [
+                [['text' => $label, 'callback_data' => "draft:confirm:{$draft->id}:{$token}"]],
+                [['text' => '← Назад, ничего не менять', 'callback_data' => "draft:review:{$draft->id}"]],
+            ]]);
+    }
+
+    public function sendInputPrompt(TelegramClient $telegram, string $chatId, ProductDraft $draft, string $description): array
+    {
+        return $this->messageLifecycle->replaceControlMessage($telegram, $draft, $chatId,
+            "✏️ Черновик #{$draft->id}: {$draft->title}\n\n{$description}", ['inline_keyboard' => [
+                [['text' => '← Отменить ввод', 'callback_data' => "draft:input-cancel:{$draft->id}"]],
+            ]]);
+    }
+
+    public function sendApprovalProblem(TelegramClient $telegram, string $chatId, ProductDraft $draft, string $reason): array
+    {
+        return $this->messageLifecycle->replaceControlMessage($telegram, $draft, $chatId,
+            "⚠️ Черновик #{$draft->id} не добавлен.\n{$reason}\nДополнительный поиск не запущен. Выберите действие:", ['inline_keyboard' => [
+                [['text' => '✏️ Исправить результат', 'callback_data' => "draft:edit:{$draft->id}"]],
+                [['text' => '← Назад', 'callback_data' => "draft:review:{$draft->id}"]],
+            ]]);
+    }
+
+    public function sendEditMenu(TelegramClient $telegram, string $chatId, ProductDraft $draft): array
+    {
+        $rows = [];
+        if ($draft->media()->exists()) {
+            $rows[] = [['text' => '🖼 Выбрать фото для изменения', 'callback_data' => "draft:photos:{$draft->id}"]];
+        }
+        $rows[] = [['text' => '🔄 Найти другие фото', 'callback_data' => "draft:restage:{$draft->id}"]];
+        $rows[] = [['text' => '➕ Найти ещё фото', 'callback_data' => "draft:findmore:{$draft->id}"]];
+        $rows[] = [['text' => '✏️ Уточнить товар и найти заново', 'callback_data' => "draft:query:{$draft->id}"]];
+        $rows[] = [['text' => '🔧 Проблема со сбором на сайте', 'callback_data' => "draft:source:{$draft->id}"]];
+        $rows[] = [['text' => '← Вернуться к черновику', 'callback_data' => "draft:review:{$draft->id}"]];
+
+        return $this->messageLifecycle->replaceControlMessage($telegram, $draft, $chatId,
+            "✏️ Исправить черновик #{$draft->id}\n{$draft->title}\n\nНе те фото — выберите работу с фото. Не тот товар или комплектация — уточните запрос для нового поиска. Открытие меню бесплатно; платный запуск потребует подтверждения.",
+            ['inline_keyboard' => $rows]);
+    }
+
+    private function editAndRejectRow(ProductDraft $draft): array
+    {
+        return [
+            ['text' => '✏️ Исправить', 'callback_data' => "draft:edit:{$draft->id}"],
+            ['text' => '✖ Отклонить', 'callback_data' => "draft:reject:{$draft->id}"],
+        ];
+    }
+
     public function sendPhotoSelection(
         TelegramClient $telegram,
         string $chatId,
@@ -168,10 +219,7 @@ class DraftTelegramPresenter
                     'text' => '🔗 Источник',
                     'callback_data' => "draft:source:{$draft->id}",
                 ]],
-                [[
-                    'text' => '✖ Отменить',
-                    'callback_data' => "draft:reject:{$draft->id}",
-                ]],
+                $this->editAndRejectRow($draft),
             ]];
         }
 
@@ -183,7 +231,7 @@ class DraftTelegramPresenter
                     'callback_data' => "draft:continue-search:{$draft->id}",
                 ]];
             }
-            $rows[] = [['text' => '✖ Отменить', 'callback_data' => "draft:reject:{$draft->id}"]];
+            $rows[] = $this->editAndRejectRow($draft);
 
             return ['inline_keyboard' => $rows];
         }
@@ -191,13 +239,14 @@ class DraftTelegramPresenter
         // The publishing action gets its own row: it used to sit shoulder to
         // shoulder with the irreversible "Отменить", which is the one mis-tap
         // on this card that costs a whole search.
-        $rows = [
-            [['text' => '✅ Добавить в каталог', 'callback_data' => "draft:add:{$draft->id}"]],
+        $rows = $mediaCount > 0
+            ? [[['text' => '✅ Добавить в каталог', 'callback_data' => "draft:add:{$draft->id}"]]]
+            : [];
+        $rows[] =
             [
                 ['text' => '🖼 Фото', 'callback_data' => "draft:photos:{$draft->id}"],
                 ['text' => '🔗 Источник', 'callback_data' => "draft:source:{$draft->id}"],
-            ],
-        ];
+            ];
 
         if (in_array($draft->gallery_search_stop_reason, ['cost_budget', 'time_budget', 'exhausted', 'specifications_unreconciled'], true)) {
             $label = match ($draft->gallery_search_stop_reason) {
@@ -226,9 +275,7 @@ class DraftTelegramPresenter
             ]];
         }
 
-        $rows[] = [
-            ['text' => '✖ Отменить черновик', 'callback_data' => "draft:reject:{$draft->id}"],
-        ];
+        $rows[] = $this->editAndRejectRow($draft);
 
         return ['inline_keyboard' => $rows];
     }
@@ -325,9 +372,7 @@ class DraftTelegramPresenter
 
     private function reconciliationPending(ProductDraft $draft): bool
     {
-        return $draft->gallery_search_stop_reason === 'specifications_unreconciled'
-            || (trim((string) $draft->primary_source_url) !== ''
-                && $draft->specifications_reconciled_source_url !== $draft->primary_source_url);
+        return $draft->reconciliationPending();
     }
 
     private function caption(ProductDraft $draft, string $usageFootnote): string

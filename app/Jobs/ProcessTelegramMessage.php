@@ -40,8 +40,11 @@ class ProcessTelegramMessage implements ShouldQueue
 
     public array $backoff = [30, 180];
 
-    public function __construct(public int $telegramUpdateId)
+    public bool $freshConversation = false;
+
+    public function __construct(public int $telegramUpdateId, bool $freshConversation = false)
     {
+        $this->freshConversation = $freshConversation;
         $this->onQueue('assistant');
     }
 
@@ -137,7 +140,7 @@ class ProcessTelegramMessage implements ShouldQueue
                 $state->update(['conversation_id' => null, 'boot_id' => $bootId]);
             }
 
-            if ($user && $state->conversation_id) {
+            if ($user && $state->conversation_id && ! $this->freshConversation) {
                 $agent->continue($state->conversation_id, as: $user);
             } elseif ($user) {
                 $agent->forUser($user);
@@ -198,6 +201,9 @@ class ProcessTelegramMessage implements ShouldQueue
             // media happens to remain on it (often none - approval moves
             // photos onto the published product).
             $draft = empty($data['draft_id']) ? null : ProductDraft::query()->find($data['draft_id']);
+            if ($this->freshConversation && (int) $draft?->telegram_update_id !== $update->id) {
+                $draft = null;
+            }
             $draft = $draft?->status === 'pending_review' ? $draft : null;
             $draft ??= ProductDraft::query()
                 ->where('telegram_update_id', $update->id)

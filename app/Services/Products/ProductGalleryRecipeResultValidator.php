@@ -296,7 +296,20 @@ class ProductGalleryRecipeResultValidator
                     && ($item['navigated_away'] ?? false) !== true)
                 ->values();
 
-            if ($kind === 'click') {
+            $traversalResult = $primaryTrace->last(fn (array $item): bool => is_bool($item['traversal_complete'] ?? null));
+            if ($traversalResult !== null) {
+                if (! $traversalResult['traversal_complete']) {
+                    return 'Gallery traversal interrupted: '.($traversalResult['traversal_stop_reason'] ?? 'unknown').'.';
+                }
+                $afterEachError = $this->incompleteAfterEachAction($action, $actionTrace, $completedTrace->count());
+                if ($afterEachError !== null) {
+                    return $afterEachError;
+                }
+
+                continue;
+            }
+
+            if (in_array($kind, ['click', 'hover', 'scroll_into_view'], true)) {
                 if ($completedTrace->isEmpty()) {
                     return 'Action plan incomplete at step '.($actionIndex + 1).': required click was not executed.';
                 }
@@ -310,7 +323,7 @@ class ProductGalleryRecipeResultValidator
                 $opened = $completedTrace->contains(fn (array $item): bool => ($item['changed'] ?? false) === true
                     || ($item['expanded_gallery_visible_after'] ?? false) === true);
 
-                if ($opensGallery && ! $opened) {
+                if ($kind === 'click' && $opensGallery && ! $opened) {
                     return 'Action plan incomplete at step '.($actionIndex + 1).': gallery viewer did not open.';
                 }
 

@@ -83,11 +83,7 @@ class RestageDraftGalleryPhotos implements ShouldQueue
             // tell the operator the card is ready when publishing is still
             // blocked (ProductDraftWorkflow::approve()). Mirrors
             // ContinueDraftGallerySearch's own check.
-            $reconciliationPending = $fresh->gallery_search_stop_reason === 'specifications_unreconciled'
-                || (trim((string) $fresh->primary_source_url) !== ''
-                    && $fresh->specifications_reconciled_source_url !== $fresh->primary_source_url);
-
-            if ($reconciliationPending) {
+            if ($fresh->reconciliationPending()) {
                 $progress->failed('Сверка не завершена', 'Фото сохранены; публикация пока недоступна.');
             } elseif ($stored > 0) {
                 $progress->done("Галерея обновлена, фото: {$stored}");

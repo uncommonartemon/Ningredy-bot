@@ -9,6 +9,17 @@ class ProductGalleryRecipeProof
 {
     public function fingerprint(array $recipe): string
     {
+        // Verification annotates a successful recipe AFTER remember(). It does
+        // not change any browser action. Including this annotation erased the
+        // control-page proof and let repairs replace working domain recipes
+        // without the canary (observed on Lenovo, Acer and Dell).
+        unset($recipe['gallery_verification_mode']);
+
+        return $this->legacyFingerprint($recipe);
+    }
+
+    private function legacyFingerprint(array $recipe): string
+    {
         unset($recipe['expected_image_count'], $recipe['observation_focus_selector']);
         $canonical = function (array $value) use (&$canonical): array {
             if (! array_is_list($value)) {
@@ -55,7 +66,12 @@ class ProductGalleryRecipeProof
             ->where('action', 'confirmed_recipe_execution')
             ->where('status', 'completed')
             ->where('output->recipe_id', $recipe->id)
-            ->where('output->recipe_fingerprint', $this->fingerprint($recipe->recipe ?? []))
+            // Keep pre-fix proofs usable without rewriting audit history. The
+            // legacy digest still has to match this exact executable recipe.
+            ->whereIn('output->recipe_fingerprint', array_unique([
+                $this->fingerprint($recipe->recipe ?? []),
+                $this->legacyFingerprint($recipe->recipe ?? []),
+            ]))
             ->where('output->validation->passed', true)
             ->whereNotNull('product_url')
             ->where('product_url', '!=', $exceptUrl)

@@ -1176,6 +1176,9 @@ class ProductGalleryRecipeTrainerTest extends TestCase
         app(ProductGalleryRecipeProof::class)->remember(
             $recipe, 'https://us.msi.com/Laptop/Another-Model/Specification', ['passed' => true],
         );
+        // Final photo verification annotates the recipe after its proof was
+        // saved. This must not silently bypass the old-product control replay.
+        $recipe->update(['recipe' => [...$recipe->recipe, 'gallery_verification_mode' => 'dedicated']]);
         ProductGalleryRecipeTrainerAgent::fake(fn (): array => $this->workingRecipe())->preventStrayPrompts();
         $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock): void {
             $mock->shouldReceive('scout')->andReturn([
@@ -2395,6 +2398,54 @@ class ProductGalleryRecipeTrainerTest extends TestCase
         $this->assertSame(2, $version->result['validation']['extracted']);
     }
 
+    public static function measuredStaticHandoffs(): array
+    {
+        return ['seven photos' => [7, false], 'large gallery' => [25, false], 'interrupted preflight' => [7, true]];
+    }
+
+    #[DataProvider('measuredStaticHandoffs')]
+    public function test_measured_gallery_urls_survive_network_noise_and_reach_the_caller(int $count, bool $interrupted): void
+    {
+        AppSetting::put('ai.gallery_prefer_playwright_first', '0');
+        $photos = array_map(fn (int $i): string => "https://cdn.example/photo-{$i}.jpg?width=1200", range(1, $count));
+        $noise = array_map(fn (int $i): string => "https://cdn.example/category-{$i}.jpg", range(1, 30));
+        $thumbs = array_map(fn (int $i): string => "https://cdn.example/photo-{$i}.jpg?width=120", range(1, $count));
+        ProductGalleryPreflightAgent::fake(function () use ($interrupted, $count): array {
+            if ($interrupted) {
+                throw new \RuntimeException('Provider unavailable');
+            }
+
+            return ['decision' => 'static_sufficient', 'gallery_likely' => true,
+                'hidden_images_likely' => false, 'interaction_required' => false,
+                'expected_image_count' => $count, 'evidence' => ['Loaded gallery images.'],
+                'confidence' => 0.98, 'reason' => 'Full-size images already loaded.'];
+        })->preventStrayPrompts();
+        ProductGalleryRecipeTrainerAgent::fake()->preventStrayPrompts();
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock) use ($photos, $noise, $thumbs): void {
+            $mock->shouldReceive('scout')->once()->andReturn(['scout' => [
+                'fragments' => ['<div data-gallery></div>'], 'access_gate' => false, 'rate_limited' => false,
+                'network_image_samples' => [...$noise, ...$thumbs, ...$photos],
+                'image_candidates' => array_map(fn (string $url): array => [
+                    'src' => 'https://cdn.example/placeholder.jpg', 'current_src' => $url,
+                    'natural_width' => 1200, 'natural_height' => 900, 'within_media' => true,
+                ], $photos),
+            ]]);
+            $mock->shouldNotReceive('executeRecipe');
+        });
+
+        $images = app(ProductGalleryRecipeTrainer::class)->train('https://shop.example/product', force: true,
+            context: ['static_image_urls' => $thumbs, 'minimum_image_width' => 700, 'minimum_image_height' => 0]);
+
+        $this->assertSame($photos, array_slice($images, 0, $count));
+        foreach ($thumbs as $thumb) {
+            $this->assertNotContains($thumb, $images);
+        }
+        $version = ProductGalleryRecipe::where('domain', 'shop.example')->firstOrFail()->versions()->latest('id')->firstOrFail();
+        $this->assertSame($interrupted ? 'interrupted' : 'skipped', $version->status);
+        $this->assertNull($version->promoted_at);
+        ProductGalleryRecipeTrainerAgent::assertNeverPrompted();
+    }
+
     public function test_preflight_skips_recipe_training_when_static_gallery_is_sufficient_and_playwright_first_is_disabled(): void
     {
         // gallery_prefer_playwright_first defaults to true (see the next
@@ -2543,6 +2594,39 @@ class ProductGalleryRecipeTrainerTest extends TestCase
         $this->assertSame('interrupted', $version->result['preflight']['decision']);
         $this->assertSame('learning', $recipe->status);
         ProductGalleryRecipeTrainerAgent::assertNeverPrompted();
+    }
+
+    public function test_measured_originals_still_produce_a_reusable_recipe_without_clicks(): void
+    {
+        $photos = ['https://cdn.example/a.jpg', 'https://cdn.example/b.jpg', 'https://cdn.example/c.jpg'];
+        ProductGalleryPreflightAgent::fake(fn (): array => ['decision' => 'static_sufficient',
+            'gallery_likely' => true, 'hidden_images_likely' => false, 'interaction_required' => false,
+            'expected_image_count' => 3, 'evidence' => ['Three decoded originals inside the product media container.'],
+            'confidence' => 0.98, 'reason' => 'Originals are already present.'])->preventStrayPrompts();
+        ProductGalleryRecipeTrainerAgent::fake(fn (): array => $this->validRecipeResponse([
+            'actions' => [], 'collect_selectors' => ['#media img'], 'frame_selectors' => [],
+            'active_image_selector' => '', 'position_selector' => '', 'gallery_scope_selector' => '#media',
+            'pre_click_selectors' => [], 'open_selectors' => [], 'thumbnail_selectors' => [], 'next_selectors' => [],
+            'max_thumbnail_clicks' => 0, 'max_next_clicks' => 0,
+        ]))->preventStrayPrompts();
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock) use ($photos): void {
+            $mock->shouldReceive('scout')->once()->andReturn(['scout' => [
+                'fragments' => ['<div id=media></div>'], 'access_gate' => false, 'rate_limited' => false,
+                'image_candidates' => array_map(fn (string $url): array => ['src' => $url, 'within_media' => true,
+                    'natural_width' => 1600, 'natural_height' => 1200], $photos),
+            ]]);
+            $mock->shouldReceive('executeRecipe')->once()->withArgs(function (string $url, array $recipe): bool {
+                $this->assertSame([], $recipe['actions']);
+                $this->assertSame(['#media img'], $recipe['collect_selectors']);
+
+                return true;
+            })->andReturn(['images' => $photos]);
+        });
+        $result = app(ProductGalleryRecipeTrainer::class)->train('https://static.example/product', force: true);
+        $this->assertSame($photos, $result);
+        $recipe = ProductGalleryRecipe::where('domain', 'static.example')->firstOrFail();
+        $this->assertSame('active', $recipe->status);
+        $this->assertArrayNotHasKey('expected_image_count', $recipe->recipe);
     }
 
     public function test_preflight_does_not_count_two_scene7_renditions_of_one_photo_as_distinct(): void
@@ -2945,6 +3029,27 @@ class ProductGalleryRecipeTrainerTest extends TestCase
         $this->assertSame('rejected', $version->status);
         $this->assertSame('recipe_mismatch', $version->result['failure_kind']);
         $this->assertStringContainsString('actions.*.limit', $version->error);
+    }
+
+    public function test_repeated_non_schema_recipe_errors_are_also_bounded(): void
+    {
+        AppSetting::put('ai.gallery_training_max_rounds', '10');
+        $calls = 0;
+        ProductGalleryRecipeTrainerAgent::fake(function () use (&$calls): array {
+            $calls++;
+
+            // Valid schema, but the subsequent selector safety check removes it.
+            return $this->validRecipeResponse(['collect_selectors' => ['script img']]);
+        })->preventStrayPrompts();
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('scout')->once()->andReturn(['scout' => [
+                'title' => 'Product page', 'fragments' => ['<div class=gallery></div>'], 'interactive_controls' => [],
+                'network_image_samples' => [], 'access_gate' => false, 'rate_limited' => false,
+            ], 'diagnostics' => []]);
+            $mock->shouldNotReceive('executeRecipe');
+        });
+        app(ProductGalleryRecipeTrainer::class)->train('https://invalid.example/product', force: true);
+        $this->assertSame(3, $calls);
     }
 
     public function test_a_different_validation_failure_in_between_resets_the_identical_failure_counter(): void

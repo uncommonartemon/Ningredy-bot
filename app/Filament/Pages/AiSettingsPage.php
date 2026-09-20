@@ -15,6 +15,9 @@ use Filament\Forms\Concerns\InteractsWithForms;
 use Filament\Forms\Contracts\HasForms;
 use Filament\Notifications\Notification;
 use Filament\Pages\Page;
+use Filament\Schemas\Components\Actions;
+use Filament\Schemas\Components\EmbeddedSchema;
+use Filament\Schemas\Components\Form;
 use Filament\Schemas\Components\Grid;
 use Filament\Schemas\Components\Section;
 use Filament\Schemas\Components\Tabs;
@@ -38,8 +41,6 @@ class AiSettingsPage extends Page implements HasForms
     protected static ?string $title = 'AI и поиск фотографий';
 
     protected static ?int $navigationSort = 1;
-
-    protected string $view = 'filament.pages.ai-settings';
 
     /** @var array<string, mixed> */
     public ?array $data = [];
@@ -95,6 +96,18 @@ class AiSettingsPage extends Page implements HasForms
                 ->modalDescription('Приложение вернётся к OPENAI_API_KEY из .env на сервере.')
                 ->action('clearApiKey'),
         ];
+    }
+
+    public function content(Schema $schema): Schema
+    {
+        return $schema->components([
+            Form::make([EmbeddedSchema::make('form')])
+                ->id('ai-settings-form')
+                ->livewireSubmitHandler('save')
+                ->footer([Actions::make([
+                    Action::make('saveSettings')->label('Сохранить настройки AI')->icon('heroicon-m-check')->submit('save'),
+                ])]),
+        ]);
     }
 
     public function form(Schema $schema): Schema

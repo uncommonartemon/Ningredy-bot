@@ -217,6 +217,8 @@ class ProcessTelegramMessageTest extends TestCase
             && data_get($request['reply_markup'] ?? [], 'inline_keyboard.1.0.callback_data') === "draft:photos:{$draft->id}"
             && data_get($request['reply_markup'] ?? [], 'inline_keyboard.1.1.callback_data') === "draft:source:{$draft->id}"
             && collect(data_get($request['reply_markup'] ?? [], 'inline_keyboard', []))->last()[0]['callback_data']
+                === "draft:edit:{$draft->id}"
+            && collect(data_get($request['reply_markup'] ?? [], 'inline_keyboard', []))->last()[1]['callback_data']
                 === "draft:reject:{$draft->id}");
     }
 

@@ -376,27 +376,12 @@ class ProductGalleryRecipeTrainer
                 // at its word: photos in hand beat a recipe nobody can pay for.
                 $canAffordToDisbelieve = ! $this->costBudget->exceeded($telegramUpdateId);
 
-                $measuredStatic = $this->usableStaticGallerySize($pageScout, $context);
-                $requiredImages = max(1, (int) ($context['minimum_verified_images'] ?? 3));
-
                 if (
                     $preflightDecision === 'static_sufficient'
                     && ($preflight['gallery_likely'] ?? false)
                     && $this->settings->galleryPreferPlaywrightFirst()
                 ) {
-                    if ($measuredStatic >= $requiredImages) {
-                        // The distrust below is aimed at the agent's *count*,
-                        // which markup inflates. This is not that count: it is
-                        // the browser's own intrinsic width for each image the
-                        // page loaded, inside the media area, deduplicated by
-                        // asset key so renditions of one photo count once - the
-                        // exact failure the distrust was written for. Measured
-                        // evidence beats an estimate, in both directions.
-                        $debug?->__invoke(
-                            'step',
-                            "Замер подтвердил предфильтр: {$measuredStatic} разных фото уже нужного размера, обучение не требуется: ".$url,
-                        );
-                    } elseif ($canAffordToDisbelieve) {
+                    if ($canAffordToDisbelieve) {
                         $debug?->__invoke(
                             'step',
                             'Предфильтр сказал "статики достаточно", но найдена настоящая галерея - обучаю Playwright-рецепт вместо доверия оценке количества фото: '.$url,
@@ -458,14 +443,7 @@ class ProductGalleryRecipeTrainer
                 // Provider/transport/schema failure is not evidence about
                 // the page. Preserve real observations as provisional
                 // candidates, but do not train or publish a semantic rule.
-                return collect([
-                    ...($pageScout['network_image_samples'] ?? []),
-                    ...($context['static_image_urls'] ?? []),
-                ])
-                    ->filter(fn (mixed $url): bool => is_string($url) && $url !== '')
-                    ->map(fn (string $url): string => ProductImageStorage::normalizeCandidateUrl($url))
-                    ->unique(fn (string $url): string => ProductImageStorage::imageAssetKey($url))
-                    ->take(20)->values()->all();
+                return $this->staticGalleryCandidates($pageScout, $context);
             }
 
             if ($preflightDecision === 'blocked') {
@@ -491,21 +469,7 @@ class ProductGalleryRecipeTrainer
                     return [];
                 }
 
-                // Prefer what the real rendered page actually fetched over what a
-                // plain HTTP GET saw in the raw HTML: a static scrape only catches
-                // whatever <img src> is literally in the markup (often a small tab
-                // icon for JS-built galleries), while network_image_samples is the
-                // real asset the browser downloaded to display it - usually already
-                // full size, and this works the same way on any site, not just the
-                // ones we've special-cased a CDN pattern for.
-                return collect([
-                    ...($pageScout['network_image_samples'] ?? []),
-                    ...($context['static_image_urls'] ?? []),
-                ])
-                    ->filter(fn (mixed $url): bool => is_string($url) && $url !== '')
-                    ->map(fn (string $url): string => ProductImageStorage::normalizeCandidateUrl($url))
-                    ->unique(fn (string $url): string => ProductImageStorage::imageAssetKey($url))
-                    ->take(20)->values()->all();
+                return $this->staticGalleryCandidates($pageScout, $context);
             }
             $oldImages = [];
 
@@ -872,7 +836,8 @@ class ProductGalleryRecipeTrainer
                         $observationFocusSelector = $selected !== '' && $this->safeSelector($selected) ? $selected : '';
                     }
                     unset($answer['observation_focus_selector']);
-                    $candidate = $this->validateRecipe($answer, (string) ($pageScout['title'] ?? ''));
+                    $candidate = $this->validateRecipe($answer, (string) ($pageScout['title'] ?? ''),
+                        (array) ($pageScout['product_headings'] ?? []));
 
                     if (($candidate['training_decision'] ?? 'propose_recipe') === 'abandon_page') {
                         // A terminal page verdict cannot silently discard an
@@ -925,8 +890,10 @@ class ProductGalleryRecipeTrainer
                         );
 
                         if (! $pageRule) {
-                            throw new RuntimeException(
-                                'abandon_page requires a terminal page kind, confidence >= 0.85 and at least two concrete evidence items.',
+                            throw new InvalidGalleryRecipeException(
+                                'Отказ от страницы не подтверждён: нужны тип страницы, уверенность и наблюдаемые доказательства.',
+                                'abandon_page requires a terminal page kind, confidence >= 0.85 and at least two concrete evidence items. Use AbandonGalleryTrainingAttempt to stop only this attempt without declaring the page unsuitable.',
+                                ['abandon_page.evidence'],
                             );
                         }
 
@@ -1553,7 +1520,13 @@ class ProductGalleryRecipeTrainer
     {
         $selectors = [];
 
-        foreach (['collect_selectors', 'exclude_selectors', 'thumbnail_selectors', 'next_selectors', 'pre_click_selectors'] as $key) {
+        foreach (['active_image_selector', 'position_selector', 'gallery_scope_selector'] as $key) {
+            if (is_string($recipe[$key] ?? null) && $recipe[$key] !== '') {
+                $selectors[] = $recipe[$key];
+            }
+        }
+
+        foreach (['collect_selectors', 'exclude_selectors', 'thumbnail_selectors', 'next_selectors', 'pre_click_selectors', 'open_selectors', 'frame_selectors'] as $key) {
             foreach (is_array($recipe[$key] ?? null) ? $recipe[$key] : [] as $selector) {
                 if (is_string($selector)) {
                     $selectors[] = $selector;
@@ -1562,6 +1535,11 @@ class ProductGalleryRecipeTrainer
         }
 
         foreach (is_array($recipe['actions'] ?? null) ? $recipe['actions'] : [] as $action) {
+            foreach ($action['frame_selectors'] ?? [] as $selector) {
+                if (is_string($selector)) {
+                    $selectors[] = $selector;
+                }
+            }
             foreach (['selector', 'after_each_selector'] as $key) {
                 if (is_string($action[$key] ?? null)) {
                     $selectors[] = $action[$key];
@@ -1834,7 +1812,7 @@ class ProductGalleryRecipeTrainer
     ): array {
         $payload = [
             'url' => $url,
-            'page' => $pageScout,
+            'page' => $this->scoutForAgent($pageScout, false),
             'diagnostics' => $diagnostics,
             'domain_hint' => $domainHint,
             'auto_domain_hint' => $autoDomainHint,
@@ -2264,7 +2242,7 @@ class ProductGalleryRecipeTrainer
     }
 
     /** @return array<string, mixed> */
-    private function validateRecipe(array $data, string $productPageTitle = ''): array
+    private function validateRecipe(array $data, string $productPageTitle = '', array $productPageHeadings = []): array
     {
         $data['training_decision'] = is_string($data['training_decision'] ?? null)
             ? $data['training_decision']
@@ -2356,6 +2334,19 @@ class ProductGalleryRecipeTrainer
                 ->map(fn (string $selector): string => trim($selector))
                 ->unique()->values()->all();
         }
+        foreach (['active_image_selector', 'position_selector', 'gallery_scope_selector'] as $key) {
+            if (! empty($data[$key]) && ! $this->safeSelector($data[$key])) {
+                throw new InvalidGalleryRecipeException('Небезопасный селектор наблюдения.', 'Unsafe observation selector: '.$key, [$key]);
+            }
+        }
+
+        foreach (array_merge([$data['frame_selectors'] ?? []], array_column($data['actions'], 'frame_selectors')) as $path) {
+            foreach ($path ?? [] as $selector) {
+                if (preg_match('/(?:javascript:|https?:|file:|xpath|\x00)/i', $selector)) {
+                    throw new InvalidGalleryRecipeException('Небезопасный путь iframe.', 'Unsafe frame path.', ['frame_selectors']);
+                }
+            }
+        }
 
         // Prefer a selector scoped to the product gallery over its broad suffix.
         // AI may return both `img.foo` and `.gallery img.foo`; executing both can
@@ -2390,12 +2381,24 @@ class ProductGalleryRecipeTrainer
             ->unique()->values()->all();
 
         if (($data['training_decision'] ?? 'propose_recipe') === 'propose_recipe' && $data['collect_selectors'] === []) {
-            throw new RuntimeException('AI не вернул безопасный селектор сбора изображений.');
+            throw new InvalidGalleryRecipeException(
+                'AI не вернул безопасный селектор сбора изображений.',
+                'No safe image collection selector remains. Select an observed product gallery element.',
+                ['collect_selectors.safe'],
+            );
         }
 
         // Last, so it sees the selectors as they will actually run - after the
         // unsafe ones are dropped and the redundant ones folded away.
         $this->rejectProductSpecificSelectors($data, $productPageTitle);
+        // A shop can leave <title> generic while its visible H1 names the
+        // product. Check each observed heading independently, never guessed
+        // product names or a concatenation of unrelated page text.
+        foreach ($productPageHeadings as $heading) {
+            if (is_string($heading)) {
+                $this->rejectProductSpecificSelectors($data, $heading);
+            }
+        }
 
         return $data;
     }
@@ -2452,7 +2455,7 @@ class ProductGalleryRecipeTrainer
     public function recipeActionFields(): array
     {
         return collect(array_keys($this->recipeValidationRules()))
-            ->filter(fn (string $rule): bool => str_starts_with($rule, 'actions.*.'))
+            ->filter(fn (string $rule): bool => str_starts_with($rule, 'actions.*.') && ! str_contains(substr($rule, strlen('actions.*.')), '.'))
             ->map(fn (string $rule): string => substr($rule, strlen('actions.*.')))
             ->values()
             ->all();
@@ -2471,7 +2474,7 @@ class ProductGalleryRecipeTrainer
             'expected_count_evidence' => ['required', 'string', 'max:500'],
             'content_confirmed_product' => ['required', 'boolean'],
             'actions' => ['present', 'array', 'max:12'],
-            'actions.*.kind' => ['required', 'in:click,click_each,click_until_no_change'],
+            'actions.*.kind' => ['required', 'in:click,click_each,click_until_no_change,hover,scroll_into_view'],
             'actions.*.selector' => ['required', 'string', 'max:300'],
             // index addresses ONE specific element among a selector's
             // matches, not a repeat count - a page can reasonably have more
@@ -2484,12 +2487,19 @@ class ProductGalleryRecipeTrainer
             'actions.*.limit' => ['required', 'integer', 'between:1,20'],
             'actions.*.wait_after_ms' => ['required', 'integer', 'between:50,1500'],
             'actions.*.when' => ['nullable', 'in:always,if_present'],
+            'actions.*.frame_selectors' => ['sometimes', 'array'],
+            'actions.*.frame_selectors.*' => ['string', 'max:300'],
             'actions.*.after_each_selector' => ['nullable', 'string', 'max:300'],
             'actions.*.after_each_limit' => ['nullable', 'integer', 'between:1,20'],
             'actions.*.after_each_wait_after_ms' => ['nullable', 'integer', 'between:50,1500'],
             'actions.*.purpose' => ['required', 'string', 'max:200'],
             'pre_click_selectors' => ['present', 'array'],
             'collect_selectors' => ['present', 'array'],
+            'active_image_selector' => ['nullable', 'string', 'max:300'],
+            'position_selector' => ['nullable', 'string', 'max:300'],
+            'gallery_scope_selector' => ['nullable', 'string', 'max:300'],
+            'frame_selectors' => ['sometimes', 'array'],
+            'frame_selectors.*' => ['string', 'max:300'],
             'thumbnail_selectors' => ['present', 'array'],
             'open_selectors' => ['present', 'array'],
             'next_selectors' => ['present', 'array'],
@@ -2703,6 +2713,12 @@ class ProductGalleryRecipeTrainer
      */
     private function usableStaticGallerySize(array $pageScout, array $context): int
     {
+        return count($this->usableStaticGalleryUrls($pageScout, $context));
+    }
+
+    /** @return array<int, string> */
+    private function usableStaticGalleryUrls(array $pageScout, array $context): array
+    {
         // A category that says zero is saying "do not restrict this", which is
         // not the same as saying nothing at all - only the absent value falls
         // back to the global setting. Treating both as "unset" would impose a
@@ -2729,11 +2745,44 @@ class ProductGalleryRecipeTrainer
                 && ($candidate['within_media'] ?? false) === true
                 && (int) ($candidate['natural_width'] ?? 0) >= $minimumWidth
                 && (int) ($candidate['natural_height'] ?? 0) >= $minimumHeight)
-            ->map(fn (array $candidate): string => trim((string) ($candidate['current_src'] ?? $candidate['src'] ?? '')))
-            ->filter(fn (string $url): bool => $url !== '' && filter_var($url, FILTER_VALIDATE_URL) !== false)
-            ->map(fn (string $url): string => ProductImageStorage::imageAssetKey($url))
-            ->unique()
-            ->count();
+            ->map(function (array $candidate): array {
+                $url = trim((string) ($candidate['current_src'] ?? ''));
+                $candidate['measured_url'] = ProductImageStorage::normalizeCandidateUrl(
+                    $url !== '' ? $url : trim((string) ($candidate['src'] ?? '')),
+                );
+
+                return $candidate;
+            })
+            ->filter(fn (array $candidate): bool => filter_var($candidate['measured_url'], FILTER_VALIDATE_URL) !== false
+                && in_array(parse_url($candidate['measured_url'], PHP_URL_SCHEME), ['http', 'https'], true))
+            ->groupBy(fn (array $candidate): string => ProductImageStorage::imageAssetKey($candidate['measured_url']))
+            // Keep frame order, choosing the largest actually observed rendition
+            // within each frame. Never construct a higher-resolution URL.
+            ->map(fn ($renditions): string => $renditions->sortByDesc(
+                fn (array $candidate): int => (int) $candidate['natural_width'] * max(1, (int) ($candidate['natural_height'] ?? 0)),
+            )->first()['measured_url'])
+            ->values()->all();
+    }
+
+    /** @return array<int, string> */
+    private function staticGalleryCandidates(array $pageScout, array $context): array
+    {
+        $measured = $this->usableStaticGalleryUrls($pageScout, $context);
+
+        // Use the SAME URLs that justified skipping training. Network order is
+        // not gallery order: category icons used to consume the first 20 slots
+        // and discard those measured photographs (Idealo/Geizhals, draft #9).
+        // These are still provisional: measurement grants no recipe or Vision
+        // confirmation. Keep the raw-candidate cap without slicing this evidence.
+        return collect([
+            ...$measured,
+            ...($pageScout['network_image_samples'] ?? []),
+            ...($context['static_image_urls'] ?? []),
+        ])
+            ->filter(fn (mixed $url): bool => is_string($url) && $url !== '')
+            ->map(fn (string $url): string => ProductImageStorage::normalizeCandidateUrl($url))
+            ->unique(fn (string $url): string => ProductImageStorage::imageAssetKey($url))
+            ->take(max(20, count($measured)))->values()->all();
     }
 
     /**
@@ -2847,6 +2896,18 @@ class ProductGalleryRecipeTrainer
             return $pageScout;
         }
 
+        if (isset($pageScout['frame_observations'])) {
+            $pageScout['frame_observations'] = array_map(fn (array $frame): array => [
+                'frame_selectors' => $frame['frame_selectors'] ?? [],
+                'final_url' => $frame['final_url'] ?? null,
+                'title' => $frame['title'] ?? null,
+                'action_candidates' => array_slice($frame['action_candidates'] ?? [], 0, 5),
+                'image_candidates' => array_slice($frame['image_candidates'] ?? [], 0, 5),
+                'error' => $frame['error'] ?? null,
+                'more' => 'ReadGalleryPageObservation(section=frame_observations) has the captured details.',
+            ], $pageScout['frame_observations']);
+        }
+
         foreach (self::AGENT_PAGE_LIST_LIMITS as $key => $keep) {
             if (is_array($pageScout[$key] ?? null) && count($pageScout[$key]) > $keep) {
                 $pageScout[$key.'_omitted'] = count($pageScout[$key]) - $keep;
@@ -2878,7 +2939,7 @@ class ProductGalleryRecipeTrainer
         // but must not be nested inside the supposedly focused paid prompt.
         unset($observation['full_page_observation']);
 
-        return $observation;
+        return $this->scoutForAgent($observation, false);
     }
 
     private function trainingProgressSignature(array $result): string

@@ -1,6 +1,7 @@
 import dns from 'node:dns/promises';
 import net from 'node:net';
 import { captureGalleryScoutInPage } from './gallery-focus.mjs';
+import { GalleryTraversalProgress, readTraversalMediaInPage, traversalMediaState, waitForTraversalMedia, resolveGalleryDocument, embeddedProductConflicts } from './gallery-traversal.mjs';
 import { existsSync } from 'node:fs';
 import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -25,7 +26,6 @@ import {
     recipeActionOpensGallery,
     recipeActionPlanStatus,
     recipeActionRequestedIndex,
-    recipeActionShouldStop,
     readProductIdentityInPage,
     recipeActionTraversesGallery,
     resolveRecipeActionTargetIndex,
@@ -33,7 +33,6 @@ import {
     settleLikeAReader,
     urlQualityScore,
     TRAVERSAL_CEILING,
-    TRAVERSAL_PATIENCE,
     traversalCeiling,
 } from './product-gallery-utils.mjs';
 
@@ -680,6 +679,10 @@ const mainGalleryImageSelectors = [
     `[class*='swiper' i] img`,
 ];
 const strictRecipe = Object.keys(recipe).length > 0 && !scoutOnly;
+const readOnlyRecipe = strictRecipe && recipeActions.length === 0
+    && recipe.max_thumbnail_clicks === 0 && recipe.max_next_clicks === 0
+    && ['pre_click_selectors', 'open_selectors', 'thumbnail_selectors', 'next_selectors']
+        .every((key) => recipeSelectors(key).length === 0);
 const preClickSelectors = recipeActions.length > 0
     ? []
     : [...new Set(recipeSelectors('pre_click_selectors'))];
@@ -728,7 +731,14 @@ const galleryStateSelectors = [...new Set([
 // re-read the (now different) gallery state instead of dying.
 const isTornDownContextError = (error) => /execution context was destroyed|context or browser has been closed/i
     .test(String(error?.message ?? error ?? ''));
-const readGalleryStateOnce = () => page.evaluate(({
+const mediaDocument = async () => {
+    const document = await resolveGalleryDocument(page, recipe.frame_selectors || []);
+    if (document !== page && embeddedProductConflicts(productIdentity, await document.evaluate(readProductIdentityInPage))) {
+        throw new Error('frame_product_identifier_mismatch');
+    }
+    return document;
+};
+const readGalleryStateOnce = async () => (await mediaDocument().catch(() => page)).evaluate(({
     selectors,
     excludedContextPatternSource,
 }) => {
@@ -974,7 +984,7 @@ const waitForStableGallery = async () => {
     };
 };
 
-const collectDomImages = async () => page.evaluate(({
+const collectDomImages = async () => (await mediaDocument()).evaluate(({
     selectors,
     extraAttributes,
     includePageFallbacks,
@@ -1023,7 +1033,9 @@ const collectDomImages = async () => page.evaluate(({
     const excludedContexts = [];
     const add = (value) => {
         if (typeof value === 'string' && value.trim() !== '') {
-            urls.push(value.trim());
+            // data-full/srcset/href can be relative to an embedded document
+            // (or its <base>), not to the outer product page.
+            try { urls.push(new URL(value.trim(), document.baseURI).href); } catch {}
         }
     };
     const selectedElements = [];
@@ -1223,14 +1235,6 @@ const collectDomImages = async () => page.evaluate(({
 // The only ceiling on collection is the caller's limit. It used to be the
 // smaller of that and the recipe's remembered count, which quietly stopped a
 // twelve-photograph gallery at whatever the training product had.
-// A press that adds no photograph the gallery has not already given is the
-// only honest sign that a slider has been walked to its end.
-const distinctCollectedAssets = () => new Set(
-    gathered
-        .map((url) => normalizeImageCandidate(url, sourceUrl))
-        .filter(Boolean)
-        .map(imageAssetKey),
-).size;
 const collectionTarget = strictRecipe ? Number.POSITIVE_INFINITY : galleryCollectionTarget(limit, 0);
 const enoughCollected = () => new Set(
     gathered
@@ -1259,7 +1263,7 @@ const collect = async () => {
     }
     checkpoint('interaction');
 };
-const collectionSignature = async () => page.evaluate(({ selectors, attributes }) => {
+const collectionSignature = async () => (await mediaDocument().catch(() => page)).evaluate(({ selectors, attributes }) => {
     const values = [];
 
     for (const selector of selectors) {
@@ -1282,12 +1286,23 @@ const collectionSignature = async () => page.evaluate(({ selectors, attributes }
     selectors: gallerySelectors,
     attributes: [...new Set([...recipeAttributes, 'src', 'href', 'srcset'])],
 }).catch(() => '');
+const readTraversalMedia = () => mediaDocument().then((document) => document.evaluate(readTraversalMediaInPage, {
+    selectors: recipe.active_image_selector ? [recipe.active_image_selector] : gallerySelectors,
+    positionSelector: recipe.position_selector || '',
+})).catch((error) => ({ images: [], busy: false, error: String(error.message) }));
+const settleTraversalMedia = () => waitForTraversalMedia(readTraversalMedia, {
+    deadline: Math.min(softDeadline, Date.now() + probeTimeoutMs),
+});
 const clickAndWaitForGalleryChange = async (locator, meta = {}) => {
     const startedAt = Date.now();
+    const targetHandle = await locator.elementHandle().catch(() => null);
+    const targetFrame = await targetHandle?.ownerFrame();
+    await targetHandle?.dispose();
     const beforeState = await readGalleryState();
     const beforeSignature = await collectionSignature();
     const beforeNetworkCount = networkImages.length;
-    const href = await locator.getAttribute('href').catch(() => null);
+    const observationOnly = ['hover', 'scroll_into_view'].includes(meta.action);
+    const href = observationOnly ? null : await locator.getAttribute('href').catch(() => null);
     let navigatedByHref = false;
 
     if (href && !isAllowedProductNavigation(productPageUrl, href)) {
@@ -1351,7 +1366,10 @@ const clickAndWaitForGalleryChange = async (locator, meta = {}) => {
 
         return navigatedByHref;
     };
-    const clicked = await locator.click({ timeout: 2000 })
+    const clicked = observationOnly
+        ? await (meta.action === 'hover' ? locator.hover({ timeout: 2000 })
+            : locator.scrollIntoViewIfNeeded({ timeout: 2000 })).then(() => true).catch(() => false)
+        : await locator.click({ timeout: 2000 })
         .then(() => true)
         .catch(() => locator.click({ force: true, timeout: 700 }).then(() => true).catch(() => false));
 
@@ -1374,14 +1392,19 @@ const clickAndWaitForGalleryChange = async (locator, meta = {}) => {
     // throwing, misreported as "the gallery changed". Checked both here and
     // on every poll iteration below for that reason.
     const bailIfNavigatedAway = async () => {
-        if (await onProductPage()) {
+        const frameIdentity = targetFrame && targetFrame !== page.mainFrame()
+            ? await targetFrame.evaluate(readProductIdentityInPage).catch(() => null) : null;
+        const conflictingFrame = frameIdentity !== null && embeddedProductConflicts(productIdentity, frameIdentity);
+        if (await onProductPage() && !conflictingFrame) {
             return false;
         }
 
         leftProductPage = true;
-        const landedOn = page.url();
-        const landedIdentity = await readProductIdentity().catch(() => null);
-        await page.goBack({ waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {});
+        const landedOn = conflictingFrame ? targetFrame.url() : page.url();
+        const landedIdentity = conflictingFrame ? frameIdentity : await readProductIdentity().catch(() => null);
+        // Returning a document does not restore viewer/zoom/scroll state.
+        const restored = conflictingFrame ? false : await page.goBack({ waitUntil: 'domcontentloaded', timeout: 5000 })
+            .then(() => true).catch(() => false);
         actionTrace.push({
             ...meta,
             clicked: true,
@@ -1390,6 +1413,8 @@ const clickAndWaitForGalleryChange = async (locator, meta = {}) => {
             // Said in full, because "navigated away" alone reads as a bad
             // selector when it may be a perfectly good link to another product.
             navigated_away_to: landedOn,
+            recovery: { document_returned: restored, gallery_state_restored: false,
+                next_step: 'Replay the complete opening path from the original URL; do not resume mid-slider.' },
             navigated_away_reason: 'The page this opened is a different product from the one being '
                 + 'trained, so nothing was collected from it and we came back. Compare the identities '
                 + 'below: they are what the two pages published about themselves.',
@@ -1641,11 +1666,32 @@ const captureInteractionScout = async (afterInteraction = false) => {
     const wide = await page.evaluate(captureGalleryScoutInPage, {
         ...args, rememberState: !afterInteraction || !observationFocusSelector,
     });
+    // A modal in the parent DOM and a document inside an iframe are different
+    // contexts. Expose observed frame paths, never make the agent guess them.
+    wide.frame_observations = [];
+    const visitFrames = async (parent, path = []) => {
+        for (const frame of parent.childFrames()) {
+            if (outOfTime()) return;
+            try {
+                const handle = await frame.frameElement();
+                const selector = await handle.evaluate((node) => node.id ? '#' + CSS.escape(node.id)
+                    : 'iframe,frame >> nth=' + [...document.querySelectorAll('iframe,frame')].indexOf(node));
+                await handle.dispose();
+                const framePath = [...path, selector];
+                const snapshot = await frame.evaluate(captureGalleryScoutInPage, args);
+                wide.frame_observations.push({ frame_selectors: framePath, ...snapshot });
+                await visitFrames(frame, framePath);
+            } catch (error) {
+                wide.frame_observations.push({ frame_selectors: path, error: String(error.message).slice(0, 200) });
+            }
+        }
+    };
+    await visitFrames(page.mainFrame());
     if (!afterInteraction || !observationFocusSelector) return wide;
     const focused = await page.evaluate(captureGalleryScoutInPage, {
         ...args, focusSelector: observationFocusSelector, initialUrl: sourceUrl,
     });
-    return { ...focused, full_page_observation: wide };
+    return { ...focused, frame_observations: wide.frame_observations, full_page_observation: wide };
 };
 const observeGalleryLayer = async (action) => {
     const observation = await captureInteractionScout(true).catch(() => null);
@@ -1823,7 +1869,7 @@ try {
         ...nextSelectors,
         ...recipeActions.flatMap((action) => [action.selector, action.after_each_selector].filter(Boolean)),
     ])]) {
-        selectorCounts[selector] = await page.locator(selector).count().catch(() => 0);
+        selectorCounts[selector] = await (await mediaDocument().catch(() => page)).locator(selector).count().catch(() => 0);
     }
     learnedRecipe = {
         collect_selectors: gallerySelectors.filter((selector) => selectorCounts[selector] > 0),
@@ -1837,6 +1883,7 @@ try {
     if (recipeActions.length > 0) {
         for (let actionIndex = 0; actionIndex < recipeActions.length && !leftProductPage && !outOfTime(); actionIndex++) {
             const action = recipeActions[actionIndex];
+            const repeatedAction = ['click_each', 'click_until_no_change'].includes(action.kind);
             const priorViewerOpenAction = recipeActions
                 .slice(0, actionIndex)
                 .some(actionOpensExpandedGallery);
@@ -1845,7 +1892,16 @@ try {
                 await attemptExpandedGallery(priorViewerOpenAction);
             }
 
-            const locator = page.locator(action.selector);
+            let actionDocument;
+            try { actionDocument = await resolveGalleryDocument(page, action.frame_selectors || []); }
+            catch (error) {
+                actionTrace.push({ action: action.kind, action_index: actionIndex, clicked: false,
+                    context_error: String(error.message), frame_selectors: action.frame_selectors,
+                    traversal_complete: false, traversal_stop_reason: 'frame_context_unavailable' });
+                await observeGalleryLayer({ action_index: actionIndex, phase: 'frame_context_unavailable' });
+                break;
+            }
+            const locator = actionDocument.locator(action.selector);
             const matched = await locator.count().catch(() => 0);
 
             if (matched < 1) {
@@ -1897,16 +1953,18 @@ try {
             // bounded by the safety ceiling below. limit is that ceiling now,
             // never a target.
             const ceiling = Math.max(action.limit, TRAVERSAL_CEILING);
-            let distinctBefore = distinctCollectedAssets();
-            let barrenPresses = 0;
-            const repetitions = action.kind === 'click'
-                ? 1
-                : Math.min(ceiling, matched > 1 ? matched : ceiling);
+            const traversal = new GalleryTraversalProgress(repeatedAction ? await settleTraversalMedia()
+                : traversalMediaState(await readTraversalMedia()), gathered);
+            let lastPrimaryTrace = null;
+            const repetitions = repeatedAction ? ceiling : 1;
 
             for (let repetition = 0; repetition < repetitions && !leftProductPage && !outOfTime(); repetition++) {
                 const currentCount = await locator.count().catch(() => 0);
 
                 if (currentCount < 1) {
+                    if (lastPrimaryTrace) Object.assign(lastPrimaryTrace, {
+                        traversal_complete: false, traversal_stop_reason: 'control_disappeared',
+                    });
                     break;
                 }
 
@@ -1917,7 +1975,10 @@ try {
                 // A single control is the opposite shape (one arrow pressed
                 // limit times) and must not be capped: doing that is what lost
                 // every frame past the first.
-                if (currentCount > 1 && repetition >= currentCount) {
+                if (action.kind === 'click_each' && currentCount > 1 && action.index + repetition >= currentCount) {
+                    if (lastPrimaryTrace) Object.assign(lastPrimaryTrace, {
+                        traversal_complete: true, traversal_stop_reason: 'all_current_controls_visited',
+                    });
                     break;
                 }
 
@@ -1954,7 +2015,16 @@ try {
                 }
 
                 const target = locator.nth(targetIndex);
-                const controlSafety = await target.evaluate((element, { purpose, excludedContextPatternSource }) => {
+                if (repeatedAction && await target.isDisabled().catch(() => false)) {
+                    const endTrace = lastPrimaryTrace || { action: action.kind, action_index: actionIndex,
+                        phase: 'ai_action', selector: action.selector, clicked: false, selector_match_count: currentCount };
+                    const media = await settleTraversalMedia();
+                    Object.assign(endTrace, { traversal_complete: media.ready,
+                        traversal_stop_reason: media.ready ? 'control_disabled' : media.status });
+                    if (!lastPrimaryTrace) actionTrace.push(endTrace);
+                    break;
+                }
+                const controlSafety = await target.evaluate((element, { purpose, excludedContextPatternSource, scopeSelector }) => {
                     const signal = [
                         element.getAttribute('id'),
                         element.getAttribute('class'),
@@ -1986,6 +2056,11 @@ try {
                         'i',
                     ).test(contextSignal);
                     const forbidden = excludedContext || /(buy|add.?to.?cart|checkout|place.?order|account|sign.?in|log.?in|wishlist|share|review|compare|subscribe|submit)/i.test(signal);
+                    let declaredScope = null;
+                    try { declaredScope = scopeSelector ? document.querySelector(scopeSelector) : null; } catch {}
+                    const insideDeclaredScope = declaredScope && declaredScope !== document.body
+                        && declaredScope !== document.documentElement && declaredScope.contains(element)
+                        && declaredScope.querySelector('img,picture');
                     const mediaContainer = element.closest([
                         '[class*=gallery i]', '[class*=thumbnail i]', '[class*=slider i]',
                         '[class*=carousel i]', '[class*=swiper i]', '[class*=zoom i]',
@@ -1999,9 +2074,10 @@ try {
                     return {
                         safe: !forbidden && Boolean(
                             consentSignal
+                            || insideDeclaredScope
                             || mediaContainer
                             || dialogWithImages
-                            || element.querySelector('img,picture')
+                            || element.matches('img,picture') || element.querySelector('img,picture')
                             || mediaSignal
                         ),
                         forbidden,
@@ -2011,6 +2087,7 @@ try {
                     };
                 }, {
                     purpose: action.purpose,
+                    scopeSelector: recipe.gallery_scope_selector || '',
                     excludedContextPatternSource: EXCLUDED_GALLERY_CONTEXT_PATTERN_SOURCE,
                 }).catch(() => ({ safe: false }));
 
@@ -2046,37 +2123,16 @@ try {
                 });
                 await collect();
                 const trace = actionTrace.at(-1) || {};
+                lastPrimaryTrace = trace;
                 trace.expanded_gallery_visible_after = await expandedGalleryVisible();
-                if (clicked && action.kind === 'click' && !leftProductPage && !outOfTime()) {
+                if (clicked && !repeatedAction && !leftProductPage && !outOfTime()) {
                     await observeGalleryLayer({ action_index: actionIndex, phase: 'click', selector: action.selector });
                 }
 
-                // A single control - a next arrow - has no count to read off the
-                // page, so it is pressed until the gallery stops yielding
-                // photographs it has not already given. That is what ends a
-                // circular slider: one lap round and every frame repeats.
-                //
-                // "Nothing new" cannot be read from the DOM changing, which is
-                // why a trained number was needed before: the active class moves
-                // to the next slide on every press for ever. Distinct collected
-                // assets are the honest signal, and the patience below covers a
-                // slide that legitimately yields nothing - a video, a repeat, a
-                // photograph still loading.
-                if (currentCount <= 1 && action.kind !== 'click') {
-                    const distinctNow = distinctCollectedAssets();
-
-                    if (distinctNow > distinctBefore) {
-                        distinctBefore = distinctNow;
-                        barrenPresses = 0;
-                    } else if (++barrenPresses >= TRAVERSAL_PATIENCE) {
-                        trace.traversal_exhausted = true;
-
-                        break;
-                    }
-                }
-
-                if (clicked && ['click', 'click_each'].includes(action.kind) && action.after_each_selector) {
-                    const followupLocator = page.locator(action.after_each_selector);
+                // Finish the per-frame sequence before interpreting progress.
+                // Improving an existing thumbnail is useful even without a new asset key.
+                if (clicked && action.after_each_selector) {
+                    const followupLocator = actionDocument.locator(action.after_each_selector);
                     // Zoom is a finite action, not traversal of an unknown
                     // number of photos. Execute the agent's requested count.
                     const followupLimit = Math.max(1, Math.min(20, action.after_each_limit || 1));
@@ -2164,17 +2220,44 @@ try {
                     }
                 }
 
-                if (recipeActionShouldStop({
-                    kind: action.kind,
-                    clicked,
-                    changed: trace.changed,
-                    matchCount: currentCount,
-                })) {
+                if (repeatedAction) {
+                    // Evaluate only AFTER follow-up zoom and actual media loading.
+                    const media = await settleTraversalMedia();
+                    await collect();
+                    trace.media_status = media.status;
+                    if (!clicked || leftProductPage) {
+                        Object.assign(trace, { traversal_complete: false, traversal_stop_reason: 'action_failed' });
+                        break;
+                    }
+                    if (currentCount <= 1 || action.kind === 'click_until_no_change') {
+                        const outcome = traversal.advance(media, gathered, {
+                            disabled: await target.isDisabled().catch(() => false),
+                        });
+                        trace.traversal_stop_reason = outcome.reason;
+                        if (outcome.stop) {
+                            trace.traversal_complete = outcome.complete;
+                            break;
+                        }
+                    } else if (!media.ready && !media.signature) {
+                        Object.assign(trace, { traversal_complete: false, traversal_stop_reason: media.status });
+                        break;
+                    } else if (action.index + repetition + 1 >= await locator.count().catch(() => 0)) {
+                        Object.assign(trace, { traversal_complete: true, traversal_stop_reason: 'all_current_controls_visited' });
+                        break;
+                    }
+                    if (repetition === repetitions - 1) Object.assign(trace, {
+                        traversal_complete: false, traversal_stop_reason: 'safety_ceiling_reached',
+                    });
+                } else {
                     break;
                 }
             }
+            if (repeatedAction && lastPrimaryTrace && typeof lastPrimaryTrace.traversal_complete !== 'boolean') {
+                Object.assign(lastPrimaryTrace, { traversal_complete: false,
+                    traversal_stop_reason: outOfTime() ? 'time_budget' : 'traversal_interrupted' });
+            }
         }
-    } else {
+    } else if (!readOnlyRecipe) {
         await attemptExpandedGallery();
         await collect();
         const thumbnails = thumbnailSelectors.length ? page.locator(thumbnailSelectors.join(',')) : null;
@@ -2281,6 +2364,8 @@ const requestedImages = networkImages.map(normalize).filter(Boolean).filter(phot
 const embeddedImages = payloadImages.map(normalize).filter(Boolean).filter(photoOnly);
 const allCandidates = [...new Set([...domImages, ...embeddedImages, ...requestedImages])];
 const actionPlanStatus = recipeActionPlanStatus({ actions: recipeActions, actionTrace });
+const interruptedTraversal = actionTrace.find((item) => ['media_wait_timeout', 'image_load_failed'].includes(item.media_status)
+    || (item.traversal_complete === false && item.traversal_stop_reason === 'time_budget'));
 const distinctDomAssetCount = new Set(domImages.map(imageAssetKey)).size;
 const structurallyCompletedRecipe = strictRecipe
     && recipe.gallery_present === true
@@ -2494,7 +2579,8 @@ if (!crashResultEmitted) process.stdout.write(JSON.stringify({
         raw_dom_candidates: gathered.length,
         raw_dom_samples: [...new Set(gathered)].slice(0, 20),
         strict_recipe: strictRecipe,
-        partial: outOfTime(),
+        partial: outOfTime() || Boolean(interruptedTraversal),
+        interruption_reason: interruptedTraversal?.media_status || interruptedTraversal?.traversal_stop_reason || null,
         excluded_gallery_contexts: [...new Set(excludedGalleryContexts)].slice(0, 20),
         payload_candidates: embeddedImages.length,
         network_candidates: requestedImages.length,

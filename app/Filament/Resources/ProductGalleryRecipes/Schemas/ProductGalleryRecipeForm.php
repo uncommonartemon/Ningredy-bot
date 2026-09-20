@@ -7,7 +7,9 @@ use Filament\Forms\Components\Textarea;
 use Filament\Forms\Components\TextInput;
 use Filament\Forms\Components\Toggle;
 use Filament\Schemas\Components\Section;
+use Filament\Schemas\Components\Utilities\Get;
 use Filament\Schemas\Schema;
+use Illuminate\Validation\Rules\Unique;
 
 class ProductGalleryRecipeForm
 {
@@ -25,12 +27,12 @@ class ProductGalleryRecipeForm
                         TextInput::make('domain')
                             ->label('Домен')
                             ->required()
-                            ->unique(ignoreRecord: true)
                             ->maxLength(255),
                         TextInput::make('path_pattern')
                             ->label('Шаблон пути')
                             ->helperText('* означает все товарные страницы домена.')
                             ->required()
+                            ->unique(ignoreRecord: true, modifyRuleUsing: fn (Unique $rule, Get $get): Unique => $rule->where('domain', $get('domain')))
                             ->maxLength(255),
                         Select::make('status')
                             ->label('Состояние')

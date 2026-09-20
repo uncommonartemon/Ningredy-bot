@@ -163,6 +163,10 @@ class StoreProductImagesTest extends TestCase
     /** @return array{Product, ProductVariant, ProductDraft} */
     private function approvedProductWithMedia(): array
     {
+        // This fixture exercises Telegram delivery, not image discovery. Keep
+        // its three existing files sufficient regardless of production defaults.
+        config(['product-images.max_images_by_type.component' => 3]);
+
         $category = Category::query()->where('slug', 'laptops')->firstOrFail();
         $brand = Brand::query()->firstOrCreate(['slug' => 'lenovo'], ['name' => 'Lenovo', 'is_active' => true]);
         $product = Product::query()->create([
@@ -183,7 +187,7 @@ class StoreProductImagesTest extends TestCase
             'is_default' => true,
             'is_active' => true,
         ]);
-        // product_type "component" targets 3 images by default; pre-fill all
+        // The fixture explicitly targets 3 component images; pre-fill all
         // 3 so ProductImageStorage::store() sees remaining <= 0 and returns
         // immediately without running the real search pipeline.
         for ($index = 0; $index < 3; $index++) {

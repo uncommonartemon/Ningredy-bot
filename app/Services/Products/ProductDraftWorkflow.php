@@ -81,8 +81,7 @@ class ProductDraftWorkflow
         // 'partial' gallery is already publishable today, so this has to
         // gate on its own persisted fact, not on that column.
         throw_if(
-            trim((string) $draft->primary_source_url) !== ''
-                && $draft->specifications_reconciled_source_url !== $draft->primary_source_url,
+            $draft->reconciliationPending(),
             UnreconciledDraftSpecificationsException::class,
             'Характеристики черновика не сверены с источником выбранных фотографий — публикация невозможна, пока сверка не завершится.',
         );

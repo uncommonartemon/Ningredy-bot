@@ -106,6 +106,31 @@ class StaticGalleryMeasurementTest extends TestCase
         $this->assertSame(1, $this->measure($page, ['minimum_image_width' => 700, 'minimum_image_height' => 0]));
     }
 
+    public function test_handoff_keeps_the_largest_observed_rendition_and_frame_order(): void
+    {
+        $page = ['image_candidates' => [
+            ['current_src' => 'https://cdn.shopify.com/s/files/1/a.jpg?width=800', 'natural_width' => 800, 'within_media' => true],
+            ['current_src' => 'https://cdn.shopify.com/s/files/1/b.jpg?width=900', 'natural_width' => 900, 'within_media' => true],
+            ['current_src' => 'https://cdn.shopify.com/s/files/1/a.jpg?width=1600', 'natural_width' => 1600, 'within_media' => true],
+        ]];
+        $urls = (new ReflectionMethod(ProductGalleryRecipeTrainer::class, 'usableStaticGalleryUrls'))
+            ->invoke(app(ProductGalleryRecipeTrainer::class), $page, []);
+
+        $this->assertSame(['https://cdn.shopify.com/s/files/1/a.jpg?width=1600', 'https://cdn.shopify.com/s/files/1/b.jpg?width=900'], $urls);
+        $this->assertSame(count($urls), $this->measure($page));
+    }
+
+    public function test_empty_current_src_uses_the_observed_src_without_inventing_a_url(): void
+    {
+        $page = ['image_candidates' => [
+            ['current_src' => '', 'src' => 'https://cdn.example/real.jpg', 'natural_width' => 900, 'within_media' => true],
+        ]];
+        $urls = (new ReflectionMethod(ProductGalleryRecipeTrainer::class, 'usableStaticGalleryUrls'))
+            ->invoke(app(ProductGalleryRecipeTrainer::class), $page, []);
+
+        $this->assertSame(['https://cdn.example/real.jpg'], $urls);
+    }
+
     /**
      * @param  array<string, mixed>  $page
      * @param  array<string, mixed>  $context

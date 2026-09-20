@@ -11,14 +11,28 @@ use App\Models\ProductSourceDomain;
 use App\Models\ProductSourcePageRule;
 use App\Models\TelegramUpdate;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 
 class ResetCatalogTestDataCommandTest extends TestCase
 {
     use RefreshDatabase;
 
+    public function test_reset_refuses_the_real_media_root_even_with_force(): void
+    {
+        // Resolve the real root but never read, create or remove any file there.
+        config(['filesystems.disks.public.root' => storage_path('app/public')]);
+        Storage::forgetDisk('public');
+        $this->artisan('catalog:reset-test-data', ['--force' => true])
+            ->expectsOutput('Refusing catalog cleanup: the testing media disk is not isolated.')
+            ->assertFailed();
+    }
+
     public function test_reset_clears_test_results_without_reusing_draft_ids_or_deleting_settings_and_audits(): void
     {
+        Storage::fake('public');
+        Storage::disk('public')->put('products/orphan/image.txt', 'test fixture');
+        Storage::disk('public')->put('drafts/orphan/image.txt', 'test fixture');
         AppSetting::put('ai.minimum_image_side', '700');
         $update = TelegramUpdate::query()->create([
             'update_id' => 900001,
@@ -72,6 +86,8 @@ class ResetCatalogTestDataCommandTest extends TestCase
             ->assertSuccessful();
 
         $this->assertDatabaseCount('product_drafts', 0);
+        Storage::disk('public')->assertMissing('products/orphan/image.txt');
+        Storage::disk('public')->assertMissing('drafts/orphan/image.txt');
         $this->assertDatabaseCount('product_gallery_recipes', 0);
         $this->assertDatabaseCount('product_source_page_rules', 0);
         $this->assertDatabaseHas('product_source_domains', [

@@ -10,6 +10,18 @@ after(async () => { await browser?.close(); });
 const args = { excludedContextPatternSource: EXCLUDED_GALLERY_CONTEXT_PATTERN_SOURCE };
 const pixel = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=';
 
+test('visible product heading survives a generic title and a focused gallery observation', async () => fixture(async (page) => {
+    await page.evaluate(() => {
+        document.title = 'Store';
+        document.body.insertAdjacentHTML('afterbegin', '<h1>Nitro 16 Gaming Laptop - AN16-41-R3ZV</h1><h1 hidden>Unrelated hidden product</h1>');
+    });
+    for (const selector of ['', '#x7']) {
+        const scout = await capture(page, selector);
+        assert.equal(scout.title, 'Store');
+        assert.deepEqual(scout.product_headings, ['Nitro 16 Gaming Laptop - AN16-41-R3ZV']);
+    }
+}));
+
 test('focused screenshot clip matches the actual selected area after scrolling', async () => fixture(async (page) => {
     await page.locator('#x7').evaluate((node) => { node.style.marginTop = '1600px'; node.style.background = 'red'; });
     await page.locator('#x7').scrollIntoViewIfNeeded();

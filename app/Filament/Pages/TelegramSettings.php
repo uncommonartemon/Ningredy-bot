@@ -12,6 +12,10 @@ use Filament\Forms\Concerns\InteractsWithForms;
 use Filament\Forms\Contracts\HasForms;
 use Filament\Notifications\Notification;
 use Filament\Pages\Page;
+use Filament\Schemas\Components\Actions;
+use Filament\Schemas\Components\EmbeddedSchema;
+use Filament\Schemas\Components\Form;
+use Filament\Schemas\Components\Section;
 use Filament\Schemas\Schema;
 use Filament\Support\Icons\Heroicon;
 use Throwable;
@@ -31,8 +35,6 @@ class TelegramSettings extends Page implements HasForms
 
     protected static ?int $navigationSort = 2;
 
-    protected string $view = 'filament.pages.telegram-settings';
-
     /** @var array<string, mixed> */
     public ?array $data = [];
 
@@ -48,7 +50,7 @@ class TelegramSettings extends Page implements HasForms
     public function form(Schema $schema): Schema
     {
         return $schema
-            ->components([
+            ->components([Section::make('Подключение и доступ')->schema([
                 TextInput::make('proxy_url')
                     ->label('Публичный proxy URL')
                     ->placeholder('https://example.ngrok-free.app')
@@ -59,7 +61,7 @@ class TelegramSettings extends Page implements HasForms
                     ->live(onBlur: true)
                     ->suffixAction(
                         Action::make('setWebhook')
-                            ->label('Set webhook')
+                            ->label('Установить webhook')
                             ->icon('heroicon-m-link')
                             ->button()
                             ->action('setWebhook'),
@@ -69,8 +71,20 @@ class TelegramSettings extends Page implements HasForms
                     ->placeholder("123456789\n987654321")
                     ->helperText('По одному ID на строку (или через запятую). Пусто — никто не сможет писать боту.')
                     ->rows(4),
-            ])
+            ])])
             ->statePath('data');
+    }
+
+    public function content(Schema $schema): Schema
+    {
+        return $schema->components([
+            Form::make([EmbeddedSchema::make('form')])
+                ->id('telegram-settings-form')
+                ->livewireSubmitHandler('save')
+                ->footer([Actions::make([
+                    Action::make('saveSettings')->label('Сохранить настройки')->icon('heroicon-m-check')->submit('save'),
+                ])]),
+        ]);
     }
 
     public function save(): void

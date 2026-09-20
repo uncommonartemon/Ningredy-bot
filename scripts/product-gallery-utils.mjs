@@ -805,6 +805,8 @@ export const imageDimensionsMeetMinimum = ({
 
 const SAFE_RECIPE_ACTION_KINDS = new Set([
     'click',
+    'hover',
+    'scroll_into_view',
     'click_each',
     'click_until_no_change',
 ]);
@@ -923,14 +925,14 @@ export const normalizeRecipeActions = (actions) => (Array.isArray(actions) ? act
             // stripped off, and treats a gate that is simply not up today as a
             // broken selector. Default always, so a legacy recipe is unchanged.
             when: action.when === 'if_present' ? 'if_present' : 'always',
+            frame_selectors: Array.isArray(action.frame_selectors) ? action.frame_selectors : [],
         };
         // A plain click carries a follow-up too. The opening click is what puts
         // the first frame on screen, and with the zoom control attachable only
         // to the traversal that follows it, that frame stayed at the viewer's
         // default size while every frame reached by an arrow was enlarged - one
         // gallery, two resolutions.
-        const afterEachSelector = ['click', 'click_each'].includes(action.kind)
-            && safeRecipeSelector(action.after_each_selector)
+        const afterEachSelector = safeRecipeSelector(action.after_each_selector)
             ? action.after_each_selector.trim()
             : null;
 
@@ -987,6 +989,13 @@ export const recipeActionPlanStatus = ({ actions, actionTrace }) => {
             };
         }
 
+        const traversalResult = primaryTraces.findLast((item) => typeof item.traversal_complete === 'boolean');
+        if (traversalResult?.traversal_complete === false) {
+            return { action_index: actionIndex, kind: action.kind, selector: action.selector,
+                required_clicks: clicked.length, completed_clicks: clicked.length, selector_match_count: selectorMatches,
+                complete: false, completion: traversalResult.traversal_stop_reason };
+        }
+
         // Whether every declared follow-up actually ran, by the same rule the
         // server-side validator applies - a control that stopped changing or
         // disappeared has finished, anything else owes the remaining presses.
@@ -1022,8 +1031,12 @@ export const recipeActionPlanStatus = ({ actions, actionTrace }) => {
             return true;
         };
 
-        if (action.kind === 'click') {
-            const openerWorked = !recipeActionOpensGallery(action)
+        if (traversalResult?.traversal_complete === true) {
+            complete = afterEachComplete(clicked.length);
+            requiredClicks = clicked.length;
+            completion = complete ? traversalResult.traversal_stop_reason : 'after_each_incomplete';
+        } else if (['click', 'hover', 'scroll_into_view'].includes(action.kind)) {
+            const openerWorked = action.kind !== 'click' || !recipeActionOpensGallery(action)
                 || clicked.some((item) => item.changed === true || item.expanded_gallery_visible_after === true);
             complete = clicked.length >= 1 && openerWorked;
             completion = complete

@@ -322,6 +322,8 @@ export const captureGalleryScoutInPage = ({ excludedContextPatternSource, focusS
         observation_focus: observationFocus,
         final_url: location.href,
         title: document.title.slice(0, 500),
+        product_headings: [...document.querySelectorAll('h1')].filter(visible)
+            .map((node) => (node.innerText || '').trim().slice(0, 500)).filter(Boolean).slice(0, 4),
         fragments: candidates.map(sanitize).filter(Boolean).slice(0, 32),
         interactive_controls: interactiveControls,
         action_candidates: actionCandidates,

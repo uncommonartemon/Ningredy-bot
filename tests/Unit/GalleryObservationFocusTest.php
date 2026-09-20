@@ -9,6 +9,17 @@ use Tests\TestCase;
 
 class GalleryObservationFocusTest extends TestCase
 {
+    public function test_agent_can_read_just_one_slice_without_receiving_the_whole_page(): void
+    {
+        $tool = new ReadGalleryPageObservation([], ['fragments' => ['large unrelated text'],
+            'action_candidates' => [['selector' => '#one'], ['selector' => '#two'], ['selector' => '#three']]]);
+        $result = json_decode($tool->handle(new Request(['snapshot' => 'latest',
+            'section' => 'action_candidates', 'offset' => 1, 'limit' => 1])), true);
+        $this->assertSame([['selector' => '#two']], $result['observation']['items']);
+        $this->assertSame(3, $result['observation']['total']);
+        $this->assertArrayNotHasKey('fragments', $result['observation']);
+    }
+
     public function test_focused_prompt_keeps_original_identity_but_not_original_dom(): void
     {
         $trainer = (new \ReflectionClass(ProductGalleryRecipeTrainer::class))->newInstanceWithoutConstructor();

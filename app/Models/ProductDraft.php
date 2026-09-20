@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Services\Ai\AiSettings;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
@@ -73,6 +74,33 @@ class ProductDraft extends Model
      * hint - invalidates the stamp rather than leaving it pointing at
      * values that no longer match what it once verified.
      */
+    /**
+     * Whether this draft is still waiting for its card to be reconciled
+     * against the source its photos came from - the one question every gate
+     * that withholds a draft from review or publication actually asks.
+     *
+     * It lives here because seven separate places used to ask it by
+     * comparing the two columns inline (the approval workflow, the Telegram
+     * presenter and its buttons, the research tool, both gallery jobs, the
+     * Filament publish action). That made AiSettings::specificationReconciliation
+     * Enabled() a switch that turned the checker off without turning the
+     * BLOCKING off: no run would ever write the stamp again, and every gate
+     * kept reading a stamp that could no longer arrive, so every draft stayed
+     * blocked for ever. A kill switch whose only effect is to wedge the
+     * pipeline shut is not a kill switch - so the switch is answered here,
+     * once, for all of them.
+     */
+    public function reconciliationPending(): bool
+    {
+        if (! app(AiSettings::class)->specificationReconciliationEnabled()) {
+            return false;
+        }
+
+        return $this->gallery_search_stop_reason === 'specifications_unreconciled'
+            || (trim((string) $this->primary_source_url) !== ''
+                && $this->specifications_reconciled_source_url !== $this->primary_source_url);
+    }
+
     protected static function booted(): void
     {
         static::saving(function (ProductDraft $draft): void {

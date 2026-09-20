@@ -22,6 +22,19 @@ class ResetCatalogTestData extends Command
 
     public function handle(): int
     {
+        // An in-memory test database says nothing about the filesystem. Fail
+        // before model deletion too: those callbacks delete media themselves.
+        if (app()->runningUnitTests() || app()->environment('testing')) {
+            $diskRoot = Storage::disk('public')->path('');
+            $testingRoot = storage_path('framework/testing');
+            $normalize = fn (string $path): string => strtolower(rtrim(str_replace('\\', '/', realpath($path) ?: $path), '/'));
+            if (! str_starts_with($normalize($diskRoot).'/', $normalize($testingRoot).'/')) {
+                $this->error('Refusing catalog cleanup: the testing media disk is not isolated.');
+
+                return self::FAILURE;
+            }
+        }
+
         if (app()->environment('production') && ! $this->option('force')) {
             $this->error('Refusing to clear catalog data in production without --force.');
 

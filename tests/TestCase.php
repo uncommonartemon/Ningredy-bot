@@ -7,6 +7,23 @@ use Illuminate\Foundation\Testing\TestCase as BaseTestCase;
 
 abstract class TestCase extends BaseTestCase
 {
+    public function createApplication()
+    {
+        $app = parent::createApplication();
+
+        // RefreshDatabase isolates rows, not files. Install isolation before
+        // test traits run: catalog cleanup must never see the real media disk.
+        $root = storage_path('framework/testing/application-disks/'.getmypid().'/'.bin2hex(random_bytes(8)));
+        foreach ($app['config']->get('filesystems.disks', []) as $name => $disk) {
+            if (($disk['driver'] ?? null) === 'local') {
+                $app['config']->set("filesystems.disks.{$name}.root", $root.'/'.$name);
+                $app['filesystem']->forgetDisk($name);
+            }
+        }
+
+        return $app;
+    }
+
     /**
      * The language gate runs on every gallery accepted as a set, which is a
      * path a great many tests reach. Left unfaked it made a real API call from

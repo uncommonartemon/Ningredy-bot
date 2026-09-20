@@ -11,6 +11,7 @@ use App\Models\AiRun;
 use App\Models\Product;
 use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
+use App\Services\Telegram\DraftTelegramInteractionState;
 use App\Services\Telegram\DraftTelegramMessageLifecycle;
 use App\Services\Telegram\DraftTelegramPresenter;
 use App\Services\Telegram\TelegramClient;
@@ -344,7 +345,7 @@ class TelegramInteractivePanelTest extends TestCase
 
             return str_contains((string) $request['text'], 'Поиск #'.$draft->id.' не завершён')
                 && ! str_contains((string) $request['text'], 'готов к добавлению')
-                && $buttons->pluck('callback_data')->all() === ["draft:reject:{$draft->id}"];
+                && $buttons->pluck('callback_data')->all() === ["draft:edit:{$draft->id}", "draft:reject:{$draft->id}"];
         });
         $this->assertSame(3, $draft->media()->count());
         Queue::assertNothingPushed();
@@ -490,6 +491,18 @@ class TelegramInteractivePanelTest extends TestCase
             ],
         ], $this->headers())->assertOk();
 
+        $state = app(DraftTelegramInteractionState::class)->get('98765', '12345');
+        $this->assertSame('pending_review', $draft->fresh()->status);
+        $this->postJson('/api/telegram/webhook', [
+            'update_id' => 3106,
+            'callback_query' => [
+                'id' => 'callback-confirm-reject',
+                'from' => ['id' => 12345],
+                'data' => "draft:confirm:{$draft->id}:{$state['token']}",
+                'message' => ['message_id' => 80, 'chat' => ['id' => 98765]],
+            ],
+        ], $this->headers())->assertOk();
+
         Http::assertSent(fn (ClientRequest $request): bool => str_ends_with($request->url(), '/editMessageCaption')
             && (int) $request['message_id'] === 77
             && str_starts_with((string) ($request['caption'] ?? ''), "✖ Черновик #{$draft->id} отклонён."));
@@ -538,6 +551,7 @@ class TelegramInteractivePanelTest extends TestCase
             ],
         ], $this->headers())->assertOk();
 
+        $this->confirmPendingAction($draft);
         Queue::assertPushed(ProcessDraftPhotoActions::class, fn (ProcessDraftPhotoActions $job): bool => $job->draftId === $draft->id
             && data_get($job->actions, '0.action') === 'enhance'
             && data_get($job->actions, '0.media_id') === $media->id
@@ -569,6 +583,7 @@ class TelegramInteractivePanelTest extends TestCase
             ],
         ], $this->headers())->assertOk();
 
+        $this->confirmPendingAction($draft);
         Queue::assertPushed(TrainDraftGalleryRecipe::class, fn (TrainDraftGalleryRecipe $job): bool => $job->draftId === $draft->id
             && $job->chatId === '98765');
     }
@@ -615,6 +630,7 @@ class TelegramInteractivePanelTest extends TestCase
             ],
         ], $this->headers())->assertOk();
 
+        $this->confirmPendingAction($draft);
         Queue::assertPushed(TrainDraftGalleryRecipe::class, fn (TrainDraftGalleryRecipe $job): bool => $job->draftId === $draft->id
             && $job->chatId === '98765'
             && $job->hint === null);
@@ -649,6 +665,7 @@ class TelegramInteractivePanelTest extends TestCase
         ], $this->headers())->assertOk();
 
         Queue::assertNotPushed(ProcessTelegramMessage::class);
+        $this->confirmPendingAction($draft);
         Queue::assertPushed(
             TrainDraftGalleryRecipe::class,
             fn (TrainDraftGalleryRecipe $job): bool => $job->draftId === $draft->id
@@ -880,6 +897,7 @@ class TelegramInteractivePanelTest extends TestCase
             ],
         ], $this->headers())->assertOk();
 
+        $this->confirmPendingAction($draft);
         Queue::assertPushed(ContinueDraftGallerySearch::class, fn (ContinueDraftGallerySearch $job): bool => $job->draftId === $draft->id && $job->chatId === '98765'
         );
         $fresh = $draft->fresh();
@@ -973,6 +991,7 @@ class TelegramInteractivePanelTest extends TestCase
             ],
         ], $this->headers())->assertOk();
 
+        $this->confirmPendingAction($draft);
         Queue::assertPushed(ContinueDraftGallerySearch::class, fn (ContinueDraftGallerySearch $job): bool => $job->draftId === $draft->id && $job->chatId === '98765'
         );
     }
@@ -1033,6 +1052,7 @@ class TelegramInteractivePanelTest extends TestCase
             ],
         ], $this->headers())->assertOk();
 
+        $this->confirmPendingAction($draft);
         Queue::assertPushed(ContinueDraftGallerySearch::class, fn (ContinueDraftGallerySearch $job): bool => $job->draftId === $draft->id && $job->chatId === '98765'
         );
     }
@@ -1092,6 +1112,22 @@ class TelegramInteractivePanelTest extends TestCase
         }
 
         return $draft;
+    }
+
+    private function confirmPendingAction(ProductDraft $draft): void
+    {
+        Queue::assertNothingPushed();
+        $state = app(DraftTelegramInteractionState::class)->get('98765', '12345');
+        $this->assertNotNull($state);
+        $this->postJson('/api/telegram/webhook', [
+            'update_id' => 990001,
+            'callback_query' => [
+                'id' => 'confirmed-action',
+                'from' => ['id' => 12345],
+                'data' => "draft:confirm:{$draft->id}:{$state['token']}",
+                'message' => ['message_id' => $draft->fresh()->telegram_control_message_ids[0] ?? 82, 'chat' => ['id' => 98765]],
+            ],
+        ], $this->headers())->assertOk();
     }
 
     private function headers(): array

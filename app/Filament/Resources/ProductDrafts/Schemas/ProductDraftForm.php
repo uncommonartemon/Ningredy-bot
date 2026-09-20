@@ -26,7 +26,9 @@ class ProductDraftForm
                         TextInput::make('brand')->label('Бренд'),
                         TextInput::make('model')->label('Модель'),
                         TextInput::make('color')->label('Цвет'),
-                        TextInput::make('product_type')->label('Тип товара'),
+                        Select::make('product_type')->label('Тип товара')->options([
+                            'laptop' => 'Ноутбук', 'desktop' => 'Готовый ПК', 'component' => 'Комплектующая', 'other' => 'Другая техника',
+                        ]),
                         TextInput::make('category')->label('Категория (текст исследователя)'),
                         TextInput::make('confidence')->label('Уверенность AI')->numeric()->minValue(0)->maxValue(1),
                         Textarea::make('description')
@@ -64,7 +66,9 @@ class ProductDraftForm
                                     'web' => 'Другой сайт',
                                 ])->default('web'),
                             ])->columns(3)->defaultItems(0)->columnSpanFull(),
-                        TagsInput::make('image_urls')->label('Ссылки на изображения (устаревшее поле)')->columnSpanFull(),
+                        TagsInput::make('image_urls')->label('Исходные ссылки на изображения')
+                            ->helperText('Используются поиском как кандидаты. Сохранённые фотографии находятся в таблице «Галерея»; ссылки не заменяют проверенные файлы.')
+                            ->columnSpanFull(),
                     ])->columns(2)->columnSpanFull(),
                 Section::make('Состояние поиска фото')
                     ->description('Технические поля поиска — только для чтения.')
