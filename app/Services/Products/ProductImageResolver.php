@@ -499,6 +499,11 @@ class ProductImageResolver
                     'static_image_urls' => $browserSeedImages,
                     'minimum_verified_images' => max(1, (int) ($source['_minimum_verified_images'] ?? 3)),
                     'category_slug' => $source['_category_slug'] ?? null,
+                    // Only a source bound to a draft carries one; without it
+                    // the trainer reports the request as unavailable.
+                    ...(isset($source[ProductRequestContext::SOURCE_KEY])
+                        ? [ProductRequestContext::CONTEXT_KEY => $source[ProductRequestContext::SOURCE_KEY]]
+                        : []),
                     'minimum_image_width' => $source['_minimum_image_width'] ?? null,
                     'minimum_image_height' => $source['_minimum_image_height'] ?? null,
                 ];

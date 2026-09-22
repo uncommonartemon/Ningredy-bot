@@ -365,6 +365,7 @@ class ProductImageStorage
 
             $source['_minimum_verified_images'] = $minimumCompleteGallerySize;
             $source['_category_slug'] = trim((string) $draft->category) !== '' ? trim((string) $draft->category) : null;
+            $source[ProductRequestContext::SOURCE_KEY] = $draft->id;
             $originalSourceUrl = (string) $source['url'];
             $productPageUrl = is_string($source['_preflight_final_url'] ?? null)
                 && filter_var($source['_preflight_final_url'], FILTER_VALIDATE_URL)
@@ -2564,7 +2565,7 @@ class ProductImageStorage
             $urls = array_values(array_diff($this->cleanUrls([
                 ...($source['image_urls'] ?? []),
                 ...$this->resolver->resolve(
-                    [$source],
+                    [[...$source, ProductRequestContext::SOURCE_KEY => $draft->id]],
                     max(4, $needed * 2),
                     $progress ? fn (string $level, string $message) => $progress($message) : null,
                     $telegramUpdateId,
@@ -2819,7 +2820,7 @@ class ProductImageStorage
         return $this->cleanUrls([
             ...($source['image_urls'] ?? []),
             ...$this->resolver->resolve(
-                [$source],
+                [[...$source, ProductRequestContext::SOURCE_KEY => $draft->id]],
                 $limit,
                 $progress ? fn (string $level, string $message) => $progress($message) : null,
                 $telegramUpdateId ?? $draft->telegram_update_id,

@@ -4,7 +4,9 @@ namespace Tests\Feature;
 
 use App\Ai\Tools\GetProductSearchIntent;
 use App\Models\Category;
+use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
+use App\Services\Products\ProductRequestContext;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Laravel\Ai\Tools\Request as ToolRequest;
 use Tests\TestCase;
@@ -13,65 +15,72 @@ class GetProductSearchIntentToolTest extends TestCase
 {
     use RefreshDatabase;
 
-    public function test_returns_both_the_telegram_request_text_and_the_category_hint(): void
+    private function draftRequesting(string $text): ProductDraft
     {
-        $update = TelegramUpdate::query()->create([
-            'update_id' => random_int(1000, 9000),
-            'telegram_user_id' => '111',
-            'chat_id' => '222',
-            'message_id' => 1,
-            'payload' => [],
-            'text' => 'найди зелёный ноутбук асус, не серебристый',
-            'status' => 'processing',
+        $draft = new ProductDraft([
+            'title' => 'ASUS Vivobook 15 Green',
+            'brand' => 'ASUS',
+            'model' => 'X1504VA',
+            'color' => 'Green',
+            'specifications' => [
+                ['key' => 'sku', 'name' => 'SKU', 'value' => 'X1504VA-BQ4485'],
+                ['key' => 'ram', 'name' => 'RAM', 'value' => '16 GB'],
+            ],
         ]);
+        $draft->setRelation('telegramUpdate', new TelegramUpdate(['text' => $text]));
+
+        return $draft;
+    }
+
+    public function test_returns_the_request_the_selected_product_and_the_category_hint(): void
+    {
         Category::query()->create([
             'name' => 'Laptops',
             'slug' => 'zzz-scratch-laptops-intent',
             'product_search_hint' => 'не используй фото товара в коробке',
         ]);
+        $context = ProductRequestContext::forDraft($this->draftRequesting('найди зелёный ноутбук асус, не серебристый'));
 
         $result = json_decode(
-            (string) (new GetProductSearchIntent($update->id, 'zzz-scratch-laptops-intent'))
+            (string) (new GetProductSearchIntent($context, 'zzz-scratch-laptops-intent'))
                 ->handle(new ToolRequest),
             true,
             flags: JSON_THROW_ON_ERROR,
         );
 
-        $this->assertSame('найди зелёный ноутбук асус, не серебристый', $result['telegram_request_text']);
+        $this->assertSame('найди зелёный ноутбук асус, не серебристый', $result['original_operator_request']);
+        $this->assertSame('provided', $result['original_operator_request_status']);
+        $this->assertSame('X1504VA', $result['selected_product']['model']);
+        $this->assertSame([['key' => 'sku', 'value' => 'X1504VA-BQ4485']], $result['selected_product']['identifiers']);
+        $this->assertSame('Green', $result['selected_product']['color']);
         $this->assertSame('не используй фото товара в коробке', $result['category_search_hint']);
     }
 
-    public function test_both_fields_are_null_when_nothing_is_bound(): void
+    public function test_an_unbound_run_says_the_request_is_unavailable(): void
     {
         $result = json_decode(
-            (string) (new GetProductSearchIntent(null, null))->handle(new ToolRequest),
+            (string) (new GetProductSearchIntent(ProductRequestContext::unavailable(), null))->handle(new ToolRequest),
             true,
             flags: JSON_THROW_ON_ERROR,
         );
 
-        $this->assertNull($result['telegram_request_text']);
+        $this->assertNull($result['original_operator_request']);
+        $this->assertSame('unavailable', $result['original_operator_request_status']);
+        $this->assertNull($result['selected_product']);
         $this->assertNull($result['category_search_hint']);
     }
 
-    public function test_a_missing_category_hint_does_not_block_the_telegram_text(): void
+    public function test_a_missing_category_hint_does_not_block_the_request(): void
     {
-        $update = TelegramUpdate::query()->create([
-            'update_id' => random_int(1000, 9000),
-            'telegram_user_id' => '111',
-            'chat_id' => '222',
-            'message_id' => 1,
-            'payload' => [],
-            'text' => 'найди зелёный ноутбук асус',
-            'status' => 'processing',
-        ]);
+        $context = ProductRequestContext::forDraft($this->draftRequesting('найди зелёный ноутбук асус'));
 
         $result = json_decode(
-            (string) (new GetProductSearchIntent($update->id, 'no-such-category'))->handle(new ToolRequest),
+            (string) (new GetProductSearchIntent($context, 'no-such-category'))->handle(new ToolRequest),
             true,
             flags: JSON_THROW_ON_ERROR,
         );
 
-        $this->assertSame('найди зелёный ноутбук асус', $result['telegram_request_text']);
+        $this->assertSame('найди зелёный ноутбук асус', $result['original_operator_request']);
         $this->assertNull($result['category_search_hint']);
     }
 }

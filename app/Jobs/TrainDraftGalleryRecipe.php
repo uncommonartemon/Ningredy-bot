@@ -6,6 +6,7 @@ use App\Models\Category;
 use App\Models\ProductDraft;
 use App\Services\Products\OperatorDomainHintRecorder;
 use App\Services\Products\ProductGalleryRecipeTrainer;
+use App\Services\Products\ProductRequestContext;
 use App\Services\Telegram\TelegramClient;
 use App\Services\Telegram\TelegramProgressReporter;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -86,11 +87,16 @@ class TrainDraftGalleryRecipe implements ShouldQueue
                 }
             },
             true,
+            // The button press: budget, cancellation and audit of this run.
             $this->telegramUpdateId,
             context: [
                 'minimum_verified_images' => $category?->minimumVerifiedImages() ?? 3,
                 'minimum_image_width' => $category?->minimumImageWidth(),
                 'minimum_image_height' => $category?->minimumImageHeight(),
+                'category_slug' => $category?->slug,
+                // The request itself is the draft's; the hint below is added
+                // beside it, not in its place.
+                ProductRequestContext::CONTEXT_KEY => $draft->id,
             ],
             userHint: $this->hint,
         );

@@ -210,6 +210,10 @@ class ProductGalleryRecipeTrainer
         // ai_operations audit trail; null whenever this run has no Telegram
         // update at all (e.g. an admin-triggered TrainProductGalleryRecipe).
         $update = $telegramUpdateId ? TelegramUpdate::query()->find($telegramUpdateId) : null;
+        // What is being searched for comes from the draft, not from $update:
+        // a continued or retrained search runs under the button press that
+        // started it, whose text is a callback, not a product.
+        $productRequest = ProductRequestContext::fromContext($context)->withOperatorHint($userHint);
 
         if ($host === '') {
             return [];
@@ -338,7 +342,7 @@ class ProductGalleryRecipeTrainer
             $preflightDecision = 'train_playwright';
 
             if (! $forceInteractive) {
-                $preflight = $this->preflight($url, $pageScout, $scout['diagnostics'] ?? [], $context, $domainHint, $autoDomainHint, $provider, $model, $version, $telegramUpdateId, $debug);
+                $preflight = $this->preflight($url, $pageScout, $scout['diagnostics'] ?? [], $context, $domainHint, $autoDomainHint, $provider, $model, $version, $telegramUpdateId, $debug, $productRequest);
 
                 // An interrupted classification is a call that never reached the
                 // agent, and everything downstream reads it as "the gallery was
@@ -354,7 +358,7 @@ class ProductGalleryRecipeTrainer
                     && $this->timeBudget->canStart($telegramUpdateId, 20)
                     && ! $this->costBudget->exceeded($telegramUpdateId)) {
                     $debug?->__invoke('warning', 'AI-предфильтр не состоялся технически; повторяю один раз.');
-                    $preflight = $this->preflight($url, $pageScout, $scout['diagnostics'] ?? [], $context, $domainHint, $autoDomainHint, $provider, $model, $version, $telegramUpdateId, $debug);
+                    $preflight = $this->preflight($url, $pageScout, $scout['diagnostics'] ?? [], $context, $domainHint, $autoDomainHint, $provider, $model, $version, $telegramUpdateId, $debug, $productRequest);
                 }
 
                 $preflightDecision = (string) ($preflight['decision'] ?? 'no_gallery');
@@ -646,8 +650,7 @@ class ProductGalleryRecipeTrainer
                     'diagnostics' => $scout['diagnostics'] ?? [],
                     'preflight' => $preflight,
                     'domain_hint' => $domainHint,
-                    'operator_hint' => $userHint,
-                    'original_operator_request' => $update?->text,
+                    ...$productRequest->forAgent(),
                     // This is always the original, freshly loaded page. Every
                     // recipe execution starts from this state in a new browser
                     // process; post-interaction DOM is diagnostic feedback only.
@@ -728,6 +731,7 @@ class ProductGalleryRecipeTrainer
                             recipe: $recipe,
                             domainSettings: $domainSettings,
                             update: $update,
+                            productRequest: $productRequest,
                             abandonSignal: $abandonSignal,
                             visionImageUrls: $this->observedImageUrls($pageScout, [
                                 'feedback' => $feedback,
@@ -1809,9 +1813,14 @@ class ProductGalleryRecipeTrainer
         ProductGalleryRecipeVersion $version,
         ?int $telegramUpdateId,
         ?callable $debug,
+        ?ProductRequestContext $productRequest = null,
     ): array {
         $payload = [
             'url' => $url,
+            // Whether this page is the product card depends on which product:
+            // the same page is a card for one request and a sibling variant
+            // for another.
+            ...($productRequest ?? ProductRequestContext::unavailable())->forAgent(),
             'page' => $this->scoutForAgent($pageScout, false),
             'diagnostics' => $diagnostics,
             'domain_hint' => $domainHint,

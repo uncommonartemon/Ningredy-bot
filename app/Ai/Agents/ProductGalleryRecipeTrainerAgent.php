@@ -16,6 +16,7 @@ use App\Models\ProductSourceDomain;
 use App\Models\TelegramUpdate;
 use App\Services\Ai\AiSettings;
 use App\Services\Products\GalleryTrainingAbandonSignal;
+use App\Services\Products\ProductRequestContext;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
 use Laravel\Ai\Attributes\MaxSteps;
 use Laravel\Ai\Attributes\MaxTokens;
@@ -56,6 +57,10 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
         private readonly array $visionImageUrls = [],
         private readonly array $initialPageObservation = [],
         private readonly array $latestPageObservation = [],
+        // The request and the selected product, from the draft. $update stays
+        // the run's own update: it attributes the write tools' audit rows, and
+        // on a continued search its text is a button callback, not a request.
+        private readonly ?ProductRequestContext $productRequest = null,
     ) {}
 
     public function tools(): iterable
@@ -79,11 +84,15 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
                 $this->version?->id,
             ),
             new GetRecipeHealth($this->domain),
-            new GetProductSearchIntent($this->telegramUpdateId, $this->categorySlug),
+            new GetProductSearchIntent($this->productRequest ?? ProductRequestContext::unavailable(), $this->categorySlug),
         ];
 
         if ($this->visionImageUrls !== []) {
-            $tools[] = new InspectGalleryImages($this->visionImageUrls, $this->telegramUpdateId, $this->update?->text);
+            $tools[] = new InspectGalleryImages(
+                $this->visionImageUrls,
+                $this->telegramUpdateId,
+                $this->productRequest ?? ProductRequestContext::unavailable(),
+            );
         }
 
         if (app(AiSettings::class)->galleryAgentWriteToolsEnabled()) {

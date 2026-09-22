@@ -10,6 +10,7 @@ use App\Services\Ai\ProductSearchTimeBudget;
 use App\Services\Products\ProductImageEncoder;
 use App\Services\Products\ProductImageResolver;
 use App\Services\Products\ProductImageStorage;
+use App\Services\Products\ProductRequestContext;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
 use Laravel\Ai\Contracts\Tool;
 use Laravel\Ai\Files\Image;
@@ -32,8 +33,9 @@ class InspectGalleryImages implements Tool
     /** @param array<int, string> $allowedImageUrls */
     public function __construct(
         private readonly array $allowedImageUrls,
+        // Budget and audit key of the current run only.
         private readonly ?int $telegramUpdateId = null,
-        private readonly ?string $originalOperatorRequest = null,
+        private readonly ?ProductRequestContext $productRequest = null,
     ) {}
 
     public function description(): Stringable|string
@@ -132,7 +134,7 @@ class InspectGalleryImages implements Tool
         $timeout = $timeBudget->timeoutFor($this->telegramUpdateId, $settings->imageVisionTimeoutSeconds());
         $productContext = mb_substr(trim((string) $request->string('product_context')), 0, 1000);
         $prompt = json_encode([
-            'original_operator_request' => $this->originalOperatorRequest,
+            ...($this->productRequest ?? ProductRequestContext::unavailable())->forAgent(),
             'requested_product_context' => $productContext,
             'inspection_scope' => 'visual observations only; exact SKU must be proven from page evidence',
             'image_urls_in_attachment_order' => $inspectedUrls,
