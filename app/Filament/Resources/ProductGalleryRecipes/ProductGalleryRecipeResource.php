@@ -2,6 +2,7 @@
 
 namespace App\Filament\Resources\ProductGalleryRecipes;
 
+use App\Filament\Resources\LocalizedResource as Resource;
 use App\Filament\Resources\ProductGalleryRecipes\Pages\EditProductGalleryRecipe;
 use App\Filament\Resources\ProductGalleryRecipes\Pages\ListProductGalleryRecipes;
 use App\Filament\Resources\ProductGalleryRecipes\Pages\ViewProductGalleryRecipe;
@@ -10,7 +11,6 @@ use App\Filament\Resources\ProductGalleryRecipes\Schemas\ProductGalleryRecipeInf
 use App\Filament\Resources\ProductGalleryRecipes\Tables\ProductGalleryRecipesTable;
 use App\Models\ProductGalleryRecipe;
 use BackedEnum;
-use Filament\Resources\Resource;
 use Filament\Schemas\Schema;
 use Filament\Support\Icons\Heroicon;
 use Filament\Tables\Table;

@@ -18,6 +18,23 @@ import {
 } from '../../scripts/product-gallery-utils.mjs';
 
 const productUrl = 'https://www.cdw.com/product/example/8501080';
+test('asset role filters do not reject Silicon hosts or real Pixel products', () => {
+    for (const url of [
+        'https://siliconvalley.com.ph/wp-content/uploads/2026/03/ACER-15.6_-NOTEBOOKg-NITRO-ANV15-51-541P-OBSIDIAN-BLACK.png',
+        'https://shop.example/products/silicon-power-ssd.jpg',
+        'https://shop.example/products/google-pixel-9-pro.jpg',
+    ]) assert.equal(normalizeImageCandidate(url, productUrl), url);
+    for (const url of [
+        'https://shop.example/assets/site-logo.png',
+        'https://shop.example/assets/icon-123.jpg',
+        'https://shop.example/assets/video-poster.jpg',
+        'https://shop.example/assets/tracking-pixel.png',
+    ]) assert.equal(normalizeImageCandidate(url, productUrl), null);
+});
+test('a long observed action plan reaches the runner without truncation', () => {
+    const actions = Array.from({length: 24}, (_, i) => ({kind:'click', selector:'#media-'+i, index:0, limit:1, wait_after_ms:200, purpose:'Open media'}));
+    assert.deepEqual(normalizeRecipeActions(actions).map(a=>a.selector), actions.map(a=>a.selector));
+});
 test('rejects recommendation, related-product and review carousel contexts', () => {
     assert.equal(
         galleryContextLooksExcluded('What other items do customers buy after viewing this item?'),
@@ -534,6 +551,42 @@ test('deduplicates UUID filename renditions and keeps the larger rendition', () 
     assert.equal(imageAssetKey(expanded), imageAssetKey(alternateFormat));
     assert.notEqual(imageAssetKey(expanded), imageAssetKey(other));
     assert.ok(urlQualityScore(expanded) > urlQualityScore(thumb));
+});
+
+test('a digest filename is one photograph whatever directory and format serve it', () => {
+    // Request #93: one ispace.cz photograph in three renditions went out three times.
+    const digest = '8bd1e38bdef6105fb72196e38c35b6fbbef66d92';
+    const zoom = `https://cdn.ispace.cz/files/photos/1600/8/${digest}.webp`;
+    const slideWebp = `https://cdn.ispace.cz/files/photos/780/8/${digest}.webp`;
+    const slideJpeg = `https://cdn.ispace.cz/files/photos/780/8/${digest}.jpg`;
+    const otherSide = 'https://cdn.ispace.cz/files/photos/1600/a/a56906f6906d2174ad8fbfb8486ca83fb4d52ed5.webp';
+
+    assert.equal(imageAssetKey(zoom), imageAssetKey(slideWebp));
+    assert.equal(imageAssetKey(slideWebp), imageAssetKey(slideJpeg));
+    assert.notEqual(imageAssetKey(zoom), imageAssetKey(otherSide));
+    assert.equal(new Set(prioritizeCandidateRenditions([slideJpeg, zoom, otherSide, slideWebp]).map(imageAssetKey)).size, 2);
+    // A long number is an id, and two ids in one directory are two photographs.
+    assert.notEqual(
+        imageAssetKey('https://cdn.example/p/1/12345678901234567890123456789012.jpg'),
+        imageAssetKey('https://cdn.example/p/2/12345678901234567890123456789012.jpg'),
+    );
+});
+
+test('extensionless digest renditions share a frame without erasing selecting query parameters', () => {
+    const base = 'https://cdn.example/is/gallery/6b056720669b42889a14019342fec822';
+    const urls = [256, 384, 640, 750, 1080, 1920].map(x => `${base}?version=0&x=${x}&quality=75`);
+    assert.equal(new Set(urls.map(imageAssetKey)).size, 1);
+    for (const extension of ['', '.jpg']) {
+        const url = base + extension;
+        assert.notEqual(imageAssetKey(`${url}?id=front`), imageAssetKey(`${url}?id=back`));
+        assert.notEqual(imageAssetKey(`${url}?x=front`), imageAssetKey(`${url}?x=back`));
+        assert.notEqual(imageAssetKey(`${url}?id=a&id=b`), imageAssetKey(`${url}?id=b`));
+        assert.notEqual(imageAssetKey(`${url}?version=0`), imageAssetKey(`${url}?version=1`));
+        assert.notEqual(imageAssetKey(url), imageAssetKey(url.replace('cdn.example', 'other.example')));
+        assert.equal(imageAssetKey(`${url}?frame=front&x=256&version=0`), imageAssetKey(`${url}?version=0&x=1600&frame=front`));
+    }
+    const other = urls.map(url => url.replace('6b056720669b42889a14019342fec822', '64e60ab548694d5db567ae9d30b27855'));
+    assert.equal(new Set(prioritizeCandidateRenditions([...urls, ...other]).slice(0, 2).map(imageAssetKey)).size, 2);
 });
 
 test('respects the explicit action plan and keeps the automatic opener only for legacy traversal', () => {

@@ -1,4 +1,5 @@
 import { imageAssetKey, sameProductIdentity } from './product-gallery-utils.mjs';
+import { evaluateWithRecipeSelectors } from './recipe-dom-selectors.mjs';
 
 // A media widget has its own address/title; those are not a product conflict.
 // Explicit commercial identifiers published inside it must not contradict the card.
@@ -7,7 +8,7 @@ export const embeddedProductConflicts = (product, frame) => sameProductIdentity(
 ) === false;
 
 // Executed in the selected document, not on the whole page's network traffic.
-export const readTraversalMediaInPage = ({ selectors, positionSelector = '' }) => {
+export const readTraversalMediaInPage = ({ selectors, positionSelector = '', resolvedSelectors }) => {
     const visible = (el) => {
         const r = el.getBoundingClientRect();
         return r.width > 0 && r.height > 0 && el.checkVisibility({ checkVisibilityCSS: true, checkOpacity: true });
@@ -16,26 +17,31 @@ export const readTraversalMediaInPage = ({ selectors, positionSelector = '' }) =
     let busy = false;
     for (const selector of selectors) {
         try {
-            for (const root of document.querySelectorAll(selector)) {
+            for (const root of resolvedSelectors.elements[selector] || []) {
                 if (!visible(root)) continue;
                 busy ||= root.matches('[aria-busy=true]') || Boolean(root.closest('[aria-busy=true]'));
                 for (const img of root.matches('img') ? [root] : root.querySelectorAll('img')) {
                     if (visible(img)) images.add(img);
                 }
             }
-        } catch { /* Invalid selectors are returned as no evidence, never end-of-gallery. */ }
+        } catch { /* A detached node is not end-of-gallery. */ }
     }
     let position = '';
     try {
-        const node = positionSelector && document.querySelector(positionSelector);
+        const node = positionSelector && resolvedSelectors.elements[positionSelector]?.[0];
         if (node && visible(node)) position = (node.textContent || '').trim().slice(0, 200);
     } catch { /* No position evidence. */ }
     return {
         images: [...images].map((img) => ({ url: img.currentSrc || img.src,
             ready: img.complete && img.naturalWidth > 0, failed: img.complete && img.naturalWidth === 0 })),
-        busy, position,
+        busy, position, selector_errors: resolvedSelectors.errors,
     };
 };
+
+export const readTraversalMediaInDocument = (document, { selectors, positionSelector = '' }, onErrors = null) => (
+    evaluateWithRecipeSelectors(document, [...selectors, ...(positionSelector ? [positionSelector] : [])],
+        readTraversalMediaInPage, { selectors, positionSelector }, onErrors)
+);
 
 export const traversalMediaState = (observation) => {
     const images = observation?.images || [];
@@ -46,8 +52,9 @@ export const traversalMediaState = (observation) => {
         signature: keys.length ? JSON.stringify([
             [...new Set(keys)].sort(), observation.position || '',
         ]) : '',
-        ready: keys.length > 0 && !observation.busy && images.every((image) => image.ready),
+        ready: keys.length > 0 && !observation.busy && !observation.selector_errors?.length && images.every((image) => image.ready),
         failed: images.some((image) => image.failed),
+        selectorError: Boolean(observation?.selector_errors?.length),
     };
 };
 
@@ -59,6 +66,7 @@ export const waitForTraversalMedia = async (read, { deadline, settleMs = 150, po
     let state = { signature: '', ready: false, failed: false };
     while (Date.now() < deadline) {
         state = traversalMediaState(await read());
+        if (state.selectorError) return { ...state, status: 'invalid_recipe_selector' };
         if (state.signature !== previous || !state.ready) stableSince = Date.now();
         previous = state.signature;
         if (state.ready && Date.now() - stableSince >= settleMs) return { ...state, status: 'ready' };

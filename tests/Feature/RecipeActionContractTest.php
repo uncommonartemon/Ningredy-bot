@@ -91,6 +91,8 @@ class RecipeActionContractTest extends TestCase
                 "The action field [{$field}] was dropped between validation and execution.",
             );
         }
+
+        $this->assertSame('elements', $executed['actions'][0]['iteration_mode']);
     }
 
     public function test_an_invented_field_is_still_dropped(): void
@@ -151,6 +153,7 @@ class RecipeActionContractTest extends TestCase
         return [
             'kind' => 'click_each',
             'when' => 'if_present',
+            'iteration_mode' => 'elements',
             'selector' => '.gallery .thumb',
             'index' => 0,
             'limit' => 3,

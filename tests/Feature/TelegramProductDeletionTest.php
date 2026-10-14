@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Ai\Agents\ServerAssistantAgent;
 use App\Ai\Tools\PrepareProductDeletion;
 use App\Jobs\ProcessTelegramMessage;
+use App\Models\AiOperation;
 use App\Models\Brand;
 use App\Models\Category;
 use App\Models\Product;
@@ -109,6 +110,65 @@ class TelegramProductDeletionTest extends TestCase
         Storage::disk('public')->assertExists($path);
     }
 
+    public function test_old_confirmation_cannot_delete_a_changed_secondary_configuration(): void
+    {
+        [$product, $update, $path] = $this->productAndUpdate(withImage: true);
+        $product->variants()->create(['name' => 'Default', 'currency' => 'CZK', 'is_default' => true]);
+        $other = $product->variants()->create(['name' => 'Other', 'price' => 500, 'currency' => 'CZK']);
+        $prepared = json_decode((new PrepareProductDeletion($update))->handle(new Request(['product_id' => $product->id])), true);
+        $other->update(['price' => 600]);
+
+        $this->postDeletionCallback(71004, "product:delete:confirm:{$prepared['operation_id']}");
+
+        $this->assertDatabaseHas('products', ['id' => $product->id]);
+        $this->assertDatabaseHas('ai_operations', ['id' => $prepared['operation_id'], 'status' => 'stale']);
+        Storage::disk('public')->assertExists($path);
+        Http::assertSent(fn (HttpRequest $request) => str_ends_with($request->url(), '/sendMessage')
+            && str_contains($request['text'], 'Товар изменился'));
+    }
+
+    public function test_confirmation_expires_and_never_refreshes_on_tool_retry(): void
+    {
+        [$product, $update] = $this->productAndUpdate();
+        $tool = new PrepareProductDeletion($update);
+        $prepared = json_decode($tool->handle(new Request(['product_id' => $product->id])), true);
+        $this->travel(11)->minutes();
+        $tool->handle(new Request(['product_id' => $product->id]));
+        $this->postDeletionCallback(71005, "product:delete:confirm:{$prepared['operation_id']}");
+
+        $this->assertDatabaseHas('products', ['id' => $product->id]);
+        $this->assertDatabaseHas('ai_operations', ['id' => $prepared['operation_id'], 'status' => 'expired']);
+    }
+
+    public function test_cancel_then_old_confirm_never_deletes(): void
+    {
+        [$product, $update] = $this->productAndUpdate();
+        $prepared = json_decode((new PrepareProductDeletion($update))->handle(new Request(['product_id' => $product->id])), true);
+        $this->postDeletionCallback(71006, "product:delete:cancel:{$prepared['operation_id']}");
+        $this->postDeletionCallback(71007, "product:delete:confirm:{$prepared['operation_id']}");
+
+        $this->assertDatabaseHas('products', ['id' => $product->id]);
+        $this->assertDatabaseHas('ai_operations', ['id' => $prepared['operation_id'], 'status' => 'cancelled']);
+        $this->assertDatabaseHas('telegram_updates', ['update_id' => 71007, 'status' => 'already_processed']);
+    }
+
+    public function test_other_authorized_operator_cannot_confirm_delete_or_cancel_search(): void
+    {
+        [$product, $update] = $this->productAndUpdate();
+        config(['services.telegram.allowed_user_ids' => ['12345', '67890']]);
+        $prepared = json_decode((new PrepareProductDeletion($update))->handle(new Request(['product_id' => $product->id])), true);
+        $this->postDeletionCallback(71008, "product:delete:confirm:{$prepared['operation_id']}", userId: 67890);
+        $this->postDeletionCallback(71009, "search:cancel:{$update->id}", userId: 67890);
+        $this->postDeletionCallback(71010, "search:cancel:{$update->id}", chatId: 88888);
+
+        $this->assertDatabaseHas('products', ['id' => $product->id]);
+        $this->assertSame('awaiting_confirmation', AiOperation::find($prepared['operation_id'])->status);
+        $this->assertNull($update->fresh()->cancel_requested_at);
+        foreach ([71008, 71009, 71010] as $id) {
+            $this->assertDatabaseHas('telegram_updates', ['update_id' => $id, 'status' => 'rejected']);
+        }
+    }
+
     /** @return array{Product, TelegramUpdate, string} */
     private function productAndUpdate(bool $withImage = false): array
     {
@@ -152,17 +212,17 @@ class TelegramProductDeletionTest extends TestCase
         return [$product, $update, $path];
     }
 
-    private function postDeletionCallback(int $updateId, string $data): void
+    private function postDeletionCallback(int $updateId, string $data, int $userId = 12345, int $chatId = 98765): void
     {
         $this->postJson('/api/telegram/webhook', [
             'update_id' => $updateId,
             'callback_query' => [
                 'id' => "callback-{$updateId}",
-                'from' => ['id' => 12345, 'username' => 'admin'],
+                'from' => ['id' => $userId, 'username' => 'admin'],
                 'data' => $data,
                 'message' => [
                     'message_id' => 81,
-                    'chat' => ['id' => 98765],
+                    'chat' => ['id' => $chatId],
                 ],
             ],
         ], ['X-Telegram-Bot-Api-Secret-Token' => 'test-secret'])->assertOk();

@@ -2,6 +2,8 @@
 
 namespace App\Services\Products;
 
+use App\Services\Photos\ImageUrls;
+
 class BrowserProductImageTransferStore
 {
     /** @var array<string, array{bytes:string, source_url:string, mime_type:string, width:int, height:int}> */
@@ -46,15 +48,15 @@ class BrowserProductImageTransferStore
                 'height' => (int) $dimensions[1],
             ];
 
-            $this->images[ProductImageStorage::normalizeCandidateUrl($item['url'])] = $download;
-            $this->images[ProductImageStorage::normalizeCandidateUrl($sourceUrl)] = $download;
+            $this->images[ImageUrls::normalizeCandidateUrl($item['url'])] = $download;
+            $this->images[ImageUrls::normalizeCandidateUrl($sourceUrl)] = $download;
         }
     }
 
     /** @return array{bytes:string, source_url:string, mime_type:string, width:int, height:int}|null */
     public function get(string $url, int $maxBytes): ?array
     {
-        $image = $this->images[ProductImageStorage::normalizeCandidateUrl($url)] ?? null;
+        $image = $this->images[ImageUrls::normalizeCandidateUrl($url)] ?? null;
 
         return is_array($image) && strlen($image['bytes']) <= $maxBytes ? $image : null;
     }

@@ -15,7 +15,7 @@ class ViewAiRun extends ViewRecord
     {
         return [
             Action::make('openTelegramUpdate')
-                ->label('Открыть Telegram update')
+                ->label(__('Открыть Telegram update'))
                 ->icon('heroicon-o-arrow-top-right-on-square')
                 ->color('gray')
                 ->visible(fn (): bool => filled($this->record->telegram_update_id))

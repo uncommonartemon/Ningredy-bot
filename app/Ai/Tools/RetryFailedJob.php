@@ -32,9 +32,12 @@ class RetryFailedJob implements Tool
             'retry_failed_job',
             ['failed_job_id' => $id],
             function () use ($id): array {
-                throw_unless(DB::table('failed_jobs')->where('id', $id)->exists(), RuntimeException::class, 'Failed job not found.');
-                $exit = Artisan::call('queue:retry', ['id' => [$id]]);
+                $failed = DB::table('failed_jobs')->where('id', $id)->first();
+                throw_unless($failed, RuntimeException::class, 'Failed job not found.');
+                $identifier = config('queue.failed.driver') === 'database-uuids' ? $failed->uuid : $failed->id;
+                $exit = Artisan::call('queue:retry', ['id' => [$identifier]]);
                 throw_if($exit !== 0, RuntimeException::class, trim(Artisan::output()) ?: 'Queue retry failed.');
+                throw_if(DB::table('failed_jobs')->where('id', $id)->exists(), RuntimeException::class, 'Queue did not retry the failed job.');
 
                 return ['failed_job_id' => $id, 'queued' => true];
             },

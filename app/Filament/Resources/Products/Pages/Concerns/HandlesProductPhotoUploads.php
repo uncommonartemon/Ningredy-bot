@@ -18,7 +18,10 @@ trait HandlesProductPhotoUploads
 
     private function saveNewProductPhotos(): void
     {
-        app(ProductMediaUploader::class)->upload($this->getRecord(), $this->data['new_photos'] ?? []);
+        $uploaded = app(ProductMediaUploader::class)->upload($this->getRecord(), $this->data['new_photos'] ?? []);
         $this->data['new_photos'] = [];
+        if ($uploaded > 0) {
+            $this->dispatch('product-photos-updated.'.$this->getRecord()->getKey());
+        }
     }
 }

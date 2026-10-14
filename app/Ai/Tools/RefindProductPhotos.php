@@ -35,16 +35,17 @@ class RefindProductPhotos implements Tool
         $productId = $request->integer('product_id');
         $replacePositions = $request->array('replace_positions');
         $fresh = $request->boolean('fresh');
+        $variantId = $request->integer('variant_id') ?: null;
 
         $result = $this->recordOperation(
             $this->update,
             class_basename(self::class),
             'refind_product_photos',
-            ['product_id' => $productId, 'replace_positions' => $replacePositions, 'fresh' => $fresh],
-            function () use ($productId, $replacePositions, $fresh): array {
+            ['product_id' => $productId, 'replace_positions' => $replacePositions, 'fresh' => $fresh, 'variant_id' => $variantId],
+            function () use ($productId, $replacePositions, $fresh, $variantId): array {
                 $product = Product::query()->find($productId);
                 throw_if(! $product, ModelNotFoundException::class, 'Product not found.');
-                $started = app(ProductPhotoManager::class)->refind($product, $replacePositions, $fresh);
+                $started = app(ProductPhotoManager::class)->refind($product, $replacePositions, $fresh, $this->update, $variantId);
 
                 return $started
                     ? ['ok' => true, 'product_id' => $product->id, 'status' => 'search_started']
@@ -61,6 +62,7 @@ class RefindProductPhotos implements Tool
     {
         return [
             'product_id' => $schema->integer()->required(),
+            'variant_id' => $schema->integer(),
             'replace_positions' => $schema->array()->items($schema->integer())->required(),
             'fresh' => $schema->boolean()->required(),
         ];

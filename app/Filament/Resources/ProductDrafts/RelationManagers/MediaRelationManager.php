@@ -2,6 +2,7 @@
 
 namespace App\Filament\Resources\ProductDrafts\RelationManagers;
 
+use App\Filament\Resources\LocalizedRelationManager as RelationManager;
 use App\Models\ProductDraftMedia;
 use Filament\Actions\BulkActionGroup;
 use Filament\Actions\DeleteAction;
@@ -9,7 +10,6 @@ use Filament\Actions\DeleteBulkAction;
 use Filament\Actions\ViewAction;
 use Filament\Infolists\Components\ImageEntry;
 use Filament\Infolists\Components\TextEntry;
-use Filament\Resources\RelationManagers\RelationManager;
 use Filament\Schemas\Schema;
 use Filament\Tables\Columns\IconColumn;
 use Filament\Tables\Columns\ImageColumn;
@@ -31,14 +31,14 @@ class MediaRelationManager extends RelationManager
     public function infolist(Schema $schema): Schema
     {
         return $schema->components([
-            ImageEntry::make('path')->label('Фото')->disk('public')->columnSpanFull(),
-            TextEntry::make('source_url')->label('Источник')->url(fn (?string $state): ?string => $state)->openUrlInNewTab()->placeholder('—'),
-            TextEntry::make('role')->label('Назначение')->badge(),
-            TextEntry::make('verification_status')->label('Проверка')->badge(),
-            TextEntry::make('verification_notes')->label('Комментарий проверки')->placeholder('—')->columnSpanFull(),
-            TextEntry::make('dimensions')->label('Размер')
+            ImageEntry::make('path')->label(__('Фото'))->disk('public')->columnSpanFull(),
+            TextEntry::make('source_url')->label(__('Источник'))->url(fn (?string $state): ?string => $state)->openUrlInNewTab()->placeholder('—'),
+            TextEntry::make('role')->label(__('Назначение'))->badge(),
+            TextEntry::make('verification_status')->label(__('Проверка'))->badge(),
+            TextEntry::make('verification_notes')->label(__('Комментарий проверки'))->placeholder('—')->columnSpanFull(),
+            TextEntry::make('dimensions')->label(__('Размер'))
                 ->state(fn (ProductDraftMedia $record): string => ($record->width && $record->height) ? "{$record->width}×{$record->height}" : '—'),
-            TextEntry::make('file_size')->label('Вес, КБ')->state(fn (ProductDraftMedia $record): ?string => $record->file_size ? number_format($record->file_size / 1024, 0) : null)->placeholder('—'),
+            TextEntry::make('file_size')->label(__('Вес, КБ'))->state(fn (ProductDraftMedia $record): ?string => $record->file_size ? number_format($record->file_size / 1024, 0) : null)->placeholder('—'),
         ]);
     }
 
@@ -49,29 +49,29 @@ class MediaRelationManager extends RelationManager
             ->defaultSort('sort_order')
             ->columns([
                 ImageColumn::make('path')
-                    ->label('Фото')
+                    ->label(__('Фото'))
                     ->disk('public')
                     ->square()
                     ->imageSize(84),
                 TextColumn::make('role')
-                    ->label('Назначение')
+                    ->label(__('Назначение'))
                     ->badge()
                     ->formatStateUsing(fn (?string $state): string => match ($state) {
-                        'primary' => 'Главное',
-                        'gallery' => 'Галерея',
-                        default => 'Деталь',
+                        'primary' => __('Главное'),
+                        'gallery' => __('Галерея'),
+                        default => __('Деталь'),
                     }),
-                IconColumn::make('is_primary')->label('Главное')->boolean(),
+                IconColumn::make('is_primary')->label(__('Главное'))->boolean(),
                 TextColumn::make('verification_status')
-                    ->label('Проверка')
+                    ->label(__('Проверка'))
                     ->badge()
                     ->formatStateUsing(fn (?string $state): string => match ($state) {
                         'verified' => 'Vision',
-                        'source_verified' => 'Подтверждено источником',
-                        'manual' => 'Вручную',
-                        'rejected' => 'Отклонено',
-                        'hint_override' => 'Нарушает подсказку',
-                        default => 'Не проверено',
+                        'source_verified' => __('Подтверждено источником'),
+                        'manual' => __('Вручную'),
+                        'rejected' => __('Отклонено'),
+                        'hint_override' => __('Нарушает подсказку'),
+                        default => __('Не проверено'),
                     })
                     ->color(fn (?string $state): string => match ($state) {
                         'verified' => 'success',
@@ -82,17 +82,17 @@ class MediaRelationManager extends RelationManager
                         default => 'warning',
                     }),
                 TextColumn::make('dimensions')
-                    ->label('Размер')
+                    ->label(__('Размер'))
                     ->state(fn (ProductDraftMedia $record): string => ($record->width && $record->height)
                         ? "{$record->width}×{$record->height}"
                         : '—'),
                 TextColumn::make('source_url')
-                    ->label('Источник')
+                    ->label(__('Источник'))
                     ->limit(40)
                     ->placeholder('—')
                     ->url(fn (?string $state): ?string => $state, true)
                     ->toggleable(),
-                TextColumn::make('sort_order')->label('Порядок')->sortable(),
+                TextColumn::make('sort_order')->label(__('Порядок'))->sortable(),
             ])
             ->recordActions([
                 ViewAction::make(),
@@ -103,7 +103,7 @@ class MediaRelationManager extends RelationManager
                     DeleteBulkAction::make(),
                 ]),
             ])
-            ->emptyStateHeading('Фото ещё не найдены')
-            ->emptyStateDescription('Галерея заполняется автоматически поиском фото.');
+            ->emptyStateHeading(__('Фото ещё не найдены'))
+            ->emptyStateDescription(__('Галерея заполняется автоматически поиском фото.'));
     }
 }

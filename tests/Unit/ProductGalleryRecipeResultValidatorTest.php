@@ -10,6 +10,25 @@ class ProductGalleryRecipeResultValidatorTest extends TestCase
 {
     use RefreshDatabase;
 
+    public function test_explicit_iteration_mode_requires_a_measured_traversal_end_but_legacy_remains_compatible(): void
+    {
+        $recipe = ['gallery_present' => true, 'content_confirmed_product' => true,
+            'actions' => [['kind' => 'click_each', 'selector' => '#thumb', 'limit' => 1]]];
+        $result = ['images' => $this->images(3), 'diagnostics' => ['observed_gallery_count' => 3],
+            'action_trace' => [['action' => 'click_each', 'action_index' => 0, 'clicked' => true,
+                'changed' => false, 'selector_match_count' => 1]]];
+        $validator = app(ProductGalleryRecipeResultValidator::class);
+        $this->assertTrue($validator->validate($recipe, $result)['passed']);
+        foreach (['elements', 'repeat'] as $mode) {
+            $recipe['actions'][0]['iteration_mode'] = $mode;
+            $validation = $validator->validate($recipe, $result);
+            $this->assertFalse($validation['passed']);
+            $this->assertStringContainsString('traversal_not_confirmed', $validation['reason']);
+        }
+        $result['action_trace'][0]['traversal_complete'] = true;
+        $this->assertTrue($validator->validate($recipe, $result)['passed']);
+    }
+
     public function test_explicit_incomplete_traversal_cannot_pass_by_count_or_unchanged_click(): void
     {
         $recipe = ['gallery_present' => true, 'content_confirmed_product' => true,
@@ -641,6 +660,30 @@ class ProductGalleryRecipeResultValidatorTest extends TestCase
 
         $this->assertTrue($result['passed']);
         $this->assertStringContainsString('after_each_selector', $result['quality_observation']);
+    }
+
+    public function test_complete_small_gallery_with_unexplored_main_image_control_returns_to_agent(): void
+    {
+        $recipe = ['gallery_present' => true, 'content_confirmed_product' => true, 'expected_image_count' => 3];
+        $result = [
+            'images' => $this->images(3),
+            'diagnostics' => ['validated_image_evidence' => [['width' => 820, 'height' => 501]]],
+            'post_interaction_scout' => ['action_candidates' => [[
+                'selector' => '#main-image', 'aria_label' => 'Click to zoom in',
+                'within_media' => true, 'in_viewport' => true, 'contains_image' => true,
+                'rect' => ['width' => 664, 'height' => 664],
+            ]]],
+        ];
+        $validator = app(ProductGalleryRecipeResultValidator::class);
+        $validation = $validator->validate($recipe, $result);
+        $this->assertTrue($validation['passed'], 'Traversal compatibility is separate from the unresolved opportunity.');
+        $this->assertTrue($validation['needs_source_quality_diagnosis']);
+        $this->assertSame('#main-image', $validation['unexplored_media_control']['selector']);
+        $result['post_interaction_scout']['action_candidates'][0]['within_media'] = false;
+        $this->assertFalse($validator->validate($recipe, $result)['needs_source_quality_diagnosis'], 'A header magnifier must not trigger gallery repair.');
+        $result['post_interaction_scout']['action_candidates'][0]['within_media'] = true;
+        $result['action_trace'] = [['clicked' => true, 'expanded_gallery_visible_after' => true]];
+        $this->assertFalse($validator->validate($recipe, $result)['needs_source_quality_diagnosis'], 'An opened viewer is a resolved investigation, even if its images did not grow.');
     }
 
     public function test_unprobed_urls_cannot_publish_a_recipe(): void

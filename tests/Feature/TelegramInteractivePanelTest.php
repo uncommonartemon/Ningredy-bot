@@ -46,6 +46,25 @@ class TelegramInteractivePanelTest extends TestCase
         ]);
     }
 
+    public function test_status_and_catalog_commands_are_free_and_do_not_start_the_agent(): void
+    {
+        Queue::fake();
+        foreach (['/status', '🖥 Статус', '/catalog', '📦 Каталог'] as $index => $text) {
+            $this->postJson('/api/telegram/webhook', [
+                'update_id' => 903001 + $index,
+                'message' => ['message_id' => 70 + $index, 'from' => ['id' => 12345],
+                    'chat' => ['id' => 98765], 'text' => $text],
+            ], $this->headers())->assertOk();
+            $this->assertDatabaseHas('telegram_updates', ['update_id' => 903001 + $index, 'status' => 'command']);
+        }
+        Queue::assertNothingPushed();
+        $this->assertDatabaseCount('ai_runs', 0);
+        Http::assertSent(fn (ClientRequest $request): bool => str_ends_with($request->url(), '/sendMessage')
+            && str_contains($request['text'], 'Состояние проекта'));
+        Http::assertSent(fn (ClientRequest $request): bool => str_ends_with($request->url(), '/sendMessage')
+            && str_contains($request['text'], 'нет опубликованных товаров'));
+    }
+
     public function test_start_command_shows_the_main_keyboard_without_starting_ai(): void
     {
         Queue::fake();
@@ -105,7 +124,10 @@ class TelegramInteractivePanelTest extends TestCase
             'sources' => [['title' => 'Store', 'url' => 'https://example.com/product']],
             'image_urls' => ['https://example.com/product.jpg'],
             'confidence' => 0.8,
+            'primary_source_url' => 'https://example.com/product',
+            'specifications_reconciled_source_url' => 'https://example.com/product',
         ]);
+        Storage::disk('public')->put("drafts/{$draft->id}/photo-1.webp", $this->jpeg());
         $draft->media()->create([
             'disk' => 'public',
             'path' => "drafts/{$draft->id}/photo-1.webp",
@@ -712,19 +734,22 @@ class TelegramInteractivePanelTest extends TestCase
         $this->assertDatabaseMissing('product_gallery_recipes', ['domain' => 'amazon.com']);
         Http::assertSent(fn (ClientRequest $request): bool => str_ends_with($request->url(), '/sendMessage')
             && str_contains((string) ($request['text'] ?? ''), 'amazon.com')
-            && data_get($request['reply_markup'] ?? [], 'inline_keyboard.0.0.callback_data') === "draft:source-block-confirm:{$draft->id}");
+            && str_starts_with(data_get($request['reply_markup'] ?? [], 'inline_keyboard.0.0.callback_data', ''), "draft:confirm:{$draft->id}:"));
     }
 
     public function test_source_block_confirm_blocks_the_domain_for_all_future_searches(): void
     {
         $draft = $this->pendingDraftWithMedia();
+        $state = app(DraftTelegramInteractionState::class)->remember('98765', '12345', $draft, 'confirmation', [
+            'callback' => "draft:source-block-confirm:{$draft->id}", 'host' => 'amazon.com',
+        ]);
 
         $this->postJson('/api/telegram/webhook', [
             'update_id' => 3306,
             'callback_query' => [
                 'id' => 'callback-source-block-confirm',
                 'from' => ['id' => 12345, 'username' => 'admin'],
-                'data' => "draft:source-block-confirm:{$draft->id}",
+                'data' => "draft:confirm:{$draft->id}:{$state['token']}",
                 'message' => [
                     'message_id' => 82,
                     'chat' => ['id' => 98765],

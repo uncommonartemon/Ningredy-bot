@@ -2,7 +2,6 @@
 
 namespace App\Models;
 
-use App\Services\Ai\AiSettings;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
@@ -10,6 +9,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 class ProductDraft extends Model
 {
     protected $fillable = [
+        'condition', 'translations', 'specification_evidence',
         'telegram_update_id', 'ai_run_id', 'status', 'reviewed_at', 'reviewed_by_user_id',
         'reviewed_by_telegram_user_id', 'rejection_reason', 'requested_by_telegram_user_id',
         'approved_product_id', 'approved_variant_id',
@@ -25,6 +25,7 @@ class ProductDraft extends Model
     protected function casts(): array
     {
         return [
+            'translations' => 'array', 'specification_evidence' => 'array',
             'specifications' => 'array', 'sources' => 'array', 'image_urls' => 'array',
             'excluded_gallery_source_urls' => 'array',
             'excluded_gallery_image_urls' => 'array',
@@ -65,40 +66,31 @@ class ProductDraft extends Model
         }
     }
 
-    /**
-     * A reconciliation confirmation is a claim about ONE exact set of card
-     * values against ONE exact source - a matching source_url alone does
-     * not mean the values it was confirmed against are still the ones on
-     * the draft. Any save that changes what was actually confirmed outside
-     * ProductImageStorage's own reconciliation write - a manual edit, a
-     * hint - invalidates the stamp rather than leaving it pointing at
-     * values that no longer match what it once verified.
-     */
-    /**
-     * Whether this draft is still waiting for its card to be reconciled
-     * against the source its photos came from - the one question every gate
-     * that withholds a draft from review or publication actually asks.
-     *
-     * It lives here because seven separate places used to ask it by
-     * comparing the two columns inline (the approval workflow, the Telegram
-     * presenter and its buttons, the research tool, both gallery jobs, the
-     * Filament publish action). That made AiSettings::specificationReconciliation
-     * Enabled() a switch that turned the checker off without turning the
-     * BLOCKING off: no run would ever write the stamp again, and every gate
-     * kept reading a stamp that could no longer arrive, so every draft stayed
-     * blocked for ever. A kill switch whose only effect is to wedge the
-     * pipeline shut is not a kill switch - so the switch is answered here,
-     * once, for all of them.
-     */
+    /** Disabling new checks does not manufacture confirmation of this card. */
     public function reconciliationPending(): bool
     {
-        if (! app(AiSettings::class)->specificationReconciliationEnabled()) {
+        // Manual intake has its own explicit readiness and file checks. Missing
+        // provenance on an AI/legacy draft must never manufacture approval.
+        if ($this->isManualUpload()) {
             return false;
         }
 
         return $this->gallery_search_stop_reason === 'specifications_unreconciled'
-            || (trim((string) $this->primary_source_url) !== ''
-                && $this->specifications_reconciled_source_url !== $this->primary_source_url);
+            || trim((string) $this->primary_source_url) === ''
+            || $this->specifications_reconciled_source_url !== $this->primary_source_url;
+    }
+
+    public function isManualUpload(): bool
+    {
+        return (bool) data_get($this->telegramUpdate?->payload, '_manual_product_upload', false);
+    }
+
+    /** Original operator material and commercial terms stay separate from web evidence. */
+    public function manualIntake(): array
+    {
+        $intake = data_get($this->telegramUpdate?->payload, '_manual_product_intake', []);
+
+        return is_array($intake) ? $intake : [];
     }
 
     protected static function booted(): void
@@ -108,7 +100,9 @@ class ProductDraft extends Model
                 return;
             }
 
-            $confirmedFields = ['title', 'model', 'color', 'description', 'specifications'];
+            $confirmedFields = ['title', 'brand', 'model', 'product_type', 'category', 'color', 'condition',
+                'description', 'translations', 'specifications', 'specification_evidence',
+                'sources', 'primary_source_url', 'official_source_url'];
 
             if (collect($confirmedFields)->contains(fn (string $field): bool => $draft->isDirty($field))) {
                 $draft->specifications_reconciled_source_url = null;

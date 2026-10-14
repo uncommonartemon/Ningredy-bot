@@ -5,6 +5,7 @@ namespace Tests\Unit;
 use App\Models\AiRun;
 use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
+use App\Services\Ai\AiSettings;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
 
@@ -71,6 +72,22 @@ class ProductDraftReconciliationStampTest extends TestCase
 
         $draft->refresh();
         $this->assertNull($draft->specifications_reconciled_source_url);
+    }
+
+    public function test_disabling_checks_does_not_confirm_a_pending_card_or_unconfirm_a_ready_one(): void
+    {
+        app(AiSettings::class)->saveSpecificationReconciliationEnabled(false);
+        $draft = $this->seedReconciledDraft();
+        $this->assertFalse($draft->reconciliationPending());
+        $draft->update(['description' => 'Different description']);
+        $this->assertTrue($draft->fresh()->reconciliationPending());
+    }
+
+    public function test_editing_translated_claims_invalidates_the_confirmation_too(): void
+    {
+        $draft = $this->seedReconciledDraft();
+        $draft->update(['translations' => ['cs' => ['title' => 'Other configuration', 'description' => '32 GB']]]);
+        $this->assertNull($draft->fresh()->specifications_reconciled_source_url);
     }
 
     public function test_reconciling_against_a_new_source_in_the_same_call_does_not_invalidate_itself(): void

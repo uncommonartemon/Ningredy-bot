@@ -27,16 +27,16 @@ class TelegramUpdatesTable
                 TextColumn::make('chat_id')->label('Chat ID')->searchable()->copyable(),
                 TextColumn::make('telegram_user_id')->label('Telegram user')->searchable()->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('message_id')->label('Message ID')->numeric()->toggleable(isToggledHiddenByDefault: true),
-                TextColumn::make('username')->label('Пользователь')->searchable()->placeholder('—'),
-                TextColumn::make('text')->label('Текст')->limit(50)->tooltip(fn (TelegramUpdate $record): ?string => $record->text)->placeholder('—'),
+                TextColumn::make('username')->label(__('Пользователь'))->searchable()->placeholder('—'),
+                TextColumn::make('text')->label(__('Текст'))->limit(50)->tooltip(fn (TelegramUpdate $record): ?string => $record->text)->placeholder('—'),
                 TextColumn::make('status')
-                    ->label('Статус')
+                    ->label(__('Статус'))
                     ->badge()
                     ->formatStateUsing(fn (string $state): string => match ($state) {
-                        'processed' => 'Обработано',
-                        'received' => 'Получено',
-                        'failed' => 'Ошибка',
-                        'cancelled' => 'Отменено',
+                        'processed' => __('Обработано'),
+                        'received' => __('Получено'),
+                        'failed' => __('Ошибка'),
+                        'cancelled' => __('Отменено'),
                         default => $state,
                     })
                     ->color(fn (string $state): string => match ($state) {
@@ -47,28 +47,28 @@ class TelegramUpdatesTable
                         default => 'gray',
                     }),
                 TextColumn::make('duration')
-                    ->label('Обработка')
+                    ->label(__('Обработка'))
                     ->state(fn (TelegramUpdate $record): ?string => $record->processed_at
                         ? $record->created_at->diffForHumans($record->processed_at, syntax: CarbonInterface::DIFF_ABSOLUTE, short: true)
                         : null)
                     ->placeholder('—'),
                 TextColumn::make('product_drafts_count')
-                    ->label('Черновики')
+                    ->label(__('Черновики'))
                     ->badge()
                     ->url(fn (TelegramUpdate $record): ?string => $record->product_drafts_count > 0
                         ? ProductDraftResource::getUrl('index', ['tableFilters' => ['telegram_update_id' => ['value' => $record->id]]])
                         : null),
-                TextColumn::make('created_at')->label('Получено')->dateTime('d.m.Y H:i:s')->sortable(),
-                TextColumn::make('processed_at')->label('Обработано в')->dateTime('d.m.Y H:i:s')->sortable()->placeholder('—')->toggleable(),
-                TextColumn::make('cancel_requested_at')->label('Запрошена отмена')->dateTime('d.m.Y H:i:s')->placeholder('—')->toggleable(isToggledHiddenByDefault: true),
-                TextColumn::make('error')->label('Ошибка')->limit(50)->placeholder('—')->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('created_at')->label(__('Получено'))->dateTime('d.m.Y H:i:s')->sortable(),
+                TextColumn::make('processed_at')->label(__('Обработано в'))->dateTime('d.m.Y H:i:s')->sortable()->placeholder('—')->toggleable(),
+                TextColumn::make('cancel_requested_at')->label(__('Запрошена отмена'))->dateTime('d.m.Y H:i:s')->placeholder('—')->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('error')->label(__('Ошибка'))->limit(50)->placeholder('—')->toggleable(isToggledHiddenByDefault: true),
             ])
             ->filters([
-                SelectFilter::make('status')->label('Статус')->options([
-                    'processed' => 'Обработано',
-                    'received' => 'Получено',
-                    'failed' => 'Ошибка',
-                    'cancelled' => 'Отменено',
+                SelectFilter::make('status')->label(__('Статус'))->options([
+                    'processed' => __('Обработано'),
+                    'received' => __('Получено'),
+                    'failed' => __('Ошибка'),
+                    'cancelled' => __('Отменено'),
                 ]),
                 Filter::make('chat_id')
                     ->schema([
@@ -80,8 +80,8 @@ class TelegramUpdatesTable
                     )),
                 Filter::make('created_at')
                     ->schema([
-                        DatePicker::make('from')->label('С'),
-                        DatePicker::make('until')->label('По'),
+                        DatePicker::make('from')->label(__('С')),
+                        DatePicker::make('until')->label(__('По')),
                     ])
                     ->query(fn (Builder $query, array $data): Builder => $query
                         ->when($data['from'] ?? null, fn (Builder $q, $date) => $q->whereDate('created_at', '>=', $date))

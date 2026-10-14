@@ -7,6 +7,7 @@ use App\Models\AiRun;
 use App\Models\ProductDraft;
 use App\Services\Ai\AiSettings;
 use App\Services\Ai\OpenAiHeavyOperationGate;
+use App\Services\Ai\ProductSearchCostBudget;
 use App\Services\Ai\ProductSearchTimeBudget;
 use Illuminate\Support\Facades\Validator;
 use Throwable;
@@ -37,15 +38,22 @@ class ProductSourceIdentityJudge
     /** @param array<string, mixed> $source */
     public function judge(ProductDraft $draft, array $source, ?int $telegramUpdateId): string
     {
+        return $this->evaluate($draft, $source, $telegramUpdateId, false);
+    }
+
+    /** The same semantic check/cache, within the already-started assembly window. */
+    public function judgeForAssembly(ProductDraft $draft, array $source, ?int $telegramUpdateId, ?array $proposedCard = null): string
+    {
+        return $this->evaluate($draft, $source, $telegramUpdateId, true, $proposedCard);
+    }
+
+    private function evaluate(ProductDraft $draft, array $source, ?int $telegramUpdateId, bool $assembly, ?array $proposedCard = null): string
+    {
         if (! $this->settings->sourceIdentityAgentEnabled()) {
             return 'unavailable';
         }
 
         $updateId = $telegramUpdateId ?? $draft->telegram_update_id;
-
-        if (! $this->timeBudget->canStart($updateId, 10)) {
-            return 'unavailable';
-        }
 
         $identifiers = collect($draft->specifications ?? [])
             ->filter(fn (mixed $item): bool => is_array($item) && in_array($item['key'] ?? null, [
@@ -69,6 +77,7 @@ class ProductSourceIdentityJudge
             ? $draft->telegramUpdate?->text
             : $draft->telegramUpdate()->value('text');
         $payload = [
+            'verification_stage' => $assembly ? 'assembled_offer' : 'source_eligibility',
             // What the operator actually asked for, not only what research
             // settled on. A page naming a different specific configuration
             // than requested_model/requested_identifiers is not automatically
@@ -83,12 +92,41 @@ class ProductSourceIdentityJudge
             'requested_color' => $draft->color,
             'evidence_url' => $source['url'] ?? null,
             'evidence_title' => $source['title'] ?? null,
-            'evidence_text' => mb_substr($evidenceText, 0, 2000),
+            'evidence_text' => mb_substr($evidenceText, 0, $proposedCard !== null ? 12000 : 2000),
         ];
+        if ($proposedCard !== null) {
+            // This verdict concerns the proposed whole card, not merely whether
+            // the page fits a broad request. Include it in the cache key too.
+            $payload['proposed_card'] = array_intersect_key($proposedCard,
+                array_flip(['title', 'model', 'color', 'description', 'specifications']));
+        }
         $prompt = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?: '{}';
         $provider = $this->settings->providerFor('product_source_identity');
         $model = $this->settings->modelFor('product_source_identity');
-        $timeout = $this->timeBudget->timeoutFor($updateId, (int) config('services.product_source_identity.timeout', 20));
+        // Main-source and fallback paths can ask the identical question.
+        // Reuse only a completed verdict for this exact input and search;
+        // technical failures are not cached as product evidence.
+        $cached = $updateId ? AiRun::query()
+            ->where('telegram_update_id', $updateId)
+            ->where('provider', $provider)
+            ->where('model', $model)
+            ->where('prompt', $prompt)
+            ->where('status', 'completed')
+            ->latest('id')->first() : null;
+        $cachedMatch = $cached?->response['match'] ?? null;
+        if (in_array($cachedMatch, ['confirmed', 'conflicting', 'uncertain'], true)) {
+            return $cachedMatch;
+        }
+        if ($assembly
+            ? ! $this->timeBudget->assemblyCanStart($updateId, 10)
+            : (! $this->timeBudget->canStart($updateId, 10) || app(ProductSearchCostBudget::class)->exceeded($updateId))) {
+            return 'unavailable';
+        }
+
+        $configuredTimeout = (int) config('services.product_source_identity.timeout', 20);
+        $timeout = $assembly
+            ? $this->timeBudget->assemblyTimeoutFor($updateId, $configuredTimeout)
+            : $this->timeBudget->timeoutFor($updateId, $configuredTimeout);
         $run = $updateId ? AiRun::query()->create([
             'telegram_update_id' => $updateId,
             'provider' => $provider,

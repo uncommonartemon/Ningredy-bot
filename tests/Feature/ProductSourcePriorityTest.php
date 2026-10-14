@@ -12,6 +12,24 @@ class ProductSourcePriorityTest extends TestCase
 {
     use RefreshDatabase;
 
+    public function test_proven_domains_do_not_recommend_a_subdomain_of_a_blocked_shop(): void
+    {
+        ProductGalleryRecipe::query()->create([
+            'domain' => 'shop.example', 'path_pattern' => '*',
+            'status' => 'disabled', 'source_blocked' => true,
+        ]);
+        foreach (['store.shop.example', 'other.example'] as $domain) {
+            ProductGalleryRecipe::query()->create([
+                'domain' => $domain, 'path_pattern' => '*',
+                'status' => 'active', 'success_count' => 3,
+            ]);
+        }
+
+        $priority = app(ProductSourcePriority::class);
+        $this->assertTrue($priority->isBlockedUrl('https://store.shop.example/product'));
+        $this->assertSame(['other.example'], $priority->provenDomains());
+    }
+
     public function test_unknown_sources_keep_input_order_regardless_of_source_type(): void
     {
         $sources = [

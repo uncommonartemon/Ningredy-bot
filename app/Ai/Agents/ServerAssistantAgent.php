@@ -193,7 +193,7 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
             new SearchCatalog,
             new GetProduct,
             new ResearchProduct($this->update, app(ProductImageResolver::class)),
-            new ListPendingDrafts,
+            new ListPendingDrafts($this->update),
             new GetSystemStatus,
             new GetRecentErrors,
             new SetProductActive($this->update),

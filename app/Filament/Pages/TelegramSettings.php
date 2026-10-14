@@ -2,6 +2,7 @@
 
 namespace App\Filament\Pages;
 
+use App\Filament\Pages\LocalizedPage as Page;
 use App\Models\AppSetting;
 use App\Services\Telegram\TelegramWebhookManager;
 use BackedEnum;
@@ -11,7 +12,6 @@ use Filament\Forms\Components\TextInput;
 use Filament\Forms\Concerns\InteractsWithForms;
 use Filament\Forms\Contracts\HasForms;
 use Filament\Notifications\Notification;
-use Filament\Pages\Page;
 use Filament\Schemas\Components\Actions;
 use Filament\Schemas\Components\EmbeddedSchema;
 use Filament\Schemas\Components\Form;
@@ -50,26 +50,26 @@ class TelegramSettings extends Page implements HasForms
     public function form(Schema $schema): Schema
     {
         return $schema
-            ->components([Section::make('Подключение и доступ')->schema([
+            ->components([Section::make(__('Подключение и доступ'))->schema([
                 TextInput::make('proxy_url')
-                    ->label('Публичный proxy URL')
+                    ->label(__('Публичный proxy URL'))
                     ->placeholder('https://example.ngrok-free.app')
-                    ->helperText('Можно указать базовый URL или полный /api/telegram/webhook.')
+                    ->helperText(__('Можно указать базовый URL или полный /api/telegram/webhook.'))
                     ->url()
                     ->rules(['starts_with:https://'])
                     ->required()
                     ->live(onBlur: true)
                     ->suffixAction(
                         Action::make('setWebhook')
-                            ->label('Установить webhook')
+                            ->label(__('Установить webhook'))
                             ->icon('heroicon-m-link')
                             ->button()
                             ->action('setWebhook'),
                     ),
                 Textarea::make('allowed_user_ids')
-                    ->label('Разрешённые Telegram ID')
+                    ->label(__('Разрешённые Telegram ID'))
                     ->placeholder("123456789\n987654321")
-                    ->helperText('По одному ID на строку (или через запятую). Пусто — никто не сможет писать боту.')
+                    ->helperText(__('По одному ID на строку (или через запятую). Пусто — никто не сможет писать боту.'))
                     ->rows(4),
             ])])
             ->statePath('data');
@@ -82,7 +82,7 @@ class TelegramSettings extends Page implements HasForms
                 ->id('telegram-settings-form')
                 ->livewireSubmitHandler('save')
                 ->footer([Actions::make([
-                    Action::make('saveSettings')->label('Сохранить настройки')->icon('heroicon-m-check')->submit('save'),
+                    Action::make('saveSettings')->label(__('Сохранить настройки'))->icon('heroicon-m-check')->submit('save'),
                 ])]),
         ]);
     }
@@ -94,7 +94,7 @@ class TelegramSettings extends Page implements HasForms
         AppSetting::put(AppSetting::TELEGRAM_ALLOWED_USER_IDS, $this->normalizedUserIds($data['allowed_user_ids'] ?? ''));
 
         Notification::make()
-            ->title('Настройки сохранены')
+            ->title(__('Настройки сохранены'))
             ->success()
             ->send();
     }
@@ -114,7 +114,7 @@ class TelegramSettings extends Page implements HasForms
             $webhookUrl = $manager->register($proxyUrl);
 
             Notification::make()
-                ->title('Telegram webhook установлен')
+                ->title(__('Telegram webhook установлен'))
                 ->body($webhookUrl)
                 ->success()
                 ->send();
@@ -122,7 +122,7 @@ class TelegramSettings extends Page implements HasForms
             report($exception);
 
             Notification::make()
-                ->title('Не удалось установить webhook')
+                ->title(__('Не удалось установить webhook'))
                 ->body($exception->getMessage())
                 ->danger()
                 ->persistent()

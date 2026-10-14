@@ -45,8 +45,8 @@ final readonly class GallerySourceResult
         string $method,
         string $notes,
     ): self {
-        // The check did not run. Its frames survive - they are real photographs
-        // of this product - but nothing about them has been confirmed, and the
+        // The check did not finish. Preserve the files, but do not claim that
+        // they depict the product: nothing about them has been confirmed, and the
         // strategy's base rule is that a technical failure is never a semantic
         // verdict.
         if ($frames === null) {
@@ -119,13 +119,15 @@ final readonly class GallerySourceResult
         return new self(
             GalleryOutcome::Interrupted,
             self::annotated(
-                array_slice(array_values($candidates), 0, max(1, $maximum)),
+                // This is a work queue, not the final Telegram selection.
+                // Keep replacements until the interrupted check actually runs.
+                array_values($candidates),
                 'pending',
-                'Проверка текста на кадрах не состоялась технически: кадры сохранены, но не подтверждены.',
+                'Проверка содержания и текста не завершена: кадры сохранены, но не подтверждены.',
             ),
             $source,
             $method,
-            'language_check_unavailable',
+            'gallery_check_unavailable',
         );
     }
 

@@ -10,6 +10,7 @@ use App\Services\Ai\AiUsageReporter;
 use App\Services\Products\ProductImageStorage;
 use App\Services\Products\ProductPhotoManager;
 use App\Services\Telegram\DraftTelegramMessageLifecycle;
+use App\Services\Telegram\TelegramCatalogDraftMedia;
 use App\Services\Telegram\TelegramClient;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
@@ -81,14 +82,16 @@ class StoreProductImages implements ShouldQueue
 
         $searchStartedAt = now();
 
-        if ($this->replaceMediaIds === [] && $draft->images_staged_at) {
+        if ($this->replaceMediaIds === [] && $draft->isManualUpload() && data_get($draft->manualIntake(), 'target_product_id')) {
+            $stored = app(TelegramCatalogDraftMedia::class)->commit($product, $variant, $draft);
+        } elseif ($this->replaceMediaIds === [] && $draft->images_staged_at) {
             $stored = $storage->adoptStaged($product, $variant, $draft);
         } else {
             $stored = $storage->store($product, $variant, $draft, $this->replaceMediaIds);
         }
 
         if ($this->replaceMediaIds !== []) {
-            app(ProductPhotoManager::class)->completeRefind($product, $this->replaceMediaIds, $stored);
+            app(ProductPhotoManager::class)->completeRefind($product, $this->replaceMediaIds, $stored, $variant->id);
             $product->unsetRelation('media');
         }
 
@@ -122,7 +125,7 @@ class StoreProductImages implements ShouldQueue
             }
 
             try {
-                if ($this->sendProductPost($telegram, $chatId, $product, $usageFootnote)) {
+                if ($this->sendProductPost($telegram, $chatId, $product, $usageFootnote, $draft)) {
                     $messageLifecycle->finalizeFallbackPost($telegram, $draft);
 
                     return;
@@ -146,16 +149,18 @@ class StoreProductImages implements ShouldQueue
                     $telegram->sendPhotoFile(
                         $chatId,
                         Storage::disk($media->disk)->path($media->path),
-                        $product->title.' - Vision verified',
+                        $product->title.($draft->isManualUpload() ? ' — фото пользователя' : ' - Vision verified'),
                     );
                 } catch (Throwable $exception) {
                     report($exception);
                 }
             }
 
-            $message = $stored > 0
+            $message = $draft->isManualUpload()
+                ? 'Ручная карточка сохранена. Фото в каталоге: '.$product->media()->where('product_variant_id', $variant->id)->count().'.'
+                : ($stored > 0
                 ? "Фото проверены Vision и сохранены: {$stored}."
-                : 'Подходящие фото товара не найдены. Товар сохранён без изображения; напишите "найди фото заново" или добавьте вручную в Filament.';
+                : 'Подходящие фото товара не найдены. Товар сохранён без изображения; напишите "найди фото заново" или добавьте вручную в Filament.');
             $this->notify($telegram, $chatId, $message.$usageFootnote);
         }
     }
@@ -208,10 +213,12 @@ class StoreProductImages implements ShouldQueue
         }
     }
 
-    private function sendProductPost(TelegramClient $telegram, string $chatId, Product $product, string $usageFootnote = ''): bool
+    private function sendProductPost(TelegramClient $telegram, string $chatId, Product $product, string $usageFootnote = '', ?ProductDraft $draft = null): bool
     {
         $media = $product->media()
             ->where('type', 'image')
+            ->when($draft && data_get($draft->manualIntake(), 'target_variant_id'),
+                fn ($query) => $query->where('product_variant_id', data_get($draft->manualIntake(), 'target_variant_id')))
             ->whereIn('verification_status', ['verified', 'source_verified', 'manual'])
             ->orderByDesc('is_primary')
             ->orderBy('sort_order')
@@ -227,7 +234,7 @@ class StoreProductImages implements ShouldQueue
         }
 
         $paths = $media->map(fn ($item): string => Storage::disk($item->disk)->path($item->path))->all();
-        $caption = $this->caption($product, $media->pluck('source_url')->filter()->all()).$usageFootnote;
+        $caption = $this->caption($product, $media->pluck('source_url')->filter()->all(), $draft).$usageFootnote;
         $telegram->sendMediaGroupFiles($chatId, $paths, $caption);
 
         return true;
@@ -246,21 +253,24 @@ class StoreProductImages implements ShouldQueue
         Product $product,
         string $usageFootnote = '',
     ): bool {
+        $result = data_get($draft->manualIntake(), 'target_product_id') ? 'обновлён' : 'добавлен в каталог';
         $caption = app(DraftTelegramMessageLifecycle::class)
-            ->finalizedReviewCaption($draft, "✅ Товар #{$product->id} добавлен в каталог");
+            ->finalizedReviewCaption($draft, "✅ Товар #{$product->id} {$result}");
 
         // Drafts created before telegram_review_caption was introduced still
         // need the old final-post fallback.
         if ($caption === null) {
             $sourceUrls = $product->media()
                 ->where('type', 'image')
+                ->when(data_get($draft->manualIntake(), 'target_variant_id'),
+                    fn ($query) => $query->where('product_variant_id', data_get($draft->manualIntake(), 'target_variant_id')))
                 ->whereIn('verification_status', ['verified', 'source_verified', 'manual'])
                 ->orderByDesc('is_primary')
                 ->orderBy('sort_order')
                 ->pluck('source_url')
                 ->filter()
                 ->all();
-            $caption = $this->caption($product, $sourceUrls).$usageFootnote;
+            $caption = $this->caption($product, $sourceUrls, $draft).$usageFootnote;
         }
 
         if ($reviewTarget['has_media']) {
@@ -281,11 +291,12 @@ class StoreProductImages implements ShouldQueue
     }
 
     /** @param array<int, string> $photoSourceUrls */
-    private function caption(Product $product, array $photoSourceUrls = []): string
+    private function caption(Product $product, array $photoSourceUrls = [], ?ProductDraft $draft = null): string
     {
         $product->loadMissing('brand');
         $identity = collect([$product->brand?->name, $product->model])->filter()->unique()->implode(' · ');
-        $header = "✅ Товар #{$product->id} добавлен в каталог\n\n{$product->title}";
+        $result = $draft && data_get($draft->manualIntake(), 'target_product_id') ? 'обновлён' : 'добавлен в каталог';
+        $header = "✅ Товар #{$product->id} {$result}\n\n{$product->title}";
 
         if ($identity !== '') {
             $header .= "\n{$identity}";

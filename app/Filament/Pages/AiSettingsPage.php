@@ -2,6 +2,7 @@
 
 namespace App\Filament\Pages;
 
+use App\Filament\Pages\LocalizedPage as Page;
 use App\Services\Ai\AiModelCatalog;
 use App\Services\Ai\AiSettings;
 use App\Services\Ai\OpenAiModelCatalogSynchronizer;
@@ -14,7 +15,6 @@ use Filament\Forms\Components\ToggleButtons;
 use Filament\Forms\Concerns\InteractsWithForms;
 use Filament\Forms\Contracts\HasForms;
 use Filament\Notifications\Notification;
-use Filament\Pages\Page;
 use Filament\Schemas\Components\Actions;
 use Filament\Schemas\Components\EmbeddedSchema;
 use Filament\Schemas\Components\Form;
@@ -49,6 +49,8 @@ class AiSettingsPage extends Page implements HasForms
     {
         $this->form->fill([
             'model' => $settings->model(),
+            'card_assembly_model' => $settings->cardAssemblyModel(),
+            'card_assembly_fallback_model' => $settings->cardAssemblyFallbackModel(),
             'image_model' => $settings->imageModel(),
             'gallery_recipe_training_model' => $settings->galleryRecipeTrainingModel()
                 ?: (string) config('services.gallery_recipe_training.model', 'gpt-5.4'),
@@ -59,6 +61,7 @@ class AiSettingsPage extends Page implements HasForms
             'gallery_agent_write_tools_enabled' => $settings->galleryAgentWriteToolsEnabled(),
             'product_search_country' => $settings->productSearchCountry(),
             'source_identity_agent_enabled' => $settings->sourceIdentityAgentEnabled(),
+            'specification_reconciliation_enabled' => $settings->specificationReconciliationEnabled(),
             'max_search_cost_usd' => $settings->maxSearchCostUsd(),
             'search_max_seconds' => $settings->searchMaxSeconds(),
             'search_reserve_seconds' => $settings->searchReserveSeconds(),
@@ -80,20 +83,20 @@ class AiSettingsPage extends Page implements HasForms
     {
         return [
             Action::make('refreshModels')
-                ->label('Обновить модели')
+                ->label(__('Обновить модели'))
                 ->icon('heroicon-o-arrow-path')
                 ->requiresConfirmation()
-                ->modalHeading('Обновить модели и цены OpenAI?')
-                ->modalDescription('Проверим доступность через API и стандартные токенные тарифы на официальных страницах моделей.')
+                ->modalHeading(__('Обновить модели и цены OpenAI?'))
+                ->modalDescription(__('Проверим доступность через API и стандартные токенные тарифы на официальных страницах моделей.'))
                 ->action('refreshModels'),
             Action::make('clearApiKey')
-                ->label('Сбросить ключ на .env')
+                ->label(__('Сбросить ключ на .env'))
                 ->icon('heroicon-o-x-circle')
                 ->color('danger')
                 ->visible(fn (AiSettings $settings): bool => $settings->hasStoredOpenAiApiKey())
                 ->requiresConfirmation()
-                ->modalHeading('Удалить сохранённый API-ключ?')
-                ->modalDescription('Приложение вернётся к OPENAI_API_KEY из .env на сервере.')
+                ->modalHeading(__('Удалить сохранённый API-ключ?'))
+                ->modalDescription(__('Приложение вернётся к OPENAI_API_KEY из .env на сервере.'))
                 ->action('clearApiKey'),
         ];
     }
@@ -105,7 +108,7 @@ class AiSettingsPage extends Page implements HasForms
                 ->id('ai-settings-form')
                 ->livewireSubmitHandler('save')
                 ->footer([Actions::make([
-                    Action::make('saveSettings')->label('Сохранить настройки AI')->icon('heroicon-m-check')->submit('save'),
+                    Action::make('saveSettings')->label(__('Сохранить настройки AI'))->icon('heroicon-m-check')->submit('save'),
                 ])]),
         ]);
     }
@@ -119,11 +122,11 @@ class AiSettingsPage extends Page implements HasForms
             ->components([
                 Tabs::make('ai_settings')
                     ->tabs([
-                        Tab::make('Основное')
+                        Tab::make(__('Основное'))
                             ->icon(Heroicon::OutlinedKey)
                             ->schema([
-                                Section::make('Доступ к OpenAI')
-                                    ->description('Ключ хранится в базе в зашифрованном виде и переопределяет OPENAI_API_KEY из .env. Пустое поле при сохранении ничего не меняет — используйте "Сбросить ключ на .env" наверху, чтобы вернуться к серверному значению.')
+                                Section::make(__('Доступ к OpenAI'))
+                                    ->description(__('Ключ хранится в базе в зашифрованном виде и переопределяет OPENAI_API_KEY из .env. Пустое поле при сохранении ничего не меняет — используйте "Сбросить ключ на .env" наверху, чтобы вернуться к серверному значению.'))
                                     ->schema([
                                         TextInput::make('openai_api_key')
                                             ->label('OpenAI API key')
@@ -133,134 +136,151 @@ class AiSettingsPage extends Page implements HasForms
                                             ->dehydrated(fn (?string $state): bool => filled($state))
                                             ->placeholder('sk-...')
                                             ->helperText(fn (AiSettings $settings): string => $settings->hasStoredOpenAiApiKey()
-                                                ? 'Сейчас используется ключ, сохранённый в базе.'
-                                                : 'Сейчас используется OPENAI_API_KEY из .env.'),
+                                                ? __('Сейчас используется ключ, сохранённый в базе.')
+                                                : __('Сейчас используется OPENAI_API_KEY из .env.')),
                                     ]),
-                                Section::make('Модель OpenAI')
-                                    ->description('Один каталог используется для выбора модели и приблизительного расчёта стоимости в Telegram. Цены указаны в USD за 1 млн токенов стандартного API-тарифа.')
+                                Section::make(__('Модель OpenAI'))
+                                    ->description(__('Один каталог используется для выбора модели и приблизительного расчёта стоимости в Telegram. Цены указаны в USD за 1 млн токенов стандартного API-тарифа.'))
                                     ->schema([
                                         Select::make('model')
-                                            ->label('Модель и тариф')
+                                            ->label(__('Модель и тариф'))
                                             ->options(fn (): array => app(AiModelCatalog::class)->options('openai'))
-                                            ->placeholder('Из .env')
-                                            ->helperText('Пусто — используются модели из .env. Тарифы проверены по официальным страницам'.($checkedAt ? " {$checkedAt}." : '.'))
+                                            ->placeholder(__('Из .env'))
+                                            ->helperText(__('Пусто — используются модели из .env. Тарифы проверены по официальным страницам').($checkedAt ? " {$checkedAt}." : '.'))
+                                            ->searchable(),
+                                        Select::make('card_assembly_model')
+                                            ->label(__('Модель сборки карточки'))
+                                            ->options(fn (): array => app(AiModelCatalog::class)->options('openai'))
+                                            ->placeholder(__('Как основная модель'))
+                                            ->helperText(__('Сборка карточки цитирует каждую характеристику дословно со страницы источника. Самые дешёвые модели пересказывают вместо цитаты, проверка отклоняет карточку, и поиск заканчивается без неё. Основная модель может быть дешёвой — эта должна справляться.'))
+                                            ->searchable(),
+                                        Select::make('card_assembly_fallback_model')
+                                            ->label(__('Запасная модель сборки карточки'))
+                                            ->options(fn (): array => app(AiModelCatalog::class)->options('openai'))
+                                            ->placeholder(__('Нет'))
+                                            ->helperText(__('Доделывает карточку, если модель сборки не смогла её собрать. Так сборка может идти на дешёвой модели, а более сильная платится только за редкие трудные карточки — вместо «поиск не завершён».'))
                                             ->searchable(),
                                     ]),
                             ]),
-                        Tab::make('Поиск фотографий')
+                        Tab::make(__('Поиск фотографий'))
                             ->icon(Heroicon::OutlinedPhoto)
                             ->schema([
-                                Section::make('Рецепты и качество')
-                                    ->description('Фотографии одной карточки никогда не смешиваются. Известные карточки-кандидаты (найденные первичным Web Search) перебираются по очереди всегда, пока есть бюджет/время — это не настраивается отдельно.')
+                                Section::make(__('Рецепты и качество'))
+                                    ->description(__('Фотографии одной карточки никогда не смешиваются. Известные карточки-кандидаты (найденные первичным Web Search) перебираются по очереди всегда, пока есть бюджет/время — это не настраивается отдельно.'))
                                     ->schema([
                                         Select::make('gallery_recipe_training_model')
-                                            ->label('Сильная модель тренера')
+                                            ->label(__('Сильная модель тренера'))
                                             ->options(fn (): array => app(AiModelCatalog::class)->options('openai'))
                                             ->default((string) config('services.gallery_recipe_training.model', 'gpt-5.4'))
                                             ->required()
-                                            ->helperText('Рецепт — безопасный JSON с CSS-селекторами и ограниченными действиями Playwright.')
+                                            ->helperText(__('Рецепт — безопасный JSON с CSS-селекторами и ограниченными действиями Playwright.'))
                                             ->searchable(),
                                         Toggle::make('gallery_prefer_playwright_first')
-                                            ->label('Обучать Playwright даже когда статики "достаточно"')
-                                            ->helperText('Оценка предфильтра по количеству фото (например "8") может быть завышена миниатюрами/повторами. Включено (по умолчанию) — при найденной галерее рецепт всё равно обучается и результат проверяется Vision, а не только оценкой. Медленнее и дороже за поиск, зато рецепт сохраняется для повторного использования.')
+                                            ->label(__('Обучать Playwright даже когда статики "достаточно"'))
+                                            ->helperText(__('Оценка предфильтра по количеству фото (например "8") может быть завышена миниатюрами/повторами. Включено (по умолчанию) — при найденной галерее рецепт всё равно обучается и результат проверяется Vision, а не только оценкой. Медленнее и дороже за поиск, зато рецепт сохраняется для повторного использования.'))
                                             ->default(true)
                                             ->inline(false),
                                         Toggle::make('browser_headless')
-                                            ->label('Скрытый браузер (без окна)')
-                                            ->helperText('Включено — браузер работает без окна. Быстрее и не мешает, но магазины это видят: у скрытого браузера нет окна, нет плагинов и другой путь отрисовки, и защита читает это со страницы. Выключите, если домен встречает капчей - видимое окно проходит заметно чаще. Окно при этом уводится за пределы экрана и поверх работы не появляется.')
+                                            ->label(__('Скрытый браузер (без окна)'))
+                                            ->helperText(__('Включено — браузер работает без окна. Быстрее и не мешает, но магазины это видят: у скрытого браузера нет окна, нет плагинов и другой путь отрисовки, и защита читает это со страницы. Выключите, если домен встречает капчей - видимое окно проходит заметно чаще. Окно при этом уводится за пределы экрана и поверх работы не появляется.'))
                                             ->default(true)
                                             ->inline(false),
                                         Toggle::make('gallery_agent_write_tools_enabled')
-                                            ->label('Разрешить AI-тренеру самому решать, когда сдаваться, и оставлять заметки о домене')
-                                            ->helperText('Выключено по умолчанию. Агент получает два инструмента: прекратить обучение на URL с указанием причины (учитывается в статистике отказов рецепта так же, как обычный сбой) и добавить короткую заметку в постоянную подсказку домена. Каждый вызов фиксируется в журнале AI-операций. Выключите мгновенно, если агент начнёт принимать плохие решения.')
+                                            ->label(__('Разрешить AI-тренеру самому решать, когда сдаваться, и оставлять заметки о домене'))
+                                            ->helperText(__('Выключено по умолчанию. Агент получает два инструмента: прекратить обучение на URL с указанием причины (учитывается в статистике отказов рецепта так же, как обычный сбой) и добавить короткую заметку в постоянную подсказку домена. Каждый вызов фиксируется в журнале AI-операций. Выключите мгновенно, если агент начнёт принимать плохие решения.'))
                                             ->default(false)
                                             ->inline(false),
                                         TextInput::make('product_search_country')
-                                            ->label('Страна веб-поиска (пусто — весь мир)')
-                                            ->placeholder('пусто')
+                                            ->label(__('Страна веб-поиска (пусто — весь мир)'))
+                                            ->placeholder(__('пусто'))
                                             ->maxLength(2)
-                                            ->helperText('Было жёстко зашито "US", из-за чего в кандидаты попадали одни и те же американские магазины — те самые, что потом блокируют нас по репутации IP, — а европейские, которые отдали бы фото, не всплывали вовсе. Пусто = поиск без страновой подсказки. Место магазина само по себе никогда не было поводом его отклонить: единственное языковое правило касается текста на самих фотографиях, и его проверяет Vision.')
+                                            ->helperText(__('Было жёстко зашито "US", из-за чего в кандидаты попадали одни и те же американские магазины — те самые, что потом блокируют нас по репутации IP, — а европейские, которые отдали бы фото, не всплывали вовсе. Пусто = поиск без страновой подсказки. Место магазина само по себе никогда не было поводом его отклонить: единственное языковое правило касается текста на самих фотографиях, и его проверяет Vision.'))
                                             ->rule('regex:/^[A-Za-z]{2}$/')
                                             ->nullable(),
+                                        Toggle::make('specification_reconciliation_enabled')
+                                            ->label(__('Сборка карточки перед подтверждением'))
+                                            ->helperText(__('Обязательный этап готовой карточки. Выключение приостанавливает новые интернет-поиски, но не разрешает публикацию непроверенных данных. Каталог остаётся доступен.'))
+                                            ->default(true)
+                                            ->inline(false),
                                         Toggle::make('source_identity_agent_enabled')
-                                            ->label('Подтверждать карточку через AI, когда точный текстовый шаблон не совпал')
-                                            ->helperText('Включено по умолчанию. Быстрая текстовая проверка (модель/SKU буквально в URL или заголовке) остаётся первой и бесплатной — этот AI-вызов срабатывает только когда она не подтвердила и не опровергла карточку явно, например если страница перечисляет те же слова в другом порядке. Реальный случай: страница B&H с точным SKU MC7A4LL/A была отклонена только из-за порядка слов в URL. Выключите мгновенно, если агент начнёт подтверждать не те карточки.')
+                                            ->label(__('Подтверждать карточку через AI, когда точный текстовый шаблон не совпал'))
+                                            ->helperText(__('Включено по умолчанию. Быстрая текстовая проверка (модель/SKU буквально в URL или заголовке) остаётся первой и бесплатной — этот AI-вызов срабатывает только когда она не подтвердила и не опровергла карточку явно, например если страница перечисляет те же слова в другом порядке. Реальный случай: страница B&H с точным SKU MC7A4LL/A была отклонена только из-за порядка слов в URL. Выключите мгновенно, если агент начнёт подтверждать не те карточки.'))
                                             ->default(true)
                                             ->inline(false),
                                         Grid::make(2)
                                             ->schema([
                                                 TextInput::make('image_minimum_width')
-                                                    ->label('Минимальная ширина фото')
+                                                    ->label(__('Минимальная ширина фото'))
                                                     ->numeric()
                                                     ->minValue(AiSettings::MIN_IMAGE_WIDTH)
                                                     ->maxValue(AiSettings::MAX_IMAGE_DIMENSION)
                                                     ->default(AiSettings::DEFAULT_IMAGE_MINIMUM_WIDTH)
                                                     ->suffix('px')
                                                     ->required()
-                                                    ->helperText('Фото проходит только при ширине не меньше этого значения.'),
+                                                    ->helperText(__('Фото проходит только при ширине не меньше этого значения.')),
                                                 TextInput::make('image_minimum_height')
-                                                    ->label('Минимальная высота фото')
+                                                    ->label(__('Минимальная высота фото'))
                                                     ->numeric()
                                                     ->minValue(AiSettings::MIN_IMAGE_HEIGHT)
                                                     ->maxValue(AiSettings::MAX_IMAGE_DIMENSION)
                                                     ->default(AiSettings::DEFAULT_IMAGE_MINIMUM_HEIGHT)
                                                     ->suffix('px')
                                                     ->required()
-                                                    ->helperText('0 — не ограничивать высоту.'),
+                                                    ->helperText(__('0 — не ограничивать высоту.')),
                                             ]),
                                     ]),
-                                Section::make('Улучшение фото')
-                                    ->description('Модель для команды "апскейл фото". Цена изображения зависит от размера и качества, поэтому не входит в токенный тариф выше.')
+                                Section::make(__('Улучшение фото'))
+                                    ->description(__('Модель для команды "апскейл фото". Цена изображения зависит от размера и качества, поэтому не входит в токенный тариф выше.'))
                                     ->schema([
                                         Select::make('image_model')
-                                            ->label('Модель изображений')
+                                            ->label(__('Модель изображений'))
                                             ->options(AiSettings::IMAGE_MODELS)
-                                            ->placeholder('Из .env')
-                                            ->helperText('Пусто — используется модель, заданная в .env.')
+                                            ->placeholder(__('Из .env'))
+                                            ->helperText(__('Пусто — используется модель, заданная в .env.'))
                                             ->searchable(),
                                     ]),
                             ]),
-                        Tab::make('Бюджеты и лимиты')
+                        Tab::make(__('Бюджеты и лимиты'))
                             ->icon(Heroicon::OutlinedBanknotes)
                             ->schema([
-                                Section::make('Лимиты поиска')
-                                    ->description('Общий дедлайн всегда короче таймаута воркера. Резерв не используется для новых поисков и остаётся на сохранение черновика и ответ Telegram.')
+                                Section::make(__('Лимиты поиска'))
+                                    ->description(__('Общий дедлайн всегда короче таймаута воркера. Резерв не используется для новых поисков и остаётся на сохранение черновика и ответ Telegram.'))
                                     ->schema([
                                         TextInput::make('max_search_cost_usd')
-                                            ->label('Бюджет одного поиска, $')
+                                            ->label(__('Бюджет одного поиска, $'))
                                             ->numeric()->minValue(0)->step(0.01)
                                             ->default(AiSettings::DEFAULT_MAX_SEARCH_COST_USD)
                                             ->required()
-                                            ->helperText('0 — без денежного ограничения.'),
+                                            ->helperText(__('0 — без денежного ограничения.')),
                                         TextInput::make('search_max_seconds')
-                                            ->label('Максимум всего цикла, сек')
+                                            ->label(__('Максимум всего цикла, сек'))
                                             ->numeric()->minValue(300)->maxValue(1800)
                                             ->default(AiSettings::DEFAULT_SEARCH_MAX_SECONDS)
                                             ->required(),
                                         TextInput::make('search_reserve_seconds')
-                                            ->label('Резерв на завершение, сек')
+                                            ->label(__('Резерв на завершение, сек'))
                                             ->numeric()->minValue(30)->maxValue(300)
                                             ->default(AiSettings::DEFAULT_SEARCH_RESERVE_SECONDS)
                                             ->required(),
                                     ])
                                     ->columns(3),
                             ]),
-                        Tab::make('Дополнительно')
+                        Tab::make(__('Дополнительно'))
                             ->icon(Heroicon::OutlinedExclamationTriangle)
                             ->schema([
-                                Section::make('Редкие и опасные параметры')
-                                    ->description('Меняйте эти значения только если понимаете последствия — они влияют на стоимость, скорость и надёжность каждого поиска.')
+                                Section::make(__('Редкие и опасные параметры'))
+                                    ->description(__('Меняйте эти значения только если понимаете последствия — они влияют на стоимость, скорость и надёжность каждого поиска.'))
                                     ->icon(Heroicon::OutlinedExclamationTriangle)
                                     ->iconColor('warning')
                                     ->collapsed()
                                     ->schema([
                                         Toggle::make('fallback_sources_enabled')
-                                            ->label('Резервный AI веб-поиск по новым магазинам')
-                                            ->helperText('Включается только когда ВСЕ уже известные карточки-источники перебраны и ни одна не дала галерею. Запускает новые платные раунды AI веб-поиска по интернету (не привязан к конкретной странице) с Vision-проверкой найденного — дороже и менее точен, чем перебор уже известных карточек, поэтому вынесен в отдельный тумблер для контроля стоимости.')
+                                            ->label(__('Резервный AI веб-поиск по новым магазинам'))
+                                            ->helperText(__('Включается только когда ВСЕ уже известные карточки-источники перебраны и ни одна не дала галерею. Запускает новые платные раунды AI веб-поиска по интернету (не привязан к конкретной странице) с Vision-проверкой найденного — дороже и менее точен, чем перебор уже известных карточек, поэтому вынесен в отдельный тумблер для контроля стоимости.'))
                                             ->default(true)
                                             ->inline(false),
                                         ToggleButtons::make('gallery_browser_mode')
-                                            ->label('Режим браузерного поиска')
+                                            ->label(__('Режим браузерного поиска'))
                                             ->options(AiSettings::GALLERY_BROWSER_MODES)
                                             ->icons([
                                                 AiSettings::GALLERY_BROWSER_AUTO => 'heroicon-o-bolt',
@@ -268,56 +288,56 @@ class AiSettingsPage extends Page implements HasForms
                                                 AiSettings::GALLERY_BROWSER_ALWAYS => 'heroicon-o-globe-alt',
                                             ])
                                             ->default(AiSettings::GALLERY_BROWSER_AUTO)
-                                            ->helperText('Выключен — Playwright не запускается никогда. Авто и Всегда сейчас ведут себя одинаково: код проверяет только "не выключен", отдельного поведения для "всегда проверять каждую карточку" ещё не реализовано — это известный технический долг, а не баг этой настройки.')
+                                            ->helperText(__('Выключен — Playwright не запускается никогда. Авто и Всегда сейчас ведут себя одинаково: код проверяет только "не выключен", отдельного поведения для "всегда проверять каждую карточку" ещё не реализовано — это известный технический долг, а не баг этой настройки.'))
                                             ->inline()
                                             ->grouped()
                                             ->required(),
                                         TextInput::make('gallery_training_max_rounds')
-                                            ->label('Раундов AI ↔ Playwright (запасной потолок)')
+                                            ->label(__('Раундов AI ↔ Playwright (запасной потолок)'))
                                             ->numeric()->minValue(1)->maxValue(12)
                                             ->default(AiSettings::DEFAULT_GALLERY_TRAINING_MAX_ROUNDS)
                                             ->required()
-                                            ->helperText('Не обычный лимит — раунды продолжаются, пока хватает денежного/временного бюджета поиска. Это число используется только когда бюджет посчитать нельзя (тесты, модель без цены, бюджет выключен).'),
+                                            ->helperText(__('Не обычный лимит — раунды продолжаются, пока хватает денежного/временного бюджета поиска. Это число используется только когда бюджет посчитать нельзя (тесты, модель без цены, бюджет выключен).')),
                                         TextInput::make('gallery_min_success_count')
-                                            ->label('Минимум фото для успеха рецепта')
+                                            ->label(__('Минимум фото для успеха рецепта'))
                                             ->numeric()->minValue(1)->maxValue(AiSettings::GALLERY_MAX_IMAGE_COUNT)
                                             ->default(AiSettings::DEFAULT_GALLERY_MIN_SUCCESS_COUNT)
                                             ->required()
-                                            ->helperText('Рецепт засчитан успешным, если извлёк хотя бы столько разных фото (максимум всегда '.AiSettings::GALLERY_MAX_IMAGE_COUNT.').'),
+                                            ->helperText(__('Рецепт засчитан успешным, если извлёк хотя бы столько разных фото (максимум всегда ').AiSettings::GALLERY_MAX_IMAGE_COUNT.').'),
                                         Grid::make(3)
                                             ->schema([
                                                 TextInput::make('product_research_timeout_seconds')
-                                                    ->label('Web Search товара, сек')
+                                                    ->label(__('Web Search товара, сек'))
                                                     ->numeric()->minValue(60)->maxValue(900)
                                                     ->default(AiSettings::DEFAULT_PRODUCT_RESEARCH_TIMEOUT_SECONDS)
                                                     ->required(),
                                                 TextInput::make('product_research_idle_timeout_seconds')
-                                                    ->label('Web Search без активности, сек')
+                                                    ->label(__('Web Search без активности, сек'))
                                                     ->numeric()->minValue(30)->maxValue(180)
                                                     ->default(AiSettings::DEFAULT_PRODUCT_RESEARCH_IDLE_TIMEOUT_SECONDS)
                                                     ->required(),
                                                 TextInput::make('image_discovery_timeout_seconds')
-                                                    ->label('Резервный Web Search, сек')
+                                                    ->label(__('Резервный Web Search, сек'))
                                                     ->numeric()->minValue(30)->maxValue(300)
                                                     ->default(AiSettings::DEFAULT_IMAGE_DISCOVERY_TIMEOUT_SECONDS)
                                                     ->required(),
                                                 TextInput::make('gallery_recipe_timeout_seconds')
-                                                    ->label('Обучение рецепта, сек')
+                                                    ->label(__('Обучение рецепта, сек'))
                                                     ->numeric()->minValue(30)->maxValue(600)
                                                     ->default(AiSettings::DEFAULT_GALLERY_RECIPE_TIMEOUT_SECONDS)
                                                     ->required(),
                                                 TextInput::make('image_vision_timeout_seconds')
-                                                    ->label('Vision-проверка, сек')
+                                                    ->label(__('Vision-проверка, сек'))
                                                     ->numeric()->minValue(15)->maxValue(180)
                                                     ->default(AiSettings::DEFAULT_IMAGE_VISION_TIMEOUT_SECONDS)
                                                     ->required(),
                                                 TextInput::make('browser_timeout_seconds')
-                                                    ->label('Playwright-рецепт, сек')
+                                                    ->label(__('Playwright-рецепт, сек'))
                                                     ->numeric()->minValue(15)->maxValue(300)
                                                     ->default(AiSettings::DEFAULT_BROWSER_TIMEOUT_SECONDS)
                                                     ->required(),
                                                 TextInput::make('browser_scout_timeout_seconds')
-                                                    ->label('Playwright Scout, сек')
+                                                    ->label(__('Playwright Scout, сек'))
                                                     ->numeric()->minValue(15)->maxValue(300)
                                                     ->default(AiSettings::DEFAULT_BROWSER_SCOUT_TIMEOUT_SECONDS)
                                                     ->required(),
@@ -335,7 +355,7 @@ class AiSettingsPage extends Page implements HasForms
             $result = $synchronizer->sync();
         } catch (Throwable $exception) {
             Notification::make()
-                ->title('Не удалось обновить модели')
+                ->title(__('Не удалось обновить модели'))
                 ->body($exception->getMessage())
                 ->danger()
                 ->send();
@@ -347,11 +367,11 @@ class AiSettingsPage extends Page implements HasForms
         $errors = count($result['errors']);
 
         $notification = Notification::make()
-            ->title($errors === 0 ? 'Модели и цены обновлены' : 'Модели обновлены частично')
+            ->title($errors === 0 ? __('Модели и цены обновлены') : __('Модели обновлены частично'))
             ->body(
-                "Доступно: {$result['available']}; недоступно: {$result['unavailable']}; ".
-                "тарифов обновлено: {$result['prices_updated']}".
-                ($errors > 0 ? "; ошибок тарифов: {$errors}. Старые цены сохранены." : '.')
+                __('Доступно: :available; недоступно: :unavailable; тарифов обновлено: :prices', [
+                    'available' => $result['available'], 'unavailable' => $result['unavailable'], 'prices' => $result['prices_updated'],
+                ]).($errors > 0 ? __('; ошибок тарифов: :errors. Старые цены сохранены.', ['errors' => $errors]) : '.')
             );
 
         if ($errors === 0) {
@@ -374,7 +394,7 @@ class AiSettingsPage extends Page implements HasForms
         }
 
         Notification::make()
-            ->title('API-ключ сброшен на .env')
+            ->title(__('API-ключ сброшен на .env'))
             ->success()
             ->send();
     }
@@ -390,6 +410,8 @@ class AiSettingsPage extends Page implements HasForms
         $settings->saveModel($data['model'] ?? null);
         $settings->saveImageModel($data['image_model'] ?? null);
         $settings->saveGalleryRecipeTrainingModel($data['gallery_recipe_training_model'] ?? null);
+        $settings->saveCardAssemblyModel($data['card_assembly_model'] ?? null);
+        $settings->saveCardAssemblyFallbackModel($data['card_assembly_fallback_model'] ?? null);
         $settings->saveGalleryBrowserMode($data['gallery_browser_mode'] ?? null);
         $settings->saveFallbackSourcesEnabled((bool) ($data['fallback_sources_enabled'] ?? false));
         $settings->saveGalleryPreferPlaywrightFirst((bool) ($data['gallery_prefer_playwright_first'] ?? false));
@@ -397,6 +419,7 @@ class AiSettingsPage extends Page implements HasForms
         $settings->saveGalleryAgentWriteToolsEnabled((bool) ($data['gallery_agent_write_tools_enabled'] ?? false));
         $settings->saveProductSearchCountry($data['product_search_country'] ?? null);
         $settings->saveSourceIdentityAgentEnabled((bool) ($data['source_identity_agent_enabled'] ?? false));
+        $settings->saveSpecificationReconciliationEnabled((bool) ($data['specification_reconciliation_enabled'] ?? true));
         $settings->saveMaxSearchCostUsd(
             isset($data['max_search_cost_usd']) && $data['max_search_cost_usd'] !== ''
                 ? (float) $data['max_search_cost_usd']
@@ -423,7 +446,7 @@ class AiSettingsPage extends Page implements HasForms
         }
 
         Notification::make()
-            ->title('Настройки AI сохранены')
+            ->title(__('Настройки AI сохранены'))
             ->success()
             ->send();
     }

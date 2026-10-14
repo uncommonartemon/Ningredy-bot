@@ -39,6 +39,7 @@ class OpenAiModelCatalogSynchronizer
             ->pluck('id')
             ->filter(fn (mixed $id): bool => is_string($id))
             ->all();
+        $this->addMissingCatalogModels();
         $records = AiModel::query()->where('provider', 'openai')->orderBy('id')->get();
 
         $priceResponses = Http::pool(function (Pool $pool) use ($records): array {
@@ -86,6 +87,39 @@ class OpenAiModelCatalogSynchronizer
         }
 
         return $result;
+    }
+
+    /**
+     * The table is seeded from config/ai_model_catalog.php once, by its
+     * migration. A model added to the catalog later, or a table emptied since,
+     * never reached it, so this button checked nothing and still reported
+     * success ("available 0, unavailable 0, prices updated 0"). Only missing
+     * rows are added: an existing row keeps its own prices and enabled flag.
+     */
+    private function addMissingCatalogModels(): void
+    {
+        $known = AiModel::query()->where('provider', 'openai')->pluck('model')->all();
+        $defaultCheckedAt = (string) config('ai_model_catalog.pricing_checked_at', now()->toDateString());
+
+        foreach ((array) config('ai_model_catalog.providers.openai.models', []) as $model => $details) {
+            if (! is_string($model) || in_array($model, $known, true) || ! is_array($details)) {
+                continue;
+            }
+
+            AiModel::query()->create([
+                'provider' => 'openai',
+                'model' => $model,
+                'label' => $details['label'] ?? $model,
+                'input_per_million' => $details['input_per_million'] ?? null,
+                'cached_input_per_million' => $details['cached_input_per_million'] ?? null,
+                'output_per_million' => $details['output_per_million'] ?? null,
+                'source_url' => $details['source_url'] ?? null,
+                'pricing_checked_at' => $details['pricing_checked_at'] ?? $defaultCheckedAt,
+                // Availability is decided by the /v1/models answer right after.
+                'is_available' => false,
+                'is_enabled' => true,
+            ]);
+        }
     }
 
     /** @return array{input_per_million: float, cached_input_per_million: float, output_per_million: float} */

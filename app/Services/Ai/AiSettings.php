@@ -142,6 +142,44 @@ class AiSettings
         );
     }
 
+    /**
+     * Card assembly and its text-evidence search, on their own model when
+     * set. It is the one step that must quote each value verbatim from a
+     * saved page; request #99 on gpt-6-luna paraphrased every quote, all
+     * three attempts were refused, and the operator got "search not
+     * finished" for a product whose photos were ready. A cheap model can
+     * still run everything else.
+     */
+    public function cardAssemblyModel(): ?string
+    {
+        $model = AppSetting::valueFor('ai.card_assembly_model');
+
+        return $this->models->has('openai', $model) ? $model : null;
+    }
+
+    public function saveCardAssemblyModel(?string $model): void
+    {
+        AppSetting::put('ai.card_assembly_model', $this->models->has('openai', $model) ? $model : null);
+    }
+
+    /**
+     * Finishes a card the assembly model could not: a cheap model assembles
+     * most cards for a fraction of the price, and the few it cannot get past
+     * the quoting check are completed here instead of reaching the operator
+     * as "search not finished" (requests #99, #51 on gpt-6-luna).
+     */
+    public function cardAssemblyFallbackModel(): ?string
+    {
+        $model = AppSetting::valueFor('ai.card_assembly_fallback_model');
+
+        return $this->models->has('openai', $model) ? $model : null;
+    }
+
+    public function saveCardAssemblyFallbackModel(?string $model): void
+    {
+        AppSetting::put('ai.card_assembly_fallback_model', $this->models->has('openai', $model) ? $model : null);
+    }
+
     public function maxSearchCostUsd(): float
     {
         $value = AppSetting::valueFor('ai.max_search_cost_usd');
@@ -262,17 +300,9 @@ class AiSettings
     }
 
     /**
-     * A real off switch: while this is off, no reconciliation runs AND
-     * nothing withholds a draft for the absence of one - see
-     * ProductDraft::reconciliationPending(), the single place every gate
-     * asks.
-     *
-     * It used to mean only the first half. Turning the checker off stopped
-     * the stamp from ever being written while seven gates went on demanding
-     * it, so every draft with a photo source was blocked for ever, with no
-     * way back. Withholding a finished card because our own checker is
-     * switched off punishes the operator for our configuration, and the
-     * escape hatch has to actually be one.
+     * Administrative pause, never permission to publish an unverified card.
+     * ResearchProduct checks this before buying research/gallery work.
+     * Already verified cards and ordinary catalog reads remain available.
      */
     public function specificationReconciliationEnabled(): bool
     {
@@ -566,6 +596,10 @@ class AiSettings
         if ($role === 'gallery_recipe_training') {
             return $this->galleryRecipeTrainingModel()
                 ?: (string) config('services.gallery_recipe_training.model', 'gpt-5.4');
+        }
+
+        if ($role === 'product_specification_reconciliation' && $this->cardAssemblyModel() !== null) {
+            return $this->cardAssemblyModel();
         }
 
         // The admin's global chat-model override must never apply to a

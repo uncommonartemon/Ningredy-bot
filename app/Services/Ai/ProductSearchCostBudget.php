@@ -26,6 +26,13 @@ class ProductSearchCostBudget
         return $spent !== null && $spent >= $limit;
     }
 
+    public function hasRemaining(?int $telegramUpdateId): bool
+    {
+        $spent = $this->spent($telegramUpdateId);
+
+        return $this->limit() > 0 && $spent !== null && $spent < $this->limit();
+    }
+
     public function spent(?int $telegramUpdateId): ?float
     {
         if (! $telegramUpdateId) {

@@ -12,6 +12,7 @@ use App\Models\ProductVariant;
 use App\Models\TelegramUpdate;
 use App\Services\Products\ProductImageStorage;
 use App\Services\Telegram\DraftTelegramMessageLifecycle;
+use App\Services\Telegram\TelegramCatalogDraftMedia;
 use App\Services\Telegram\TelegramClient;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request as HttpRequest;
@@ -158,6 +159,32 @@ class StoreProductImagesTest extends TestCase
         $this->assertSame([701, 702, 703], $draft->telegram_review_message_ids);
         $this->assertSame([], $draft->telegram_control_message_ids);
         $this->assertNotNull($draft->telegram_review_finalized_at);
+    }
+
+    public function test_refinding_photos_of_a_manually_edited_product_does_not_recommit_its_old_draft(): void
+    {
+        Storage::fake('public');
+        config(['services.telegram.bot_token' => 'test-token']);
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []])]);
+        [$product, $variant, $draft] = $this->approvedProductWithMedia();
+        $draft->telegramUpdate->update(['payload' => ['_manual_product_upload' => true, '_manual_product_intake' => [
+            'origin' => 'catalog_edit', 'target_product_id' => $product->id, 'target_variant_id' => $variant->id,
+        ]]]);
+        $oldIds = $product->media()->pluck('id')->all();
+        $storage = \Mockery::mock(ProductImageStorage::class);
+        $storage->shouldReceive('store')->once()->withArgs(fn ($foundProduct, $foundVariant, $foundDraft, $ids) => $foundProduct->id === $product->id && $foundVariant->id === $variant->id && $foundDraft->id === $draft->id && $ids === $oldIds)
+            ->andReturn(0);
+        $commit = \Mockery::mock(TelegramCatalogDraftMedia::class);
+        $commit->shouldNotReceive('commit');
+        $this->app->instance(TelegramCatalogDraftMedia::class, $commit);
+
+        (new StoreProductImages($product->id, $variant->id, $draft->id, $oldIds))->handle(
+            $storage, app(TelegramClient::class), app(DraftTelegramMessageLifecycle::class));
+
+        $this->assertSame($oldIds, $product->media()->pluck('id')->all());
+        foreach ($product->media as $media) {
+            Storage::disk('public')->assertExists($media->path);
+        }
     }
 
     /** @return array{Product, ProductVariant, ProductDraft} */

@@ -3,6 +3,7 @@
 namespace App\Ai\Tools;
 
 use App\Models\Product;
+use App\Services\Products\ProductCondition;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Str;
@@ -28,6 +29,7 @@ class SearchCatalog implements Tool
         $cpu = trim((string) ($input['cpu'] ?? ''));
         $gpu = trim((string) ($input['gpu'] ?? ''));
         $color = trim((string) ($input['color'] ?? ''));
+        $condition = in_array($input['condition'] ?? null, ProductCondition::VALUES, true) ? $input['condition'] : null;
         $ramMin = $this->number($input['ram_min'] ?? null);
         $ramMax = $this->number($input['ram_max'] ?? null);
         $priceMin = $this->number($input['price_min'] ?? null);
@@ -50,34 +52,38 @@ class SearchCatalog implements Tool
                 ->values()
                 ->all();
         }
+        $variantFilter = function (Builder $variant) use ($condition, $color, $cpu, $gpu, $ramMin, $ramMax, $priceMin, $priceMax, $activeOnly): void {
+            $variant->when($condition !== null, fn ($q) => $q->where('condition', $condition))
+                ->when($activeOnly, fn ($q) => $q->where('is_active', true))
+                ->when($color !== '', fn ($q) => $q->where('color', 'like', $this->like($color)))
+                ->when($priceMin !== null, fn ($q) => $q->where('price', '>=', $priceMin))
+                ->when($priceMax !== null, fn ($q) => $q->where('price', '<=', $priceMax));
+            foreach (['cpu' => $cpu, 'gpu' => $gpu] as $key => $value) {
+                if ($value !== '') {
+                    $variant->whereHas('attributes', fn ($a) => $a->whereHas('definition', fn ($d) => $d->where('key', $key))
+                        ->where('value', 'like', $this->like($value)));
+                }
+            }
+            if ($ramMin !== null || $ramMax !== null) {
+                $variant->whereHas('attributes', fn ($a) => $a->whereHas('definition', fn ($d) => $d->where('key', 'ram'))
+                    ->when($ramMin !== null, fn ($q) => $q->where('numeric_value', '>=', $ramMin))
+                    ->when($ramMax !== null, fn ($q) => $q->where('numeric_value', '<=', $ramMax)));
+            }
+        };
+        $hasVariantFilters = $condition !== null || $color !== '' || $cpu !== '' || $gpu !== ''
+            || $ramMin !== null || $ramMax !== null || $priceMin !== null || $priceMax !== null;
         $products = Product::query()
             ->with([
                 'brand:id,name', 'category:id,name,slug',
-                'defaultVariant.attributes.definition:id,key,label',
+                'variants' => fn ($q) => $q->where($variantFilter)->orderByDesc('is_default')->orderBy('id'),
+                'variants.attributes.definition:id,key,label',
             ])
             ->when($activeOnly, fn (Builder $builder) => $builder->visibleInCatalog())
+            ->when($hasVariantFilters, fn ($q) => $q->whereHas('variants', $variantFilter))
             ->when($productType !== '', fn (Builder $builder) => $builder->where('product_type', $productType))
             ->when($brand !== '', fn (Builder $builder) => $builder->whereHas(
                 'brand', fn (Builder $brandQuery) => $brandQuery->where('name', 'like', $this->like($brand)),
             ))
-            ->when($color !== '', fn (Builder $builder) => $builder->whereHas(
-                'variants', fn (Builder $variant) => $variant->where('color', 'like', $this->like($color)),
-            ))
-            ->when($cpu !== '', fn (Builder $builder) => $this->whereAttributeText($builder, 'cpu', $cpu))
-            ->when($gpu !== '', fn (Builder $builder) => $this->whereAttributeText($builder, 'gpu', $gpu))
-            ->when($ramMin !== null || $ramMax !== null, function (Builder $builder) use ($ramMin, $ramMax): void {
-                $builder->whereHas('variants.attributes', function (Builder $attribute) use ($ramMin, $ramMax): void {
-                    $attribute->whereHas('definition', fn (Builder $definition) => $definition->where('key', 'ram'))
-                        ->when($ramMin !== null, fn (Builder $value) => $value->where('numeric_value', '>=', $ramMin))
-                        ->when($ramMax !== null, fn (Builder $value) => $value->where('numeric_value', '<=', $ramMax));
-                });
-            })
-            ->when($priceMin !== null || $priceMax !== null, function (Builder $builder) use ($priceMin, $priceMax): void {
-                $builder->whereHas('variants', fn (Builder $variant) => $variant
-                    ->when($priceMin !== null, fn (Builder $price) => $price->where('price', '>=', $priceMin))
-                    ->when($priceMax !== null, fn (Builder $price) => $price->where('price', '<=', $priceMax))
-                );
-            })
             ->when($terms !== [], function (Builder $builder) use ($terms): void {
                 foreach ($terms as $term) {
                     $like = $this->like($term);
@@ -103,24 +109,29 @@ class SearchCatalog implements Tool
             ->latest('id')
             ->limit($limit)
             ->get()
-            ->map(fn (Product $product): array => [
-                'id' => $product->id,
-                'title' => $product->title,
-                'brand' => $product->brand?->name,
-                'model' => $product->model,
-                'product_type' => $product->product_type,
-                'category' => $product->category?->name,
-                'status' => $product->status,
-                'active' => $product->is_active,
-                'variant_id' => $product->defaultVariant?->id,
-                'price' => $product->defaultVariant?->price,
-                'currency' => $product->defaultVariant?->currency,
-                'stock_status' => $product->defaultVariant?->stock_status,
-                'color' => $product->defaultVariant?->color,
-                'attributes' => $product->defaultVariant?->attributes->mapWithKeys(
-                    fn ($value) => [$value->definition?->key ?? 'attribute' => $value->value]
-                )->all() ?? [],
-            ])->all();
+            ->map(function (Product $product): array {
+                $variant = $product->variants->first();
+
+                return [
+                    'id' => $product->id,
+                    'title' => $product->title,
+                    'brand' => $product->brand?->name,
+                    'model' => $product->model,
+                    'product_type' => $product->product_type,
+                    'category' => $product->category?->name,
+                    'status' => $product->status,
+                    'active' => $product->is_active,
+                    'variant_id' => $variant?->id,
+                    'condition' => $variant?->condition,
+                    'price' => $variant?->price,
+                    'currency' => $variant?->currency,
+                    'stock_status' => $variant?->stock_status,
+                    'color' => $variant?->color,
+                    'attributes' => $variant?->attributes->mapWithKeys(
+                        fn ($value) => [$value->definition?->key ?? 'attribute' => $value->value]
+                    )->all() ?? [],
+                ];
+            })->all();
 
         return json_encode([
             'count' => count($products),
@@ -140,18 +151,12 @@ class SearchCatalog implements Tool
             'ram_min' => $schema->number(),
             'ram_max' => $schema->number(),
             'color' => $schema->string(),
+            'condition' => $schema->string()->enum(ProductCondition::VALUES),
             'price_min' => $schema->number(),
             'price_max' => $schema->number(),
             'active_only' => $schema->boolean(),
             'limit' => $schema->integer(),
         ];
-    }
-
-    private function whereAttributeText(Builder $builder, string $key, string $value): void
-    {
-        $builder->whereHas('variants.attributes', fn (Builder $attribute) => $attribute
-            ->whereHas('definition', fn (Builder $definition) => $definition->where('key', $key))
-            ->where('value', 'like', $this->like($value)));
     }
 
     /**

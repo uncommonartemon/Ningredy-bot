@@ -65,7 +65,7 @@ class TopUpDraftGalleryPhotos implements ShouldQueue
                 $progress->done("Добавлено новых фото: {$stored}");
                 $presenter->sendReview($telegram, $this->chatId, $draft->fresh('media'));
             } else {
-                $progress->done('Поиск завершён: новых непохожих фото не нашлось.');
+                $progress->done('Дозаливка завершена: новых проверенных фото из текущей галереи не получено. Прежние фото сохранены.');
             }
         } finally {
             Cache::forget("draft-gallery-topup:{$this->draftId}:queued");

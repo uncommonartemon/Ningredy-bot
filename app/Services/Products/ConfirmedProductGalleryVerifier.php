@@ -18,11 +18,10 @@ class ConfirmedProductGalleryVerifier
     ) {}
 
     /**
-     * Pixel inspection is advisory evidence used by the recipe-training agent,
-     * not a second autonomous frame selector. Once the exact source, coherent
-     * product content and complete Playwright traversal have been established,
-     * keep the gallery atomic. An uncertain/negative agent decision returns no
-     * trusted gallery and lets the caller continue with another source.
+     * Recipe evidence establishes where the product gallery is. It does not
+     * verify the pixels of another product using the same layout. The caller
+     * must still check the current frames before publication. Missing recipe
+     * evidence leaves the gallery unconfirmed for the normal fallback path.
      *
      * @param  Collection<int, array<string, mixed>>  $candidates
      * @return array{mode: string, candidates: Collection<int, array<string, mixed>>, cached: bool}
@@ -43,9 +42,8 @@ class ConfirmedProductGalleryVerifier
         $recipeData = is_array($recipe?->recipe) ? $recipe->recipe : [];
         $contentConfirmed = ($recipeData['content_confirmed_product'] ?? false) === true;
 
-        // Compatibility for a recipe already pixel-checked before Vision was
-        // demoted to an advisory agent tool. No new standalone Vision verdict
-        // is created or consulted here.
+        // Legacy recipe evidence is still usable for routing, never as a
+        // replacement for the current gallery's content-and-language check.
         $legacyVisionConfirmed = ($recipeData['content_verified_by_vision'] ?? false) === true;
         $accepted = $contentConfirmed || $legacyVisionConfirmed;
 
@@ -53,8 +51,8 @@ class ConfirmedProductGalleryVerifier
             $draft,
             $telegramUpdateId,
             $productPageUrl,
-            $accepted ? 'accept_agent_confirmed_gallery' : 'reject_unconfirmed_gallery_content',
-            $accepted ? 'content_confirmed' : 'content_uncertain',
+            $accepted ? 'accept_recipe_gallery_evidence' : 'reject_unconfirmed_gallery_content',
+            $accepted ? 'current_pixels_pending' : 'content_uncertain',
             $candidates->count(),
             $accepted ? $candidates->count() : 0,
         );

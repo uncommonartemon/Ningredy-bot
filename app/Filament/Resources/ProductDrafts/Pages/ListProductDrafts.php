@@ -19,14 +19,14 @@ class ListProductDrafts extends ListRecords
     public function getTabs(): array
     {
         return [
-            'all' => Tab::make('Все'),
-            'pending' => Tab::make('Ожидают')
+            'all' => Tab::make(__('Все')),
+            'pending' => Tab::make(__('Ожидают'))
                 ->modifyQueryUsing(fn (Builder $query) => $query->where('status', 'pending_review')),
-            'approved' => Tab::make('Одобрены')
+            'approved' => Tab::make(__('Одобрены'))
                 ->modifyQueryUsing(fn (Builder $query) => $query->where('status', 'approved')),
-            'rejected' => Tab::make('Отклонены')
+            'rejected' => Tab::make(__('Отклонены'))
                 ->modifyQueryUsing(fn (Builder $query) => $query->where('status', 'rejected')),
-            'no_photos' => Tab::make('Без фото / поиск приостановлен')
+            'no_photos' => Tab::make(__('Без фото / поиск приостановлен'))
                 ->modifyQueryUsing(fn (Builder $query) => $query
                     ->where('status', 'pending_review')
                     ->where(fn (Builder $q) => $q

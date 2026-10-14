@@ -15,7 +15,7 @@ class ViewTelegramUpdate extends ViewRecord
     {
         return [
             Action::make('openDrafts')
-                ->label('Черновики этого обновления')
+                ->label(__('Черновики этого обновления'))
                 ->icon('heroicon-o-arrow-top-right-on-square')
                 ->color('gray')
                 ->visible(fn (): bool => $this->record->productDrafts()->exists())

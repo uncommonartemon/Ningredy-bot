@@ -4,15 +4,20 @@ namespace App\Jobs;
 
 use App\Models\Category;
 use App\Models\ProductDraft;
+use App\Models\TelegramUpdate;
+use App\Services\Ai\ProductSearchCancellation;
 use App\Services\Products\OperatorDomainHintRecorder;
 use App\Services\Products\ProductGalleryRecipeTrainer;
 use App\Services\Products\ProductRequestContext;
+use App\Services\Telegram\DraftAccess;
 use App\Services\Telegram\TelegramClient;
+use App\Services\Telegram\TelegramDraftEditor;
 use App\Services\Telegram\TelegramProgressReporter;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
 use Illuminate\Queue\Middleware\WithoutOverlapping;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 use RuntimeException;
 use Throwable;
 
@@ -51,6 +56,8 @@ class TrainDraftGalleryRecipe implements ShouldQueue
         OperatorDomainHintRecorder $hints,
     ): void {
         $draft = ProductDraft::query()->with('media')->findOrFail($this->draftId);
+        $update = TelegramUpdate::findOrFail($this->telegramUpdateId);
+        $this->assertCurrent($draft, $update);
         throw_unless(
             $this->expectedDraftTelegramUpdateId !== null
                 && (int) $draft->telegram_update_id === $this->expectedDraftTelegramUpdateId,
@@ -59,6 +66,7 @@ class TrainDraftGalleryRecipe implements ShouldQueue
         );
         throw_unless($draft->status === 'pending_review', RuntimeException::class, 'Черновик уже обработан.');
         $url = trim((string) $draft->primary_source_url);
+        $fingerprint = app(TelegramDraftEditor::class)->fingerprint($draft);
         throw_if($url === '', RuntimeException::class, 'У черновика нет ссылки на товарную карточку.');
         $category = Category::query()
             ->where('slug', trim((string) $draft->category))
@@ -102,7 +110,14 @@ class TrainDraftGalleryRecipe implements ShouldQueue
         );
         throw_if(count($images) < 2, RuntimeException::class, 'Новый рецепт не прошёл проверку; старый рецепт и фото сохранены.');
 
-        $draft->update(['image_urls' => $images]);
+        DB::transaction(function () use ($images, $update, $fingerprint): void {
+            $current = ProductDraft::query()->lockForUpdate()->findOrFail($this->draftId);
+            $this->assertCurrent($current, $update);
+            throw_unless(hash_equals($fingerprint, app(TelegramDraftEditor::class)->fingerprint($current)),
+                RuntimeException::class, 'Черновик изменился во время обучения. Новый набор не применяется к изменённой карточке.');
+            $current->update(['image_urls' => $images]);
+        });
+        $draft->refresh()->load('media');
         $actions = $draft->media->values()->map(fn ($media, int $index): array => [
             'action' => 'replace',
             'media_id' => $media->id,
@@ -111,7 +126,7 @@ class TrainDraftGalleryRecipe implements ShouldQueue
 
         if ($actions === []) {
             $telegram->sendMessage($this->chatId, '✅ Рецепт переобучен. В черновике пока нет фото для замены.');
-            Cache::forget("draft-gallery-retrain:{$this->draftId}:queued");
+            $this->clearQueuedMarker();
 
             return;
         }
@@ -124,12 +139,31 @@ class TrainDraftGalleryRecipe implements ShouldQueue
             $this->chatId,
             expectedDraftTelegramUpdateId: $this->expectedDraftTelegramUpdateId,
         );
-        Cache::forget("draft-gallery-retrain:{$this->draftId}:queued");
+        $this->clearQueuedMarker();
+    }
+
+    private function assertCurrent(ProductDraft $draft, TelegramUpdate $update): void
+    {
+        app(ProductSearchCancellation::class)->throwIfCancelled($update->id);
+        throw_unless($this->expectedDraftTelegramUpdateId !== null
+            && (int) $draft->telegram_update_id === $this->expectedDraftTelegramUpdateId
+            && $draft->status === 'pending_review'
+            && (string) $update->chat_id === $this->chatId
+            && app(DraftAccess::class)->belongsToContext($draft, $update),
+            RuntimeException::class, 'Черновик или контекст переобучения изменились.');
+    }
+
+    private function clearQueuedMarker(): void
+    {
+        $key = "draft-gallery-retrain:{$this->draftId}:queued";
+        if (in_array(Cache::get($key), [true, $this->telegramUpdateId], true)) {
+            Cache::forget($key);
+        }
     }
 
     public function failed(?Throwable $exception): void
     {
-        Cache::forget("draft-gallery-retrain:{$this->draftId}:queued");
+        $this->clearQueuedMarker();
 
         try {
             app(TelegramClient::class)->sendMessage(

@@ -1,0 +1,26 @@
+<?php
+
+return [
+    'paste_from_excel' => 'Vložit z Excelu',
+    'paste_heading' => 'Vložit parametry',
+    'paste_submit' => 'Vložit do formuláře',
+    'paste_table' => 'Tabulka parametrů',
+    'paste_help' => 'Zkopírujte dva nebo tři sloupce z Excelu: parametr, hodnota, jednotka. Dva sloupce zachovají aktuální jednotku; prázdný třetí sloupec ji odstraní. Můžete také vložit řádky „název: hodnota“.',
+    'replace_filled' => 'Nahradit vyplněné hodnoty',
+    'replace_help' => 'Ve výchozím stavu se vyplněné hodnoty zachovají a prázdné řádky se doplní.',
+    'create_missing' => 'Vytvořit chybějící parametry',
+    'create_help' => 'Nové názvy se přidají do seznamu parametrů. Hodnoty produktu se uloží až po uložení formuláře.',
+    'pasted' => 'Parametry vloženy',
+    'paste_result' => 'Přidáno: :added. Doplněno: :updated. Ponecháno beze změny: :skipped. Nové parametry: :created.',
+    'ambiguous_attribute' => 'Název „:name“ je nejednoznačný. Použijte přesný název nebo klíč parametru.',
+    'duplicate_attribute' => 'Parametr „:name“ je uveden dvakrát. Ponechte jeden řádek.',
+    'missing_attributes' => 'Nenalezené parametry: :names. Povolte vytvoření chybějících parametrů nebo použijte existující názvy.',
+    'too_many' => 'Vložte nejvýše 100 parametrů najednou.',
+    'invalid_columns' => 'Řádek :line musí mít dva sloupce: parametr a hodnotu; volitelný třetí sloupec je jednotka.',
+    'empty_cell' => 'Řádek :line: vyplňte název i hodnotu.',
+    'too_long' => 'Řádek :line je příliš dlouhý: název do 255, hodnota do 2000, jednotka do 24 znaků.',
+    'empty_table' => 'Vložte alespoň jeden parametr s hodnotou.',
+    'copy_variant' => 'Zkopírovat konfiguraci',
+    'copy_variant_help' => 'Parametry se zkopírují. Cenu, dostupnost a identifikátory nové konfigurace vyplňte samostatně.',
+    'invalid_quotes' => 'Zkontrolujte uvozovky v tabulce: text v uvozovkách musí být uzavřený; uvozovku uvnitř takového textu napište dvakrát.',
+];

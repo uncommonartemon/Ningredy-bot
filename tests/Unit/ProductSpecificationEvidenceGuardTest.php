@@ -1,0 +1,317 @@
+<?php
+
+namespace Tests\Unit;
+
+use App\Services\Products\ProductSpecificationEvidenceGuard;
+use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\TestCase;
+use RuntimeException;
+
+class ProductSpecificationEvidenceGuardTest extends TestCase
+{
+    private function fact(array $changes = []): array
+    {
+        return [...['key' => 'ram', 'name' => 'RAM', 'value' => '64 GB',
+            'source_url' => 'https://maker.example/specs.pdf', 'source_excerpt' => 'Installed RAM: 64 GB'], ...$changes];
+    }
+
+    public function test_an_existing_cited_fact_survives_an_empty_photo_page_without_a_new_fetch(): void
+    {
+        $fact = $this->fact();
+        (new ProductSpecificationEvidenceGuard)->validate([$fact], [[...$fact, 'evidence' => 'confirmed']], [], []);
+        $this->addToAssertionCount(1);
+    }
+
+    public function test_a_table_quoted_with_its_own_separators_and_row_order_is_still_observed(): void
+    {
+        // Request #99: gpt-6-luna quoted rows the page lists apart, with tabs.
+        $page = ['url' => 'https://shop.example/dell', 'specification_text' => "Processor Model: 155H\nProcessor Brand: Intel\nProcessor Type: Core Ultra 7"];
+        $cpu = ['key' => 'cpu', 'name' => 'Processor', 'value' => 'Intel Core Ultra 7 155H', 'evidence' => 'confirmed',
+            'source_url' => 'https://shop.example/dell', 'source_excerpt' => "Processor Type\tCore Ultra 7\nProcessor Model\t155H"];
+
+        (new ProductSpecificationEvidenceGuard)->validate([], [$cpu], [], [$page]);
+        $this->addToAssertionCount(1);
+    }
+
+    public function test_two_rows_joined_by_a_semicolon_are_each_observed(): void
+    {
+        $page = ['url' => 'https://shop.example/zenbook', 'specification_text' => "Display\n3K (2880 x 1800) 120Hz OLED 16:10 aspect ratio\nWeight\n1.2 kg\nTouch Screen\nYes"];
+
+        (new ProductSpecificationEvidenceGuard)->validate([], [['key' => 'display', 'name' => 'Display', 'value' => '14-inch OLED touchscreen',
+            'evidence' => 'confirmed', 'source_url' => 'https://shop.example/zenbook',
+            'source_excerpt' => '3K (2880 x 1800) 120Hz OLED 16:10 aspect ratio; Touch Screen: Yes']], [], [$page]);
+        $this->addToAssertionCount(1);
+    }
+
+    public function test_a_changed_number_is_not_observed_although_only_punctuation_differs(): void
+    {
+        // A reviewer's reproduction: the page says 2.5 kg, the quote 25 kg.
+        $page = ['url' => 'https://shop.example/p', 'specification_text' => "Weight: 2.5 kg\nDisplay: 1 6 inch"];
+        $guard = new ProductSpecificationEvidenceGuard;
+
+        foreach (['Weight: 25 kg', 'Display: 16 inch'] as $quote) {
+            try {
+                $guard->validate([], [['key' => 'x', 'name' => 'X', 'value' => 'x', 'evidence' => 'confirmed',
+                    'source_url' => 'https://shop.example/p', 'source_excerpt' => $quote]], [], [$page]);
+                $this->fail("{$quote} was accepted against the page");
+            } catch (RuntimeException $exception) {
+                $this->assertStringContainsString('excerpt was not observed', $exception->getMessage());
+            }
+        }
+
+        $guard->validate([], [['key' => 'weight', 'name' => 'Weight', 'value' => '2.5 kg', 'evidence' => 'confirmed',
+            'source_url' => 'https://shop.example/p', 'source_excerpt' => "Weight\t2.5 kg"]], [], [$page]);
+    }
+
+    #[DataProvider('changedNumericQuotes')]
+    public function test_a_quote_cannot_change_or_cut_a_number(string $pageText, string $quote): void
+    {
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('excerpt was not observed');
+
+        (new ProductSpecificationEvidenceGuard)->validate([], [['key' => 'x', 'value' => 'x', 'evidence' => 'confirmed',
+            'source_url' => 'https://shop.example/p', 'source_excerpt' => $quote]], [], [
+                ['url' => 'https://shop.example/p', 'specification_text' => $pageText],
+            ]);
+    }
+
+    public static function changedNumericQuotes(): array
+    {
+        return [
+            'raw decimal suffix' => ['Weight: 2.5 kg', '5 kg'],
+            'one-digit newline fragment' => ['Weight: 2.5 kg', "5\nkg"],
+            'one-digit semicolon fragment' => ['Weight: 2.5 kg', '5; kg'],
+            'normalized decimal suffix' => ['Weight: 2.5 kg', "5\tkg"],
+            'raw whole-number suffix' => ['Weight: 12.5 kg', '2.5 kg'],
+            'normalized whole-number suffix' => ['Weight: 12.5 kg', "2.5\tkg"],
+            'raw decimal prefix' => ['Weight: 2.5 kg', 'Weight: 2'],
+            'normalized decimal prefix' => ['Weight: 2.5 kg', "Weight\t2"],
+            'raw integer suffix' => ['RAM: 64 GB', '4 GB'],
+            'raw integer prefix' => ['RAM: 64 GB', 'RAM: 6'],
+            'decimal comma suffix' => ['Weight: 2,5 kg', "5\tkg"],
+            'decimal comma removed' => ['Weight: 2,5 kg', 'Weight: 25 kg'],
+            'negative sign removed' => ['Voltage: -12 V', 'Voltage: 12 V'],
+            'raw negative suffix' => ['Voltage: -12 V', '12 V'],
+            'normalized negative suffix' => ['Voltage: -12 V', "12\tV"],
+            'negative after colon without space' => ['Voltage:-12 V', '12 V'],
+            'normalized negative after colon' => ['Voltage:-12 V', "12\tV"],
+            'negative after colon removed with label' => ['Voltage:-12 V', "Voltage\t12 V"],
+            'positive sign removed' => ['Voltage: +12 V', '12 V'],
+            'normalized positive sign removed' => ['Voltage: +12 V', "12\tV"],
+            'normalized positive after colon' => ['Voltage:+12 V', "12\tV"],
+            'sign changed' => ['Voltage: -12 V', 'Voltage: +12 V'],
+            'unicode minus removed' => ["Voltage: \u{2212}12 V", '12 V'],
+            'normalized unicode minus removed' => ["Voltage: \u{2212}12 V", "12\tV"],
+            'normalized unicode minus after colon' => ["Voltage:\u{2212}12 V", "12\tV"],
+            'leading decimal point removed' => ['Weight: .5 kg', 'Weight: 5 kg'],
+            'adjacent numbers joined' => ['Display: 1 6 inch', 'Display: 16 inch'],
+        ];
+    }
+
+    #[DataProvider('unchangedNumericQuotes')]
+    public function test_whole_numeric_quotes_still_allow_short_excerpts_and_formatting(string $pageText, string $quote): void
+    {
+        (new ProductSpecificationEvidenceGuard)->validate([], [['key' => 'x', 'value' => 'x', 'evidence' => 'confirmed',
+            'source_url' => 'https://shop.example/p', 'source_excerpt' => $quote]], [], [
+                ['url' => 'https://shop.example/p', 'specification_text' => $pageText],
+            ]);
+        $this->addToAssertionCount(1);
+    }
+
+    public static function unchangedNumericQuotes(): array
+    {
+        return [
+            'raw short decimal' => ['Weight: 2.5 kg', '2.5 kg'],
+            'short hyphenated cpu code' => ['CPU: Intel Core i7-13620H', '13620H'],
+            'normalized short hyphenated cpu code' => ['CPU: Intel Core i7-13620H', "13620\tH"],
+            'normalized whole hyphenated cpu code' => ['CPU: Intel Core i7-13620H', 'Intel Core i7 13620H'],
+            'model hyphen separator' => ['Model: X-123', 'Model: X 123'],
+            'model hyphen and tab separators' => ['Model:X-123', "Model\tX\t123"],
+            'normalized short decimal' => ['Weight: 2.5 kg', "2.5\tkg"],
+            'raw short integer' => ['Weight: 5 kg', '5 kg'],
+            'whole one-digit newline fragment' => ['Weight: 5 kg', "5\nkg"],
+            'whole one-digit semicolon fragment' => ['Weight: 5 kg', '5; kg'],
+            'normalized short integer' => ['Weight: 5 kg', "5\tkg"],
+            'negative sign retained' => ['Voltage: -12 V', "Voltage\t-12 V"],
+            'negative after colon retained' => ['Voltage:-12 V', "Voltage\t-12 V"],
+            'short negative number' => ['Voltage: -12 V', "-12\tV"],
+            'positive sign retained' => ['Voltage: +12 V', "+12\tV"],
+            'positive after colon retained' => ['Voltage:+12 V', "Voltage\t+12 V"],
+            'unicode minus retained' => ["Voltage: \u{2212}12 V", "\u{2212}12\tV"],
+            'unicode minus after colon retained' => ["Voltage:\u{2212}12 V", "Voltage\t\u{2212}12 V"],
+            'decimal comma retained' => ['Weight: 2,5 kg', "2,5\tkg"],
+            'leading decimal retained' => ['Weight: .5 kg', "Weight\t.5 kg"],
+            'adjacent numbers retained' => ['Display: 1 6 inch', "Display\t1 6 inch"],
+            'later whole raw occurrence' => ['Weight: 2.5 kg; Package: 5 kg', '5 kg'],
+            'later whole normalized occurrence' => ['Weight: 2.5 kg; Package: 5 kg', "5\tkg"],
+        ];
+    }
+
+    public function test_words_the_page_does_not_have_are_still_not_observed(): void
+    {
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('excerpt was not observed');
+        $page = ['url' => 'https://shop.example/dell', 'specification_text' => "Processor Type: Core Ultra 7\nProcessor Model: 155H"];
+
+        (new ProductSpecificationEvidenceGuard)->validate([], [['key' => 'cpu', 'name' => 'Processor', 'value' => 'Intel Core Ultra 7 155H',
+            'evidence' => 'confirmed', 'source_url' => 'https://shop.example/dell',
+            'source_excerpt' => "Processor Type\tCore Ultra 7\nMaximum Turbo Speed\t4.80 GHz"]], [], [$page]);
+    }
+
+    public function test_known_url_without_captured_text_is_not_proof(): void
+    {
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('excerpt was not observed');
+        (new ProductSpecificationEvidenceGuard)->validate([], [[...$this->fact(), 'evidence' => 'confirmed']], [], [
+            ['url' => 'https://maker.example/specs.pdf', 'specification_text' => ''],
+        ]);
+    }
+
+    public function test_missing_page_feedback_distinguishes_absent_evidence_from_a_bad_quote(): void
+    {
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('No saved text is available for this URL');
+
+        (new ProductSpecificationEvidenceGuard)->validate([], [[...$this->fact(), 'evidence' => 'confirmed']], [], []);
+    }
+
+    public function test_joined_sentences_are_rejected_with_repair_guidance_not_a_url_guess(): void
+    {
+        $url = 'https://shop.example/product';
+        $first = 'The processor has 16 cores.';
+        $last = 'Its maximum frequency is 4.8 GHz.';
+        $page = ['url' => $url, 'specification_text' => $first.' A benchmark score is reported here. '.$last];
+        $item = ['key' => 'cpu', 'value' => '16 cores, up to 4.8 GHz', 'evidence' => 'confirmed',
+            'source_url' => $url, 'source_excerpt' => $first.' '.$last];
+        $guard = new ProductSpecificationEvidenceGuard;
+
+        try {
+            $guard->validate([], [$item], [], [$page]);
+            $this->fail('Nonadjacent sentences were accepted as a continuous quote');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString('Saved text exists for this URL', $exception->getMessage());
+            $this->assertStringContainsString('separate nonadjacent passages with a newline or semicolon', $exception->getMessage());
+            $this->assertStringContainsString('Do not change the source URL just to retry this quote', $exception->getMessage());
+        }
+
+        $guard->validate([], [[...$item, 'source_excerpt' => $first."\n".$last]], [], [$page]);
+        $this->addToAssertionCount(1);
+    }
+
+    public function test_a_quote_from_another_url_cannot_be_attributed_to_this_one(): void
+    {
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('excerpt was not observed');
+        (new ProductSpecificationEvidenceGuard)->validate([], [[...$this->fact(), 'evidence' => 'confirmed']], [], [
+            ['url' => 'https://other.example/specs', 'specification_text' => 'Installed RAM: 64 GB'],
+        ]);
+    }
+
+    public function test_spaces_entities_and_redirect_aliases_do_not_invalidate_a_real_excerpt(): void
+    {
+        (new ProductSpecificationEvidenceGuard)->validate([], [[...$this->fact(), 'evidence' => 'confirmed']], [], [
+            ['url' => 'https://maker.example/old', 'final_url' => 'https://maker.example/specs.pdf',
+                'specification_text' => 'Installed RAM:&nbsp; 64   GB'],
+        ]);
+        $this->addToAssertionCount(1);
+    }
+
+    public function test_a_confirmed_label_cannot_silently_replace_an_existing_value(): void
+    {
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('confirmed but changed');
+        $fact = $this->fact();
+        (new ProductSpecificationEvidenceGuard)->validate([$fact], [[...$fact, 'value' => '48 GB', 'evidence' => 'confirmed']], [], []);
+    }
+
+    public function test_old_supported_facts_cannot_be_dropped_without_accounting_for_their_sources(): void
+    {
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('considered_source_urls');
+        $fact = $this->fact();
+        (new ProductSpecificationEvidenceGuard)->validate([$fact], [[...$fact, 'evidence' => 'dropped',
+            'reason' => 'The photo page does not mention RAM.']], [], []);
+    }
+
+    public function test_agent_can_drop_an_inapplicable_fact_after_reviewing_its_evidence(): void
+    {
+        $fact = $this->fact();
+        (new ProductSpecificationEvidenceGuard)->validate([$fact], [[...$fact, 'evidence' => 'dropped',
+            'reason' => 'This specification applies only to another regional revision.',
+            'considered_source_urls' => [$fact['source_url']]]], [], []);
+        $this->addToAssertionCount(1);
+    }
+
+    public function test_keeping_the_old_value_still_requires_addressing_a_new_differing_observation(): void
+    {
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('considered_source_urls');
+        $old = $this->fact();
+        $new = $this->fact(['value' => '48 GB', 'source_url' => 'https://shop.example/product', 'source_excerpt' => 'RAM: 48 GB']);
+        (new ProductSpecificationEvidenceGuard)->validate([$old], [[...$old, 'evidence' => 'confirmed']], [$new], []);
+    }
+
+    public function test_equivalent_spellings_can_be_resolved_by_the_agent_without_a_numeric_dictionary(): void
+    {
+        $old = $this->fact();
+        $new = $this->fact(['value' => '64GB', 'source_url' => 'https://shop.example/product', 'source_excerpt' => 'RAM: 64GB']);
+        (new ProductSpecificationEvidenceGuard)->validate([$old], [[...$old, 'evidence' => 'confirmed',
+            'reason' => 'Both sources describe the same capacity; only spacing differs.',
+            'considered_source_urls' => [$old['source_url'], $new['source_url']]]], [$new], []);
+        $this->addToAssertionCount(1);
+    }
+
+    public function test_differing_observations_keep_both_sides_for_the_agent_without_choosing_a_winner(): void
+    {
+        $one = $this->fact();
+        $two = $this->fact(['value' => '48 GB', 'source_url' => 'https://shop.example/product', 'source_excerpt' => 'RAM: 48 GB']);
+        $this->assertSame(['ram' => [$one, $two]], (new ProductSpecificationEvidenceGuard)->differingObservations([$one, $two]));
+    }
+
+    public function test_selected_cited_source_does_not_need_to_be_duplicated_in_considered_urls(): void
+    {
+        $selected = $this->fact();
+        $other = $this->fact(['value' => '48 GB', 'source_url' => 'https://shop.example/product', 'source_excerpt' => 'RAM: 48 GB']);
+
+        (new ProductSpecificationEvidenceGuard)->validate([$selected], [[...$selected, 'evidence' => 'confirmed',
+            'reason' => 'The shop observation describes a different regional revision.',
+            'considered_source_urls' => [$other['source_url']]]], [$other], []);
+
+        $this->addToAssertionCount(1);
+    }
+
+    public function test_selected_source_and_reason_do_not_replace_review_of_the_other_source(): void
+    {
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('Missing source URLs: https://shop.example/product.');
+        $selected = $this->fact();
+        $other = $this->fact(['value' => '48 GB', 'source_url' => 'https://shop.example/product', 'source_excerpt' => 'RAM: 48 GB']);
+
+        (new ProductSpecificationEvidenceGuard)->validate([$selected], [[...$selected, 'evidence' => 'confirmed',
+            'reason' => 'This source appears applicable.', 'considered_source_urls' => []]], [$other], []);
+    }
+
+    public function test_all_considered_sources_still_require_an_explanation_of_the_difference(): void
+    {
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('Missing explanation in reason.');
+        $selected = $this->fact();
+        $other = $this->fact(['value' => '48 GB', 'source_url' => 'https://shop.example/product', 'source_excerpt' => 'RAM: 48 GB']);
+
+        (new ProductSpecificationEvidenceGuard)->validate([$selected], [[...$selected, 'evidence' => 'confirmed',
+            'reason' => '', 'considered_source_urls' => [$selected['source_url'], $other['source_url']]]], [$other], []);
+    }
+
+    public function test_implicitly_considered_source_still_requires_its_real_quote(): void
+    {
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('excerpt was not observed');
+        $selected = $this->fact();
+        $other = $this->fact(['value' => '48 GB', 'source_url' => 'https://shop.example/product', 'source_excerpt' => 'RAM: 48 GB']);
+
+        (new ProductSpecificationEvidenceGuard)->validate([$selected], [[...$selected, 'evidence' => 'confirmed',
+            'source_excerpt' => 'Confirmed factory-installed RAM: 64 GB',
+            'reason' => 'The shop observation describes a different regional revision.',
+            'considered_source_urls' => [$other['source_url']]]], [$other], []);
+    }
+}

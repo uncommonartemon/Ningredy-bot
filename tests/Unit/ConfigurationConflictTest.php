@@ -119,6 +119,43 @@ class ConfigurationConflictTest extends TestCase
         ));
     }
 
+    public function test_unscoped_page_recommendations_do_not_invent_a_memory_conflict(): void
+    {
+        // Live #171: the real 16 GB notebook was demoted because its rendered
+        // page also advertised a tablet with 128 GB storage. A raw body is not
+        // a memory specification belonging to the primary product.
+        $this->assertFalse(app(ProductIdentityMatcher::class)->conflictsMemoryConfiguration(
+            $this->draftWithMemory('16 GB DDR5'),
+            [
+                'url' => 'https://shop.example/product/4815083',
+                'title' => 'Dell Latitude 5450 U7 16/512 GB',
+                '_preflight_identity_evidence' => "MPN: 03G40\nArbeitsspeicher: 16 GB - SSD: 51... mehr\n"
+                    ."Ähnliche Produkte\nSamsung Galaxy Tab A11+ 128 GB EE",
+            ],
+        ));
+    }
+
+    public function test_a_recommended_matching_configuration_cannot_rescue_a_conflicting_product_title(): void
+    {
+        $this->assertTrue(app(ProductIdentityMatcher::class)->conflictsMemoryConfiguration(
+            $this->draftWithMemory('32 GB DDR5'),
+            [
+                'url' => 'https://shop.example/product/1',
+                'title' => 'Notebook 16 GB RAM, 512 GB SSD',
+                '_preflight_identity_evidence' => "Recommended products\nAnother notebook 32 GB RAM",
+            ],
+        ));
+    }
+
+    public function test_body_only_memory_is_left_for_semantic_verification_not_a_deterministic_conflict(): void
+    {
+        $this->assertFalse(app(ProductIdentityMatcher::class)->conflictsMemoryConfiguration(
+            $this->draftWithMemory('32 GB'),
+            ['url' => 'https://shop.example/product/1', 'title' => 'Notebook',
+                '_preflight_identity_evidence' => 'RAM: 16 GB'],
+        ));
+    }
+
     private function draftWithMemory(?string $memory): ProductDraft
     {
         return $this->draftWithSpecifications($memory === null ? [] : [

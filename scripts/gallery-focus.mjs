@@ -1,4 +1,13 @@
 export const captureGalleryScoutInPage = ({ excludedContextPatternSource, focusSelector = '', initialUrl = '', rememberState = true }) => {
+    // Keep observed controls addressable even when a consent/viewer widget lives
+    // in an open shadow root. Playwright CSS locators can reach those controls.
+    const roots = [document];
+    for (let index = 0; index < roots.length; index++) {
+        for (const node of roots[index].querySelectorAll('*')) {
+            if (node.shadowRoot) roots.push(node.shadowRoot);
+        }
+    }
+    const queryAll = selector => roots.flatMap(root => [...root.querySelectorAll(selector)]);
     const excludedContextPattern = new RegExp(excludedContextPatternSource.replaceAll('\\\\', '\\'), 'i');
     const semanticContext = (element) => {
         const parts = [];
@@ -70,7 +79,7 @@ export const captureGalleryScoutInPage = ({ excludedContextPatternSource, focusS
         if (id && id.length <= 100) {
             const selector = `#${CSS.escape(id)}`;
 
-            if (document.querySelectorAll(selector).length === 1) {
+            if (queryAll(selector).length === 1) {
                 return selector;
             }
         }
@@ -85,7 +94,7 @@ export const captureGalleryScoutInPage = ({ excludedContextPatternSource, focusS
             const selector = attributeSelector(element, name, value);
 
             try {
-                if (document.querySelectorAll(selector).length > 0) {
+                if (queryAll(selector).length > 0) {
                     return selector;
                 }
             } catch {
@@ -133,7 +142,7 @@ export const captureGalleryScoutInPage = ({ excludedContextPatternSource, focusS
             if (initialUrl && address(location.href) !== address(initialUrl)) { root = null; reason = 'page_navigated'; }
         } catch { root = null; reason = 'invalid_focus_selector'; }
     }
-    const overlays = new Set([...document.querySelectorAll('[role=dialog],dialog[open],[aria-modal=true],[role=alert]')].filter(visible));
+    const overlays = new Set(queryAll('[role=dialog],dialog[open],[aria-modal=true],[role=alert]').filter(visible));
     if (root) {
         const r = root.getBoundingClientRect();
         for (const [x, y] of [[r.left + r.width / 2, r.top + r.height / 2], [r.left + 1, r.top + 1], [r.right - 1, r.bottom - 1]]) {
@@ -205,7 +214,7 @@ export const captureGalleryScoutInPage = ({ excludedContextPatternSource, focusS
         ].join(','))].filter((element) => !excludedContext(element)),
         (element) => withinObservation(element),
     ).slice(0, 70);
-    const interactiveControlElements = [...document.querySelectorAll('button,a,[role=button]')]
+    const interactiveControlElements = queryAll('button,a,[role=button]')
         .filter((element) => /\b(gallery|media|image|photo|thumbnail|carousel|slider|zoom|next|more)\b/i.test([
             element.getAttribute('aria-label'),
              element.getAttribute('title'),
@@ -222,7 +231,7 @@ export const captureGalleryScoutInPage = ({ excludedContextPatternSource, focusS
     ).slice(0, 50)
         .map(sanitize)
         .filter(Boolean);
-    const actionCandidateObjects = [...document.querySelectorAll('button,a,[role=button],summary')]
+    const actionCandidateObjects = queryAll('button,a,[role=button],summary')
         .filter(visible)
         .filter((element) => !excludedContext(element))
         .map((element, documentIndex) => {
@@ -241,7 +250,7 @@ export const captureGalleryScoutInPage = ({ excludedContextPatternSource, focusS
             let selectorIndex = 0;
 
             try {
-                const selectorMatches = [...document.querySelectorAll(selector)];
+                const selectorMatches = queryAll(selector);
                 selectorCount = selectorMatches.length;
                 selectorIndex = Math.max(0, selectorMatches.indexOf(element));
             } catch {

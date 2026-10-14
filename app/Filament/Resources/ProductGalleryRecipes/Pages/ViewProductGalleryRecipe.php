@@ -9,10 +9,13 @@ use App\Models\ProductGalleryRecipe;
 use App\Services\Products\ProductGalleryRecipeRouter;
 use Filament\Actions\Action;
 use Filament\Actions\EditAction;
+use Filament\Forms\Components\Hidden;
 use Filament\Forms\Components\Textarea;
 use Filament\Forms\Components\TextInput;
 use Filament\Notifications\Notification;
 use Filament\Resources\Pages\ViewRecord;
+use Filament\Schemas\Components\Utilities\Get;
+use Illuminate\Validation\ValidationException;
 
 class ViewProductGalleryRecipe extends ViewRecord
 {
@@ -25,52 +28,55 @@ class ViewProductGalleryRecipe extends ViewRecord
 
         return [
             Action::make('toggleStatus')
-                ->label(fn (): string => $record->status === 'disabled' ? 'Включить' : 'Отключить')
+                ->label(fn (): string => $record->status === 'disabled' ? __('Включить') : __('Отключить'))
                 ->icon(fn (): string => $record->status === 'disabled' ? 'heroicon-o-play' : 'heroicon-o-pause')
                 ->color(fn (): string => $record->status === 'disabled' ? 'success' : 'gray')
                 ->requiresConfirmation()
                 ->action(function () use ($record): void {
                     $record->update(['status' => $record->status === 'disabled' ? 'active' : 'disabled']);
                     Notification::make()
-                        ->title($record->status === 'disabled' ? 'Рецепт отключён' : 'Рецепт включён')
+                        ->title($record->status === 'disabled' ? __('Рецепт отключён') : __('Рецепт включён'))
                         ->success()
                         ->send();
                 }),
             Action::make('toggleBlocked')
-                ->label(fn (): string => $record->source_blocked ? 'Разблокировать домен' : 'Заблокировать домен')
-                ->icon(fn (): string => $record->source_blocked ? 'heroicon-o-lock-open' : 'heroicon-o-lock-closed')
-                ->color(fn (): string => $record->source_blocked ? 'success' : 'danger')
+                ->label(fn (): string => $this->domainBlockIsSet() ? __('Разблокировать домен') : __('Заблокировать домен'))
+                ->icon(fn (): string => $this->domainBlockIsSet() ? 'heroicon-o-lock-open' : 'heroicon-o-lock-closed')
+                ->color(fn (): string => $this->domainBlockIsSet() ? 'success' : 'danger')
                 ->requiresConfirmation()
-                ->modalDescription(fn (): string => $record->source_blocked
-                    ? 'Домен снова будет участвовать в Web Search и обработке источников.'
-                    : 'Домен не будет участвовать ни в Web Search, ни в HTML/Playwright-обработке ни для одного товара.')
-                ->schema(fn (): array => $record->source_blocked ? [] : [
-                    Textarea::make('reason')
-                        ->label('Причина блокировки')
-                        ->rows(3),
+                ->fillForm(fn (): array => ['block' => ! $this->domainBlockIsSet(), 'domain' => $this->record->domain])
+                ->modalDescription(__('Действие относится ко всему домену. Независимые блокировки отдельных путей сохраняются.'))
+                ->schema([
+                    Hidden::make('block')->required()->rules(['boolean']),
+                    Hidden::make('domain')->required(),
+                    Textarea::make('reason')->label(__('Причина блокировки'))->rows(3)
+                        ->visible(fn (Get $get): bool => (bool) $get('block')),
                 ])
-                ->action(function (array $data) use ($record): void {
+                ->action(function (array $data): void {
+                    $record = $this->record->fresh();
+                    if ($record->domain !== $data['domain']) {
+                        throw ValidationException::withMessages(['domain' => __('Домен изменился. Откройте действие заново.')]);
+                    }
                     $router = app(ProductGalleryRecipeRouter::class);
-                    $blocking = ! $record->source_blocked;
-
-                    // Через общий писатель, а не по текущей строке: этот рецепт
-                    // почти всегда описывает один path, и раньше кнопка с
-                    // обещанием "ни для одного товара" гасила только его.
+                    $blocking = (bool) $data['block'];
                     $blocking
-                        ? $router->blockDomain($record->domain, trim((string) ($data['reason'] ?? '')) ?: 'Заблокировано вручную оператором в панели.')
+                        ? $router->blockDomain($record->domain, trim((string) ($data['reason'] ?? '')) ?: __('Заблокировано вручную оператором в панели.'))
                         : $router->unblockDomain($record->domain);
-                    $record->refresh();
-                    Notification::make()
-                        ->title($blocking ? 'Домен заблокирован' : 'Домен разблокирован')
-                        ->success()
-                        ->send();
+                    Notification::make()->title($blocking ? __('Домен заблокирован') : __('Домен разблокирован'))
+                        ->success()->send();
+                    if (! $this->record->fresh()) {
+                        $this->redirect(ProductGalleryRecipeResource::getUrl('index'));
+
+                        return;
+                    }
+                    $this->record->refresh();
                 }),
             Action::make('retrain')
-                ->label('Проверить / переобучить')
+                ->label(__('Проверить / переобучить'))
                 ->icon('heroicon-o-sparkles')
                 ->schema([
                     TextInput::make('product_url')
-                        ->label('Ссылка на товарную карточку')
+                        ->label(__('Ссылка на товарную карточку'))
                         ->url()
                         ->required()
                         ->default(fn (): string => 'https://'.$record->domain.'/'),
@@ -78,29 +84,29 @@ class ViewProductGalleryRecipe extends ViewRecord
                 ->action(function (array $data): void {
                     TrainProductGalleryRecipe::dispatch($data['product_url']);
                     Notification::make()
-                        ->title('Обучение поставлено в очередь')
-                        ->body('История и результат появятся в журнале версий рецепта.')
+                        ->title(__('Обучение поставлено в очередь'))
+                        ->body(__('История и результат появятся в журнале версий рецепта.'))
                         ->success()
                         ->send();
                 }),
             Action::make('viewVersions')
-                ->label('Посмотреть версии')
+                ->label(__('Посмотреть версии'))
                 ->icon('heroicon-o-clock')
                 ->color('gray')
                 ->url(fn (): string => ProductGalleryRecipeVersionResource::getUrl('index', [
                     'tableFilters' => ['domain' => ['value' => $record->domain]],
                 ])),
             Action::make('editRecipeJson')
-                ->label('Изменить JSON вручную')
+                ->label(__('Изменить JSON вручную'))
                 ->icon('heroicon-o-exclamation-triangle')
                 ->color('danger')
                 ->requiresConfirmation()
-                ->modalHeading('Ручное редактирование рецепта')
-                ->modalDescription('Опасное действие: неверный JSON или селекторы сломают автоматический сбор фотографий для этого домена. Разрешены только CSS-селекторы, атрибуты изображений и ограниченные клики — произвольный JavaScript не исполняется.')
-                ->modalSubmitActionLabel('Сохранить JSON')
+                ->modalHeading(__('Ручное редактирование рецепта'))
+                ->modalDescription(__('Опасное действие: неверный JSON или селекторы сломают автоматический сбор фотографий для этого домена. Разрешены только CSS-селекторы, атрибуты изображений и ограниченные клики — произвольный JavaScript не исполняется.'))
+                ->modalSubmitActionLabel(__('Сохранить JSON'))
                 ->schema([
                     Textarea::make('recipe_json')
-                        ->label('Рецепт (JSON)')
+                        ->label(__('Рецепт (JSON)'))
                         ->rows(20)
                         ->default(fn (): string => json_encode(
                             $record->recipe ?? [],
@@ -109,7 +115,7 @@ class ViewProductGalleryRecipe extends ViewRecord
                         ->rules([
                             fn (): \Closure => function (string $attribute, $value, \Closure $fail): void {
                                 if (json_decode((string) $value, true) === null && trim((string) $value) !== 'null') {
-                                    $fail('Некорректный JSON.');
+                                    $fail(__('Некорректный JSON.'));
                                 }
                             },
                         ])
@@ -118,12 +124,18 @@ class ViewProductGalleryRecipe extends ViewRecord
                 ->action(function (array $data) use ($record): void {
                     $record->update(['recipe' => json_decode($data['recipe_json'], true) ?? []]);
                     Notification::make()
-                        ->title('Рецепт обновлён вручную')
+                        ->title(__('Рецепт обновлён вручную'))
                         ->warning()
                         ->send();
                 }),
             EditAction::make()
-                ->label('Быстрое редактирование'),
+                ->label(__('Быстрое редактирование')),
         ];
+    }
+
+    private function domainBlockIsSet(): bool
+    {
+        return ProductGalleryRecipe::query()->where('domain', $this->record->domain)
+            ->where('path_pattern', '*')->where('source_blocked', true)->exists();
     }
 }

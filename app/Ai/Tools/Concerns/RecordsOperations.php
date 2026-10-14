@@ -4,6 +4,7 @@ namespace App\Ai\Tools\Concerns;
 
 use App\Models\AiOperation;
 use App\Models\TelegramUpdate;
+use App\Services\Ai\ProductSearchCancellation;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Throwable;
@@ -18,6 +19,7 @@ trait RecordsOperations
         callable $callback,
         ?string $targetType = null,
         ?int $targetId = null,
+        bool $staged = false,
     ): array {
         $key = hash('sha256', $this->json([
             'update_id' => $update?->id,
@@ -29,7 +31,7 @@ trait RecordsOperations
         ]));
 
         return Cache::lock('ai-operation:'.$key, 300)->block(10, function () use (
-            $update, $tool, $action, $payload, $callback, $targetType, $targetId, $key,
+            $update, $tool, $action, $payload, $callback, $targetType, $targetId, $key, $staged,
         ): array {
             $existing = AiOperation::query()->where('idempotency_key', $key)->first();
 
@@ -37,43 +39,56 @@ trait RecordsOperations
                 return ['operation_id' => $existing->id, 'ok' => true, ...($existing->result ?? [])];
             }
 
-            return DB::transaction(function () use (
-                $update, $tool, $action, $payload, $callback, $targetType, $targetId, $key, $existing,
-            ): array {
-                $operation = $existing ?: AiOperation::query()->create([
-                    'telegram_update_id' => $update?->id,
-                    'telegram_user_id' => $update?->telegram_user_id,
-                    'tool' => $tool,
-                    'action' => $action,
-                    'target_type' => $targetType,
-                    'target_id' => $targetId,
-                    'idempotency_key' => $key,
-                    'payload' => $payload,
-                    'status' => 'running',
-                ]);
+            app(ProductSearchCancellation::class)->throwIfCancelled($update?->id);
 
-                $operation->update(['status' => 'running', 'error' => null, 'executed_at' => null]);
+            $operation = $existing ?: AiOperation::query()->create([
+                'telegram_update_id' => $update?->id,
+                'telegram_user_id' => $update?->telegram_user_id,
+                'tool' => $tool,
+                'action' => $action,
+                'target_type' => $targetType,
+                'target_id' => $targetId,
+                'idempotency_key' => $key,
+                'payload' => $payload,
+                'status' => 'running',
+            ]);
 
-                try {
-                    $result = $callback();
-                    $result = is_array($result) ? $result : ['value' => $result];
-                    $operation->update([
-                        'result' => $result,
-                        'status' => 'completed',
-                        'executed_at' => now(),
-                    ]);
+            $operation->update(['status' => 'running', 'error' => null, 'executed_at' => null]);
 
-                    return ['operation_id' => $operation->id, 'ok' => true, ...$result];
-                } catch (Throwable $exception) {
-                    $operation->update([
-                        'status' => 'failed',
-                        'error' => mb_substr($exception->getMessage(), 0, 5000),
-                        'executed_at' => now(),
-                    ]);
+            try {
+                $commit = function (callable $mutation) use ($operation, $update): array {
+                    return DB::transaction(function () use ($operation, $mutation, $update): array {
+                        app(ProductSearchCancellation::class)->throwIfCancelled($update?->id);
+                        $result = $mutation();
+                        app(ProductSearchCancellation::class)->throwIfCancelled($update?->id);
+                        $result = is_array($result) ? $result : ['value' => $result];
+                        $operation->update([
+                            'result' => $result,
+                            'status' => 'completed',
+                            'executed_at' => now(),
+                        ]);
 
+                        return ['operation_id' => $operation->id, 'ok' => true, ...$result];
+                    });
+                };
+
+                // External generation and verification run before opening a write transaction.
+                // The callback must commit its mutation through this short transaction.
+                return $staged ? $callback($commit) : $commit($callback);
+            } catch (Throwable $exception) {
+                // Record the failure after business changes have rolled back.
+                $operation->refresh();
+                if ($operation->status === 'completed') {
                     throw $exception;
                 }
-            });
+                $operation->update([
+                    'status' => 'failed',
+                    'error' => mb_substr($exception->getMessage(), 0, 5000),
+                    'executed_at' => now(),
+                ]);
+
+                throw $exception;
+            }
         });
     }
 

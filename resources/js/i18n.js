@@ -2,8 +2,20 @@ import { computed, ref } from 'vue';
 
 const messages = {
     en: {
+        searchLabel: 'Search', allCategories: 'All products', navigation: 'Main navigation',
+        selectedFilters: 'Selected filters', removeFilter: 'Remove filter', closeFilters: 'Close filters',
+        minimumPrice: 'Minimum price', maximumPrice: 'Maximum price', showResults: 'Show',
+        updating: 'Updating products…', viewMode: 'Product view', viewProduct: 'View product',
+        photoUnavailable: 'Photo unavailable', previousPage: 'Previous', nextPage: 'Next',
+        skipToProducts: 'Skip to products', invalidPriceRange: 'The minimum price must not exceed the maximum price.',
+        filterError: 'Could not apply filters. Check the values and try again.',
+        updatingFilters: 'Updating filter counts…', afterFilterChange: 'After selecting this option',
+        filterCountsHint: 'Numbers in brackets show the product count after selecting an option.',
+        priceRange: 'Price range', priceOutsideRange: 'The entered limit is outside the available prices. Its exact value is kept.',
+        noPricedProducts: 'No listed prices for this selection.', clearPrice: 'Clear price',
+        condition: { new: 'New', used: 'Used', refurbished: 'Refurbished', open_box: 'Open box', unknown: 'Condition unspecified' },
         pageTitle: 'Electronics catalog', catalog: 'Electronics catalog', search: 'Search products…',
-        filters: 'Filters', filtersActive: 'active', reset: 'Reset', resetFilters: 'Reset filters',
+        filters: 'Filters', filtersActive: 'active', selectedOptions: 'selected', reset: 'Reset', resetFilters: 'Reset filters',
         category: 'Category', price: 'Price', from: 'from', to: 'to', apply: 'Apply', sorting: 'Sorting',
         sortNewest: 'Newest first', sortPriceAsc: 'Price: low to high', sortPriceDesc: 'Price: high to low', sortTitle: 'By title',
         grid: 'Grid', list: 'List', emptyTitle: 'No products found', emptyText: 'Change or reset the filters.',
@@ -18,11 +30,24 @@ const messages = {
         },
     },
     cs: {
+        searchLabel: 'Hledání', allCategories: 'Všechny produkty', navigation: 'Hlavní navigace',
+        selectedFilters: 'Vybrané filtry', removeFilter: 'Odebrat filtr', closeFilters: 'Zavřít filtry',
+        minimumPrice: 'Minimální cena', maximumPrice: 'Maximální cena', showResults: 'Zobrazit',
+        updating: 'Aktualizuji produkty…', viewMode: 'Zobrazení produktů', viewProduct: 'Detail produktu',
+        photoUnavailable: 'Fotografie není k dispozici', previousPage: 'Předchozí', nextPage: 'Další',
+        skipToProducts: 'Přejít na produkty', invalidPriceRange: 'Minimální cena nesmí být vyšší než maximální.',
+        filterError: 'Filtry se nepodařilo použít. Zkontrolujte hodnoty a zkuste to znovu.',
+        updatingFilters: 'Přepočítávám filtry…', afterFilterChange: 'Po výběru této možnosti',
+        filterCountsHint: 'Čísla v závorkách ukazují počet produktů po výběru možnosti.',
+        priceRange: 'Cenové rozpětí', priceOutsideRange: 'Zadaný limit je mimo dostupné ceny. Jeho přesná hodnota zůstává zachována.',
+        noPricedProducts: 'Pro tento výběr nejsou uvedeny ceny.', clearPrice: 'Vymazat cenu',
+        condition: { new: 'Nové', used: 'Použité', refurbished: 'Repasované', open_box: 'Rozbalené', unknown: 'Stav neuveden' },
         pageTitle: 'Katalog techniky',
         catalog: 'Katalog techniky',
         search: 'Hledat produkty…',
         filters: 'Filtry',
         filtersActive: 'aktivní',
+        selectedOptions: 'vybráno',
         reset: 'Vymazat',
         resetFilters: 'Vymazat filtry',
         category: 'Kategorie',
@@ -62,11 +87,24 @@ const messages = {
         },
     },
     uk: {
+        searchLabel: 'Пошук', allCategories: 'Усі товари', navigation: 'Головна навігація',
+        selectedFilters: 'Вибрані фільтри', removeFilter: 'Прибрати фільтр', closeFilters: 'Закрити фільтри',
+        minimumPrice: 'Мінімальна ціна', maximumPrice: 'Максимальна ціна', showResults: 'Показати',
+        updating: 'Оновлюю товари…', viewMode: 'Вигляд товарів', viewProduct: 'Деталі товару',
+        photoUnavailable: 'Фото відсутнє', previousPage: 'Назад', nextPage: 'Далі',
+        skipToProducts: 'Перейти до товарів', invalidPriceRange: 'Мінімальна ціна не може перевищувати максимальну.',
+        filterError: 'Не вдалося застосувати фільтри. Перевірте значення та повторіть спробу.',
+        updatingFilters: 'Оновлюю кількість товарів у фільтрах…', afterFilterChange: 'Після вибору цієї опції',
+        filterCountsHint: 'Числа в дужках показують кількість товарів після вибору опції.',
+        priceRange: 'Діапазон ціни', priceOutsideRange: 'Введена межа поза доступними цінами. Її точне значення збережено.',
+        noPricedProducts: 'Для цього вибору ціни не вказано.', clearPrice: 'Скинути ціну',
+        condition: { new: 'Новий', used: 'Вживаний', refurbished: 'Відновлений', open_box: 'Відкрита упаковка', unknown: 'Стан не вказаний' },
         pageTitle: 'Каталог техніки',
         catalog: 'Каталог техніки',
         search: 'Пошук товарів…',
         filters: 'Фільтри',
         filtersActive: 'активні',
+        selectedOptions: 'вибрано',
         reset: 'Скинути',
         resetFilters: 'Скинути фільтри',
         category: 'Категорія',
@@ -150,6 +188,29 @@ const productCount = (count) => {
 
 const localeTag = computed(() => ({ cs: 'cs-CZ', uk: 'uk-UA', en: 'en-US' })[locale.value] || 'en-US');
 
+// A product's own text is written in English and translated into Czech only
+// (App\Services\Products\CatalogLocales). Any other interface language shows
+// the English text, never another language's translation.
+const contentLocales = ['cs'];
+const contentLocale = computed(() => (contentLocales.includes(locale.value) ? locale.value : 'en'));
+
+const attributeLabel = (attribute) => attribute?.label_translations?.[contentLocale.value]
+    || read(messages[contentLocale.value], `attributes.${attribute?.key}`)
+    || attribute?.label_translations?.en
+    || attribute?.label;
+
+const attributeValue = (attribute) => attribute?.translations?.[contentLocale.value] || attribute?.value;
+const attributeGroupName = (group) => group?.translations?.[contentLocale.value] || group?.name || '';
+
+// "15,6 inch" is spelled out in the value already; a unit is added only to a
+// bare number, so a value is never followed by its own unit twice.
+const attributeUnit = (attribute) => (attribute?.unit && /^[\d\s.,]+$/.test(String(attribute?.value ?? ''))
+    ? attribute.unit
+    : null);
+
 if (typeof document !== 'undefined') document.documentElement.lang = locale.value;
 
-export const useI18n = () => ({ locale, localeTag, setLocale, t, productCount, categoryName });
+export const useI18n = () => ({
+    locale, localeTag, setLocale, t, productCount, categoryName,
+    contentLocale, attributeLabel, attributeValue, attributeUnit, attributeGroupName,
+});

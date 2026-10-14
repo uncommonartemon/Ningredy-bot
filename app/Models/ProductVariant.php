@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Models\Concerns\InvalidatesStaleTextTranslations;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -10,7 +11,10 @@ use Illuminate\Support\Str;
 
 class ProductVariant extends Model
 {
+    use InvalidatesStaleTextTranslations;
+
     protected $fillable = [
+        'translations',
         'product_id', 'fingerprint', 'name', 'sku', 'mpn', 'gtin', 'color', 'condition',
         'price', 'compare_at_price', 'currency', 'stock_status', 'quantity',
         'warranty_months', 'is_default', 'is_active',
@@ -19,6 +23,7 @@ class ProductVariant extends Model
     protected function casts(): array
     {
         return [
+            'translations' => 'array',
             'price' => 'decimal:2',
             'compare_at_price' => 'decimal:2',
             'is_default' => 'boolean',

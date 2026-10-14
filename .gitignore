@@ -23,6 +23,12 @@ Homestead.json
 Homestead.yaml
 Thumbs.db
 /database/*.sqlite*
+/database/backups/
+/backups/
+/.claude/settings.local.json
+# Database dumps/archives (may contain encrypted keys, sessions, chat IDs).
+/database.zip
+*.sqlite.zip
 /output
 /.playwright-cli
 /graphify-out

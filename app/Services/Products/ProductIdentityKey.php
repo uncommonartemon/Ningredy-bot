@@ -5,10 +5,9 @@ namespace App\Services\Products;
 use Illuminate\Support\Str;
 
 /**
- * The same brand+model (falling back to title) slug used both to decide
- * whether an approved draft updates an existing product instead of
- * duplicating it (ProductDraftWorkflow), and to check - before a new draft
- * is even created - whether the catalog already has this exact product.
+ * A shared brand+model (falling back to title) key. This can identify a family,
+ * not a sellable configuration: ProductCatalogIdentity checks commercial
+ * identifiers before research or approval may reuse an existing product.
  */
 class ProductIdentityKey
 {

@@ -2,13 +2,16 @@
 
 namespace Tests\Feature;
 
+use App\Ai\Tools\ReviewProductDraft;
 use App\Jobs\ProcessTelegramMessage;
 use App\Jobs\RestageDraftGalleryPhotos;
 use App\Jobs\TrainDraftGalleryRecipe;
+use App\Models\AiOperation;
 use App\Models\AiRun;
 use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
 use App\Services\Ai\AiSettings;
+use App\Services\Products\ProductDraftWorkflow;
 use App\Services\Telegram\DraftTelegramInteractionState;
 use App\Services\Telegram\DraftTelegramPresenter;
 use App\Services\Telegram\TelegramClient;
@@ -25,6 +28,24 @@ class TelegramDraftInteractionsTest extends TestCase
 
     private int $sequence = 88000;
 
+    public function test_sales_description_is_expandable_escaped_and_within_message_size(): void
+    {
+        // Render a ready card, not one whose translated claims were edited
+        // after confirmation (that must invalidate readiness).
+        // The card's own description is English; there is no Russian one.
+        $draft = $this->draft(['description' => str_repeat('An <OLED> & vivid display. ', 120)]);
+        app(DraftTelegramPresenter::class)->sendControls(app(TelegramClient::class), '900', $draft);
+        Http::assertSent(function (Request $request): bool {
+            $text = (string) ($request['text'] ?? '');
+
+            return ($request['parse_mode'] ?? null) === 'HTML'
+                && str_contains($text, '<blockquote expandable>')
+                && str_contains($text, '&lt;OLED&gt; &amp;')
+                && ! str_contains($text, '<OLED>')
+                && mb_strlen($text) <= 4096;
+        });
+    }
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -34,6 +55,72 @@ class TelegramDraftInteractionsTest extends TestCase
         config(['services.telegram.bot_token' => 'test-token', 'services.telegram.webhook_secret' => 'test-secret',
             'services.telegram.allowed_user_ids' => ['123', '456']]);
         Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => ['message_id' => 700]])]);
+    }
+
+    public function test_text_tool_uses_the_same_rejection_confirmation_as_buttons(): void
+    {
+        $draft = $this->draft();
+        $update = TelegramUpdate::create(['update_id' => ++$this->sequence, 'telegram_user_id' => '123',
+            'chat_id' => '900', 'payload' => [], 'status' => 'processing']);
+        $tool = new ReviewProductDraft($update, app(ProductDraftWorkflow::class));
+        $result = json_decode($tool->handle(new \Laravel\Ai\Tools\Request(['draft_id' => $draft->id, 'action' => 'reject'])), true);
+        $this->assertSame('confirmation_required', $result['status']);
+        $this->assertSame('pending_review', $draft->fresh()->status);
+        $state = app(DraftTelegramInteractionState::class)->get('900', '123');
+        $this->press("draft:confirm:{$draft->id}:{$state['token']}");
+        $this->assertSame('rejected', $draft->fresh()->status);
+        Queue::assertNothingPushed();
+    }
+
+    public function test_text_tool_asks_before_publishing_and_only_the_button_publishes(): void
+    {
+        // Archived test run, update #11: the operator typed "каталог" and the
+        // model called this tool to approve a draft. Only an already approved
+        // draft kept that from publishing.
+        $draft = $this->draft();
+        $draft->media()->create([
+            'disk' => 'public', 'path' => "drafts/{$draft->id}/photo-1.webp", 'source_url' => 'https://shop.example/photo-1.jpg',
+            'role' => 'primary', 'mime_type' => 'image/webp', 'width' => 1200, 'height' => 900, 'file_size' => 1024,
+            'checksum' => hash('sha256', 'text-approval-'.$draft->id), 'verification_status' => 'verified',
+            'sort_order' => 0, 'is_primary' => true,
+        ]);
+        $update = TelegramUpdate::create(['update_id' => ++$this->sequence, 'telegram_user_id' => '123',
+            'chat_id' => '900', 'payload' => [], 'status' => 'processing']);
+        $tool = new ReviewProductDraft($update, app(ProductDraftWorkflow::class));
+
+        $result = json_decode($tool->handle(new \Laravel\Ai\Tools\Request(['draft_id' => $draft->id, 'action' => 'approve'])), true);
+
+        $this->assertSame('confirmation_required', $result['status']);
+        $this->assertSame('pending_review', $draft->fresh()->status);
+        $this->assertNull($draft->fresh()->approved_product_id);
+        $state = app(DraftTelegramInteractionState::class)->get('900', '123');
+        $this->assertSame("draft:add:{$draft->id}", $state['callback']);
+        Http::assertSent(fn (Request $request) => str_contains($request->body(), "draft:confirm:{$draft->id}:{$state['token']}"));
+        Queue::assertNothingPushed();
+
+        $this->press("draft:confirm:{$draft->id}:{$state['token']}");
+
+        $this->assertSame('approved', $draft->fresh()->status);
+        $this->assertNotNull($draft->fresh()->approved_product_id);
+    }
+
+    public function test_text_tool_cannot_review_another_operators_draft(): void
+    {
+        $draft = $this->draft();
+        $update = TelegramUpdate::create(['update_id' => ++$this->sequence, 'telegram_user_id' => '456',
+            'chat_id' => '900', 'payload' => [], 'status' => 'processing']);
+        $tool = new ReviewProductDraft($update, app(ProductDraftWorkflow::class));
+        foreach (['reject', 'approve'] as $action) {
+            try {
+                $tool->handle(new \Laravel\Ai\Tools\Request(['draft_id' => $draft->id, 'action' => $action]));
+                $this->fail('Another operator must not change this draft.');
+            } catch (\RuntimeException $exception) {
+                $this->assertSame('Draft belongs to another operator or chat.', $exception->getMessage());
+            }
+        }
+        $this->assertSame('pending_review', $draft->fresh()->status);
+        Http::assertNothingSent();
+        Queue::assertNothingPushed();
     }
 
     public function test_rejection_requires_confirmation_and_back_preserves_the_draft(): void
@@ -56,7 +143,7 @@ class TelegramDraftInteractionsTest extends TestCase
         $this->press("draft:confirm:{$draft->id}:{$state['token']}");
         $this->press("draft:confirm:{$draft->id}:{$state['token']}");
         $this->assertSame('rejected', $draft->fresh()->status);
-        $this->assertDatabaseCount('ai_operations', 1);
+        $this->assertSame(1, AiOperation::where('action', 'reject_product_draft')->count());
         Queue::assertNothingPushed();
     }
 
@@ -247,7 +334,7 @@ class TelegramDraftInteractionsTest extends TestCase
         Queue::assertNothingPushed();
     }
 
-    private function draft(): ProductDraft
+    private function draft(array $overrides = []): ProductDraft
     {
         $update = TelegramUpdate::query()->create(['update_id' => ++$this->sequence, 'telegram_user_id' => '123',
             'chat_id' => '900', 'text' => 'Lenovo белый', 'payload' => [], 'status' => 'completed', 'processed_at' => now()]);
@@ -258,7 +345,7 @@ class TelegramDraftInteractionsTest extends TestCase
         return ProductDraft::query()->create(['telegram_update_id' => $update->id, 'ai_run_id' => $run->id, 'requested_by_telegram_user_id' => '123',
             'title' => 'Test laptop', 'status' => 'pending_review', 'primary_source_url' => 'https://shop.example/product',
             'specifications_reconciled_source_url' => 'https://shop.example/product', 'images_staged_at' => now(),
-            'specifications' => [], 'sources' => [], 'image_urls' => [], 'telegram_review_chat_id' => '900', 'telegram_control_message_ids' => [700]]);
+            'specifications' => [], 'sources' => [], 'image_urls' => [], 'telegram_review_chat_id' => '900', 'telegram_control_message_ids' => [700], ...$overrides]);
     }
 
     private function press(string $data, int $user = 123, int $chat = 900, int $message = 700): void

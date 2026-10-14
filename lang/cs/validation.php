@@ -1,0 +1,42 @@
+<?php
+
+return [
+    'accepted' => 'Pole :attribute musí být přijato.',
+    'array' => 'Pole :attribute musí být seznam.',
+    'boolean' => 'Pole :attribute musí být ano nebo ne.',
+    'date' => 'Pole :attribute musí obsahovat platné datum.',
+    'distinct' => 'Hodnota pole :attribute se opakuje.',
+    'email' => 'Pole :attribute musí obsahovat platný e-mail.',
+    'exists' => 'Vybraná hodnota pole :attribute není platná.',
+    'image' => 'Pole :attribute musí obsahovat obrázek.',
+    'integer' => 'Pole :attribute musí být celé číslo.',
+    'in' => 'Vybraná hodnota pole :attribute není platná.',
+    'max' => [
+        'array' => 'Pole :attribute smí obsahovat nejvýše :max položek.',
+        'file' => 'Soubor :attribute nesmí být větší než :max kB.',
+        'numeric' => 'Pole :attribute nesmí být větší než :max.',
+        'string' => 'Pole :attribute smí obsahovat nejvýše :max znaků.',
+    ],
+    'min' => [
+        'array' => 'Pole :attribute musí obsahovat alespoň :min položek.',
+        'file' => 'Soubor :attribute musí mít alespoň :min kB.',
+        'numeric' => 'Pole :attribute musí být alespoň :min.',
+        'string' => 'Pole :attribute musí obsahovat alespoň :min znaků.',
+    ],
+    'mimes' => 'Soubor :attribute musí být typu :values.',
+    'mimetypes' => 'Soubor :attribute musí být typu :values.',
+    'numeric' => 'Pole :attribute musí být číslo.',
+    'regex' => 'Formát pole :attribute není platný.',
+    'required' => 'Pole :attribute je povinné.',
+    'required_with' => 'Pole :attribute je povinné, pokud je vyplněno :values.',
+    'size' => [
+        'array' => 'Pole :attribute musí obsahovat :size položek.',
+        'file' => 'Soubor :attribute musí mít :size kB.',
+        'numeric' => 'Pole :attribute musí být :size.',
+        'string' => 'Pole :attribute musí obsahovat :size znaků.',
+    ],
+    'string' => 'Pole :attribute musí být text.',
+    'unique' => 'Tato hodnota pole :attribute již existuje.',
+    'uploaded' => 'Soubor :attribute se nepodařilo nahrát.',
+    'url' => 'Pole :attribute musí obsahovat platnou URL.',
+];

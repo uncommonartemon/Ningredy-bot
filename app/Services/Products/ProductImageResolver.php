@@ -6,11 +6,11 @@ use App\Exceptions\ProductSourceHostDriftException;
 use App\Services\Ai\AiSettings;
 use App\Services\Ai\ProductSearchCostBudget;
 use App\Services\Ai\ProductSearchTimeBudget;
+use App\Services\Photos\ImageUrls;
 use DOMDocument;
 use DOMXPath;
 use Illuminate\Http\Client\RequestException;
 use Illuminate\Http\Client\Response;
-use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Throwable;
@@ -29,6 +29,7 @@ class ProductImageResolver
         private readonly ProductGalleryRecipeRouter $recipeRouter,
         private readonly HostReputation $reputation,
         private readonly GalleryDownloadCache $galleryDownloads,
+        private readonly SafeProductHttp $http,
     ) {}
 
     /** @var array<int, true> */
@@ -36,6 +37,9 @@ class ProductImageResolver
 
     /** @var array<string, array<string, mixed>> */
     private array $sourceContextsByImageUrl = [];
+
+    /** @var array<string, array<string, mixed>> */
+    private array $sourceContextsByPageUrl = [];
 
     /**
      * Keyed by page URL, unlike sourceContextsByImageUrl (keyed by image
@@ -51,12 +55,18 @@ class ProductImageResolver
     /** @return array<string, mixed>|null */
     public function sourceContextForImage(string $imageUrl): ?array
     {
-        return $this->sourceContextsByImageUrl[ProductImageStorage::normalizeCandidateUrl($imageUrl)] ?? null;
+        return $this->sourceContextsByImageUrl[ImageUrls::normalizeCandidateUrl($imageUrl)] ?? null;
+    }
+
+    /** Page evidence survives an empty gallery, including a rejected scout. */
+    public function sourceContextForPage(string $pageUrl): ?array
+    {
+        return $this->sourceContextsByPageUrl[ImageUrls::normalizeCandidateUrl($pageUrl)] ?? null;
     }
 
     public function specificationTextForPage(string $pageUrl): ?string
     {
-        return $this->specificationTextByPageUrl[ProductImageStorage::normalizeCandidateUrl($pageUrl)] ?? null;
+        return $this->specificationTextByPageUrl[ImageUrls::normalizeCandidateUrl($pageUrl)] ?? null;
     }
 
     /** @param array<string, mixed> $source @return array<string, mixed> */
@@ -290,10 +300,14 @@ class ProductImageResolver
                     $url,
                     $openSelector,
                     telegramUpdateId: $telegramUpdateId,
+                    context: ['card_assembly' => true],
                     confineNavigationToHost: $requestedHost,
                 );
             } else {
-                $this->browser->scout($url, telegramUpdateId: $telegramUpdateId, confineNavigationToHost: $requestedHost);
+                // Only card assembly reads additional pages; its browser gets
+                // the assembly window, not the search's.
+                $this->browser->scout($url, telegramUpdateId: $telegramUpdateId, context: ['card_assembly' => true],
+                    confineNavigationToHost: $requestedHost);
             }
         } catch (Throwable) {
             return $empty;
@@ -335,6 +349,28 @@ class ProductImageResolver
         bool $activeRecipeOnly = false,
     ): array {
         $images = [];
+        // Clear the requested pages before any budget/access early return.
+        // An earlier successful visit must not identify this new attempt.
+        foreach ($sources as $source) {
+            $url = is_array($source) ? ($source['url'] ?? null) : null;
+            if (! is_string($url)) {
+                continue;
+            }
+            $key = ImageUrls::normalizeCandidateUrl($url);
+            unset($this->sourceContextsByPageUrl[$key]);
+            unset($this->specificationTextByPageUrl[$key]);
+            foreach ($this->sourceContextsByPageUrl as $pageKey => $context) {
+                if (($context['original_url'] ?? null) === $url) {
+                    unset($this->sourceContextsByPageUrl[$pageKey]);
+                    unset($this->specificationTextByPageUrl[$pageKey]);
+                }
+            }
+            foreach ($this->sourceContextsByImageUrl as $imageKey => $context) {
+                if (($context['original_url'] ?? null) === $url) {
+                    unset($this->sourceContextsByImageUrl[$imageKey]);
+                }
+            }
+        }
         // A research pass routinely returns four links to one manufacturer's
         // own shop. Opening all four is four visits to one host inside three
         // minutes, and if the first is refused the other three are refused too
@@ -434,11 +470,13 @@ class ProductImageResolver
             $browserImages = [];
             $failureKind = null;
             $identityEvidence = '';
+            $sourceTitle = is_string($source['title'] ?? null) ? $source['title'] : null;
+            $sourceIdentityAssessment = null;
             $specificationText = '';
             $reportedSourceImages = collect(is_array($source['image_urls'] ?? null) ? $source['image_urls'] : [])
                 ->filter(fn (mixed $imageUrl): bool => is_string($imageUrl) && $this->isPublicUrl($imageUrl))
-                ->map(fn (string $imageUrl): string => ProductImageStorage::normalizeCandidateUrl($imageUrl))
-                ->unique(fn (string $url): string => ProductImageStorage::imageAssetKey($url))->values()->all();
+                ->map(fn (string $imageUrl): string => ImageUrls::normalizeCandidateUrl($imageUrl))
+                ->unique(fn (string $url): string => ImageUrls::imageAssetKey($url))->values()->all();
 
             try {
                 [$response, $finalUrl] = $this->fetch($sourceUrl);
@@ -453,6 +491,10 @@ class ProductImageResolver
                         $this->reputation->noteRefusal($sourceUrl, HostReputation::REFUSAL_ACCESS_GATE);
                     } else {
                         $this->reputation->noteAcceptance($sourceUrl);
+                        // The actual document's title is already included in
+                        // extractPageIdentityEvidence; an older search title
+                        // must not supply a missing SKU after a redirect.
+                        $sourceTitle = null;
                         $identityEvidence = $this->extractPageIdentityEvidence($html, $finalUrl);
                         $specificationText = $this->extractPageSpecificationText($html, $finalUrl);
                         foreach ($this->extractPageImages($html, $finalUrl) as $imageUrl) {
@@ -535,8 +577,8 @@ class ProductImageResolver
                         ));
                 $browserImages = collect($browserResult)
                     ->filter(fn (mixed $imageUrl): bool => is_string($imageUrl) && $this->isPublicUrl($imageUrl))
-                    ->map(fn (string $imageUrl): string => ProductImageStorage::normalizeCandidateUrl($imageUrl))
-                    ->unique(fn (string $url): string => ProductImageStorage::imageAssetKey($url))
+                    ->map(fn (string $imageUrl): string => ImageUrls::normalizeCandidateUrl($imageUrl))
+                    ->unique(fn (string $url): string => ImageUrls::imageAssetKey($url))
                     ->values()
                     ->all();
 
@@ -546,9 +588,45 @@ class ProductImageResolver
                 // for anything that outright needed a browser to pass. Prefer
                 // it over the static extract whenever Playwright produced one.
                 $browserSpecificationText = $this->browser->lastSpecificationText();
+                $browserPageUrl = $this->browser->lastProductPageUrl();
+                $browserIdentity = $this->browser->lastProductIdentity();
+
+                if ((is_string($browserPageUrl) && $browserPageUrl !== '') || $browserIdentity !== null) {
+                    // The rendered page may disagree with HTTP/search even
+                    // when training returns no images. Never let that older
+                    // title/SKU identify the new page or rescue its seed URLs.
+                    if (is_string($browserPageUrl) && $browserPageUrl !== '') {
+                        $browserUrl = $browserPageUrl;
+                    }
+                    $sourceTitle = is_string($browserIdentity['name'] ?? null)
+                        ? $browserIdentity['name'] : null;
+                    $specificationText = is_string($browserSpecificationText) ? $browserSpecificationText : '';
+                    $identityEvidence = implode("\n", array_filter([
+                        $browserIdentity !== null
+                            ? (string) json_encode($browserIdentity, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
+                            : '',
+                        $specificationText,
+                    ]));
+                }
 
                 if (is_string($browserSpecificationText) && $browserSpecificationText !== '') {
                     $specificationText = $browserSpecificationText;
+                }
+
+                $assessment = $this->browser->lastSourceIdentityAssessment();
+                if (is_array($assessment)
+                    && ($assessment['verdict'] ?? null) === 'conflicting'
+                    && isset($source[ProductRequestContext::SOURCE_KEY], $assessment['product_draft_id'])
+                    && (int) $assessment['product_draft_id'] === (int) $source[ProductRequestContext::SOURCE_KEY]
+                    && ($assessment['telegram_update_id'] ?? null) === $telegramUpdateId
+                    && is_array($assessment['source'] ?? null)) {
+                    // Keep the exact rejected scout evidence and its verdict:
+                    // a second, smaller snapshot cannot undo a known conflict.
+                    $sourceIdentityAssessment = $assessment;
+                    $assessedSource = $assessment['source'];
+                    $browserUrl = is_string($assessedSource['url'] ?? null) ? $assessedSource['url'] : $browserUrl;
+                    $sourceTitle = is_string($assessedSource['title'] ?? null) ? $assessedSource['title'] : null;
+                    $identityEvidence = (string) ($assessedSource['_preflight_identity_evidence'] ?? '');
                 }
 
                 if ($browserImages !== []) {
@@ -564,8 +642,8 @@ class ProductImageResolver
             }
 
             if ($specificationText !== '') {
-                $this->specificationTextByPageUrl[ProductImageStorage::normalizeCandidateUrl($sourceUrl)] = $specificationText;
-                $this->specificationTextByPageUrl[ProductImageStorage::normalizeCandidateUrl($browserUrl)] = $specificationText;
+                $this->specificationTextByPageUrl[ImageUrls::normalizeCandidateUrl($sourceUrl)] = $specificationText;
+                $this->specificationTextByPageUrl[ImageUrls::normalizeCandidateUrl($browserUrl)] = $specificationText;
             }
 
             if ($accessGateDetected && $browserImages === []) {
@@ -573,18 +651,22 @@ class ProductImageResolver
             }
 
             $images = collect($images)
-                ->unique(fn (string $url): string => ProductImageStorage::imageAssetKey($url))
+                ->unique(fn (string $url): string => ImageUrls::imageAssetKey($url))
                 ->values()->all();
             $sourceImageCount = max(0, count($images) - $sourceImageStart);
+            $pageContext = [
+                'url' => $browserUrl,
+                'original_url' => $sourceUrl,
+                'title' => $sourceTitle,
+                '_preflight_final_url' => $browserUrl,
+                '_preflight_identity_evidence' => $identityEvidence,
+                '_preflight_specification_text' => $specificationText,
+                ...($sourceIdentityAssessment !== null ? ['_observed_identity' => $sourceIdentityAssessment] : []),
+            ];
+            $this->sourceContextsByPageUrl[ImageUrls::normalizeCandidateUrl($sourceUrl)] = $pageContext;
+            $this->sourceContextsByPageUrl[ImageUrls::normalizeCandidateUrl($browserUrl)] = $pageContext;
             foreach (array_slice($images, $sourceImageStart) as $imageUrl) {
-                $this->sourceContextsByImageUrl[ProductImageStorage::normalizeCandidateUrl($imageUrl)] = [
-                    'url' => $browserUrl,
-                    'original_url' => $sourceUrl,
-                    'title' => is_string($source['title'] ?? null) ? $source['title'] : null,
-                    '_preflight_final_url' => $browserUrl,
-                    '_preflight_identity_evidence' => $identityEvidence,
-                    '_preflight_specification_text' => $specificationText,
-                ];
+                $this->sourceContextsByImageUrl[ImageUrls::normalizeCandidateUrl($imageUrl)] = $pageContext;
             }
             if ($browserImages !== []) {
                 $this->metrics->recordExtraction($sourceUrl, count($browserImages));
@@ -690,7 +772,7 @@ class ProductImageResolver
         }
 
         try {
-            [$response, $finalUrl] = $this->fetch($url, $refererUrl, asDocument: false);
+            [$response, $finalUrl] = $this->fetch($url, $refererUrl, asDocument: false, maxBytes: $maxBytes);
             $bytes = $response->body();
 
             if ($bytes === '') {
@@ -805,6 +887,7 @@ class ProductImageResolver
         ?string $refererUrl = null,
         bool $asDocument = true,
         ?string $confineToHost = null,
+        int $maxBytes = 8_388_608,
     ): array {
         for ($redirects = 0; $redirects <= 3; $redirects++) {
             if (! $this->isPublicUrl($url)) {
@@ -822,15 +905,11 @@ class ProductImageResolver
             // the page's own URL as Referer, never the image origin. Falling
             // back to the image's own origin when no page URL is known keeps
             // prior behavior for callers that never had one to pass.
-            $response = Http::withHeaders([
+            $response = $this->http->get($url, [
                 ...$this->browserHeaders($asDocument),
                 'Referer' => $refererUrl !== null && $refererUrl !== '' ? $refererUrl : $this->origin($url).'/',
                 'Cache-Control' => 'no-cache',
-            ])->withoutRedirecting()
-                ->connectTimeout((int) config('product-images.http.connect_timeout', 3))
-                ->timeout((int) config('product-images.http.timeout', 7))
-                ->retry(2, 250)
-                ->get($url);
+            ], $maxBytes);
 
             if ($response->redirect()) {
                 $location = $response->header('Location');
@@ -952,11 +1031,46 @@ class ProductImageResolver
         $xpath = new DOMXPath($document);
         $parts = [];
 
-        foreach ($xpath->query('//table | //dl') ?: [] as $node) {
-            $text = trim(html_entity_decode(Str::squish($node->textContent), ENT_QUOTES | ENT_HTML5));
+        // One line per row, "label: value". textContent glued the cells into
+        // "Installed RAM16 GB", and card assembly - which must quote this text
+        // verbatim - could only quote the glue: gpt-6-luna quoted the table it
+        // could read, "Processor Type: Core Ultra 7", and every attempt was
+        // refused as not observed (request #99).
+        foreach ($xpath->query('//table') ?: [] as $table) {
+            $rows = [];
 
-            if ($text !== '') {
-                $parts[] = $text;
+            foreach ($xpath->query('.//tr', $table) ?: [] as $row) {
+                $cells = collect(iterator_to_array($xpath->query('./th | ./td', $row) ?: []))
+                    ->map(fn (\DOMNode $cell): string => $this->cellText($cell))
+                    ->filter(fn (string $text): bool => $text !== '')
+                    ->values();
+
+                if ($cells->isNotEmpty()) {
+                    $rows[] = $cells->implode($cells->count() === 2 ? ': ' : ' | ');
+                }
+            }
+
+            if ($rows !== []) {
+                $parts[] = implode("\n", $rows);
+            }
+        }
+
+        foreach ($xpath->query('//dl') ?: [] as $list) {
+            $lines = [];
+            $term = null;
+
+            foreach ($xpath->query('./dt | ./dd | ./div/dt | ./div/dd', $list) ?: [] as $item) {
+                $text = $this->cellText($item);
+
+                if (strtolower($item->nodeName) === 'dt') {
+                    $term = $text;
+                } elseif ($text !== '') {
+                    $lines[] = $term !== null && $term !== '' ? "{$term}: {$text}" : $text;
+                }
+            }
+
+            if ($lines !== []) {
+                $parts[] = implode("\n", $lines);
             }
         }
 
@@ -965,15 +1079,22 @@ class ProductImageResolver
             $value = trim(html_entity_decode(strip_tags($node->nodeValue), ENT_QUOTES | ENT_HTML5));
 
             if (is_string($name) && $name !== '' && $value !== '') {
-                $parts[] = "{$name}: {$value}";
+                $parts[] = "{$name}: ".Str::squish($value);
             }
         }
 
+        // Structured data as the same "label: value" lines, not raw JSON:
+        // {"name":"Processor Type","propertyID":"processor_type","value":"Core
+        // Ultra 7"} was the only form of pcnation.com's specification table.
         foreach ($xpath->query('//script[@type="application/ld+json"]') ?: [] as $node) {
             $decoded = json_decode($node->nodeValue ?? '', true);
 
             if (is_array($decoded)) {
-                $parts[] = Str::squish(json_encode($decoded, JSON_UNESCAPED_UNICODE) ?: '');
+                $lines = [];
+                $this->structuredDataLines($decoded, $lines);
+                if ($lines !== []) {
+                    $parts[] = implode("\n", $lines);
+                }
             }
         }
 
@@ -983,12 +1104,92 @@ class ProductImageResolver
         // wasting a good chunk of the size budget on a duplicate.
         if ($parts === []) {
             $body = $xpath->query('//body')?->item(0);
-            $parts[] = $body !== null
-                ? trim(html_entity_decode(Str::squish($body->textContent), ENT_QUOTES | ENT_HTML5))
-                : '';
+            $parts[] = $body !== null ? $this->blockText($body) : '';
         }
 
-        return Str::limit(Str::squish(implode(' ', array_filter($parts))), 12_000, '');
+        $text = implode("\n", array_filter(array_map(
+            fn (string $part): string => trim((string) preg_replace(['/[^\S\n]+/u', '/\n\s*\n+/u'], [' ', "\n"], $part)),
+            $parts,
+        )));
+
+        return Str::limit($text, 12_000, '');
+    }
+
+    /** One table cell or list item as a single readable line. */
+    private function cellText(\DOMNode $node): string
+    {
+        return trim(Str::squish(html_entity_decode($this->blockText($node), ENT_QUOTES | ENT_HTML5)));
+    }
+
+    /** Text with a line break wherever the page starts a new block, instead of textContent's glue. */
+    private function blockText(\DOMNode $node): string
+    {
+        if ($node instanceof \DOMText) {
+            return $node->wholeText;
+        }
+
+        $text = '';
+        foreach ($node->childNodes ?? [] as $child) {
+            $text .= $this->blockText($child);
+        }
+
+        $block = in_array(strtolower($node->nodeName), [
+            'p', 'div', 'li', 'tr', 'br', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'section', 'article',
+            'table', 'ul', 'ol', 'dl', 'dt', 'dd', 'td', 'th',
+        ], true);
+
+        return $block ? "\n{$text}\n" : $text;
+    }
+
+    /**
+     * schema.org name/value pairs (PropertyValue) as "name: value", other
+     * scalar fields as "field: value". Keep vocabulary IRIs such as
+     * schema.org/NewCondition: they are values, not image/navigation links.
+     * Paths retain which product/offer owns a value in arrays and @graph.
+     *
+     * @param  array<int, string>  $lines
+     */
+    private function structuredDataLines(mixed $node, array &$lines, int $depth = 0, string $path = ''): void
+    {
+        if (! is_array($node) || $depth > 8) {
+            return;
+        }
+
+        if (array_is_list($node)) {
+            foreach ($node as $index => $item) {
+                $this->structuredDataLines($item, $lines, $depth + 1, $path.'['.$index.']');
+            }
+
+            return;
+        }
+
+        if (is_scalar($node['name'] ?? null) && is_scalar($node['value'] ?? null)) {
+            if ($path !== '') {
+                $lines[] = '['.$path.']';
+            }
+            $lines[] = Str::squish($node['name'].': '.$node['value'].(is_scalar($node['unitText'] ?? null) ? ' '.$node['unitText'] : ''));
+
+            return;
+        }
+
+        foreach ($node as $key => $value) {
+            $field = $path === '' ? (string) $key : $path.'.'.$key;
+            if ($key === '@graph') {
+                $this->structuredDataLines($value, $lines, $depth + 1, $field);
+            } elseif ($key === '@id' && is_string($value) && trim($value) !== '') {
+                // JSON-LD node references also carry relationships to a specific
+                // product. Never flatten them into an unrelated offer's fields.
+                $lines[] = ($path !== '' && count($node) === 1 ? $path : $field).': '.Str::squish($value);
+            } elseif (is_string($key) && ! str_starts_with($key, '@')) {
+                if (is_scalar($value) && trim((string) $value) !== ''
+                    && (! preg_match('#^https?://#i', (string) $value)
+                        || in_array(strtolower((string) parse_url((string) $value, PHP_URL_HOST)), ['schema.org', 'www.schema.org'], true))) {
+                    $lines[] = Str::squish($field.': '.html_entity_decode(strip_tags((string) $value), ENT_QUOTES | ENT_HTML5));
+                } elseif (is_array($value)) {
+                    $this->structuredDataLines($value, $lines, $depth + 1, $field);
+                }
+            }
+        }
     }
 
     /** @return array<int, string> */
@@ -1107,8 +1308,8 @@ class ProductImageResolver
             // photos - collapsing them here, at the root of every page scrape,
             // keeps every downstream count and gallery-sufficiency decision
             // from inheriting an inflated "distinct photo" count.
-            ->map(fn (string $url): string => ProductImageStorage::normalizeCandidateUrl($url))
-            ->unique(fn (string $url): string => ProductImageStorage::imageAssetKey($url))
+            ->map(fn (string $url): string => ImageUrls::normalizeCandidateUrl($url))
+            ->unique(fn (string $url): string => ImageUrls::imageAssetKey($url))
             ->take((int) config('product-images.max_urls_per_page', 60))
             ->values()
             ->all();
@@ -1167,7 +1368,7 @@ class ProductImageResolver
         return collect($matches[0] ?? [])
             ->map(fn (string $url): string => str_replace(['\/', '\\/'], '/', $url))
             ->filter(fn (string $url): bool => $this->looksLikeImageUrl($url))
-            ->unique(fn (string $url): string => ProductImageStorage::imageAssetKey($url))
+            ->unique(fn (string $url): string => ImageUrls::imageAssetKey($url))
             ->values()
             ->all();
     }
@@ -1245,26 +1446,6 @@ class ProductImageResolver
 
     private function isPublicUrl(string $url): bool
     {
-        if (filter_var($url, FILTER_VALIDATE_URL) === false || ! in_array(parse_url($url, PHP_URL_SCHEME), ['http', 'https'], true)) {
-            return false;
-        }
-
-        $host = parse_url($url, PHP_URL_HOST);
-
-        if (! is_string($host) || $host === '' || strtolower($host) === 'localhost') {
-            return false;
-        }
-
-        $addresses = filter_var($host, FILTER_VALIDATE_IP) ? [$host] : gethostbynamel($host);
-
-        if (! is_array($addresses) || $addresses === []) {
-            return false;
-        }
-
-        return collect($addresses)->every(fn (string $address): bool => filter_var(
-            $address,
-            FILTER_VALIDATE_IP,
-            FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE,
-        ) !== false);
+        return $this->http->isPublicUrl($url);
     }
 }

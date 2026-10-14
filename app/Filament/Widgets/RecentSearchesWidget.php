@@ -18,19 +18,20 @@ class RecentSearchesWidget extends TableWidget
     public function table(Table $table): Table
     {
         return $table
+            ->heading(__('Последние поиски'))
             ->query(ProductDraft::query()->with('aiRun')->withCount('media')->latest('id'))
             ->paginated([5, 10, 25])
             ->defaultPaginationPageOption(5)
             ->columns([
-                TextColumn::make('title')->label('Запрос')->searchable()->wrap()->limit(50),
+                TextColumn::make('title')->label(__('Запрос'))->searchable()->wrap()->limit(50),
                 TextColumn::make('gallery_status')
-                    ->label('Галерея')
+                    ->label(__('Галерея'))
                     ->badge()
                     ->formatStateUsing(fn (?string $state): string => match ($state) {
-                        'complete' => 'Полная',
-                        'partial' => 'Частичная',
-                        'missing' => 'Не найдена',
-                        default => 'Ожидание',
+                        'complete' => __('Полная'),
+                        'partial' => __('Частичная'),
+                        'missing' => __('Не найдена'),
+                        default => __('Ожидание'),
                     })
                     ->color(fn (?string $state): string => match ($state) {
                         'complete' => 'success',
@@ -38,15 +39,15 @@ class RecentSearchesWidget extends TableWidget
                         'missing' => 'danger',
                         default => 'gray',
                     }),
-                TextColumn::make('media_count')->label('Фото')->badge(),
+                TextColumn::make('media_count')->label(__('Фото'))->badge(),
                 TextColumn::make('primary_source_url')
-                    ->label('Источник')
+                    ->label(__('Источник'))
                     ->formatStateUsing(fn (?string $state): string => $state ? (parse_url($state, PHP_URL_HOST) ?: $state) : '—'),
                 TextColumn::make('cost')
-                    ->label('Стоимость')
+                    ->label(__('Стоимость'))
                     ->state(fn (ProductDraft $record): ?string => self::cost($record))
                     ->placeholder('—'),
-                TextColumn::make('created_at')->label('Время')->since()->sortable(),
+                TextColumn::make('created_at')->label(__('Время'))->since()->sortable(),
             ])
             ->recordActions([
                 ViewAction::make()
@@ -70,7 +71,7 @@ class RecentSearchesWidget extends TableWidget
         }
 
         return trim(
-            ($tokens !== null ? $tokens.' ток.' : '').
+            ($tokens !== null ? $tokens.__(' ток.') : '').
             ($cost !== null ? ' (~$'.number_format((float) $cost, 3).')' : '')
         );
     }

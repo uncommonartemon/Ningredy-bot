@@ -7,6 +7,7 @@ use App\Jobs\StoreProductImages;
 use App\Models\AiRun;
 use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
+use App\Services\Ai\AiSettings;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request as ClientRequest;
 use Illuminate\Support\Facades\Cache;
@@ -153,10 +154,19 @@ class UnreconciledDraftApprovalTest extends TestCase
         Queue::assertNotPushed(ContinueDraftGallerySearch::class);
     }
 
-    public function test_a_draft_with_no_primary_source_url_is_not_blocked_by_this_gate(): void
+    public function test_disabling_checks_does_not_allow_an_old_button_to_publish_an_unverified_card(): void
     {
-        // Nothing to reconcile against yet - this must not become a new,
-        // unrelated way to get stuck for drafts this feature does not apply to.
+        app(AiSettings::class)->saveSpecificationReconciliationEnabled(false);
+        $this->test_old_publish_button_is_blocked_without_starting_another_reconciliation();
+        Http::assertSent(fn (ClientRequest $request): bool => str_ends_with($request->url(), '/sendMessage')
+            && str_contains((string) $request['text'], 'Сборка карточки выключена')
+            && ! str_contains((string) $request['text'], 'после автоматического восстановления'));
+    }
+
+    public function test_an_ai_draft_with_no_primary_source_url_requires_positive_confirmation(): void
+    {
+        // Missing provenance does not confirm an AI draft. Explicit manual
+        // intake uses a separate readiness contract covered by its own tests.
         $draft = $this->draftWithGoodMedia([
             'primary_source_url' => null,
             'specifications_reconciled_source_url' => null,
@@ -175,7 +185,7 @@ class UnreconciledDraftApprovalTest extends TestCase
             ],
         ], ['X-Telegram-Bot-Api-Secret-Token' => 'test-secret'])->assertOk();
 
-        $this->assertSame('approved', $draft->fresh()->status);
-        Queue::assertPushed(StoreProductImages::class);
+        $this->assertSame('pending_review', $draft->fresh()->status);
+        Queue::assertNotPushed(StoreProductImages::class);
     }
 }

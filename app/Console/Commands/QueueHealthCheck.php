@@ -2,7 +2,7 @@
 
 namespace App\Console\Commands;
 
-use App\Models\TelegramChatState;
+use App\Models\TelegramUpdate;
 use App\Services\Telegram\TelegramClient;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Cache;
@@ -66,11 +66,17 @@ class QueueHealthCheck extends Command
             ->whereNotNull('reserved_at')
             ->exists();
 
-        if ($queueIsBusy || $waitingSeconds < self::STUCK_AFTER_SECONDS || Cache::has(self::CACHE_KEY)) {
+        if ($queueIsBusy) {
+            Cache::forget(self::CACHE_KEY);
+
             return self::SUCCESS;
         }
 
-        $chatId = TelegramChatState::query()->latest('updated_at')->value('chat_id');
+        if ($waitingSeconds < self::STUCK_AFTER_SECONDS || Cache::has(self::CACHE_KEY)) {
+            return self::SUCCESS;
+        }
+
+        $chatId = $this->chatIdFor($oldestPending);
 
         if (! $chatId) {
             return self::SUCCESS;
@@ -83,7 +89,9 @@ class QueueHealthCheck extends Command
                 (string) $chatId,
                 "⚠️ Очередь {$queue} не обрабатывается уже {$minutes} мин. Похоже, соответствующий воркер (queue:work) не запущен или упал. Перезапустите start-ningredy.bat.",
             );
-            Cache::put(self::CACHE_KEY, true, self::ALERT_COOLDOWN_SECONDS);
+            // One notice per outage. A stopped worker cannot repair itself by
+            // receiving the same reminder every fifteen minutes.
+            Cache::forever(self::CACHE_KEY, true);
         } catch (Throwable $exception) {
             report($exception);
         }
@@ -121,7 +129,7 @@ class QueueHealthCheck extends Command
             DB::table('jobs')->where('id', $job->id)->update(['reserved_at' => null]);
 
             try {
-                $chatId = TelegramChatState::query()->latest('updated_at')->value('chat_id');
+                $chatId = $this->chatIdFor($job);
 
                 // Several schedule:work processes can be running at once (easy
                 // to end up with after manual restarts), and each would report
@@ -132,13 +140,22 @@ class QueueHealthCheck extends Command
                 if ($chatId && ! $announced) {
                     $telegram->sendMessage(
                         (string) $chatId,
-                        '♻️ Поиск оборвался (воркер не отвечает) — перезапускаю его автоматически, ждать не нужно.',
+                        '♻️ Обработка поиска прервалась. Задача возвращена в очередь и продолжится, когда воркер будет запущен.',
                     );
                 }
             } catch (Throwable $exception) {
                 report($exception);
             }
         }
+    }
+
+    private function chatIdFor(object $job): ?string
+    {
+        $updateId = $this->telegramUpdateIdFor($job);
+        $chatId = $updateId === null ? null : TelegramUpdate::query()->whereKey($updateId)->value('chat_id');
+
+        // A missing owner is not permission to notify an unrelated recent chat.
+        return filled($chatId) ? (string) $chatId : null;
     }
 
     private function searchIsAlive(int $telegramUpdateId): bool

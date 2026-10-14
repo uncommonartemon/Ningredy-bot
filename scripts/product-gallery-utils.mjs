@@ -12,15 +12,19 @@ export const normalizeImageCandidate = (rawUrl, sourceUrl) => {
     }
 
     let normalized = url.toString();
+    // A hostname or a product name is not an asset role: Silicon contains
+    // "icon", and Pixel is a real product family. Match bounded path tokens.
+    const assetPath = url.pathname + url.search;
 
-    const pathSize = Number.parseInt(normalized.match(/images(\d+)x\d+/i)?.[1] || '0', 10);
+    const pathSize = Number.parseInt(assetPath.match(/images(\d+)x\d+/i)?.[1] || '0', 10);
     const knownNonImageExtension = /\.(?:svg|gif|ico|pdf|html?|json|xml)(?:$|[?#])/i;
     const nonPhotoMediaMarker = /(?:^|[\/_.?&=-])(?:video|poster|spin|360(?:view|degree)?)(?:[\/_.?&=-]|$)/i;
 
     if ((pathSize > 0 && pathSize < 200)
         || knownNonImageExtension.test(normalized)
-        || nonPhotoMediaMarker.test(normalized)
-        || /(?:logo|icon|sprite|badge|avatar|tracking|pixel|oldiemessage|\/images\/fb\/|favicon|social)/i.test(normalized)) {
+        || nonPhotoMediaMarker.test(assetPath)
+        || /(?:^|[\/_.?&=-])(?:logos?|icons?|sprites?|badges?|avatars?|tracking|oldiemessage|favicons?|social)(?:\d*[\/_.?&=-]|$)/i.test(assetPath)
+        || /\/images\/fb\//i.test(assetPath)) {
         return null;
     }
 
@@ -174,10 +178,9 @@ export const readProductIdentityInPage = () => {
  * shape of a URL, where /store/laptops/model-a and /store/laptops/model-b look
  * exactly as related as /product/spec and /product/gallery do.
  *
- * Identifiers are compared within their own kind only. A name is deliberately
- * asymmetric: two different names are two different products, but one name is
- * shared by every configuration of a laptop, so an equal name proves nothing
- * and yields null rather than true.
+ * Identifiers are compared within their own kind only. Titles can change on
+ * the same product's gallery tab (slogans/localization) and can also be shared
+ * by different configurations. Names alone therefore never settle identity.
  */
 export const sameProductIdentity = (expected, landed) => {
     if (!expected || !landed) {
@@ -201,11 +204,6 @@ export const sameProductIdentity = (expected, landed) => {
             if (key === 'og_url' && expected[key] !== landed[key]) continue;
             return expected[key] === landed[key];
         }
-    }
-
-    // Enough to rule out, never enough to confirm.
-    if (expected.name && landed.name && expected.name !== landed.name) {
-        return false;
     }
 
     return null;
@@ -530,10 +528,53 @@ export const revealedContainerTextInPage = (element, beforeVisibility) => {
  * head-truncation every caller applies (specification_text is capped,
  * deliberately, to keep the payload bounded) and the reveal was lost even
  * though the click itself worked. Passing '' (nothing clicked, an ordinary
- * read) is exactly the previous whole-page behaviour.
+ * read) keeps the visible page and its structured facts. JSON-LD may carry
+ * offer condition/availability that has no rendered text (#202). Paths keep
+ * these values attached to their own product/offer instead of merging them.
  */
 export const capturePageTextInPage = (revealedText) => {
-    return `${document.title}\n${revealedText || ''}\n${document.body?.innerText || ''}`.slice(0, 20_000);
+    // Self-contained for page.evaluate(); do not reference module globals.
+    // Mirrors ProductImageResolver::structuredDataLines for HTTP captures.
+    const lines = [];
+    const scalar = value => ['string', 'number', 'boolean'].includes(typeof value);
+    const plain = value => {
+        const element = document.createElement('template');
+        element.innerHTML = String(value);
+        return (element.content.textContent || '').replace(/\s+/g, ' ').trim();
+    };
+    const textValue = value => {
+        if (!scalar(value) || !String(value).trim()) return false;
+        if (!/^https?:\/\//i.test(String(value))) return true;
+        try { return ['schema.org', 'www.schema.org'].includes(new URL(String(value)).hostname); }
+        catch { return false; }
+    };
+    const walk = (node, path = '', depth = 0) => {
+        if (depth > 8 || !node || typeof node !== 'object') return;
+        if (Array.isArray(node)) {
+            node.forEach((item, index) => walk(item, `${path}[${index}]`, depth + 1));
+            return;
+        }
+        if (scalar(node.name) && scalar(node.value)) {
+            if (path) lines.push(`[${path}]`);
+            lines.push(`${plain(node.name)}: ${plain(node.value)}${scalar(node.unitText) ? ` ${plain(node.unitText)}` : ''}`);
+            return;
+        }
+        for (const [key, value] of Object.entries(node)) {
+            const field = path ? `${path}.${key}` : key;
+            if (key === '@graph') walk(value, field, depth + 1);
+            else if (key === '@id' && typeof value === 'string' && value.trim()) {
+                lines.push(`${path && Object.keys(node).length === 1 ? path : field}: ${plain(value)}`);
+            } else if (!key.startsWith('@')) {
+                if (textValue(value)) lines.push(`${field}: ${plain(value)}`);
+                else if (value && typeof value === 'object') walk(value, field, depth + 1);
+            }
+        }
+    };
+    for (const script of document.querySelectorAll('script[type="application/ld+json"]')) {
+        try { walk(JSON.parse(script.textContent || '')); }
+        catch { /* One malformed block must not discard the others or visible text. */ }
+    }
+    return `${document.title}\n${revealedText || ''}\n${lines.join('\n')}\n${document.body?.innerText || ''}`.slice(0, 20_000);
 };
 
 
@@ -649,6 +690,15 @@ const SIZE_SEGMENT = /\/(?:[a-z][a-z_-]*)?\d{2,5}(?:x\d{2,5}|w)\//i;
 // The bytes and canvas can differ enough for perceptual hashing to miss the
 // duplicate, but the stable UUID proves that both URLs are one gallery frame.
 const UUID_PHYSICAL_ASSET = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:_(?:\d{2,5}|sea))?\.(?:jpe?g|png|webp|gif|avif)$/i;
+// A filename that is itself a long hexadecimal digest names the photograph's
+// content; the directory and extension around it only pick a rendition.
+// Request #93: ispace.cz served each of four photographs as
+// /photos/1600/8/<sha1>.webp, /photos/780/8/<sha1>.webp and .../<sha1>.jpg,
+// and a card went out with the same photograph three times. Pixels could not
+// have told them apart: the left and right side views of that laptop hash to
+// the same dHash. Mirrors ImageUrls::imageAssetKey(). The image endpoint may
+// omit the extension; query fields selecting content must still be retained.
+const CONTENT_DIGEST_FILENAME = /\/([0-9a-f]{32,})(?:\.(?:jpe?g|png|webp|gif|avif))?$/i;
 
 export const isShopifyCdnUrl = (url) => url.hostname.endsWith('shopify.com')
     || /\/cdn\/shop\/(?:files|products)\//i.test(url.pathname);
@@ -678,6 +728,21 @@ export const imageAssetKey = (rawUrl) => {
         url.hash = '';
 
         return 'dynamic-image:'+url.hostname.toLowerCase()+url.pathname.toLowerCase();
+    }
+
+    const digest = url.pathname.match(CONTENT_DIGEST_FILENAME)?.[1];
+
+    // At least one letter: a 32-digit number is an id, not a digest.
+    if (digest && /[a-f]/i.test(digest)) {
+        for (const key of ['width', 'height', 'w', 'h', 'quality', 'q', 'fit']) {
+            url.searchParams.delete(key);
+        }
+        const selectingParams = new URLSearchParams([...url.searchParams]
+            .filter(([key, value]) => key !== 'x' || !/^\d+$/.test(value)));
+        selectingParams.sort();
+        const query = selectingParams.toString();
+
+        return 'digest:'+url.hostname.toLowerCase()+':'+digest.toLowerCase()+(query ? '?'+query : '');
     }
 
     if (isShopifyCdnUrl(url)) {
@@ -807,6 +872,7 @@ const SAFE_RECIPE_ACTION_KINDS = new Set([
     'click',
     'hover',
     'scroll_into_view',
+    'scroll_each',
     'click_each',
     'click_until_no_change',
 ]);
@@ -864,8 +930,10 @@ export const resolveRecipeActionTargetIndex = (requestedIndex, matchCount) => {
 
 /**
  * Which index a single click_each/click repetition should even ask for,
- * before resolveRecipeActionTargetIndex() checks whether it exists. A real
- * strip of distinct elements (currentCount > 1) is walked one new element
+ * before resolveRecipeActionTargetIndex() checks whether it exists. New
+ * recipes explicitly choose elements or repeat, independent of match count.
+ * Only legacy/auto recipes retain the old inference: a strip with several
+ * matches is walked one new element
  * per repetition, so repetition is added to index. A single control - one
  * "next" arrow, currentCount staying 1 for as long as it stays alone - has
  * nothing to add repetition to: it is the same element on every press, so
@@ -878,8 +946,13 @@ export const resolveRecipeActionTargetIndex = (requestedIndex, matchCount) => {
  * the caller, so a control that starts alone and later reveals a real
  * strip correctly switches to walking it.
  */
+export const recipeActionIteratesElements = (action, currentCount) => action.kind === 'scroll_each'
+    || (action.kind === 'click_each'
+        && (action.iteration_mode === 'elements'
+            || (action.iteration_mode !== 'repeat' && currentCount > 1)));
+
 export const recipeActionRequestedIndex = (action, repetition, currentCount) => (
-    action.kind === 'click_each' && currentCount > 1
+    recipeActionIteratesElements(action, currentCount)
         ? action.index + repetition
         : action.index
 );
@@ -889,7 +962,6 @@ export const recipeActionRequestedIndex = (action, repetition, currentCount) => 
 // before Playwright sees them; no JavaScript, typing, form submission or
 // arbitrary navigation can enter the runner through a recipe.
 export const normalizeRecipeActions = (actions) => (Array.isArray(actions) ? actions : [])
-    .slice(0, 12)
     .filter((action) => action && typeof action === 'object'
         && SAFE_RECIPE_ACTION_KINDS.has(action.kind)
         && safeRecipeSelector(action.selector)
@@ -902,6 +974,9 @@ export const normalizeRecipeActions = (actions) => (Array.isArray(actions) ? act
         const normalized = {
             kind: action.kind,
             selector: action.selector.trim(),
+            // Explicit semantics survive a change from many thumbnails to one.
+            // Missing mode retains the historical count-based behaviour.
+            ...(['elements', 'repeat', 'auto'].includes(action.iteration_mode) ? { iteration_mode: action.iteration_mode } : {}),
             // index addresses ONE specific element among the selector's
             // matches, not a repeat count - clamping it to 20 used to
             // silently retarget a legitimately higher request (a broad
@@ -965,7 +1040,7 @@ export const recipeActionPlanStatus = ({ actions, actionTrace }) => {
         const primaryTraces = traces.filter((item) => item.after_each !== true);
         const clicked = primaryTraces.filter((item) => item.clicked === true);
         const afterEachTraces = traces.filter((item) => item.after_each === true);
-        const selectorMatches = traces.reduce(
+        const selectorMatches = (action.kind === 'scroll_each' ? primaryTraces : traces).reduce(
             (maximum, item) => Math.max(maximum, Number.parseInt(item.selector_match_count || '0', 10) || 0),
             0,
         );
@@ -976,7 +1051,7 @@ export const recipeActionPlanStatus = ({ actions, actionTrace }) => {
         // The gate this step clears is not up on this visit. Reported as its own
         // outcome rather than as a completed click, so the agent reading the
         // trace can tell "nothing to clear" from "cleared it".
-        if (traces.some((item) => item.optional_absent === true)) {
+        if (action.kind !== 'scroll_each' && traces.some((item) => item.optional_absent === true)) {
             return {
                 action_index: actionIndex,
                 kind: action.kind,
@@ -994,6 +1069,12 @@ export const recipeActionPlanStatus = ({ actions, actionTrace }) => {
             return { action_index: actionIndex, kind: action.kind, selector: action.selector,
                 required_clicks: clicked.length, completed_clicks: clicked.length, selector_match_count: selectorMatches,
                 complete: false, completion: traversalResult.traversal_stop_reason };
+        }
+        if ((action.kind === 'scroll_each' || (['elements', 'repeat'].includes(action.iteration_mode)
+            && ['click_each', 'click_until_no_change'].includes(action.kind))) && !traversalResult) {
+            return { action_index: actionIndex, kind: action.kind, selector: action.selector,
+                required_clicks: clicked.length, completed_clicks: clicked.length, selector_match_count: selectorMatches,
+                complete: false, completion: 'traversal_not_confirmed' };
         }
 
         // Whether every declared follow-up actually ran, by the same rule the
@@ -1035,6 +1116,18 @@ export const recipeActionPlanStatus = ({ actions, actionTrace }) => {
             complete = afterEachComplete(clicked.length);
             requiredClicks = clicked.length;
             completion = complete ? traversalResult.traversal_stop_reason : 'after_each_incomplete';
+            if (action.kind === 'scroll_each') {
+                const currentCount = Math.max(traversalResult.traversal_match_count || 0, selectorMatches);
+                const visited = new Set(clicked.map((item) => item.index));
+                requiredClicks = Math.max(0, currentCount - action.index);
+                const covered = requiredClicks > 0
+                    && Array.from({ length: requiredClicks }, (_, offset) => action.index + offset)
+                        .every((index) => visited.has(index));
+                if (!covered) {
+                    complete = false;
+                    completion = 'matches_left_unvisited';
+                }
+            }
         } else if (['click', 'hover', 'scroll_into_view'].includes(action.kind)) {
             const openerWorked = action.kind !== 'click' || !recipeActionOpensGallery(action)
                 || clicked.some((item) => item.changed === true || item.expanded_gallery_visible_after === true);
@@ -1181,7 +1274,9 @@ export const clearBlockingOverlays = async (target) => {
     const dismissed = [];
 
     for (let pass = 0; pass < 3; pass++) {
-        const found = await target.evaluate((labels) => {
+        // Playwright locators pierce open shadow roots. document.querySelectorAll
+        // missed consent widgets there, so the next gallery click hit the wall.
+        const found = await target.locator('div,section,aside,dialog,[role=dialog],[aria-modal=true]').evaluateAll((elements, labels) => {
             const visible = (element) => {
                 const style = getComputedStyle(element);
                 const box = element.getBoundingClientRect();
@@ -1193,7 +1288,7 @@ export const clearBlockingOverlays = async (target) => {
             };
             const centre = { x: innerWidth / 2, y: innerHeight / 2 };
 
-            for (const element of document.querySelectorAll('div,section,aside,dialog,[role=dialog],[aria-modal=true]')) {
+            for (const element of elements) {
                 if (element.dataset.ningredyOverlay || !visible(element)) {
                     continue;
                 }
@@ -1266,16 +1361,15 @@ export const clearBlockingOverlays = async (target) => {
         const control = target.locator('[data-ningredy-overlay-control="1"]').first();
         // A real click, not a synthetic one: consent frameworks routinely
         // listen for trusted events and ignore anything else.
-        await control.click({ timeout: 2_000 }).catch(() => {});
-        await target.evaluate(() => {
-            document.querySelectorAll('[data-ningredy-overlay-control]')
-                .forEach((element) => element.removeAttribute('data-ningredy-overlay-control'));
+        const clicked = await control.click({ timeout: 2_000 }).then(() => true).catch(() => false);
+        await target.locator('[data-ningredy-overlay-control]').evaluateAll(elements => {
+            elements.forEach(element => element.removeAttribute('data-ningredy-overlay-control'));
         }).catch(() => {});
         await target.waitForLoadState('domcontentloaded', { timeout: 8_000 }).catch(() => {});
-        dismissed.push(found);
+        if (clicked) dismissed.push(found);
     }
 
-    const stuck = await target.evaluate(() => [...document.querySelectorAll('[data-ningredy-overlay="stuck"]')]
+    const stuck = await target.locator('[data-ningredy-overlay="stuck"]').evaluateAll(elements => elements
         .map((element) => (element.id ? `#${element.id}` : element.className.toString().split(/\s+/)[0] || 'overlay').slice(0, 60))
         .slice(0, 3)).catch(() => []);
 

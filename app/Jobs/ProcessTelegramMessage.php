@@ -12,10 +12,13 @@ use App\Models\User;
 use App\Services\Ai\AiErrorPresenter;
 use App\Services\Ai\AiSettings;
 use App\Services\Ai\AiUsageReporter;
+use App\Services\Ai\ProductSearchCancellation;
 use App\Services\Ai\ProductSearchTimeBudget;
+use App\Services\Telegram\DraftAccess;
 use App\Services\Telegram\DraftTelegramPresenter;
 use App\Services\Telegram\ProductCardPresenter;
 use App\Services\Telegram\TelegramClient;
+use App\Services\Telegram\TelegramConversationScope;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
 use Illuminate\Queue\Middleware\WithoutOverlapping;
@@ -84,6 +87,12 @@ class ProcessTelegramMessage implements ShouldQueue
             return;
         }
 
+        if ($this->isCancelled($update)) {
+            $update->update(['status' => 'cancelled', 'processed_at' => now()]);
+
+            return;
+        }
+
         // A second delivery means the first attempt entered this method and
         // never came back out - a dead worker, or a retryable failure that
         // starts the whole search again from nothing. Either way the new
@@ -123,7 +132,7 @@ class ProcessTelegramMessage implements ShouldQueue
         try {
             $agent = ServerAssistantAgent::make($update);
             $state = TelegramChatState::query()->firstOrCreate(
-                ['chat_id' => $update->chat_id],
+                ['chat_id' => TelegramConversationScope::key($update->chat_id, $update->telegram_user_id)],
                 ['telegram_user_id' => $update->telegram_user_id],
             );
             $user = User::query()->first();
@@ -140,7 +149,8 @@ class ProcessTelegramMessage implements ShouldQueue
                 $state->update(['conversation_id' => null, 'boot_id' => $bootId]);
             }
 
-            if ($user && $state->conversation_id && ! $this->freshConversation) {
+            if ($user && $state->conversation_id && ! $this->freshConversation
+                && (string) $state->telegram_user_id === (string) $update->telegram_user_id) {
                 $agent->continue($state->conversation_id, as: $user);
             } elseif ($user) {
                 $agent->forUser($user);
@@ -150,6 +160,14 @@ class ProcessTelegramMessage implements ShouldQueue
                 ? "[Пользователь ответил (Reply) на сообщение бота: \"{$update->reply_to_text}\"]\n{$update->text}"
                 : (string) $update->text;
             $response = $agent->prompt($prompt, provider: $provider, model: $model, timeout: 1440);
+            if ($this->isCancelled($update)) {
+                $this->finishCancelledRun($update, $run, [
+                    'invocation_id' => $response->invocationId,
+                    'usage' => $response->usage->toArray(),
+                ]);
+
+                return;
+            }
             $normalizedResponse = $response->toArray();
 
             if (is_string($normalizedResponse['message'] ?? null)) {
@@ -191,7 +209,6 @@ class ProcessTelegramMessage implements ShouldQueue
                 'usage' => $response->usage->toArray(),
                 'completed_at' => now(),
             ]);
-            $update->update(['status' => 'completed', 'processed_at' => now()]);
 
             // The AI can echo a draft_id from earlier in the same live
             // conversation (its own memory of "the current draft", not a
@@ -201,6 +218,9 @@ class ProcessTelegramMessage implements ShouldQueue
             // media happens to remain on it (often none - approval moves
             // photos onto the published product).
             $draft = empty($data['draft_id']) ? null : ProductDraft::query()->find($data['draft_id']);
+            if ($draft && ! app(DraftAccess::class)->belongsToContext($draft, $update)) {
+                $draft = null;
+            }
             if ($this->freshConversation && (int) $draft?->telegram_update_id !== $update->id) {
                 $draft = null;
             }
@@ -223,7 +243,20 @@ class ProcessTelegramMessage implements ShouldQueue
                 ->latest('id')
                 ->first();
 
-            $usageFootnote = $this->usageFootnote($update->id);
+            $usageFootnote = $this->usageFootnote($update->id, includeSearchDuration: $draft !== null);
+
+            // /reset can arrive while the provider or a nested tool is busy.
+            // Claim completion conditionally rather than overwriting its
+            // cancellation with a stale model, then delivering an old result.
+            $completed = TelegramUpdate::query()->whereKey($update->id)
+                ->whereNull('cancel_requested_at')
+                ->where('status', '!=', 'cancelled')
+                ->update(['status' => 'completed', 'processed_at' => now()]);
+            if (! $completed) {
+                $this->finishCancelledRun($update, $run);
+
+                return;
+            }
 
             if ($draft) {
                 $this->sendDraftApproval($telegram, $update->chat_id, $draft, $usageFootnote);
@@ -253,11 +286,18 @@ class ProcessTelegramMessage implements ShouldQueue
                 );
             } elseif ($data['response_type'] === 'catalog_results' && ! empty($data['product_ids'])) {
                 $telegram->sendMessage($update->chat_id, $data['message'].$usageFootnote);
-                $productCards->sendMany($telegram, $update->chat_id, $data['product_ids']);
+                $productCards->sendMany($telegram, $update->chat_id, $data['product_ids'], telegramUserId: $update->telegram_user_id);
             } else {
                 $telegram->sendMessage($update->chat_id, $data['message'].$usageFootnote);
             }
         } catch (Throwable $exception) {
+            if ($this->isCancelled($update)) {
+                $this->finishCancelledRun($update, $run, [
+                    'error' => mb_substr($exception->getMessage(), 0, 5000),
+                ]);
+
+                return;
+            }
             $run->update([
                 'status' => 'failed',
                 'error' => mb_substr($exception->getMessage(), 0, 5000),
@@ -326,6 +366,16 @@ class ProcessTelegramMessage implements ShouldQueue
         }
 
         $run = $update->aiRuns()->latest('id')->first();
+        if ($this->isCancelled($update)) {
+            $update->aiRuns()->where('status', 'running')->update([
+                'status' => 'completed',
+                'response' => json_encode(['status' => 'cancelled']),
+                'completed_at' => now(),
+            ]);
+            $update->update(['status' => 'cancelled', 'processed_at' => $update->processed_at ?: now()]);
+
+            return;
+        }
         $wasProcessed = (bool) $update->processed_at;
         $error = mb_substr(
             $exception?->getMessage() ?: (string) ($run?->error ?: 'Queue job failed before completion.'),
@@ -370,7 +420,25 @@ class ProcessTelegramMessage implements ShouldQueue
         }
     }
 
-    private function usageFootnote(int $telegramUpdateId): string
+    private function isCancelled(TelegramUpdate $update): bool
+    {
+        return app(ProductSearchCancellation::class)->isCancelled($update->id);
+    }
+
+    /** @param array<string, mixed> $metadata */
+    private function finishCancelledRun(TelegramUpdate $update, AiRun $run, array $metadata = []): void
+    {
+        $run->update([
+            ...$metadata,
+            'status' => 'completed',
+            'response' => ['status' => 'cancelled'],
+            'completed_at' => now(),
+        ]);
+        TelegramUpdate::query()->whereKey($update->id)
+            ->update(['status' => 'cancelled', 'processed_at' => now()]);
+    }
+
+    private function usageFootnote(int $telegramUpdateId, bool $includeSearchDuration = false): string
     {
         $usage = app(AiUsageReporter::class)->forTelegramUpdate($telegramUpdateId);
         $tokens = (int) ($usage['tokens']['total'] ?? 0);
@@ -383,6 +451,17 @@ class ProcessTelegramMessage implements ShouldQueue
 
         if ($usage['estimated_cost_usd'] !== null) {
             $line .= sprintf(' (~$%s)', number_format((float) $usage['estimated_cost_usd'], 4));
+        }
+
+        if ($includeSearchDuration) {
+            // Whole request-to-review wall time, including queue waits and
+            // automatic repairs, not the sum of overlapping AI call times.
+            $receivedAt = TelegramUpdate::find($telegramUpdateId)?->created_at;
+            if ($receivedAt !== null) {
+                $seconds = max(0, (int) $receivedAt->diffInSeconds(now()));
+                $duration = ($seconds >= 60 ? intdiv($seconds, 60).' мин ' : '').($seconds % 60).' сек';
+                $line .= ' ('.$duration.')';
+            }
         }
 
         if (($usage['usage_unknown_failures'] ?? 0) > 0) {

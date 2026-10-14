@@ -327,6 +327,29 @@ test('with no before-snapshot, a merely-visible sibling is not trusted as the re
     }
 });
 
+test('rendered evidence keeps structured offer values with their owning product, not only visible text', async (t) => {
+    const browser = await launch();
+    if (!browser) { t.skip('No Chromium available.'); return; }
+    try {
+        const page = await browser.newPage();
+        await page.setContent(`<title>Audit product</title>
+            <script type="application/ld+json">{broken json</script>
+            <script type="application/ld+json">${JSON.stringify({ '@graph': [
+                { '@type': 'Product', sku: 'AUDIT-42', image: 'https://cdn.example/photo.jpg',
+                    offers: { itemCondition: 'https://schema.org/NewCondition', availability: { '@id': 'https://schema.org/OutOfStock' } } },
+                { '@type': 'Product', sku: 'OTHER-99', offers: { itemCondition: 'https://schema.org/UsedCondition' } },
+            ] })}</script><p>${'Unrelated visible text. '.repeat(800)}</p>`);
+        const text = (await page.evaluate(capturePageTextInPage, 'RAM: 32 GB')).slice(0, 12_000);
+        assert.match(text, /RAM: 32 GB/);
+        assert.match(text, /@graph\[0\]\.sku: AUDIT-42/);
+        assert.match(text, /@graph\[0\]\.offers\.itemCondition: https:\/\/schema.org\/NewCondition/);
+        assert.match(text, /@graph\[0\]\.offers\.availability: https:\/\/schema.org\/OutOfStock/);
+        assert.match(text, /@graph\[1\]\.sku: OTHER-99/);
+        assert.match(text, /@graph\[1\]\.offers\.itemCondition: https:\/\/schema.org\/UsedCondition/);
+        assert.doesNotMatch(text, /cdn.example|broken json/);
+    } finally { await browser.close(); }
+});
+
 test('with nothing clicked, capturePageTextInPage behaves like a plain whole-page read', async (t) => {
     const browser = await launch();
     if (!browser) {

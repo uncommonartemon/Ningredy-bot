@@ -79,11 +79,11 @@ class TelegramProgressReporter
      * heartbeat() returns, so a step that has already finished never keeps
      * showing a button for a wait that's already over.
      */
-    public function withCancelButton(int $telegramUpdateId): static
+    public function withCancelButton(int $telegramUpdateId, string $label = '❌ Отменить поиск'): static
     {
         $this->cancelTelegramUpdateId = $telegramUpdateId;
         $this->cancelButtonMarkup = [[[
-            'text' => '❌ Отменить поиск',
+            'text' => $label,
             'callback_data' => "search:cancel:{$telegramUpdateId}",
         ]]];
 

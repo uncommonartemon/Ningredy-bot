@@ -45,7 +45,7 @@ class FilamentNativeFormsTest extends TestCase
     {
         Livewire::test(CreateProduct::class)->fillForm([
             ...$this->productData(),
-            'variants' => [], 'sources' => [],
+            'sources' => [],
             'new_photos' => [UploadedFile::fake()->image('front.jpg', 1200, 800), UploadedFile::fake()->image('side.png', 900, 600)],
         ])->call('create')->assertHasNoFormErrors();
 
@@ -91,6 +91,26 @@ class FilamentNativeFormsTest extends TestCase
 
         $this->assertSame(2, $product->media()->count());
         $this->assertSame(1, $product->media()->where('is_primary', true)->count());
+    }
+
+    public function test_saving_new_photos_refreshes_the_open_gallery_without_reloading_the_page(): void
+    {
+        $product = Product::query()->create($this->productData());
+        $gallery = Livewire::test(MediaRelationManager::class, [
+            'ownerRecord' => $product, 'pageClass' => EditProduct::class,
+        ])->assertCountTableRecords(0);
+
+        Livewire::test(EditProduct::class, ['record' => $product->getKey()])->fillForm([
+            'new_photos' => [UploadedFile::fake()->image('new-photo.jpg', 900, 600)],
+        ])->call('save')->assertHasNoFormErrors()
+            ->assertDispatched('product-photos-updated.'.$product->getKey());
+
+        $gallery->dispatch('product-photos-updated.'.$product->getKey())
+            ->assertCountTableRecords(1)->assertCanSeeTableRecords($product->media()->get());
+
+        Livewire::test(EditProduct::class, ['record' => $product->getKey()])
+            ->call('save')->assertHasNoFormErrors()
+            ->assertNotDispatched('product-photos-updated.'.$product->getKey());
     }
 
     public function test_single_photo_form_uses_image_content_for_the_stored_extension(): void

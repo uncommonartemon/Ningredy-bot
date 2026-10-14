@@ -6,6 +6,8 @@ use App\Ai\Tools\Concerns\RecordsOperations;
 use App\Jobs\TrainDraftGalleryRecipe;
 use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
+use App\Services\Ai\ProductSearchCancellation;
+use App\Services\Telegram\DraftAccess;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
 use Illuminate\Support\Facades\Cache;
 use Laravel\Ai\Contracts\Tool;
@@ -31,6 +33,9 @@ class RetrainDraftGalleryRecipe implements Tool
     {
         $draft = ProductDraft::query()->find($request->integer('draft_id'));
         throw_unless($draft, RuntimeException::class, 'Draft not found.');
+        throw_unless(app(DraftAccess::class)->belongsToContext($draft, $this->update), RuntimeException::class,
+            'Draft belongs to another operator or chat.');
+        app(ProductSearchCancellation::class)->throwIfCancelled($this->update->id);
         throw_unless($draft->status === 'pending_review', RuntimeException::class, 'Draft is no longer pending review.');
         throw_if(blank($draft->primary_source_url), RuntimeException::class, 'Draft has no primary product page URL.');
 
@@ -38,11 +43,6 @@ class RetrainDraftGalleryRecipe implements Tool
         $hint = $hint === '' ? null : mb_substr($hint, 0, 1000);
 
         $queuedKey = "draft-gallery-retrain:{$draft->id}:queued";
-        throw_unless(
-            Cache::add($queuedKey, $this->update->id, now()->addMinutes(10)),
-            RuntimeException::class,
-            'This source is already being retrained.',
-        );
 
         try {
             $result = $this->recordOperation(
@@ -50,7 +50,9 @@ class RetrainDraftGalleryRecipe implements Tool
                 class_basename(self::class),
                 'retrain_draft_gallery_recipe',
                 ['draft_id' => $draft->id, 'url' => $draft->primary_source_url, 'hint' => $hint],
-                function () use ($draft, $hint): array {
+                function () use ($draft, $hint, $queuedKey): array {
+                    throw_unless(Cache::add($queuedKey, $this->update->id, now()->addMinutes(35)),
+                        RuntimeException::class, 'This source is already being retrained.');
                     TrainDraftGalleryRecipe::dispatch(
                         $draft->id,
                         $this->update->id,
@@ -65,7 +67,9 @@ class RetrainDraftGalleryRecipe implements Tool
                 $draft->id,
             );
         } catch (\Throwable $exception) {
-            Cache::forget($queuedKey);
+            if (Cache::get($queuedKey) === $this->update->id) {
+                Cache::forget($queuedKey);
+            }
 
             throw $exception;
         }

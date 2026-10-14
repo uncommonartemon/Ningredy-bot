@@ -3,15 +3,17 @@
 namespace Tests\Unit;
 
 use App\Models\ProductGalleryRecipe;
+use App\Models\ProductSourceAttempt;
 use App\Services\Ai\AiSettings;
 use App\Services\Ai\ProductSearchTimeBudget;
+use App\Services\Playwright\BrowserRunner;
 use App\Services\Products\BrowserProductGalleryExtractor;
-use App\Services\Products\BrowserProductImageTransferStore;
 use App\Services\Products\HostReputation;
 use App\Services\Products\ProductGalleryRecipeProof;
 use App\Services\Products\ProductGalleryRecipeResultValidator;
 use App\Services\Products\ProductGalleryRecipeRouter;
 use App\Services\Products\ProductGalleryRecipeTrainer;
+use App\Services\Products\ProductImageResolver;
 use App\Services\Products\ProductSourceAttemptRecorder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use ReflectionMethod;
@@ -20,6 +22,34 @@ use Tests\TestCase;
 class BrowserProductGalleryExtractorTest extends TestCase
 {
     use RefreshDatabase;
+
+    public function test_card_assembly_page_reads_get_the_assembly_window_not_the_spent_search_clock(): void
+    {
+        // A reviewer's reproduction: assembly had 60 seconds left, its browser was given one.
+        $this->mock(ProductSearchTimeBudget::class, function ($mock): void {
+            $mock->shouldReceive('timeoutFor')->andReturn(1);
+            $mock->shouldReceive('assemblyTimeoutFor')->andReturn(60);
+        });
+        $browser = app(BrowserProductGalleryExtractor::class);
+        $timeout = new ReflectionMethod($browser, 'processTimeoutSeconds');
+
+        $this->assertSame(60, $timeout->invoke($browser, true, 7, ['card_assembly' => true]));
+        $this->assertSame(1, $timeout->invoke($browser, true, 7, []));
+    }
+
+    public function test_the_page_reader_of_card_assembly_marks_its_browser_reads_as_assembly(): void
+    {
+        $this->mock(BrowserProductGalleryExtractor::class, function ($mock): void {
+            $mock->shouldReceive('scout')->once()
+                ->withArgs(fn (string $url, $debug = null, $update = null, array $context = []): bool => ($context['card_assembly'] ?? false) === true)
+                ->andReturn(['scout' => []]);
+            $mock->shouldReceive('lastProductPageUrl', 'lastScoutText', 'lastScoutIdentityEvidence')->andReturn(null)->byDefault();
+            $mock->shouldIgnoreMissing();
+        });
+
+        app(ProductImageResolver::class)
+            ->fetchAdditionalPageText('https://93.184.216.34/specs', 7, forceBrowser: true);
+    }
 
     public function test_two_frame_gallery_does_not_retrain_for_a_three_photo_publication_minimum(): void
     {
@@ -38,6 +68,24 @@ class BrowserProductGalleryExtractorTest extends TestCase
         $this->assertSame('active', $recipe->fresh()->status);
         $this->assertSame('https://two.example/b',
             app(ProductGalleryRecipeProof::class)->provenUrl($recipe, 'https://two.example/a'));
+    }
+
+    public function test_complete_single_frame_gallery_is_not_repaired_to_meet_a_three_photo_quota(): void
+    {
+        config(['product-images.browser_fallback.enabled' => true]);
+        $this->mock(ProductGalleryRecipeTrainer::class)->shouldNotReceive('train');
+        $recipe = ProductGalleryRecipe::create(['domain' => 'single.example', 'path_pattern' => '*',
+            'status' => 'active', 'failure_count' => 0, 'recipe' => [
+                'collect_selectors' => ['#photos img'], 'gallery_present' => true, 'content_confirmed_product' => true,
+            ]]);
+        $urls = ['https://cdn.example/only.jpg'];
+        $browser = $this->extractorReturning(['images' => $urls, 'diagnostics' => [
+            'observed_gallery_count' => 1, 'validated_candidates' => 1,
+        ]]);
+        $this->assertSame($urls, $browser->extract('https://single.example/a', context: ['minimum_verified_images' => 3]));
+        $this->assertSame(0, $recipe->fresh()->failure_count);
+        $this->assertSame('active', $recipe->fresh()->status);
+        $this->assertSame(1, $recipe->fresh()->success_count);
     }
 
     public function test_vision_first_does_not_train_when_the_domain_has_no_active_recipe(): void
@@ -292,21 +340,124 @@ class BrowserProductGalleryExtractorTest extends TestCase
         $this->assertNull($recipe->compatible_path_patterns);
     }
 
+    public function test_each_probe_of_another_domain_recipe_is_journalled_with_its_duration_rank_and_fit(): void
+    {
+        // Whether MAX_COMPATIBLE_RECIPE_ATTEMPTS is right depends on how long a
+        // probe takes and how often a later one fits; neither was recorded.
+        $body = [
+            'gallery_present' => true,
+            'content_confirmed_product' => true,
+            'expected_image_count' => 2,
+            'collect_selectors' => ['.product-gallery img'],
+            'actions' => [],
+        ];
+        $mostSuccessful = ProductGalleryRecipe::query()->create(['domain' => 'shop.example', 'path_pattern' => '/notebooks/*',
+            'status' => 'active', 'success_count' => 4, 'recipe' => $body]);
+        $lessSuccessful = ProductGalleryRecipe::query()->create(['domain' => 'shop.example', 'path_pattern' => '/tablets/*',
+            'status' => 'active', 'success_count' => 1, 'recipe' => $body]);
+
+        $this->invokeCompatibleAttempt($this->extractorReturning([
+            'images' => ['https://cdn.example/only-one.jpg'],
+            'learned_recipe' => ['collect_selectors' => [], 'thumbnail_selectors' => [], 'actions' => []],
+            'diagnostics' => ['validated_candidates' => 1],
+        ]), 'https://shop.example/components/case-1');
+
+        $probes = ProductSourceAttempt::query()->where('phase', 'compatible_recipe_probe')
+            ->where('action', 'extract_gallery')->orderBy('id')->get();
+        $this->assertCount(2, $probes);
+        $this->assertSame([$mostSuccessful->id, $lessSuccessful->id], $probes->pluck('output.outcome.recipe_id')->all());
+        $this->assertSame([1, 2], $probes->pluck('output.outcome.probe_rank')->all());
+        foreach ($probes as $probe) {
+            $this->assertIsInt($probe->duration_ms);
+            $this->assertFalse($probe->output['outcome']['fits']);
+            $this->assertSame(2, $probe->output['outcome']['probe_candidates']);
+            $this->assertNotNull($probe->output['outcome']['validation_reason']);
+        }
+    }
+
+    public function test_a_stored_recipe_run_is_journalled_with_its_duration_and_that_it_fitted(): void
+    {
+        config(['product-images.browser_fallback.enabled' => true]);
+        $recipe = ProductGalleryRecipe::query()->create(['domain' => 'shop.example', 'path_pattern' => '*', 'status' => 'active',
+            'success_count' => 3, 'recipe' => [
+                'gallery_present' => true,
+                'content_confirmed_product' => true,
+                'expected_image_count' => 2,
+                'collect_selectors' => ['.product-gallery img'],
+                'actions' => [],
+            ]]);
+        $images = ['https://cdn.example/product-front.jpg', 'https://cdn.example/product-side.jpg'];
+
+        $this->assertSame($images, $this->extractorReturning([
+            'images' => $images,
+            'learned_recipe' => ['collect_selectors' => ['.product-gallery img'], 'thumbnail_selectors' => [], 'actions' => []],
+            'diagnostics' => ['validated_candidates' => 2, 'observed_gallery_count' => 2],
+        ])->extract('https://shop.example/notebooks/laptop-1', 10, context: ['minimum_verified_images' => 2]));
+
+        $run = ProductSourceAttempt::query()->where('phase', 'active_recipe')->where('action', 'extract_gallery')->sole();
+        $this->assertIsInt($run->duration_ms);
+        $this->assertSame($recipe->id, $run->output['outcome']['recipe_id']);
+        $this->assertTrue($run->output['outcome']['fits']);
+        $this->assertFalse($run->output['outcome']['execution_interrupted']);
+    }
+
+    public function test_missing_selectors_do_not_prove_recipe_breakage_on_an_unavailable_product_page(): void
+    {
+        config(['product-images.browser_fallback.enabled' => true]);
+        $recipe = ProductGalleryRecipe::create(['domain' => 'unavailable.example', 'path_pattern' => '*',
+            'status' => 'active', 'success_count' => 2, 'failure_count' => 0,
+            'recipe' => ['gallery_present' => true, 'content_confirmed_product' => true,
+                'collect_selectors' => ['#photos img']]]);
+        $this->mock(ProductGalleryRecipeTrainer::class)->shouldNotReceive('train');
+        $browser = $this->extractorReturning([
+            'images' => [], 'learned_recipe' => ['collect_selectors' => [], 'thumbnail_selectors' => [], 'actions' => []],
+            'scout' => ['page_text' => 'Der Artikel ist zur Zeit leider nicht verfügbar.'],
+            'diagnostics' => ['validated_candidates' => 0],
+        ]);
+        $this->assertSame([], $browser->extract('https://unavailable.example/item-b', activeRecipeOnly: true));
+        $this->assertSame(0, $recipe->fresh()->failure_count);
+        $this->assertSame('active', $recipe->fresh()->status);
+        $this->assertFalse((bool) $recipe->fresh()->source_blocked);
+        $this->assertSame('source_unconfirmed', $recipe->fresh()->last_failure_kind);
+    }
+
+    public function test_missing_selectors_are_sent_to_the_agent_as_a_question_not_a_proven_broken_recipe(): void
+    {
+        config(['product-images.browser_fallback.enabled' => true]);
+        $recipe = ProductGalleryRecipe::create(['domain' => 'unknown-page.example', 'path_pattern' => '*',
+            'status' => 'active', 'failure_count' => 0,
+            'recipe' => ['collect_selectors' => ['#photos img']]]);
+        $this->mock(ProductGalleryRecipeTrainer::class)->shouldReceive('train')->once()
+            ->andReturnUsing(function (...$arguments) use ($recipe): array {
+                $feedback = $arguments['repairFrom'] ?? $arguments[9];
+                $this->assertSame('source_diagnosis', $feedback['mode']);
+                $this->assertSame('source_unconfirmed', $feedback['failure_kind']);
+                $this->assertSame(0, $recipe->fresh()->failure_count);
+
+                return [];
+            });
+        $this->extractorReturning(['images' => [],
+            'learned_recipe' => ['collect_selectors' => [], 'thumbnail_selectors' => [], 'actions' => []],
+            'diagnostics' => ['validated_candidates' => 0],
+        ])->extract('https://unknown-page.example/item-b');
+        $this->assertSame(0, $recipe->fresh()->failure_count);
+    }
+
     private function extractorReturning(array $result): BrowserProductGalleryExtractor
     {
-        return new class(app(AiSettings::class), app(ProductSearchTimeBudget::class), app(ProductGalleryRecipeResultValidator::class), app(ProductSourceAttemptRecorder::class), app(BrowserProductImageTransferStore::class), app(ProductGalleryRecipeRouter::class), app(HostReputation::class), $result) extends BrowserProductGalleryExtractor
+        return new class(app(AiSettings::class), app(ProductSearchTimeBudget::class), app(ProductGalleryRecipeResultValidator::class), app(ProductSourceAttemptRecorder::class), app(BrowserRunner::class), app(ProductGalleryRecipeRouter::class), app(HostReputation::class), $result) extends BrowserProductGalleryExtractor
         {
             public function __construct(
                 AiSettings $settings,
                 ProductSearchTimeBudget $timeBudget,
                 ProductGalleryRecipeResultValidator $resultValidator,
                 ProductSourceAttemptRecorder $attempts,
-                BrowserProductImageTransferStore $transfers,
+                BrowserRunner $runner,
                 ProductGalleryRecipeRouter $recipeRouter,
                 HostReputation $reputation,
                 private readonly array $fakeResult,
             ) {
-                parent::__construct($settings, $timeBudget, $resultValidator, $attempts, $transfers, $recipeRouter, $reputation);
+                parent::__construct($settings, $timeBudget, $resultValidator, $attempts, $runner, $recipeRouter, $reputation);
             }
 
             public function executeRecipe(

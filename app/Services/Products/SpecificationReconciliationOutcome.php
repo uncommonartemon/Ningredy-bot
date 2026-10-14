@@ -4,8 +4,9 @@ namespace App\Services\Products;
 
 /**
  * The verdict of one attempt to reconcile a draft's whole card - title,
- * model, color, description, and specifications - against its actual, final
- * chosen photo source. See ProductSpecificationReconciler.
+ * model, color, description, and specifications - against applicable evidence
+ * for the chosen product. Photos remain one gallery; textual evidence may
+ * come from several sources. See ProductSpecificationReconciler.
  *
  * isReconciled() is what ProductImageStorage and ProductDraftWorkflow::
  * approve() both act on: true only for Reconciled/AlreadyReconciled, false
@@ -13,8 +14,8 @@ namespace App\Services\Products;
  * reconciled - "an unreconciled draft is not ready for publication" was
  * agreed without a carve-out for the checker being turned off.
  *
- * unavailableReason distinguishes WHY the AI was never actually consulted -
- * ProductImageStorage needs this specifically to tell "the whole shared
+ * unavailableReason distinguishes WHY no verified card was returned, even
+ * when an AI call already happened. ProductImageStorage uses it to tell "the whole shared
  * budget for this search is spent" (which must stop automatic retries the
  * same way cost_budget/time_budget already do everywhere else) from every
  * other reason (which is still bounded by the draft's own attempt counter,
@@ -40,6 +41,9 @@ final readonly class SpecificationReconciliationOutcome
         // progress, and the caller's own attempt counter must not treat it
         // the same as a repeat of the exact same failed work.
         public bool $madeProgress = false,
+        public ?array $translations = null,
+        public ?array $repairContext = null,
+        public ?array $offerSelection = null,
     ) {}
 
     /** @param array<int, array{key: string, name: string, value: string}> $specifications */
@@ -51,10 +55,14 @@ final readonly class SpecificationReconciliationOutcome
         string $description,
         array $specifications,
         string $summary,
+        ?array $translations = null,
+        ?array $offerSelection = null,
     ): self {
         return new self(
             SpecificationReconciliationStatus::Reconciled,
             $url, $title, $model, $color, $description, $specifications, $summary, null,
+            translations: $translations,
+            offerSelection: $offerSelection,
         );
     }
 
@@ -65,15 +73,17 @@ final readonly class SpecificationReconciliationOutcome
 
     public static function disabled(?string $url): self
     {
-        return new self(SpecificationReconciliationStatus::Disabled, $url, null, null, null, null, null, null, null);
+        return new self(SpecificationReconciliationStatus::Disabled, $url, null, null, null, null, null,
+            'Сборка карточки выключена в настройках AI. Проверка не запускалась; повтор поиска не исправит эту настройку.',
+            'configuration_disabled');
     }
 
-    /** @param 'budget_exhausted'|'empty_url'|'technical_error' $reason */
-    public static function unavailable(string $reason, bool $madeProgress = false, ?string $detail = null): self
+    /** @param 'budget_exhausted'|'empty_url'|'technical_error'|'invalid_response'|'provider_busy' $reason */
+    public static function unavailable(string $reason, bool $madeProgress = false, ?string $detail = null, ?array $repairContext = null): self
     {
         return new self(
             SpecificationReconciliationStatus::Unavailable,
-            null, null, null, null, null, null, $detail, $reason, $madeProgress,
+            null, null, null, null, null, null, $detail, $reason, $madeProgress, repairContext: $repairContext,
         );
     }
 
@@ -84,11 +94,11 @@ final readonly class SpecificationReconciliationOutcome
      * Both mean the same thing to a caller deciding whether to publish:
      * not yet. summary is what tells a human which one it actually was.
      */
-    public static function notReady(string $summary, bool $madeProgress = false): self
+    public static function notReady(string $summary, bool $madeProgress = false, ?array $repairContext = null): self
     {
         return new self(
             SpecificationReconciliationStatus::NotReady,
-            null, null, null, null, null, null, $summary, null, $madeProgress,
+            null, null, null, null, null, null, $summary, null, $madeProgress, repairContext: $repairContext,
         );
     }
 

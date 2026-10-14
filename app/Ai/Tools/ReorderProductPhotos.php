@@ -30,18 +30,19 @@ class ReorderProductPhotos implements Tool
     {
         $productId = $request->integer('product_id');
         $newOrder = $request->array('new_order');
+        $variantId = $request->integer('variant_id') ?: null;
 
         $result = $this->recordOperation(
             $this->update,
             class_basename(self::class),
             'reorder_product_photos',
-            ['product_id' => $productId, 'new_order' => $newOrder],
-            function () use ($productId, $newOrder): array {
-                $product = Product::query()->find($productId);
+            ['product_id' => $productId, 'new_order' => $newOrder, 'variant_id' => $variantId],
+            function () use ($productId, $newOrder, $variantId): array {
+                $product = Product::query()->lockForUpdate()->find($productId);
                 throw_if(! $product, ModelNotFoundException::class, 'Product not found.');
 
                 try {
-                    app(ProductPhotoManager::class)->reorder($product, $newOrder);
+                    app(ProductPhotoManager::class)->reorder($product, $newOrder, $this->update, $variantId);
                 } catch (RuntimeException $exception) {
                     return ['ok' => false, 'error' => $exception->getMessage()];
                 }
@@ -59,6 +60,7 @@ class ReorderProductPhotos implements Tool
     {
         return [
             'product_id' => $schema->integer()->required(),
+            'variant_id' => $schema->integer(),
             'new_order' => $schema->array()->items($schema->integer())->required(),
         ];
     }

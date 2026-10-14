@@ -156,7 +156,7 @@ class OpenAiHeavyOperationGate
         ($this->sleeper ?? static fn (int $seconds): int => sleep($seconds))($remaining);
     }
 
-    private function isRateLimit(Throwable $exception): bool
+    public function isRateLimit(Throwable $exception): bool
     {
         $cause = $exception;
 

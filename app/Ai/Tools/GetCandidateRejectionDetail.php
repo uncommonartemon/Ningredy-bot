@@ -3,7 +3,7 @@
 namespace App\Ai\Tools;
 
 use App\Models\ProductSourceAttempt;
-use App\Services\Products\ProductImageStorage;
+use App\Services\Photos\ImageUrls;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
 use Laravel\Ai\Contracts\Tool;
 use Laravel\Ai\Tools\Request;
@@ -34,7 +34,7 @@ class GetCandidateRejectionDetail implements Tool
             return json_encode(['found' => false], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         }
 
-        $targetKey = ProductImageStorage::imageAssetKey($imageUrl);
+        $targetKey = ImageUrls::imageAssetKey($imageUrl);
 
         $match = ProductSourceAttempt::query()
             ->where('domain', $this->domain)
@@ -61,7 +61,7 @@ class GetCandidateRejectionDetail implements Tool
             ->first(function (mixed $candidate) use ($targetKey): bool {
                 return is_array($candidate)
                     && is_string($candidate['url'] ?? null)
-                    && ProductImageStorage::imageAssetKey($candidate['url']) === $targetKey;
+                    && ImageUrls::imageAssetKey($candidate['url']) === $targetKey;
             });
 
         if (! is_array($match)) {

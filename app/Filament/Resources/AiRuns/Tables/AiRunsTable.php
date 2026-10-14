@@ -30,15 +30,15 @@ class AiRunsTable
                         : null)
                     ->searchable(),
                 TextColumn::make('invocation_id')->label('Invocation ID')->copyable()->toggleable(isToggledHiddenByDefault: true),
-                TextColumn::make('provider')->label('Провайдер')->badge(),
-                TextColumn::make('model')->label('Модель')->searchable(),
+                TextColumn::make('provider')->label(__('Провайдер'))->badge(),
+                TextColumn::make('model')->label(__('Модель'))->searchable(),
                 TextColumn::make('status')
-                    ->label('Статус')
+                    ->label(__('Статус'))
                     ->badge()
                     ->formatStateUsing(fn (string $state): string => match ($state) {
-                        'completed' => 'Завершён',
-                        'running' => 'Выполняется',
-                        'failed' => 'Ошибка',
+                        'completed' => __('Завершён'),
+                        'running' => __('Выполняется'),
+                        'failed' => __('Ошибка'),
                         default => $state,
                     })
                     ->color(fn (string $state): string => match ($state) {
@@ -48,24 +48,24 @@ class AiRunsTable
                         default => 'gray',
                     }),
                 TextColumn::make('duration')
-                    ->label('Длительность')
+                    ->label(__('Длительность'))
                     ->state(fn (AiRun $record): ?string => self::duration($record))
                     ->placeholder('—'),
-                TextColumn::make('started_at')->label('Начат')->dateTime('d.m.Y H:i:s')->sortable(),
-                TextColumn::make('completed_at')->label('Завершён')->dateTime('d.m.Y H:i:s')->sortable()->toggleable(),
-                TextColumn::make('created_at')->label('Создан')->dateTime('d.m.Y H:i:s')->sortable()->toggleable(isToggledHiddenByDefault: true),
-                TextColumn::make('updated_at')->label('Изменён')->dateTime('d.m.Y H:i:s')->sortable()->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('started_at')->label(__('Начат'))->dateTime('d.m.Y H:i:s')->sortable(),
+                TextColumn::make('completed_at')->label(__('Завершён'))->dateTime('d.m.Y H:i:s')->sortable()->toggleable(),
+                TextColumn::make('created_at')->label(__('Создан'))->dateTime('d.m.Y H:i:s')->sortable()->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('updated_at')->label(__('Изменён'))->dateTime('d.m.Y H:i:s')->sortable()->toggleable(isToggledHiddenByDefault: true),
             ])
             ->filters([
-                SelectFilter::make('status')->label('Статус')->options([
-                    'completed' => 'Завершён',
-                    'running' => 'Выполняется',
-                    'failed' => 'Ошибка',
+                SelectFilter::make('status')->label(__('Статус'))->options([
+                    'completed' => __('Завершён'),
+                    'running' => __('Выполняется'),
+                    'failed' => __('Ошибка'),
                 ]),
                 Filter::make('started_at')
                     ->schema([
-                        DatePicker::make('from')->label('С'),
-                        DatePicker::make('until')->label('По'),
+                        DatePicker::make('from')->label(__('С')),
+                        DatePicker::make('until')->label(__('По')),
                     ])
                     ->query(fn (Builder $query, array $data): Builder => $query
                         ->when($data['from'] ?? null, fn (Builder $q, $date) => $q->whereDate('started_at', '>=', $date))

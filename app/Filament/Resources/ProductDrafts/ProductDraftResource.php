@@ -2,6 +2,7 @@
 
 namespace App\Filament\Resources\ProductDrafts;
 
+use App\Filament\Resources\LocalizedResource as Resource;
 use App\Filament\Resources\ProductDrafts\Pages\EditProductDraft;
 use App\Filament\Resources\ProductDrafts\Pages\ListProductDrafts;
 use App\Filament\Resources\ProductDrafts\Pages\ViewProductDraft;
@@ -11,7 +12,6 @@ use App\Filament\Resources\ProductDrafts\Schemas\ProductDraftInfolist;
 use App\Filament\Resources\ProductDrafts\Tables\ProductDraftsTable;
 use App\Models\ProductDraft;
 use BackedEnum;
-use Filament\Resources\Resource;
 use Filament\Schemas\Schema;
 use Filament\Support\Icons\Heroicon;
 use Filament\Tables\Table;

@@ -94,6 +94,18 @@ class AbandonGalleryTrainingAttemptToolTest extends TestCase
             ->handle(new ToolRequest(['reason' => '   ']));
     }
 
+    public function test_no_product_media_is_a_page_verdict_not_a_recipe_failure(): void
+    {
+        [$recipe, $version] = $this->recipeAndVersion();
+        $signal = new GalleryTrainingAbandonSignal;
+        (new AbandonGalleryTrainingAttempt($version, $recipe, 'https://stuck.example/product', null, $signal))
+            ->handle(new ToolRequest(['reason' => 'The opened viewer contains only the same placeholder, no product photographs.',
+                'failure_kind' => 'source_has_no_product_media']));
+
+        $this->assertSame('source_has_no_product_media', $signal->failureKind);
+        $this->assertTrue($signal->abandoned);
+    }
+
     public function test_an_invalid_failure_kind_falls_back_to_agent_abandoned(): void
     {
         [$recipe, $version] = $this->recipeAndVersion();

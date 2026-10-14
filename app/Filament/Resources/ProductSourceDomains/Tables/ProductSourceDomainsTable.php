@@ -20,23 +20,23 @@ class ProductSourceDomainsTable
             ->columns([
                 TextColumn::make('id')->label('#')->sortable()->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('domain')
-                    ->label('Домен')
+                    ->label(__('Домен'))
                     ->searchable()
                     ->copyable()
                     ->sortable(),
                 TextColumn::make('agent_hint')
-                    ->label('Подсказка агенту')
+                    ->label(__('Подсказка агенту'))
                     ->limit(80)
                     ->placeholder('—')
                     ->tooltip(fn ($record): ?string => $record->agent_hint),
                 TextColumn::make('recipe_status')
-                    ->label('Рецепт')
+                    ->label(__('Рецепт'))
                     ->badge()
                     ->state(fn (ProductSourceDomain $record): string => match (self::recipeFor($record)?->status) {
-                        'active' => 'Активен',
-                        'learning' => 'Обучается',
-                        'disabled' => 'Отключён',
-                        default => 'Нет рецепта',
+                        'active' => __('Активен'),
+                        'learning' => __('Обучается'),
+                        'disabled' => __('Отключён'),
+                        default => __('Нет рецепта'),
                     })
                     ->color(fn (ProductSourceDomain $record): string => match (self::recipeFor($record)?->status) {
                         'active' => 'success',
@@ -48,27 +48,27 @@ class ProductSourceDomainsTable
                         ? ProductGalleryRecipeResource::getUrl('view', ['record' => self::recipeFor($record)])
                         : null),
                 IconColumn::make('recipe_blocked')
-                    ->label('Заблокирован')
+                    ->label(__('Заблокирован'))
                     ->boolean()
                     ->state(fn (ProductSourceDomain $record): bool => (bool) self::recipeFor($record)?->source_blocked),
                 TextColumn::make('recipe_success_count')
-                    ->label('Успехов')
+                    ->label(__('Успехов'))
                     ->state(fn (ProductSourceDomain $record): int => self::recipeFor($record)?->success_count ?? 0),
                 TextColumn::make('recipe_failure_count')
-                    ->label('Ошибок')
+                    ->label(__('Ошибок'))
                     ->state(fn (ProductSourceDomain $record): int => self::recipeFor($record)?->failure_count ?? 0),
                 TextColumn::make('recipe_last_success_at')
-                    ->label('Последний успех')
+                    ->label(__('Последний успех'))
                     ->state(fn (ProductSourceDomain $record): ?string => self::recipeFor($record)?->last_success_at?->format('d.m.Y H:i'))
                     ->placeholder('—')
                     ->toggleable(),
                 TextColumn::make('created_at')
-                    ->label('Создан')
+                    ->label(__('Создан'))
                     ->dateTime('d.m.Y H:i:s')
                     ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('updated_at')
-                    ->label('Обновлено')
+                    ->label(__('Обновлено'))
                     ->dateTime('d.m.Y H:i:s')
                     ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),

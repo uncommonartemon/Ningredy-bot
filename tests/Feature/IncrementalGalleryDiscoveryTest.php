@@ -2,10 +2,14 @@
 
 namespace Tests\Feature;
 
+use App\Models\AiRun;
 use App\Models\ProductDraft;
+use App\Models\ProductSourceAttempt;
+use App\Models\TelegramUpdate;
 use App\Services\Products\ProductIdentityMatcher;
 use App\Services\Products\ProductImageCandidateDiscovery;
 use App\Services\Products\ProductImageResolver;
+use App\Services\Products\ProductSourceIdentityJudge;
 use App\Services\Products\WikimediaImageSearch;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
@@ -13,6 +17,66 @@ use Tests\TestCase;
 class IncrementalGalleryDiscoveryTest extends TestCase
 {
     use RefreshDatabase;
+
+    public function test_card_recovery_passes_the_original_request_and_failure_to_discovery(): void
+    {
+        $update = TelegramUpdate::create(['update_id' => 98121, 'telegram_user_id' => '1',
+            'chat_id' => '1', 'payload' => [], 'status' => 'completed', 'text' => 'Orbit Pro 14 16GB 512GB']);
+        $run = AiRun::create(['telegram_update_id' => $update->id, 'provider' => 'fake',
+            'model' => 'fake', 'status' => 'completed', 'prompt' => 'test', 'started_at' => now(), 'completed_at' => now()]);
+        $draft = ProductDraft::create(['telegram_update_id' => $update->id, 'ai_run_id' => $run->id,
+            'requested_by_telegram_user_id' => '1', 'title' => 'Orbit Pro', 'image_urls' => [],
+            'sources' => [], 'specifications' => [], 'gallery_search_stop_reason' => 'specifications_unreconciled']);
+        ProductSourceAttempt::create(['product_draft_id' => $draft->id, 'telegram_update_id' => $update->id,
+            'product_url' => 'https://first.example/product', 'domain' => 'first.example', 'actor' => 'server', 'phase' => 'card_assembly',
+            'action' => 'recover_with_another_source', 'status' => 'interrupted',
+            'output' => ['failure_context' => 'Storage capacity not supported by source text', 'saved_file_count' => 3]]);
+        $discovery = app(ProductImageCandidateDiscovery::class);
+        $prompt = (new \ReflectionMethod($discovery, 'prompt'))->invoke($discovery, $draft, [], ['https://first.example/product'], 1);
+
+        $this->assertStringContainsString('Orbit Pro 14 16GB 512GB', $prompt);
+        $this->assertStringContainsString('Storage capacity not supported by source text', $prompt);
+        $this->assertStringContainsString('"failed_source_url":"https://first.example/product"', $prompt);
+        $this->assertStringContainsString('"saved_photo_count":3', $prompt);
+    }
+
+    public function test_a_conflicting_regional_variant_is_rejected_before_recipe_execution_or_training(): void
+    {
+        $url = 'https://shop.example/product/123';
+        $draft = new ProductDraft(['model' => 'Stealth 16 AI A2HWGG-009IT', 'specifications' => [
+            ['key' => 'mpn', 'value' => '9S7-15F515-009'],
+        ]]);
+        $resolver = $this->mock(ProductImageResolver::class);
+        $resolver->shouldReceive('preflightSource')->once()->andReturn([
+            'final_url' => $url, 'identity_evidence' => 'Stealth 16 AI A2HWGG-008US',
+        ]);
+        $resolver->shouldNotReceive('resolve');
+        $this->mock(ProductSourceIdentityJudge::class)->shouldReceive('judge')->once()
+            ->withArgs(fn ($actualDraft, $source) => $actualDraft === $draft
+                && $source['_preflight_identity_evidence'] === 'Stealth 16 AI A2HWGG-008US')
+            ->andReturn('conflicting');
+
+        $discovery = app(ProductImageCandidateDiscovery::class);
+        $method = new \ReflectionMethod($discovery, 'resolveSourcesIndividually');
+        $this->assertSame([], $method->invoke($discovery, [['url' => $url]], $draft));
+        $this->assertDatabaseHas('product_source_attempts', [
+            'decision' => 'reject_conflicting_identifier_before_browser',
+        ]);
+    }
+
+    public function test_an_unknown_identity_is_still_allowed_to_get_browser_evidence(): void
+    {
+        $url = 'https://shop.example/product/123';
+        $draft = new ProductDraft(['model' => 'Laptop A9', 'specifications' => [['key' => 'sku', 'value' => 'A9-123']]]);
+        $draft->setRelation('telegramUpdate', new TelegramUpdate(['text' => 'Laptop A9']));
+        $resolver = $this->mock(ProductImageResolver::class);
+        $resolver->shouldReceive('preflightSource')->once()->andReturn(['identity_evidence' => 'Laptop A9']);
+        $resolver->shouldReceive('resolve')->once()->andReturn([]);
+        $this->mock(ProductSourceIdentityJudge::class)->shouldReceive('judge')->once()->andReturn('uncertain');
+        $discovery = app(ProductImageCandidateDiscovery::class);
+        $this->assertSame([], (new \ReflectionMethod($discovery, 'resolveSourcesIndividually'))
+            ->invoke($discovery, [['url' => $url, 'title' => 'Laptop A9']], $draft));
+    }
 
     public function test_complete_gallery_yields_before_next_store_and_pending_store_resumes_without_search(): void
     {
@@ -30,7 +94,9 @@ class IncrementalGalleryDiscoveryTest extends TestCase
         $resolver->shouldReceive('isConfirmedGalleryImage')->andReturn(true);
         $this->mock(WikimediaImageSearch::class)->shouldNotReceive('find');
         $matcher = $this->mock(ProductIdentityMatcher::class);
+        $resolver->shouldReceive('sourceContextForPage')->andReturn(null)->byDefault();
         $matcher->shouldReceive('conflictsSource')->andReturn(false);
+        $matcher->shouldReceive('confirmsExactIdentifier')->andReturn(false);
         $matcher->shouldReceive('requiresExactIdentifier')->andReturn(false);
         $draft = new ProductDraft(['brand' => 'Example', 'model' => 'Laptop',
             'sources' => [['url' => $first], ['url' => $second]]]);

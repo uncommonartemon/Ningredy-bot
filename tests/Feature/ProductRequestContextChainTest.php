@@ -17,9 +17,11 @@ use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
 use App\Services\Products\BrowserProductGalleryExtractor;
 use App\Services\Products\OperatorDomainHintRecorder;
+use App\Services\Products\ProductCardAssembly;
 use App\Services\Products\ProductGalleryRecipeTrainer;
 use App\Services\Products\ProductImageCandidateDiscovery;
 use App\Services\Products\ProductImageStorage;
+use App\Services\Products\SpecificationReconciliationOutcome;
 use App\Services\Telegram\TelegramClient;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
@@ -242,6 +244,12 @@ class ProductRequestContextChainTest extends TestCase
         $draft = $this->draft();
         $press = $this->buttonPress($draft);
         $this->spendBeyondTheLimit($press);
+        // Spent money stops photo work, not the card: with no photos the card
+        // is still assembled, as text, against the page research chose
+        // (PROJECT_STRATEGY: "Сборка карточки не ограничивается лимитами поиска").
+        $this->mock(ProductCardAssembly::class)->shouldReceive('complete')->once()
+            ->withArgs(fn (ProductDraft $draft, array $source): bool => $source['url'] === self::PAGE_URL)
+            ->andReturn(SpecificationReconciliationOutcome::alreadyReconciled(self::PAGE_URL));
 
         app(ProductImageStorage::class)->continueStage($draft->fresh(), null, $press->id);
 
@@ -251,6 +259,7 @@ class ProductRequestContextChainTest extends TestCase
         ProductImageDiscoveryAgent::assertNeverPrompted();
         $this->assertSame(1, AiRun::query()->where('telegram_update_id', $press->id)->count(), 'only the pre-existing spend');
         $this->assertSame('cost_budget', $draft->fresh()->gallery_search_stop_reason);
+        $this->assertSame(self::PAGE_URL, $draft->fresh()->specifications_reconciled_source_url);
     }
 
     /**

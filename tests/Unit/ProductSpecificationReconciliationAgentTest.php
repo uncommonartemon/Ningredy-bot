@@ -4,10 +4,26 @@ namespace Tests\Unit;
 
 use App\Ai\Agents\ProductSpecificationReconciliationAgent;
 use App\Ai\Tools\FetchProductSourcePageText;
+use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
 
 class ProductSpecificationReconciliationAgentTest extends TestCase
 {
+    use RefreshDatabase;
+
+    public function test_instructions_expose_offer_selection_without_relaxing_the_original_request(): void
+    {
+        // Contract visibility only; the live replay must still verify the model's decision.
+        $instructions = (string) (new ProductSpecificationReconciliationAgent)->instructions();
+
+        $this->assertStringContainsString('retain_selected_offer', $instructions);
+        $this->assertStringContainsString('adopt_source_offer', $instructions);
+        $this->assertStringContainsString('Never relax a user requirement.', $instructions);
+        $this->assertStringContainsString('target_offer=source_offer', $instructions);
+        $this->assertStringContainsString('re-evaluate EVERY retained fact', $instructions);
+        $this->assertStringNotContainsString('Never change product, configuration, color or condition merely', $instructions);
+    }
+
     public function test_it_offers_no_tools_when_constructed_without_a_source_host(): void
     {
         $agent = new ProductSpecificationReconciliationAgent;

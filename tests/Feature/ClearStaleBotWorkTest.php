@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Jobs\ProcessTelegramMessage;
 use App\Models\ProductSourceAttempt;
 use App\Models\TelegramUpdate;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -16,7 +17,7 @@ class ClearStaleBotWorkTest extends TestCase
     {
         DB::table('jobs')->insert([
             'queue' => 'assistant',
-            'payload' => '{}',
+            'payload' => json_encode(['data' => ['commandName' => ProcessTelegramMessage::class]]),
             'attempts' => 0,
             'reserved_at' => null,
             'available_at' => now()->timestamp,
@@ -46,7 +47,7 @@ class ClearStaleBotWorkTest extends TestCase
         // process produces them.
         DB::table('jobs')->insert([
             'queue' => 'assistant',
-            'payload' => '{}',
+            'payload' => json_encode(['data' => ['commandName' => ProcessTelegramMessage::class]]),
             'attempts' => 1,
             'reserved_at' => now()->timestamp,
             'available_at' => now()->timestamp,
@@ -83,7 +84,7 @@ class ClearStaleBotWorkTest extends TestCase
         // request come back to life on the next start.
         DB::table('jobs')->insert([
             'queue' => 'assistant',
-            'payload' => '{}',
+            'payload' => json_encode(['data' => ['commandName' => ProcessTelegramMessage::class]]),
             'attempts' => 1,
             'reserved_at' => now()->subHour()->timestamp,
             'available_at' => now()->subHour()->timestamp,

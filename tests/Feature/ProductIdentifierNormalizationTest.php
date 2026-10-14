@@ -9,11 +9,61 @@ use App\Models\TelegramUpdate;
 use App\Services\Products\ProductDraftWorkflow;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Queue;
+use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 
 class ProductIdentifierNormalizationTest extends TestCase
 {
     use RefreshDatabase;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        Storage::fake('public');
+    }
+
+    public function test_publishing_keeps_open_box_translations_and_new_fact_sources(): void
+    {
+        $translations = ['cs' => ['title' => 'Notebook', 'description' => 'Ověřené parametry.']];
+        $draft = $this->draftWithIdentifiers([
+            ['key' => 'sku', 'name' => 'SKU', 'value' => 'SAME-123'],
+            ['key' => 'video_memory', 'name' => 'VRAM', 'value' => '8 GB', 'source_url' => 'https://maker.example/specs', 'source_excerpt' => '8 GB VRAM'],
+            ['key' => 'maximum_memory', 'name' => 'Maximum RAM', 'value' => '64 GB'],
+        ], ['condition' => 'open_box', 'translations' => $translations]);
+        $product = app(ProductDraftWorkflow::class)->approve($draft);
+        $variant = $product->variants()->firstOrFail();
+        $this->assertSame('open_box', $variant->condition);
+        $this->assertSame($translations, $variant->translations);
+        $this->assertSame($translations, $product->translations);
+        $this->assertDatabaseHas('product_sources', ['product_variant_id' => $variant->id, 'url' => 'https://maker.example/specs']);
+        $this->assertDatabaseHas('attribute_definitions', ['key' => 'video_memory']);
+        $this->assertDatabaseHas('attribute_definitions', ['key' => 'maximum_memory']);
+        $this->assertDatabaseMissing('attribute_definitions', ['key' => 'video_memory', 'label' => 'Оперативная память']);
+        $newDraft = $this->draftWithIdentifiers([['key' => 'sku', 'name' => 'SKU', 'value' => 'SAME-123']]);
+        $second = app(ProductDraftWorkflow::class)->approve($newDraft);
+        $this->assertSame($product->id, $second->id);
+        $this->assertSame(['new', 'open_box'], $product->variants()->orderBy('condition')->pluck('condition')->all());
+    }
+
+    public function test_different_mpns_of_a_shared_model_cannot_overwrite_the_existing_product(): void
+    {
+        $firstDraft = $this->draftWithIdentifiers([
+            ['key' => 'mpn', 'name' => 'MPN', 'value' => 'FAMILY-2TB'],
+            ['key' => 'storage', 'name' => 'Storage', 'value' => '2 TB'],
+        ]);
+        $first = app(ProductDraftWorkflow::class)->approve($firstDraft);
+        $before = $first->fresh()->getAttributes();
+        $secondDraft = $this->draftWithIdentifiers([
+            ['key' => 'mpn', 'name' => 'MPN', 'value' => 'FAMILY-1TB'],
+            ['key' => 'storage', 'name' => 'Storage', 'value' => '1 TB'],
+        ], ['title' => 'A different sellable configuration']);
+        $second = app(ProductDraftWorkflow::class)->approve($secondDraft);
+
+        $this->assertNotSame($first->id, $second->id);
+        $this->assertSame($before, $first->fresh()->getAttributes());
+        $this->assertSame('FAMILY-2TB', $first->variants()->sole()->mpn);
+        $this->assertSame('FAMILY-1TB', $second->variants()->sole()->mpn);
+    }
 
     public function test_an_identifier_arriving_with_its_explanation_is_stored_clean(): void
     {
@@ -47,7 +97,7 @@ class ProductIdentifierNormalizationTest extends TestCase
     }
 
     /** @param array<int, array<string, string>> $specifications */
-    private function draftWithIdentifiers(array $specifications): ProductDraft
+    private function draftWithIdentifiers(array $specifications, array $overrides = []): ProductDraft
     {
         $update = TelegramUpdate::query()->create([
             'update_id' => random_int(2000, 90000),
@@ -81,23 +131,35 @@ class ProductIdentifierNormalizationTest extends TestCase
             'color' => 'Sky Blue',
             'description' => 'Тонкий и лёгкий ноутбук.',
             'specifications' => $specifications,
-            'sources' => [],
+            'sources' => [['title' => 'Fixture product source', 'url' => 'https://example.com/product']],
             'image_urls' => [],
             'confidence' => 0.9,
             'status' => 'pending_review',
+            ...$overrides,
+            // Identification/translation normalization is exercised after
+            // successful assembly, not by bypassing its readiness guard.
+            'primary_source_url' => 'https://example.com/product',
+            'specifications_reconciled_source_url' => 'https://example.com/product',
         ]);
         // approve() refuses a draft with no media, so give it one that clears
         // the category's own resolution minimum.
+        $path = 'drafts/'.$draft->id.'/photo.webp';
+        $image = imagecreatetruecolor(1200, 1200);
+        ob_start();
+        imagewebp($image);
+        $bytes = ob_get_clean();
+        imagedestroy($image);
+        Storage::disk('public')->put($path, $bytes);
         $draft->media()->create([
             'disk' => 'public',
-            'path' => 'drafts/'.$draft->id.'/photo.webp',
+            'path' => $path,
             'source_url' => 'https://example.com/photo.webp',
             'role' => 'primary',
             'mime_type' => 'image/webp',
             'width' => 1200,
             'height' => 1200,
-            'file_size' => 2048,
-            'checksum' => hash('sha256', 'photo-'.$draft->id),
+            'file_size' => strlen($bytes),
+            'checksum' => hash('sha256', $bytes),
             'verification_status' => 'verified',
             'sort_order' => 0,
             'is_primary' => true,

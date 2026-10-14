@@ -23,27 +23,35 @@ class AiErrorPresenter
 
         return match (true) {
             str_contains($classificationText, 'insufficient_quota'), str_contains($classificationText, 'billing'), str_contains($classificationText, 'credit'), str_contains($classificationText, 'quota') => [
+                'kind' => 'provider_quota',
                 'retryable' => false, 'message' => 'У AI-провайдера закончилась квота или средства. Пополните баланс/лимит и повторите запрос.'.$suffix,
             ],
             str_contains($raw, 'does not exist'), str_contains($raw, 'model_not_found'), str_contains($raw, 'invalid model'), str_contains($raw, 'no such model'), str_contains($raw, 'unknown model') => [
+                'kind' => 'provider_model',
                 'retryable' => false, 'message' => 'AI-провайдер не знает такую модель. Проверьте имя модели: Настройки → AI в админке или .env.'.$suffix,
             ],
             str_contains($raw, '401'), str_contains($raw, 'unauthorized'), str_contains($raw, 'api key'), str_contains($raw, 'authentication') => [
+                'kind' => 'provider_authentication',
                 'retryable' => false, 'message' => 'AI-провайдер отклонил API-ключ. Проверьте ключ: Настройки → AI в админке или .env.'.$suffix,
             ],
             str_contains($raw, 'context length'), str_contains($raw, 'maximum context'), str_contains($raw, 'too many tokens') => [
+                'kind' => 'context_length',
                 'retryable' => false, 'message' => 'Запрос или история диалога слишком длинные для модели. Сформулируйте короче или начните новый диалог.'.$suffix,
             ],
             str_contains($classificationText, '429'), str_contains($classificationText, 'rate limit') => [
+                'kind' => 'rate_limit',
                 'retryable' => true, 'message' => 'AI-провайдер временно ограничил частоту запросов. Повторю автоматически.'.$suffix,
             ],
             str_contains($raw, 'timeout'), str_contains($raw, 'timed out') => [
+                'kind' => 'timeout',
                 'retryable' => true, 'message' => 'AI не успел ответить вовремя. Повторю запрос автоматически.'.$suffix,
             ],
             str_contains($raw, 'ssl'), str_contains($raw, 'connection'), str_contains($raw, 'could not resolve'), str_contains($raw, 'network') => [
+                'kind' => 'connection',
                 'retryable' => true, 'message' => 'Нет стабильного соединения с AI-провайдером. Повторю автоматически.'.$suffix,
             ],
             default => [
+                'kind' => 'unknown',
                 'retryable' => false, 'message' => 'Не удалось выполнить запрос. Ошибка записана в журнал; можно открыть «Ошибки» в Telegram.'.$suffix,
             ],
         };

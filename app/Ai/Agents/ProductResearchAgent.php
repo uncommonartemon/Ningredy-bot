@@ -4,6 +4,10 @@ namespace App\Ai\Agents;
 
 use App\Models\Category;
 use App\Services\Ai\AiSettings;
+use App\Services\Products\AiAttributeGroups;
+use App\Services\Products\ProductCondition;
+use App\Services\Products\ProductSourceTypes;
+use App\Services\Products\ProductTextEvidenceContract;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
 use Laravel\Ai\Attributes\MaxTokens;
 use Laravel\Ai\Attributes\Strict;
@@ -40,6 +44,7 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
     public function instructions(): Stringable|string
     {
         $categories = $this->categoryList();
+        $attributeGroups = AiAttributeGroups::instructions();
 
         return <<<PROMPT
             Always classify the product into exactly one category from this exact list (return its
@@ -54,6 +59,8 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
             category independently and risk it disagreeing with product_type.
 
             {$this->researchInstructions()}
+
+            {$attributeGroups}
             PROMPT;
     }
 
@@ -76,10 +83,11 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
             constraint applies to text visible inside the photographs themselves, enforced separately by Vision
             after research, not here.
 
-            Always search only for a new, factory-sealed product page for identity, specifications, and
-            photographs. Never select used, refurbished, renewed, recertified, second-hand, or open-box offers as
-            a source, even when the request mentions such a condition (e.g. "БУ", "used", "б/у") - that wording
-            only helps confirm which exact product is meant, it never changes which page or photos are used.
+            Select condition=new unless the operator explicitly requests another condition.
+            Respect an explicit open-box/unsealed request as condition=open_box, used as used, and
+            refurbished/renewed/recertified as refurbished. Do not silently substitute a different condition.
+            Condition describes the requested offer, not the reusable catalog photographs: a new-retail
+            photo gallery may illustrate an open-box offer of the exact same physical configuration.
             Used-listing photos are taken by random sellers of one specific physical unit (scratches, wear,
             different lighting) and can never represent the catalog entry. Photographs must always come from a
             professional manufacturer or new-retail page for the exact same physical model, chassis revision,
@@ -141,6 +149,10 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
             those three would be empty, null, or missing, return not_found instead - never found with an empty or
             missing title, sources, or primary_source_url.
 
+            Write every catalog field in English - title, color, description, specification names and values -
+            whatever language the operator or the source pages use. Keep model codes, part numbers, numbers and
+            units as published. Translations are made later from this English card.
+
             The description is public storefront copy, not a research report. Write two to four concise, neutral
             sentences about the product and its technical features. Never mention the search process, sources,
             confidence, approval, or AI. Put factual caveats only in research_notes.
@@ -152,6 +164,14 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
             never a valid identifier. Installed CPU, GPU, RAM, storage, display, color and pack/module count must
             each describe one selected configuration; move upgrade ceilings to separate maximum_* specifications.
             Never put a per-unit serial number into these fields.
+
+            Collect detailed verified specifications appropriate to this category, not only headline CPU/GPU.
+            Include available port counts and capabilities, wireless modules, display, expansion, power,
+            dimensions and materials when applicable. These are examples, not mandatory fields to invent.
+            Text facts may come from several sources about this exact configuration. For each specification
+            provide source_url and a short supporting source_excerpt; distinguish installed equipment from
+            optional features and family maximums. Shared chassis facts need evidence that they apply.
+            Keep photos in one gallery; text enrichment does not authorize mixing photographic sources.
 
             Always classify product_type as laptop, desktop, component, or other. Laptops and notebooks are laptop;
             complete stationary PCs are desktop; separate parts, monitors, and peripherals are component.
@@ -215,6 +235,7 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
                 ->enum($this->categorySlugs())
                 ->nullable()->required(),
             'color' => $schema->string()->max(255)->nullable()->required(),
+            'condition' => $schema->string()->enum(ProductCondition::VALUES)->required(),
             'description' => $schema->string()->max(5000)->nullable()->required(),
             'research_notes' => $schema->string()->max(5000)->nullable()->required(),
             'specifications' => $schema->array()->max(100)->items(
@@ -222,14 +243,18 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
                     'key' => $schema->string()->max(100)->required(),
                     'name' => $schema->string()->max(255)->required(),
                     'value' => $schema->string()->max(2000)->required(),
+                    'group' => AiAttributeGroups::schema($schema),
+                    'source_url' => $schema->string()->max(2048)->nullable()->required(),
+                    'source_excerpt' => $schema->string()->max(800)->nullable()->required(),
                 ])->withoutAdditionalProperties()
             )->required(),
+            'specification_evidence' => $schema->array()->description('Additional observed corroborating or conflicting text evidence for the selected product, including applicable official specifications/PDFs. Preserve competing observations with the same field key, not only the chosen winner. No need to duplicate the single citation already returned in specifications or to search solely to fill a quota; return [] when there are no additional observations. These are text sources, not photo candidates.')->items(ProductTextEvidenceContract::observationSchema($schema))->required(),
             'sources' => $schema->array()->max(self::MAX_SOURCES)->items(
                 $schema->object([
                     'title' => $schema->string()->max(500)->required(),
                     'url' => $schema->string()->max(2048)->required(),
                     'type' => $schema->string()
-                        ->enum(['manufacturer', 'retailer', 'marketplace', 'review', 'database', 'web'])
+                        ->enum(ProductSourceTypes::VALUES)
                         ->required(),
                     'image_urls' => $schema->array()->max(10)
                         ->items($schema->string()->max(2048))

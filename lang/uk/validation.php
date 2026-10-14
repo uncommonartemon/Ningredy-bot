@@ -1,0 +1,42 @@
+<?php
+
+return [
+    'accepted' => 'Поле :attribute потрібно прийняти.',
+    'array' => 'Поле :attribute має бути списком.',
+    'boolean' => 'Поле :attribute має бути «так» або «ні».',
+    'date' => 'Поле :attribute має містити коректну дату.',
+    'distinct' => 'Значення поля :attribute повторюється.',
+    'email' => 'Поле :attribute має містити коректну електронну адресу.',
+    'exists' => 'Обране значення поля :attribute некоректне.',
+    'image' => 'Поле :attribute має містити зображення.',
+    'integer' => 'Поле :attribute має бути цілим числом.',
+    'in' => 'Обране значення поля :attribute некоректне.',
+    'max' => [
+        'array' => 'Поле :attribute має містити не більше :max елементів.',
+        'file' => 'Файл :attribute не повинен перевищувати :max КБ.',
+        'numeric' => 'Значення :attribute не повинно перевищувати :max.',
+        'string' => 'Поле :attribute має містити не більше :max символів.',
+    ],
+    'min' => [
+        'array' => 'Поле :attribute має містити щонайменше :min елементів.',
+        'file' => 'Файл :attribute має бути щонайменше :min КБ.',
+        'numeric' => 'Значення :attribute має бути щонайменше :min.',
+        'string' => 'Поле :attribute має містити щонайменше :min символів.',
+    ],
+    'mimes' => 'Файл :attribute має бути типу :values.',
+    'mimetypes' => 'Файл :attribute має бути типу :values.',
+    'numeric' => 'Поле :attribute має бути числом.',
+    'regex' => 'Формат поля :attribute некоректний.',
+    'required' => 'Поле :attribute обов’язкове.',
+    'required_with' => 'Поле :attribute обов’язкове, якщо заповнено :values.',
+    'size' => [
+        'array' => 'Поле :attribute має містити :size елементів.',
+        'file' => 'Файл :attribute має бути розміром :size КБ.',
+        'numeric' => 'Значення :attribute має дорівнювати :size.',
+        'string' => 'Поле :attribute має містити :size символів.',
+    ],
+    'string' => 'Поле :attribute має бути текстом.',
+    'unique' => 'Таке значення поля :attribute вже існує.',
+    'uploaded' => 'Не вдалося завантажити файл :attribute.',
+    'url' => 'Поле :attribute має містити коректний URL.',
+];

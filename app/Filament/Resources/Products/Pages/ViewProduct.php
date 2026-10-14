@@ -14,7 +14,7 @@ class ViewProduct extends ViewRecord
     protected function getHeaderActions(): array
     {
         return [
-            Action::make('openCatalog')->label('Открыть на сайте')->icon('heroicon-o-arrow-top-right-on-square')
+            Action::make('openCatalog')->label(__('Открыть на сайте'))->icon('heroicon-o-arrow-top-right-on-square')
                 ->url(fn (): string => route('products.show', $this->record), true)
                 ->visible(fn (): bool => $this->record->status === 'published' && $this->record->is_active),
             EditAction::make(),

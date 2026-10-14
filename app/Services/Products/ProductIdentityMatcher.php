@@ -210,9 +210,65 @@ class ProductIdentityMatcher
             return false;
         }
 
-        return collect($this->exactIdentifierCandidates($draft))->contains(
+        $hasExactIdentifier = collect($this->exactIdentifierCandidates($draft))->contains(
             fn (string $identifier): bool => $this->containsWholeIdentifier($evidence, $identifier),
         );
+
+        // A matching MPN/SKU cannot settle a second, explicitly requested
+        // whole model or code that this page has not confirmed. This only
+        // removes the free confirmation shortcut: missing evidence remains
+        // unknown and is left to the identity judge, not declared a conflict.
+        // Inferred identifiers do not become operator requirements here.
+        // Nor does a code the page names beside its own sibling: a variant
+        // selector or a family spec page names both. That is for the judge.
+        return $hasExactIdentifier && collect($this->requestedWholeIdentifiers($draft))->every(
+            fn (string $identifier): bool => $this->containsRequestedIdentifier($draft, $evidence, $identifier),
+        ) && ! $this->namesRequestedCodeBesideASibling($draft, $evidence);
+    }
+
+    /**
+     * A descriptive model that embeds a dedicated exact code is not a second
+     * opaque code. Retailers can put its size before the family name. Require
+     * every word and every whole code, but not that presentation order. Without
+     * the embedded dedicated code, keep the existing whole-value requirement.
+     */
+    private function containsRequestedIdentifier(ProductDraft $draft, string $evidence, string $identifier): bool
+    {
+        if ($this->containsWholeIdentifier($evidence, $identifier)) {
+            return true;
+        }
+
+        $dedicated = collect($draft->specifications ?? [])
+            ->filter(fn (mixed $item): bool => is_array($item) && in_array($item['key'] ?? null, [
+                'sku', 'mpn', 'ean', 'upc', 'gtin',
+            ], true))
+            ->map(fn (array $item): string => $this->compact((string) ($item['value'] ?? '')))
+            ->filter();
+
+        // Never split a dedicated identifier itself, even if it has spaces.
+        if ($dedicated->isEmpty() || $dedicated->contains($identifier)) {
+            return false;
+        }
+
+        return $this->requestedRawValues($draft)
+            ->filter(fn (string $raw): bool => $this->compact($raw) === $identifier)
+            ->contains(function (string $raw) use ($dedicated, $evidence): bool {
+                $model = Str::lower(Str::ascii(urldecode($raw)));
+                $hasEmbeddedExactCode = $dedicated->contains(fn (string $code): bool => $this->containsWholeIdentifier($model, $code)
+                    && $this->containsWholeIdentifier($evidence, $code));
+
+                if (! $hasEmbeddedExactCode) {
+                    return false;
+                }
+
+                // Keep hyphenated/slashed codes intact; don't admit their
+                // family prefix and regional suffix found in separate places.
+                preg_match_all('/[a-z0-9]+(?:[-_.\/][a-z0-9]+)*/', $model, $matches);
+
+                return count($matches[0]) > 1 && collect($matches[0])->every(
+                    fn (string $part): bool => $this->containsWholeIdentifier($evidence, $this->compact($part)),
+                );
+            });
     }
 
     /**
@@ -299,7 +355,72 @@ class ProductIdentityMatcher
 
     public function requiresExactIdentifier(ProductDraft $draft): bool
     {
-        return $this->requestedIdentifiers($draft) !== [];
+        $request = $this->requestText($draft);
+        if ($request === null) {
+            return $this->requestedIdentifiers($draft) !== [];
+        }
+
+        return $this->explicitOperatorCodes($draft, $request) !== [];
+    }
+
+    /** Actual operator codes only; research's own inferred SKU is not mandatory. */
+    public function missingOperatorIdentifiers(ProductDraft $draft, string $evidence): array
+    {
+        $normalized = Str::lower(Str::ascii(urldecode($evidence)));
+
+        return array_values(array_filter($this->requestedWholeIdentifiers($draft),
+            fn (string $identifier): bool => ! $this->containsRequestedIdentifier($draft, $normalized, $identifier)));
+    }
+
+    /** Opaque codes for offer adoption; descriptive model requirements belong to the semantic judge. */
+    public function missingOperatorCodes(ProductDraft $draft, string $evidence): array
+    {
+        $request = $this->requestText($draft);
+        if ($request === null) {
+            return [];
+        }
+        $normalized = Str::lower(Str::ascii(urldecode($evidence)));
+        $normalizedRequest = Str::lower(Str::ascii(urldecode($request)));
+        $dedicated = collect($draft->specifications ?? [])
+            ->filter(fn (mixed $item): bool => is_array($item) && in_array($item['key'] ?? null, ['sku', 'mpn', 'ean', 'upc', 'gtin'], true))
+            ->map(fn (array $item): string => $this->compact((string) ($item['value'] ?? '')))
+            ->filter(fn (string $code): bool => $code !== '' && $this->containsWholeIdentifier($normalizedRequest, $code));
+
+        return array_values(array_filter(
+            array_unique([...$this->explicitOperatorCodes($draft, $request), ...$dedicated->all()]),
+            fn (string $code): bool => ! $this->containsWholeIdentifier($normalized, $code),
+        ));
+    }
+
+    /** @return array<int, string> */
+    private function explicitOperatorCodes(ProductDraft $draft, string $request): array
+    {
+        // A broad phrase such as "Stealth 16 AI" is not the operator naming
+        // a SKU. Adjacent-word candidates (stealth16, 16ai) help discovery,
+        // but must not turn an uncertain page into a mandatory-code refusal.
+        // Preserve only actual code tokens, including internal separators.
+        $normalizedRequest = Str::lower(Str::ascii(urldecode($request)));
+        preg_match_all('/[a-z0-9]+(?:[-_.\/][a-z0-9]+)*/', $normalizedRequest, $matches);
+        $operatorCodes = collect($matches[0] ?? [])
+            ->map(fn (string $token): string => $this->compact($token))
+            ->filter(fn (string $token): bool => $this->isStrongToken($token) && ! ctype_digit($token))
+            ->all();
+
+        $matchingCodes = array_intersect($operatorCodes, $this->requestedIdentifiers($draft));
+
+        // Numeric GTIN/SKU values are valid codes too; arbitrary years,
+        // screen sizes and RAM quantities are not. Require a whole dedicated
+        // value actually supplied by the operator, without guessing by length.
+        $numericCodes = collect($draft->specifications ?? [])
+            ->filter(fn (mixed $item): bool => is_array($item) && in_array($item['key'] ?? null, [
+                'sku', 'mpn', 'ean', 'upc', 'gtin',
+            ], true))
+            ->map(fn (array $item): string => $this->compact((string) ($item['value'] ?? '')))
+            ->filter(fn (string $identifier): bool => $identifier !== '' && ctype_digit($identifier)
+                && $this->containsWholeIdentifier($normalizedRequest, $identifier))
+            ->all();
+
+        return array_values(array_unique([...$matchingCodes, ...$numericCodes]));
     }
 
     /**
@@ -335,53 +456,108 @@ class ProductIdentityMatcher
             return null;
         }
 
-        $compactEvidence = $this->compact($evidence);
+        $normalizedEvidence = Str::lower(Str::ascii(urldecode($evidence)));
         $evidenceIdentifiers = $this->identifierCandidates($evidence);
         $exactIdentifiers = collect($requested)
-            ->filter(fn (string $identifier): bool => str_contains($compactEvidence, $identifier))
+            ->filter(fn (string $identifier): bool => $this->containsWholeIdentifier($normalizedEvidence, $identifier))
             ->values();
 
         foreach ($requested as $identifier) {
-            $identifierIsPresent = str_contains($compactEvidence, $identifier);
-
-            // Once one exact requested identifier is present, a missing weaker
-            // fragment must not turn that exact page into a false conflict.
-            // Close alternatives to the identifier that is present are still
-            // inspected, so a mixed variant table remains ambiguous.
-            if (! $identifierIsPresent && $exactIdentifiers->isNotEmpty()) {
+            // The requested code is on the page. A nearby code beside it makes
+            // the page ambiguous, not a different product: a family spec page
+            // lists every configuration (request #94: rog.asus.com named
+            // GA403UV-G14.R94060 next to two GA403UI builds and was refused as
+            // "another product", leaving the card nothing to be built from),
+            // and a variant selector lists the sibling SKUs. The identity judge
+            // reads such a page; matchesExactIdentifier() will not confirm it.
+            if ($exactIdentifiers->contains($identifier)) {
                 continue;
             }
 
-            foreach ($evidenceIdentifiers as $candidate) {
-                if ($candidate === $identifier || abs(strlen($candidate) - strlen($identifier)) > 3) {
-                    continue;
-                }
+            // A present, more specific code can explain its own missing
+            // fragments. A shared family word cannot instead excuse a missing
+            // full operator-supplied code, nor can one different identifier
+            // (for example MPN) suppress a conflict in another (model).
+            if (! $exactIdentifiers->contains($identifier) && $exactIdentifiers->contains(
+                fn (string $exact): bool => str_contains($exact, $identifier),
+            )) {
+                continue;
+            }
 
-                // identifierCandidates() also builds adjacent token pairs.
-                // When the exact SKU is already present, that can produce a
-                // synthetic value such as 16ah0097nr16 from the exact
-                // 16-ah0097nr plus its first atom. It is derivable from the
-                // exact match, not evidence of another variant. A genuinely
-                // nearby SKU (for example 16ah0098nr) contains neither value
-                // and is still inspected below.
-                if ($exactIdentifiers->contains(
-                    fn (string $exact): bool => str_contains($candidate, $exact)
-                        || str_contains($exact, $candidate),
-                )) {
-                    continue;
-                }
+            $found = $this->nearbyIdentifier($identifier, $evidenceIdentifiers, $exactIdentifiers);
 
-                $prefixLength = min(4, max(2, (int) floor(strlen($identifier) * 0.35)));
-                $distanceLimit = max(1, min(3, (int) ceil(strlen($identifier) * 0.12)));
-
-                if (substr($candidate, 0, $prefixLength) === substr($identifier, 0, $prefixLength)
-                    && levenshtein($candidate, $identifier) <= $distanceLimit) {
-                    return ['requested' => $identifier, 'found' => $candidate];
-                }
+            if ($found !== null) {
+                return ['requested' => $identifier, 'found' => $found];
             }
         }
 
         return null;
+    }
+
+    /**
+     * A code on the page within a character or two of $identifier - the
+     * shape of a sibling configuration - other than codes the page's exact
+     * matches themselves explain.
+     *
+     * @param  array<int, string>  $evidenceIdentifiers
+     * @param  Collection<int, string>  $exactIdentifiers
+     */
+    private function nearbyIdentifier(string $identifier, array $evidenceIdentifiers, Collection $exactIdentifiers, int $minimumDistance = 1): ?string
+    {
+        foreach ($evidenceIdentifiers as $candidate) {
+            if ($candidate === $identifier || abs(strlen($candidate) - strlen($identifier)) > 3) {
+                continue;
+            }
+
+            // identifierCandidates() also builds adjacent token pairs.
+            // When the exact SKU is already present, that can produce a
+            // synthetic value such as 16ah0097nr16 from the exact
+            // 16-ah0097nr plus its first atom. It is derivable from the
+            // exact match, not evidence of another variant. A genuinely
+            // nearby SKU (for example 16ah0098nr) contains neither value
+            // and is still inspected below. Only a code at least as
+            // specific as the requested value may explain a synthetic
+            // pair: a shared family fragment must not hide a variant.
+            if ($exactIdentifiers->contains(
+                fn (string $exact): bool => strlen($exact) >= strlen($identifier)
+                    && (str_contains($candidate, $exact) || str_contains($exact, $candidate)),
+            )) {
+                continue;
+            }
+
+            $prefixLength = min(4, max(2, (int) floor(strlen($identifier) * 0.35)));
+            $distanceLimit = max($minimumDistance, min(3, (int) ceil(strlen($identifier) * 0.12)));
+
+            if (substr($candidate, 0, $prefixLength) === substr($identifier, 0, $prefixLength)
+                && levenshtein($candidate, $identifier) <= $distanceLimit) {
+                return $candidate;
+            }
+        }
+
+        return null;
+    }
+
+    /** The page names a requested code and, beside it, a sibling of it. */
+    private function namesRequestedCodeBesideASibling(ProductDraft $draft, string $evidence): bool
+    {
+        $requested = $this->requestedIdentifiers($draft);
+
+        if ($evidence === '' || $requested === []) {
+            return false;
+        }
+
+        $normalizedEvidence = Str::lower(Str::ascii(urldecode($evidence)));
+        $present = collect($requested)
+            ->filter(fn (string $identifier): bool => $this->containsWholeIdentifier($normalizedEvidence, $identifier))
+            ->values();
+        $evidenceIdentifiers = $this->identifierCandidates($evidence);
+
+        return $present->contains(
+            // Short regional SKUs can differ in two letters (EU/US). This
+            // widens ambiguity only; the conflicting-product rule keeps its
+            // original distance, so an uncertain variant still goes to AI.
+            fn (string $identifier): bool => $this->nearbyIdentifier($identifier, $evidenceIdentifiers, $present, minimumDistance: 2) !== null,
+        );
     }
 
     /** @param array<string, mixed> $source */
@@ -394,13 +570,13 @@ class ProductIdentityMatcher
      * become the card's source while the card's own specifications say something
      * else (seen live: a 32 GB draft sourced from a 16 GB listing).
      *
-     * Only installed memory is compared. It is the one configuration value
-     * written unambiguously as "16 gb" in titles and slugs; storage appears as
-     * "1-024-tb" and similar forms that cannot be parsed reliably, and a wrong
-     * guess here would reject good sources. A conflict therefore needs the
-     * evidence to state memory sizes explicitly and none of them to be the one
-     * the draft committed to - evidence that says nothing about memory, which is
-     * the common case, never conflicts.
+     * This conservative hint reads only the product title and its current URL.
+     * A flattened page body also contains recommendations, accessories and
+     * alternative configurations: its capacity tokens are not specifications
+     * of the selected offer. They can neither invent a conflict nor rescue a
+     * conflicting title. The complete evidence remains available to the source
+     * judge and card assembly; false here means no deterministic conflict,
+     * not that a configuration was verified.
      *
      * @param  array<string, mixed>  $source
      */
@@ -412,7 +588,13 @@ class ProductIdentityMatcher
             return false;
         }
 
-        $found = $this->memorySizes($this->sourceEvidence($source));
+        $productLabel = implode(' ', array_filter([
+            is_string($source['title'] ?? null) ? $source['title'] : null,
+            is_string($source['_preflight_final_url'] ?? null)
+                ? $source['_preflight_final_url']
+                : (is_string($source['url'] ?? null) ? $source['url'] : null),
+        ]));
+        $found = $this->memorySizes($productLabel);
 
         return $found !== [] && array_intersect($expected, $found) === [];
     }
@@ -601,6 +783,37 @@ class ProductIdentityMatcher
 
     private function requestCompact(ProductDraft $draft): ?string
     {
+        $request = $this->requestText($draft);
+
+        return $request === null ? null : $this->compact($request);
+    }
+
+    /** @return array<int, string> */
+    private function requestedWholeIdentifiers(ProductDraft $draft): array
+    {
+        $request = $this->requestText($draft);
+
+        if ($request === null) {
+            return [];
+        }
+
+        $normalizedRequest = Str::lower(Str::ascii(urldecode($request)));
+
+        return $this->requestedRawValues($draft)
+            ->map(fn (string $value): string => $this->compact($value))
+            ->filter(fn (string $value): bool => $value !== ''
+                && $this->containsWholeIdentifier($normalizedRequest, $value))
+            // The operator may type only A2HWGG-009IT or 009IT while the
+            // draft's model includes the marketing name around it. An
+            // inferred MPN must not override that real explicit code.
+            ->merge($this->explicitOperatorCodes($draft, $request))
+            ->unique()
+            ->values()
+            ->all();
+    }
+
+    private function requestText(ProductDraft $draft): ?string
+    {
         if (! $draft->telegram_update_id && ! $draft->relationLoaded('telegramUpdate')) {
             return null;
         }
@@ -613,7 +826,7 @@ class ProductIdentityMatcher
             return null;
         }
 
-        return $this->compact($request);
+        return $request;
     }
 
     /**
@@ -648,6 +861,16 @@ class ProductIdentityMatcher
         $combined = [$this->compact($value)];
 
         for ($index = 0; $index < $parts->count() - 1; $index++) {
+            // atomicParts includes a hyphenated whole code followed by its
+            // own pieces. Appending a piece already contained in the other
+            // part invents a longer identifier (A2HWGG009ITA2HWGG), and even
+            // changes its length-based conflict tolerance. It is not another
+            // observation from the page or from the operator.
+            if (str_contains($parts[$index], $parts[$index + 1])
+                || str_contains($parts[$index + 1], $parts[$index])) {
+                continue;
+            }
+
             $combined[] = $parts[$index].$parts[$index + 1];
         }
 

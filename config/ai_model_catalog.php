@@ -32,6 +32,11 @@ return [
                 'gpt-4o-mini' => ['label' => 'GPT-4o mini', 'input_per_million' => 0.15, 'cached_input_per_million' => 0.075, 'output_per_million' => 0.60, 'source_url' => 'https://developers.openai.com/api/docs/models/gpt-4o-mini'],
                 'o3' => ['label' => 'o3', 'input_per_million' => 2.00, 'cached_input_per_million' => 0.50, 'output_per_million' => 8.00, 'source_url' => 'https://developers.openai.com/api/docs/models/o3'],
                 'o4-mini' => ['label' => 'o4-mini', 'input_per_million' => 1.10, 'cached_input_per_million' => 0.275, 'output_per_million' => 4.40, 'source_url' => 'https://developers.openai.com/api/docs/models/o4-mini'],
+                // Standard tier, short context, from developers.openai.com/api/docs/pricing on 2026-09-27.
+                // Long context and cache writes are priced separately there and are not modelled here.
+                'gpt-6-astra' => ['label' => 'GPT-6 Astra', 'input_per_million' => 10.00, 'cached_input_per_million' => 1.00, 'output_per_million' => 50.00, 'source_url' => 'https://developers.openai.com/api/docs/models/gpt-6-astra', 'pricing_checked_at' => '2026-09-27'],
+                'gpt-6-sol' => ['label' => 'GPT-6 Sol', 'input_per_million' => 2.00, 'cached_input_per_million' => 0.20, 'output_per_million' => 10.00, 'source_url' => 'https://developers.openai.com/api/docs/models/gpt-6-sol', 'pricing_checked_at' => '2026-09-27'],
+                'gpt-6-luna' => ['label' => 'GPT-6 Luna', 'input_per_million' => 0.10, 'cached_input_per_million' => 0.01, 'output_per_million' => 0.50, 'source_url' => 'https://developers.openai.com/api/docs/models/gpt-6-luna', 'pricing_checked_at' => '2026-09-27'],
             ],
         ],
         'deepseek' => [

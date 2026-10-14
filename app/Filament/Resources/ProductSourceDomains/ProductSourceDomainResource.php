@@ -2,6 +2,7 @@
 
 namespace App\Filament\Resources\ProductSourceDomains;
 
+use App\Filament\Resources\LocalizedResource as Resource;
 use App\Filament\Resources\ProductSourceDomains\Pages\CreateProductSourceDomain;
 use App\Filament\Resources\ProductSourceDomains\Pages\EditProductSourceDomain;
 use App\Filament\Resources\ProductSourceDomains\Pages\ListProductSourceDomains;
@@ -9,7 +10,6 @@ use App\Filament\Resources\ProductSourceDomains\Schemas\ProductSourceDomainForm;
 use App\Filament\Resources\ProductSourceDomains\Tables\ProductSourceDomainsTable;
 use App\Models\ProductSourceDomain;
 use BackedEnum;
-use Filament\Resources\Resource;
 use Filament\Schemas\Schema;
 use Filament\Support\Icons\Heroicon;
 use Filament\Tables\Table;

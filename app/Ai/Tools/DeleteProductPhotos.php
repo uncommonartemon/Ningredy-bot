@@ -30,16 +30,17 @@ class DeleteProductPhotos implements Tool
     {
         $productId = $request->integer('product_id');
         $positions = $request->array('positions');
+        $variantId = $request->integer('variant_id') ?: null;
 
         $result = $this->recordOperation(
             $this->update,
             class_basename(self::class),
             'delete_product_photos',
-            ['product_id' => $productId, 'positions' => $positions],
-            function () use ($productId, $positions): array {
-                $product = Product::query()->find($productId);
+            ['product_id' => $productId, 'positions' => $positions, 'variant_id' => $variantId],
+            function () use ($productId, $positions, $variantId): array {
+                $product = Product::query()->lockForUpdate()->find($productId);
                 throw_if(! $product, ModelNotFoundException::class, 'Product not found.');
-                $deleted = app(ProductPhotoManager::class)->delete($product, $positions);
+                $deleted = app(ProductPhotoManager::class)->delete($product, $positions, $this->update, $variantId);
 
                 return ['ok' => true, 'product_id' => $product->id, 'deleted' => $deleted];
             },
@@ -54,6 +55,7 @@ class DeleteProductPhotos implements Tool
     {
         return [
             'product_id' => $schema->integer()->required(),
+            'variant_id' => $schema->integer()->description('Selected configuration; otherwise use the last displayed gallery.'),
             'positions' => $schema->array()->items($schema->integer())->required(),
         ];
     }

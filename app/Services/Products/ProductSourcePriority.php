@@ -54,9 +54,11 @@ class ProductSourcePriority
      * set, not only the sources that had to be moved. Queueing just the moved
      * ones let a weaker third source overtake a better first one that was
      * equally ready, which is the opposite of what the ranking decided. It is
-     * built at all only when at least one reuse-ready source sits behind a
-     * trainable one - otherwise the ranking already tries them first and a
-     * second entry would buy nothing but a repeated browser run.
+     * needed whenever a ready source follows the first candidate: even a ready
+     * first source can fail and start training before the next ready source
+     * gets its turn. If the only reusable source is already first, no extra
+     * pass is needed. Failed attempts carry their observations into the full
+     * pass, so that second entry does not repeat the browser execution.
      *
      * A source with nothing to reuse is never queued twice: the staging loop
      * only accepts a gallery on Playwright-confirmed frames, so such a source
@@ -71,19 +73,9 @@ class ProductSourcePriority
         $sources = array_values($cardSources);
         $reusable = fn (array $source): bool => (bool) ($source['_preflight_active_recipe'] ?? false)
             || (bool) ($source['_preflight_known_recipe_domain'] ?? false);
-        $firstTrainable = null;
-
-        foreach ($sources as $index => $source) {
-            if (! $trainingDisabled && ! $reusable($source)) {
-                $firstTrainable = $index;
-
-                break;
-            }
-        }
-
-        $movesSomething = $firstTrainable !== null
-            && array_filter(array_slice($sources, $firstTrainable + 1), $reusable) !== [];
-        $reuseFirst = $movesSomething ? array_filter($sources, $reusable) : [];
+        $reuseFirst = ! $trainingDisabled && array_filter(array_slice($sources, 1), $reusable) !== []
+            ? array_filter($sources, $reusable)
+            : [];
 
         return [
             ...array_map(
@@ -166,7 +158,8 @@ class ProductSourcePriority
                 ->pluck('domain')
                 ->filter(fn (mixed $domain): bool => is_string($domain) && $domain !== '')
                 ->map(fn (string $domain): string => self::host('https://'.$domain))
-                ->reject(fn (string $domain): bool => in_array($domain, $blocked, true))
+                ->reject(fn (string $domain): bool => collect($blocked)
+                    ->contains(fn (string $banned): bool => self::hostsMatch($domain, $banned)))
                 ->unique()
                 ->take($limit)
                 ->values()

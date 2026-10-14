@@ -2,9 +2,8 @@
 
 namespace Tests\Unit;
 
-use App\Services\Products\ProductImageStorage;
+use App\Services\Photos\ImageGeometry;
 use GdImage;
-use ReflectionMethod;
 use Tests\TestCase;
 
 /**
@@ -50,8 +49,6 @@ class WorkingEdgeDownscaleTest extends TestCase
 
     private function downscale(GdImage $image): GdImage
     {
-        $method = new ReflectionMethod(ProductImageStorage::class, 'downscaleForWork');
-
-        return $method->invoke(app(ProductImageStorage::class), $image);
+        return (new ImageGeometry)->downscaleForWork($image);
     }
 }

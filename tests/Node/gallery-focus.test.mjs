@@ -2,13 +2,30 @@ import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright-core';
 import { captureGalleryScoutInPage } from '../../scripts/gallery-focus.mjs';
-import { EXCLUDED_GALLERY_CONTEXT_PATTERN_SOURCE } from '../../scripts/product-gallery-utils.mjs';
+import { EXCLUDED_GALLERY_CONTEXT_PATTERN_SOURCE, clearBlockingOverlays } from '../../scripts/product-gallery-utils.mjs';
 
 let browser;
 before(async () => { browser = await chromium.launch({ headless: true }); });
 after(async () => { await browser?.close(); });
 const args = { excludedContextPatternSource: EXCLUDED_GALLERY_CONTEXT_PATTERN_SOURCE };
 const pixel = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=';
+
+test('shadow consent controls reach agent observations and can be dismissed', async () => fixture(async (page) => {
+    await page.evaluate(() => {
+        const host = document.createElement('consent-widget');
+        document.body.append(host);
+        const root = host.attachShadow({ mode: 'open' });
+        root.innerHTML = '<div role="dialog" style="position:fixed;inset:0;background:white;z-index:99999"><h2>Privacy settings</h2><button data-testid="accept-consent">Accept all</button></div>';
+        root.querySelector('button').onclick = () => host.remove();
+    });
+    const scout = await capture(page);
+    const control = scout.action_candidates.find(item => item.selector.includes('accept-consent'));
+    assert.ok(control, 'The agent must see the real control behind the shadow host.');
+    assert.equal(control.selector_match_count, 1);
+    const outcome = await clearBlockingOverlays(page);
+    assert.equal(outcome.dismissed.length, 1);
+    assert.equal(await page.locator('consent-widget').count(), 0);
+}));
 
 test('visible product heading survives a generic title and a focused gallery observation', async () => fixture(async (page) => {
     await page.evaluate(() => {

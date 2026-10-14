@@ -2,10 +2,9 @@
 
 namespace App\Models;
 
+use App\Jobs\DeleteUnreferencedMedia;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
-use Illuminate\Support\Facades\Storage;
-use Throwable;
 
 class ProductDraftMedia extends Model
 {
@@ -15,7 +14,7 @@ class ProductDraftMedia extends Model
         'product_draft_id', 'disk', 'path', 'source_url', 'role', 'mime_type',
         'width', 'height', 'file_size', 'checksum', 'verification_status',
         'verification_score', 'verification_model', 'verification_notes',
-        'sort_order', 'is_primary',
+        'sort_order', 'is_primary', 'gallery_traversal_complete',
     ];
 
     protected function casts(): array
@@ -23,18 +22,15 @@ class ProductDraftMedia extends Model
         return [
             'verification_score' => 'float',
             'is_primary' => 'boolean',
+            'gallery_traversal_complete' => 'boolean',
         ];
     }
 
     protected static function booted(): void
     {
-        static::deleting(function (ProductDraftMedia $media): void {
-            try {
-                if ($media->disk && $media->path) {
-                    Storage::disk($media->disk)->delete($media->path);
-                }
-            } catch (Throwable $exception) {
-                report($exception);
+        static::deleted(function (ProductDraftMedia $media): void {
+            if ($media->disk && $media->path) {
+                DeleteUnreferencedMedia::dispatch($media->disk, $media->path);
             }
         });
     }

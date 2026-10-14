@@ -9,11 +9,13 @@ class DraftTelegramActionConfirmation
 {
     public function describe(string $callback): ?array
     {
-        if (! preg_match('/^draft:(restage|continue-search|findmore|source-retrain|retrain|new-search|enhance-photo|replace-photo|delete-photo):\d+(?::\d+)?$/', $callback, $match)) {
+        if (! preg_match('/^draft:(enrich|webphotos|restage|continue-search|findmore|source-retrain|retrain|new-search|enhance-photo|replace-photo|delete-photo):\d+(?::\d+)?$/', $callback, $match)) {
             return null;
         }
 
         [$title, $description] = match ($match[1]) {
+            'enrich' => ['Дополнить характеристики из интернета?', 'Будет выполнен отдельный поиск текста по этому товару. Ваши фото, цена и описание сохраняются. Новые характеристики сначала появятся как предложение для подтверждения.'],
+            'webphotos' => ['Подобрать интернет-галерею?', 'Бот найдёт карточку этого товара и проверенную галерею в интернете. Результат придёт отдельным черновиком; ваши загруженные материалы сохраняются. Это поиск карточки и фото, без смешивания галерей.'],
             'restage' => ['Заменить всю галерею?', 'Будет запущен поиск других фото с исключением прежних источников. Текущие фото сохраняются до успешной замены.'],
             'continue-search' => ['Продолжить поиск?', 'Поиск получит новый бюджет. Найденное ранее сохраняется.'],
             'findmore' => ['Найти дополнительные фото?', 'Текущие фото останутся, бот попробует дополнить галерею.'],

@@ -2,12 +2,12 @@
 
 namespace App\Filament\Pages;
 
+use App\Filament\Pages\LocalizedPage as Page;
 use App\Services\BotHealth;
 use BackedEnum;
 use Filament\Actions\Action;
 use Filament\Infolists\Components\TextEntry;
 use Filament\Notifications\Notification;
-use Filament\Pages\Page;
 use Filament\Schemas\Components\Grid;
 use Filament\Schemas\Components\Section;
 use Filament\Schemas\Schema;
@@ -58,16 +58,16 @@ class BotStatus extends Page
             Grid::make(['default' => 1, 'md' => 2, 'xl' => 3])
                 ->schema(fn (): array => array_map(static fn (array $check): Section => Section::make($check['label'])
                     ->schema([
-                        TextEntry::make($check['key'].'_state')->label('Состояние')->state($check['state'])
+                        TextEntry::make($check['key'].'_state')->label(__('Состояние'))->state($check['state'])
                             ->badge()->formatStateUsing(fn (string $state): string => match ($state) {
-                                'up' => 'Работает', 'down' => 'Не работает', default => 'Неизвестно',
+                                'up' => __('Работает'), 'down' => __('Не работает'), default => __('Неизвестно'),
                             })->color(fn (string $state): string => match ($state) {
                                 'up' => 'success', 'down' => 'danger', default => 'gray',
                             }),
                         TextEntry::make($check['key'].'_detail')->hiddenLabel()->state($check['detail']),
-                        TextEntry::make($check['key'].'_hint')->label('Что сделать')->state($check['hint'])->visible(filled($check['hint'])),
+                        TextEntry::make($check['key'].'_hint')->label(__('Что сделать'))->state($check['hint'])->visible(filled($check['hint'])),
                     ]), $this->checks)),
-            Section::make('Результат полной проверки')->visible(fn (): bool => filled($this->smokeOutput))
+            Section::make(__('Результат полной проверки'))->visible(fn (): bool => filled($this->smokeOutput))
                 ->schema([
                     TextEntry::make('smokeOutput')->hiddenLabel()->state(fn (): ?string => $this->smokeOutput)
                         ->fontFamily(FontFamily::Mono)->copyable()->extraAttributes(['class' => 'whitespace-pre-wrap']),
@@ -79,20 +79,20 @@ class BotStatus extends Page
     {
         return [
             Action::make('refresh')
-                ->label('Обновить')
+                ->label(__('Обновить'))
                 ->icon(Heroicon::OutlinedArrowPath)
                 ->color('gray')
                 ->action(fn () => $this->refreshChecks()),
             Action::make('smoke')
-                ->label('Полная проверка')
+                ->label(__('Полная проверка'))
                 ->icon(Heroicon::OutlinedBeaker)
                 ->requiresConfirmation()
-                ->modalHeading('Полная проверка')
+                ->modalHeading(__('Полная проверка'))
                 ->modalDescription(
-                    'Запустит настоящий браузер и один небольшой платный запрос к AI, чтобы проверить весь путь '
-                    .'сбора фотографий. Занимает около минуты.',
+                    __('Запустит настоящий браузер и один небольшой платный запрос к AI, чтобы проверить весь путь ')
+                    .__('сбора фотографий. Занимает около минуты.'),
                 )
-                ->modalSubmitActionLabel('Запустить')
+                ->modalSubmitActionLabel(__('Запустить'))
                 ->action(function (): void {
                     try {
                         // The same command the console offers, so the two can
@@ -104,13 +104,13 @@ class BotStatus extends Page
                         $this->refreshChecks();
 
                         Notification::make()
-                            ->title(str_contains($this->smokeOutput, 'FAIL') ? 'Проверка нашла проблемы' : 'Проверка пройдена')
+                            ->title(str_contains($this->smokeOutput, 'FAIL') ? __('Проверка нашла проблемы') : __('Проверка пройдена'))
                             ->status(str_contains($this->smokeOutput, 'FAIL') ? 'warning' : 'success')
                             ->send();
                     } catch (Throwable $exception) {
                         $this->smokeOutput = $exception->getMessage();
 
-                        Notification::make()->title('Проверку не удалось запустить')->danger()->send();
+                        Notification::make()->title(__('Проверку не удалось запустить'))->danger()->send();
                     }
                 }),
         ];

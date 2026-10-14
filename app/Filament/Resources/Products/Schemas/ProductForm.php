@@ -2,8 +2,20 @@
 
 namespace App\Filament\Resources\Products\Schemas;
 
+use App\Filament\Schemas\ProductAttributeFields;
 use App\Filament\Schemas\ProductPhotoUpload;
+use App\Filament\Schemas\ProductTranslations;
+use App\Filament\Schemas\RelatedCatalogForms;
+use App\Filament\Support\ProductOptions;
+use App\Filament\Support\ProductVariantFormState;
+use App\Models\Brand;
+use App\Models\Category;
+use App\Services\Products\ManualProductAttributes;
+use App\Services\Products\ProductCondition;
+use App\Services\Products\ProductSourceTypes;
+use Filament\Actions\Action;
 use Filament\Forms\Components\DateTimePicker;
+use Filament\Forms\Components\Hidden;
 use Filament\Forms\Components\Repeater;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\Textarea;
@@ -12,114 +24,152 @@ use Filament\Forms\Components\Toggle;
 use Filament\Schemas\Components\Grid;
 use Filament\Schemas\Components\Group;
 use Filament\Schemas\Components\Section;
+use Filament\Schemas\Components\Utilities\Get;
+use Filament\Schemas\Components\Utilities\Set;
 use Filament\Schemas\Schema;
 
 class ProductForm
 {
     public static function configure(Schema $schema): Schema
     {
-        // Without an explicit columns(1), EditRecord/CreateRecord default
-        // this top-level schema to columns(2) and our single Grid below
-        // only fills one of those tracks, halving the usable width.
-        return $schema
-            ->columns(1)
-            ->components([
-                Grid::make(['default' => 1, 'lg' => 3])
-                    ->schema([
-                        Group::make([
-                            Section::make('Товар')->schema([
-                                TextInput::make('title')->label('Название')->required()->columnSpanFull(),
-                                TextInput::make('model')->label('Модель'),
-                                Select::make('product_type')->label('Тип')->options([
-                                    'laptop' => 'Ноутбук', 'desktop' => 'Готовый ПК', 'component' => 'Комплектующая', 'other' => 'Другая техника',
-                                ])->required(),
-                                Textarea::make('description')->label('Описание')->rows(6)->columnSpanFull(),
-                            ])->columns(2),
-                        ])->columnSpan(['default' => 1, 'lg' => 2]),
+        return $schema->columns(1)->components([
+            Grid::make(['default' => 1, 'lg' => 3])->schema([
+                Group::make([
+                    Section::make(__('Товар'))->schema([
+                        TextInput::make('title')->label(__('Название'))->required()->maxLength(255)->columnSpanFull(),
+                        Select::make('category_id')->label(__('Категория'))->relationship('category', 'name')
+                            ->searchable()->preload()->required()->live()->createOptionForm(RelatedCatalogForms::category())
+                            ->createOptionUsing(fn (array $data): int => RelatedCatalogForms::createCategory($data))
+                            ->afterStateUpdated(function (Get $get, Set $set, $state): void {
+                                $category = Category::find($state);
+                                if ($category?->product_type_affinity) {
+                                    $set('product_type', $category->product_type_affinity);
+                                }
+                                $set('variants', app(ManualProductAttributes::class)->applyCategory($get('variants') ?? [], $state));
+                            }),
+                        Select::make('brand_id')->label(__('Бренд'))->relationship('brand', 'name')->searchable()->preload()
+                            ->createOptionForm([
+                                TextInput::make('name')->label(__('Название'))->required()->maxLength(255)->unique(table: Brand::class, column: 'name'),
+                                TextInput::make('country')->label(__('Страна'))->maxLength(255),
+                            ]),
+                        TextInput::make('model')->label(__('Модель'))->maxLength(255),
+                        Hidden::make('product_type')->default('other')
+                            ->dehydrateStateUsing(function (Get $get, ?string $state): string {
+                                $affinity = Category::query()->whereKey($get('category_id'))->value('product_type_affinity');
 
-                        Group::make([
-                            Section::make('Публикация')->schema([
-                                Select::make('status')->label('Статус')->options([
-                                    'published' => 'Опубликован', 'draft' => 'Черновик', 'archived' => 'Архив',
-                                ])->default('draft')->required(),
-                                Toggle::make('is_active')->label('Показывать в каталоге')->default(true),
-                                Toggle::make('is_featured')->label('Рекомендуемый'),
-                                DateTimePicker::make('published_at')->label('Дата публикации'),
-                                TextInput::make('sort_order')->label('Порядок')->integer()->minValue(0)->default(0),
-                            ]),
-                            Section::make('Категория и бренд')->schema([
-                                Select::make('category_id')->label('Категория')->relationship('category', 'name')->searchable()->preload()->required(),
-                                Select::make('brand_id')->label('Бренд')->relationship('brand', 'name')->searchable()->preload()
-                                    ->createOptionForm([
-                                        TextInput::make('name')->label('Название')->required(),
-                                        TextInput::make('slug')->label('Slug')->required(),
-                                        TextInput::make('country')->label('Страна'),
-                                    ]),
-                            ]),
-                            Section::make('Идентификаторы')
-                                ->schema([
-                                    TextInput::make('slug')->label('Slug')->helperText('Можно оставить пустым — создастся автоматически.')->unique(ignoreRecord: true),
-                                    TextInput::make('canonical_key')->label('Ключ дедупликации')->helperText('Можно оставить пустым.')->unique(ignoreRecord: true),
-                                ])
-                                ->collapsed(),
-                        ])->columnSpan(1),
+                                return array_key_exists($affinity ?? '', ProductOptions::types())
+                                    ? $affinity
+                                    : (array_key_exists($state ?? '', ProductOptions::types()) ? $state : 'other');
+                            }),
+                    ])->columns(2),
+
+                    Section::make(__('Характеристики и конфигурации'))
+                        ->description(__('Выберите готовые значения или впишите свои. Новые значения появятся в подсказках после сохранения товара. Пустые стартовые строки можно не заполнять.'))
+                        ->schema([self::variants()]),
+
+                    Section::make(__('Фотографии'))
+                        ->description(__('Перетащите фотографии сюда. Они сохранятся вместе с товаром.'))
+                        ->schema([ProductPhotoUpload::multiple()->dehydrated(false)]),
+
+                    Section::make(__('Описание'))
+                        ->schema([Textarea::make('description')->label(__('Описание'))->hiddenLabel()->rows(5)->columnSpanFull()]),
+                    Section::make(__('Переводы'))->schema([ProductTranslations::make()])->collapsed(),
+                ])->columnSpan(['default' => 1, 'lg' => 2]),
+
+                Group::make([
+                    Section::make(__('Публикация'))->schema([
+                        Select::make('status')->label(__('Статус'))->options(ProductOptions::statuses())->default('draft')->required(),
+                        Toggle::make('is_active')->label(__('Показывать в каталоге'))->default(true),
+                        Toggle::make('is_featured')->label(__('Рекомендуемый')),
                     ]),
+                    Section::make(__('Дополнительно'))->schema([
+                        DateTimePicker::make('published_at')->label(__('Дата публикации')),
+                        TextInput::make('sort_order')->label(__('Порядок'))->integer()->minValue(0)->default(0),
+                    ])->collapsed(),
+                ])->columnSpan(1),
+            ]),
+            Section::make(__('Источники'))->schema([
+                Repeater::make('sources')->relationship()->label(__('Источники данных'))->schema([
+                    TextInput::make('title')->label(__('Название'))->required()->maxLength(500),
+                    TextInput::make('url')->label('URL')->url()->required()->columnSpan(2),
+                    Select::make('source_type')->label(__('Тип'))->options(ProductSourceTypes::options())->default('web'),
+                ])->mutateRelationshipDataBeforeCreateUsing(fn (array $data): array => self::sourceData($data))
+                    ->mutateRelationshipDataBeforeSaveUsing(fn (array $data): array => self::sourceData($data))
+                    ->columns(['default' => 1, 'md' => 4])->defaultItems(0)
+                    ->addActionLabel(__('Добавить источник'))->columnSpanFull(),
+            ])->columnSpanFull()->collapsed(),
+        ]);
+    }
 
-                Section::make('Конфигурации / SKU')
-                    ->description('Цена, наличие, цвет и технические характеристики конкретной конфигурации.')
-                    ->schema([
-                        Repeater::make('variants')->relationship()->label('Варианты')->schema([
-                            TextInput::make('name')->label('Название конфигурации')->columnSpan(2),
-                            TextInput::make('sku')->label('SKU')->unique(ignoreRecord: true),
-                            TextInput::make('mpn')->label('MPN'),
-                            TextInput::make('gtin')->label('GTIN')->unique(ignoreRecord: true),
-                            TextInput::make('color')->label('Цвет'),
-                            Select::make('condition')->label('Состояние')->options([
-                                'new' => 'Новый', 'used' => 'Б/у', 'refurbished' => 'Восстановленный',
-                            ])->default('new')->required(),
-                            Select::make('stock_status')->label('Наличие')->options([
-                                'unknown' => 'Уточнить', 'in_stock' => 'В наличии', 'out_of_stock' => 'Нет', 'preorder' => 'Предзаказ',
-                            ])->default('unknown')->required(),
-                            TextInput::make('price')->label('Цена')->numeric()->minValue(0),
-                            TextInput::make('compare_at_price')->label('Старая цена')->numeric()->minValue(0),
-                            TextInput::make('currency')->label('Валюта')->default('CZK')->length(3),
-                            TextInput::make('quantity')->label('Количество')->integer()->minValue(0),
-                            TextInput::make('warranty_months')->label('Гарантия, месяцев')->integer()->minValue(0),
-                            Toggle::make('is_default')->label('Основной вариант'),
-                            Toggle::make('is_active')->label('Активен')->default(true),
-                            Repeater::make('attributes')->relationship()->label('Характеристики')->schema([
-                                Select::make('attribute_definition_id')->label('Характеристика')
-                                    ->relationship('definition', 'label')->searchable()->preload()->required()->columnSpan(2),
-                                TextInput::make('value')->label('Значение')->required(),
-                                TextInput::make('numeric_value')->label('Число')->numeric(),
-                                TextInput::make('unit')->label('Единица'),
-                            ])->columns(['md' => 2, 'xl' => 5])->defaultItems(0)->addActionLabel('Добавить характеристику')->columnSpanFull(),
-                        ])->columns(['md' => 2, 'xl' => 4])->defaultItems(1)
-                            ->itemLabel(fn (array $state): string => ($state['name'] ?? '') ?: (($state['sku'] ?? '') ?: 'Новая конфигурация'))
-                            ->addActionLabel('Добавить конфигурацию')->collapsible()->columnSpanFull(),
-                    ])
-                    ->columnSpanFull(),
+    private static function variants(): Repeater
+    {
+        return Repeater::make('variants')->relationship()->label(__('Конфигурации'))
+            ->schema([
+                ProductAttributeFields::make(),
+                Section::make(__('Цена и наличие'))->schema([
+                    Select::make('condition')->label(__('Состояние'))->options(ProductCondition::options())
+                        ->default('new')->required()->live()->columnSpanFull(),
+                    TextInput::make('price')->label(__('Цена'))->numeric()->minValue(0),
+                    TextInput::make('currency')->label(__('Валюта'))->default('CZK')->length(3),
+                    Select::make('stock_status')->label(__('Наличие'))->options(ProductOptions::stockStatuses())->default('unknown')->required(),
+                    TextInput::make('quantity')->label(__('Количество'))->integer()->minValue(0)->default(0)->required(),
+                    Toggle::make('is_default')->label(__('Основной вариант'))->fixIndistinctState()
+                        ->default(fn (Get $get): bool => count($get('../../variants') ?? []) <= 1),
+                ])->columns(['default' => 1, 'md' => 2])->columnSpanFull(),
+                Section::make(__('Дополнительные данные конфигурации'))->schema([
+                    TextInput::make('name')->label(__('Название конфигурации'))->maxLength(255)
+                        ->placeholder(__('Например: 16 GB / 512 GB'))->columnSpanFull(),
+                    TextInput::make('sku')->label('SKU')->maxLength(255)
+                        ->rules(fn (Get $get): array => [self::uniqueOfferIdentifier($get, 'sku')])
+                        ->unique(ignoreRecord: true, modifyRuleUsing: fn ($rule, Get $get) => $rule->where('condition', $get('condition') ?? 'new')),
+                    TextInput::make('mpn')->label('MPN')->maxLength(255),
+                    TextInput::make('gtin')->label('GTIN')->maxLength(255)
+                        ->rules(fn (Get $get): array => [self::uniqueOfferIdentifier($get, 'gtin')])
+                        ->unique(ignoreRecord: true, modifyRuleUsing: fn ($rule, Get $get) => $rule->where('condition', $get('condition') ?? 'new')),
+                    TextInput::make('color')->label(__('Цвет'))->maxLength(255),
+                    TextInput::make('compare_at_price')->label(__('Старая цена'))->numeric()->minValue(0),
+                    TextInput::make('warranty_months')->label(__('Гарантия, месяцев'))->integer()->minValue(0),
 
-                Section::make('Источники')
-                    ->schema([
-                        Repeater::make('sources')->relationship()->label('Источники данных')->schema([
-                            TextInput::make('title')->label('Название')->required(),
-                            TextInput::make('url')->label('URL')->url()->required()->columnSpan(2),
-                            TextInput::make('domain')->label('Домен'),
-                            Select::make('source_type')->label('Тип')->options([
-                                'manufacturer' => 'Производитель', 'retailer' => 'Магазин', 'review' => 'Обзор', 'web' => 'Сайт',
-                            ])->default('web'),
-                            TextInput::make('confidence')->label('Уверенность')->numeric()->minValue(0)->maxValue(1),
-                        ])->columns(['md' => 2, 'xl' => 5])->defaultItems(0)->addActionLabel('Добавить источник')->columnSpanFull(),
-                    ])
-                    ->columnSpanFull()
-                    ->collapsed(),
-                Section::make('Добавить фотографии')
-                    ->description(fn (string $operation): string => $operation === 'create'
-                        ? 'Фотографии сохранятся вместе с товаром. После создания можно изменить главную фотографию и порядок галереи.'
-                        : 'Файлы сохраняются при сохранении товара. Существующая галерея редактируется в таблице «Фотографии» ниже.')
-                    ->schema([ProductPhotoUpload::multiple()->dehydrated(false)])
-                    ->columnSpanFull(),
-            ]);
+                    Toggle::make('is_active')->label(__('Активен'))->default(true),
+                ])->columns(['default' => 1, 'md' => 3])->collapsed()->columnSpanFull(),
+                Section::make(__('Переводы конфигурации'))->schema([ProductTranslations::make()])->collapsed(),
+            ])->defaultItems(1)->columns(1)
+            ->minItems(fn (string $operation): int => $operation === 'create' ? 1 : 0)
+            ->deletable(fn (Repeater $component): bool => count($component->getRawState() ?? []) > 1)
+            ->afterStateHydrated(fn (Repeater $component) => $component->rawState(ProductVariantFormState::ensureDefault($component->getRawState() ?? [])))
+            ->afterStateUpdated(fn (Repeater $component) => $component->rawState(ProductVariantFormState::ensureDefault($component->getRawState() ?? [])))
+            ->cloneable()
+            ->cloneAction(fn (Action $action): Action => $action->label(__('catalog-form.copy_variant'))
+                ->tooltip(__('catalog-form.copy_variant_help'))
+                ->action(function (array $arguments, Repeater $component): void {
+                    $items = $component->getRawState();
+                    $items[$component->generateUuid()] = ProductVariantFormState::copy($items[$arguments['item']]);
+                    $component->rawState($items);
+                    $component->collapsed(false, shouldMakeComponentCollapsible: false);
+                    $component->callAfterStateUpdated();
+                }))
+            ->itemLabel(fn (array $state): string => ($state['name'] ?? '') ?: (($state['sku'] ?? '') ?: __('Конфигурация товара')))
+            ->addActionLabel(__('Добавить конфигурацию'))->collapsible()->columnSpanFull();
+    }
+
+    private static function sourceData(array $data): array
+    {
+        $data['domain'] = parse_url($data['url'], PHP_URL_HOST);
+
+        return $data;
+    }
+
+    private static function uniqueOfferIdentifier(Get $get, string $field): \Closure
+    {
+        return function (string $attribute, mixed $value, \Closure $fail) use ($get, $field): void {
+            if (blank($value)) {
+                return;
+            }
+            $condition = $get('condition') ?? 'new';
+            $matches = collect($get('../../variants') ?? [])->filter(fn ($row) => ($row[$field] ?? null) === $value && ($row['condition'] ?? 'new') === $condition);
+            if ($matches->count() > 1) {
+                $fail(__('validation.unique', ['attribute' => strtoupper($field)]));
+            }
+        };
     }
 }

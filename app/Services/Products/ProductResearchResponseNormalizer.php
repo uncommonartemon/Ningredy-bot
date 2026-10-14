@@ -135,6 +135,12 @@ class ProductResearchResponseNormalizer
                     'key' => $key !== '' ? $key : "spec_{$index}",
                     'name' => $name,
                     'value' => $value,
+                    ...(array_key_exists('group', $specification)
+                        ? ['group' => AiAttributeGroups::normalize($specification['group'])]
+                        : []),
+                    ...((is_string($specification['source_url'] ?? null) && $this->isHttpUrl($specification['source_url']))
+                        ? ['source_url' => $specification['source_url'], 'source_excerpt' => mb_substr((string) ($specification['source_excerpt'] ?? ''), 0, 800)]
+                        : []),
                 ];
             })
             ->filter()

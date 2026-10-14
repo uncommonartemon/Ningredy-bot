@@ -44,4 +44,28 @@ class ProductSourceAttemptRecorder
             return null;
         }
     }
+
+    /**
+     * Nested resolver/trainer services only know the Telegram update that
+     * started the current search cycle. During continuation that update is
+     * the callback, while the draft still points at its original message, so
+     * recorder inference cannot bind the attempts on its own. Attach every
+     * attempt created by this exact nested call before continuation logic
+     * decides whether the source is terminal or retryable.
+     */
+    public function associateWithDraftSince(
+        ProductDraft $draft,
+        ?int $telegramUpdateId,
+        int $afterId,
+    ): void {
+        if (! $telegramUpdateId) {
+            return;
+        }
+
+        ProductSourceAttempt::query()
+            ->where('id', '>', $afterId)
+            ->where('telegram_update_id', $telegramUpdateId)
+            ->whereNull('product_draft_id')
+            ->update(['product_draft_id' => $draft->id]);
+    }
 }

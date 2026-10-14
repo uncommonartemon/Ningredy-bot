@@ -2,14 +2,21 @@
 
 namespace Tests;
 
+use App\Ai\Agents\GalleryFrameReviewAgent;
 use App\Ai\Agents\GalleryTextLanguageAgent;
+use App\Ai\Agents\ProductSourceIdentityAgent;
 use Illuminate\Foundation\Testing\TestCase as BaseTestCase;
+use Illuminate\Support\Facades\Http;
+use Tests\Support\IsolatedEnvironment;
 
 abstract class TestCase extends BaseTestCase
 {
     public function createApplication()
     {
+        // Protect direct diagnostic TestCase use outside the PHPUnit CLI too.
+        IsolatedEnvironment::prepare();
         $app = parent::createApplication();
+        IsolatedEnvironment::assertDatabase($app);
 
         // RefreshDatabase isolates rows, not files. Install isolation before
         // test traits run: catalog cleanup must never see the real media disk.
@@ -36,9 +43,24 @@ abstract class TestCase extends BaseTestCase
     {
         parent::setUp();
 
+        // A missed fake must fail locally, never become a paid provider call
+        // or a real Telegram message. Network canaries opt in to their own URL.
+        Http::preventStrayRequests();
+
+        // Identity checks run in both source queues. A regression test must
+        // never become a paid provider call; tests of the judge override this.
+        ProductSourceIdentityAgent::fake(fn (): array => [
+            'match' => 'uncertain', 'confidence' => 0.5, 'reason' => 'No identity verdict configured by this test.',
+        ])->preventStrayPrompts();
+
         GalleryTextLanguageAgent::fake(fn (): array => [
             'foreign_text_frames' => [],
             'reason' => 'Иностранного текста не найдено.',
         ]);
+
+        GalleryFrameReviewAgent::fake(fn (): array => [
+            'foreign_text_frames' => [], 'non_product_frames' => [], 'uncertain_content_frames' => [],
+            'reason' => 'Product frames, no foreign text (test fixture).',
+        ])->preventStrayPrompts();
     }
 }

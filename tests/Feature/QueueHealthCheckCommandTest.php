@@ -2,7 +2,9 @@
 
 namespace Tests\Feature;
 
+use App\Jobs\ProcessTelegramMessage;
 use App\Models\TelegramChatState;
+use App\Models\TelegramUpdate;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request as HttpRequest;
 use Illuminate\Support\Facades\Cache;
@@ -72,11 +74,29 @@ class QueueHealthCheckCommandTest extends TestCase
         $this->assertFalse(Cache::has('queue-health:alerted'));
     }
 
+    public function test_a_stopped_worker_does_not_receive_repeated_alerts_after_fifteen_minutes(): void
+    {
+        config(['services.telegram.bot_token' => 'test-token']);
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []])]);
+        $this->queueJob(now()->subMinutes(5)->timestamp);
+        TelegramChatState::query()->create(['chat_id' => '98765', 'telegram_user_id' => '12345']);
+
+        $this->artisan('queue:health-check')->assertSuccessful();
+        $this->travel(95)->minutes();
+        $this->artisan('queue:health-check')->assertSuccessful();
+        Http::assertSentCount(1);
+    }
+
     private function queueJob(int $createdAt): void
     {
+        $update = TelegramUpdate::create([
+            'update_id' => 91000 + TelegramUpdate::count(), 'chat_id' => '98765',
+            'telegram_user_id' => '12345', 'payload' => [], 'status' => 'pending',
+        ]);
         DB::table('jobs')->insert([
             'queue' => 'assistant',
-            'payload' => json_encode(['displayName' => 'App\\Jobs\\ProcessTelegramMessage']),
+            'payload' => json_encode(['displayName' => ProcessTelegramMessage::class,
+                'data' => ['command' => serialize(new ProcessTelegramMessage($update->id))]]),
             'attempts' => 0,
             'reserved_at' => null,
             'available_at' => $createdAt,

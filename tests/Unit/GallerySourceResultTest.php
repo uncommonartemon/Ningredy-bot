@@ -100,7 +100,7 @@ class GallerySourceResultTest extends TestCase
         );
 
         $this->assertSame(GalleryOutcome::Interrupted, $result->outcome);
-        $this->assertSame('language_check_unavailable', $result->reason);
+        $this->assertSame('gallery_check_unavailable', $result->reason);
         $this->assertTrue(collect($result->candidates)->every(
             fn (array $frame): bool => $frame['verification_status'] === 'pending',
         ));
@@ -114,6 +114,17 @@ class GallerySourceResultTest extends TestCase
 
         $this->assertSame(GalleryOutcome::Partial, $result->outcome);
         $this->assertSame('verified_partial_traversal', $result->reason);
+    }
+
+    public function test_interrupted_verification_keeps_replacement_frames_beyond_the_album_limit(): void
+    {
+        $frames = $this->frames(13);
+        $pending = GallerySourceResult::fromVerifiedGallery(null, $frames, 3, 10, null, 'playwright', '');
+        $this->assertCount(13, $pending->candidates);
+        $checked = array_slice($pending->candidates, 3);
+        $final = GallerySourceResult::fromVerifiedGallery($checked, $frames, 3, 10, null, 'playwright', '');
+        $this->assertCount(10, $final->candidates);
+        $this->assertTrue($final->isComplete());
     }
 
     /** @return array<int, array<string, mixed>> */

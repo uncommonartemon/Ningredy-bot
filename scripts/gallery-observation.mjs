@@ -25,6 +25,16 @@ export const observedGalleryRenditions = (domUrls, observedUrls) => {
     return [...new Set([...domUrls, ...observedUrls.filter((url) => keys.has(imageAssetKey(url)))])];
 };
 
+// A failed file is not a failed selector. Only unresolved frames from the
+// selected gallery interrupt verification. A usable alternative resolves the
+// failure, but a tiny thumbnail cannot prove that a failed original is unusable.
+export const unresolvedGalleryImageProbes = (probes, galleryKeys) => {
+    const measured = new Set(probes.filter((probe) => probe.ok === true && probe.width > 0 && probe.height > 0)
+        .map((probe) => imageAssetKey(probe.url)));
+    return probes.filter((probe) => ['image_load_failed', 'probe_timeout', 'probe_failed'].includes(probe.reason)
+        && galleryKeys.has(imageAssetKey(probe.url)) && !measured.has(imageAssetKey(probe.url)));
+};
+
 // Diagnostic history only: these bounds never limit actions or collected photos.
 export const rememberGalleryLayer = (history, scout, action) => {
     const fields = { action_candidates: 20, image_candidates: 20, fragments: 4, visible_overlays: 8 };

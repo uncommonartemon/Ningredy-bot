@@ -2,18 +2,20 @@
 
 namespace App\Services\Products;
 
-use App\Ai\Agents\GalleryTextLanguageAgent;
-use App\Ai\Agents\ProductImageVisionAgent;
-use App\Models\AiRun;
+use App\Exceptions\ProductSearchCancelled;
 use App\Models\Category;
 use App\Models\ProductDraft;
 use App\Services\Ai\AiSettings;
-use App\Services\Ai\OpenAiHeavyOperationGate;
+use App\Services\Ai\ProductSearchCancellation;
 use App\Services\Ai\ProductSearchTimeBudget;
+use App\Services\Photos\ProductPhotoPolicy;
+use App\Services\Vision\VisionCallContext;
+use App\Services\Vision\VisionImagePreparer;
+use App\Services\Vision\VisionResponse;
+use App\Services\Vision\VisionService;
 use GdImage;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Validator;
-use Laravel\Ai\Files\Image;
 use Throwable;
 
 class ProductImageVisionVerifier
@@ -215,10 +217,11 @@ class ProductImageVisionVerifier
             ->where('slug', trim((string) $draft->category))
             ->value('product_search_hint'));
         $prompt = $this->prompt($draft, $candidates, $categoryHint, $galleryFramePolicy);
-        $attachments = array_map(fn (array $candidate, int $index) => Image::fromBase64(
-            base64_encode($this->thumbnail($candidate['image'])),
-            'image/webp',
-        )->as('candidate-'.($index + 1).'.webp')->withProviderOptions(['detail' => (string) config('product-images.vision_detail', 'low')]), $candidates, array_keys($candidates));
+        $attachments = array_map(fn (array $candidate, int $index) => app(VisionImagePreparer::class)->thumbnail(
+            $candidate['image'],
+            'candidate-'.($index + 1).'.webp',
+            (string) config('product-images.vision_detail', 'low'),
+        ), $candidates, array_keys($candidates));
 
         // The mini model occasionally returns a structurally invalid batch -
         // a missing required field (e.g. "reason") or the wrong number of
@@ -235,6 +238,15 @@ class ProductImageVisionVerifier
         $lastException = null;
 
         for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
+            if ($attempt > 1) {
+                if (! $timeBudget->canStart($telegramUpdateId ?? $draft->telegram_update_id, 15)) {
+                    break;
+                }
+                $visionTimeout = $timeBudget->timeoutFor(
+                    $telegramUpdateId ?? $draft->telegram_update_id,
+                    $settings->imageVisionTimeoutSeconds(),
+                );
+            }
             try {
                 $data = $this->reviewGalleryBatch(
                     $provider,
@@ -244,19 +256,35 @@ class ProductImageVisionVerifier
                     $visionTimeout,
                     $telegramUpdateId ?? $draft->telegram_update_id,
                     count($candidates),
+                    $minimumScore,
                 );
+                if (($data['validation_issues'] ?? []) !== []) {
+                    throw new \UnexpectedValueException(implode(' ', $data['validation_issues']));
+                }
                 $lastException = null;
 
                 break;
+            } catch (ProductSearchCancelled $exception) {
+                throw $exception;
             } catch (Throwable $exception) {
                 $lastException = $exception;
+                // Return the actual contract failure on the bounded repair,
+                // instead of paying to repeat the same blind request.
+                $prompt .= PHP_EOL.json_encode(['validation_feedback' => mb_substr($exception->getMessage(), 0, 1500)], JSON_UNESCAPED_UNICODE);
             }
         }
 
         if ($lastException !== null) {
             report($lastException);
-
-            throw $lastException;
+            // An unresolved frame must not erase other valid reviews in
+            // the same paid batch. Preserve only non-contradictory frames;
+            // if none remain, this is interruption, not a negative verdict.
+            $consistent = array_values(array_filter($data['images'] ?? [],
+                fn (array $review): bool => ! isset($data['validation_issues'][$review['index']])));
+            if ($consistent === []) {
+                throw $lastException;
+            }
+            $data['images'] = $consistent;
         }
 
         $reviewed = collect($data['images'])
@@ -275,6 +303,9 @@ class ProductImageVisionVerifier
         $allowedKinds = $galleryFramePolicy
             ? ['product', 'packaging', 'detail', 'banner']
             : ['product', 'packaging', 'detail'];
+        if (ProductPhotoPolicy::allowsComponentLogos($draft)) {
+            $allowedKinds[] = 'logo';
+        }
         $forbidsPackaging = self::categoryHintForbidsPackaging($categoryHint);
         $qualifies = fn (array $review): bool => $review['publishable']
             && (! filled($draft->color) || $review['color_match'])
@@ -325,95 +356,78 @@ class ProductImageVisionVerifier
         int $visionTimeout,
         ?int $telegramUpdateId,
         int $candidateCount,
+        int $minimumScore,
     ): array {
-        $run = AiRun::query()->create([
-            'telegram_update_id' => $telegramUpdateId,
-            'provider' => $provider,
-            'model' => $model,
-            'status' => 'running',
-            'prompt' => $prompt,
-            'started_at' => now(),
-        ]);
+        return app(VisionService::class)->reviewGallery(
+            $prompt,
+            $attachments,
+            new VisionCallContext($telegramUpdateId, $visionTimeout, provider: $provider, model: $model),
+            function (array $normalizedResponse) use ($candidateCount, $minimumScore): VisionResponse {
+                $normalizedResponse['images'] = collect($normalizedResponse['images'] ?? [])
+                    ->filter(fn (mixed $image): bool => is_array($image))
+                    ->map(function (array $image): array {
+                        if (is_string($image['reason'] ?? null)) {
+                            $image['reason'] = mb_substr($image['reason'], 0, 1000);
+                        }
 
-        try {
-            $response = app(OpenAiHeavyOperationGate::class)->run(
-                $provider,
-                $visionTimeout,
-                fn () => ProductImageVisionAgent::make()->prompt(
-                    $prompt,
-                    attachments: $attachments,
-                    provider: $provider,
-                    model: $model,
-                    timeout: $visionTimeout,
-                ),
-            );
-            $normalizedResponse = $response->toArray();
-            $normalizedResponse['images'] = collect($normalizedResponse['images'] ?? [])
-                ->filter(fn (mixed $image): bool => is_array($image))
-                ->map(function (array $image): array {
-                    if (is_string($image['reason'] ?? null)) {
-                        $image['reason'] = mb_substr($image['reason'], 0, 1000);
+                        // The model occasionally free-associates a plausible but
+                        // out-of-enum value for one of these two fixed-vocabulary
+                        // fields (e.g. "lifestyle" instead of a listed kind).
+                        // Failing validation over it would discard the entire
+                        // already-paid review - and every already-downloaded
+                        // photo - for a single cosmetic classification miss, so
+                        // fall back to the deliberately noncommittal enum member;
+                        // "uncertain" is excluded from every allowed-kind list
+                        // downstream, so this only drops that one image instead
+                        // of the whole batch.
+                        if (! in_array($image['kind'] ?? null, ['product', 'packaging', 'detail', 'logo', 'banner', 'screenshot', 'unrelated', 'uncertain'], true)) {
+                            $image['kind'] = 'uncertain';
+                        }
+
+                        if (! in_array($image['view'] ?? null, ['front', 'angle', 'side', 'back', 'detail', 'packaging', 'other'], true)) {
+                            $image['view'] = 'other';
+                        }
+
+                        return $image;
+                    })
+                    ->filter(fn (array $image): bool => is_int($image['index'] ?? null)
+                        && $image['index'] >= 1
+                        && $image['index'] <= $candidateCount)
+                    ->unique('index')
+                    ->sortBy('index')
+                    ->take($candidateCount)
+                    ->values()
+                    ->all();
+                $data = Validator::make($normalizedResponse, [
+                    'images' => ['required', 'array', 'size:'.$candidateCount],
+                    'images.*.index' => ['required', 'integer', 'between:1,'.$candidateCount, 'distinct'],
+                    'images.*.exact_match' => ['required', 'boolean'],
+                    'images.*.color_match' => ['required', 'boolean'],
+                    'images.*.publishable' => ['required', 'boolean'],
+                    'images.*.kind' => ['required', 'in:product,packaging,detail,logo,banner,screenshot,unrelated,uncertain'],
+                    'images.*.view' => ['required', 'in:front,angle,side,back,detail,packaging,other'],
+                    // Equal ranks are a tie, not a failed visual examination.
+                    // Frame index remains unique; tie-breaking is deterministic.
+                    'images.*.gallery_rank' => ['required', 'integer', 'between:1,'.$candidateCount],
+                    'images.*.score' => ['required', 'integer', 'between:0,100'],
+                    'images.*.reason' => ['required', 'string', 'max:1000'],
+                ])->validate();
+
+                $issues = [];
+                foreach ($data['images'] as $review) {
+                    if ($review['publishable'] && $review['exact_match'] && $review['color_match']
+                        && ($review['kind'] === 'uncertain' || $review['score'] < $minimumScore)) {
+                        $issues[$review['index']] = 'Conflicting Vision verdict for image '.$review['index']
+                            .': publishable/exact_match/color_match=true but kind='.$review['kind'].' and score='
+                            .$review['score'].'. Score uses 0..100; configured minimum is '.$minimumScore
+                            .'. Reassess this inconsistency; do not automatically increase the score or approve the image.';
                     }
+                }
+                $data['validation_issues'] = $issues;
 
-                    // The model occasionally free-associates a plausible but
-                    // out-of-enum value for one of these two fixed-vocabulary
-                    // fields (e.g. "lifestyle" instead of a listed kind).
-                    // Failing validation over it would discard the entire
-                    // already-paid review - and every already-downloaded
-                    // photo - for a single cosmetic classification miss, so
-                    // fall back to the deliberately noncommittal enum member;
-                    // "uncertain" is excluded from every allowed-kind list
-                    // downstream, so this only drops that one image instead
-                    // of the whole batch.
-                    if (! in_array($image['kind'] ?? null, ['product', 'packaging', 'detail', 'logo', 'banner', 'screenshot', 'unrelated', 'uncertain'], true)) {
-                        $image['kind'] = 'uncertain';
-                    }
-
-                    if (! in_array($image['view'] ?? null, ['front', 'angle', 'side', 'back', 'detail', 'packaging', 'other'], true)) {
-                        $image['view'] = 'other';
-                    }
-
-                    return $image;
-                })
-                ->filter(fn (array $image): bool => is_int($image['index'] ?? null)
-                    && $image['index'] >= 1
-                    && $image['index'] <= $candidateCount)
-                ->unique('index')
-                ->sortBy('index')
-                ->take($candidateCount)
-                ->values()
-                ->all();
-            $data = Validator::make($normalizedResponse, [
-                'images' => ['required', 'array', 'size:'.$candidateCount],
-                'images.*.index' => ['required', 'integer', 'between:1,'.$candidateCount, 'distinct'],
-                'images.*.exact_match' => ['required', 'boolean'],
-                'images.*.color_match' => ['required', 'boolean'],
-                'images.*.publishable' => ['required', 'boolean'],
-                'images.*.kind' => ['required', 'in:product,packaging,detail,logo,banner,screenshot,unrelated,uncertain'],
-                'images.*.view' => ['required', 'in:front,angle,side,back,detail,packaging,other'],
-                'images.*.gallery_rank' => ['required', 'integer', 'between:1,'.$candidateCount, 'distinct'],
-                'images.*.score' => ['required', 'integer', 'between:0,100'],
-                'images.*.reason' => ['required', 'string', 'max:1000'],
-            ])->validate();
-
-            $run->update([
-                'invocation_id' => $response->invocationId,
-                'status' => 'completed',
-                'response' => $data,
-                'usage' => $response->usage->toArray(),
-                'completed_at' => now(),
-            ]);
-
-            return $data;
-        } catch (Throwable $exception) {
-            $run->update([
-                'status' => 'failed',
-                'error' => mb_substr($exception->getMessage(), 0, 5000),
-                'completed_at' => now(),
-            ]);
-
-            throw $exception;
-        }
+                return new VisionResponse($data, $issues === [] ? null : implode(' ', $issues));
+            },
+        );
     }
 
     private function rankReviews($reviews)
@@ -424,6 +438,7 @@ class ProductImageVisionVerifier
                 fn ($query) => $query->sortBy(fn (array $review): array => [
                     $review['gallery_rank'],
                     -$review['score'],
+                    $review['index'],
                 ]),
                 fn ($query) => $query->sortByDesc(fn (array $review): array => [
                     $review['hero'] ? 1 : 0,
@@ -494,11 +509,17 @@ class ProductImageVisionVerifier
             is not identity or color evidence by itself, only a pass on resolution and camera angle.
             POLICY;
 
+        $componentLogoPolicy = ProductPhotoPolicy::allowsComponentLogos($draft)
+            ? 'COMPONENT EXCEPTION: relevant brand or product-family logos are allowed, including as the cover. Classify as kind=logo; judge correspondence using the requested product and source evidence. This overrides the generic logo rejection below, never permits missing-image placeholders or conflicting brands/families, and never proves an exact SKU from pixels alone.'
+            : 'NO LOGO EXCEPTION: standalone brand/family logos are not acceptable for this product type.';
+
         return <<<PROMPT
             Review {$count} attached candidate images for a public product catalog.
             Exact requested product: {$draft->title}
             Brand: {$draft->brand}
             Model: {$draft->model}
+            Product type: {$draft->product_type}; category: {$draft->category}
+            {$componentLogoPolicy}
             Required color/version: {$draft->color}
             Trusted category instruction: {$categoryHint}
 
@@ -537,16 +558,13 @@ class ProductImageVisionVerifier
     }
 
     /**
-     * The one pixel rule a wholesale-accepted gallery still owes.
-     *
-     * A complete, structurally confirmed slider from an exact product page is
-     * taken as a set, so no frame of it is reviewed individually - which is the
-     * point, and also why the language rule stopped applying to exactly the
-     * galleries most likely to be published. This asks that single question
-     * about the whole set in one call, and drops what fails.
+     * Current content and language, checked together in provider-sized batches.
+     * Recipe provenance never replaces this call. Obvious non-product frames
+     * are removed, subject to the explicit component-logo exception; useful
+     * angles/details remain. The first survivor becomes the catalog cover.
      *
      * Null means the question could not be answered - a timeout, a malformed
-     * reply, an exception. PROJECT_STRATEGY forbids a technical failure from
+     * reply, an exception, or unresolved content. PROJECT_STRATEGY forbids failure from
      * being dressed as a semantic verdict, and returning the frames unchanged
      * would do exactly that: the gallery would be published as though Vision
      * had cleared it. The caller keeps the frames but must not treat them as
@@ -555,7 +573,7 @@ class ProductImageVisionVerifier
      * @param  array<int, array<string, mixed>>  $candidates
      * @return array<int, array<string, mixed>>|null
      */
-    public function withoutForeignTextFrames(
+    public function checkedGalleryFrames(
         array $candidates,
         ProductDraft $draft,
         ?int $telegramUpdateId = null,
@@ -567,91 +585,60 @@ class ProductImageVisionVerifier
         $settings = app(AiSettings::class);
         $provider = $settings->providerFor('product_image_vision');
         $model = $settings->modelFor('product_image_vision');
-        $timeout = app(ProductSearchTimeBudget::class)->timeoutFor(
-            $telegramUpdateId ?? $draft->telegram_update_id,
-            $settings->imageVisionTimeoutSeconds(),
-        );
-        $frames = array_slice(array_values($candidates), 0, 40);
-        $prompt = json_encode([
-            'product' => trim((string) $draft->title),
-            'frames' => count($frames),
-        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-        $run = AiRun::query()->create([
-            'telegram_update_id' => $telegramUpdateId ?? $draft->telegram_update_id,
-            'provider' => $provider,
-            'model' => $model,
-            'status' => 'running',
-            'prompt' => $prompt,
-            'started_at' => now(),
-        ]);
+        $cancellation = app(ProductSearchCancellation::class);
+        $runId = $telegramUpdateId ?? $draft->telegram_update_id;
+        $batches = array_chunk(array_values($candidates), 40);
+        $accepted = [];
 
-        try {
-            $attachments = array_map(
-                fn (array $candidate, int $index) => Image::fromBase64(
-                    base64_encode($this->thumbnail($candidate['image'])),
-                    'image/webp',
-                )->as('frame-'.($index + 1).'.webp')
-                    ->withProviderOptions(['detail' => (string) config('product-images.vision_detail', 'low')]),
-                $frames,
-                array_keys($frames),
-            );
-            $response = app(OpenAiHeavyOperationGate::class)->run(
-                $provider,
-                $timeout,
-                fn () => GalleryTextLanguageAgent::make()->prompt(
+        foreach ($batches as $batchIndex => $frames) {
+            $cancellation->throwIfCancelled($runId);
+            $prompt = json_encode([
+                'product' => trim((string) $draft->title),
+                'category' => $draft->category,
+                'product_type' => $draft->product_type,
+                'allow_component_logos' => ProductPhotoPolicy::allowsComponentLogos($draft),
+                'model' => $draft->model,
+                'frames' => count($frames),
+                'batch' => $batchIndex + 1,
+                'batches' => count($batches),
+                'indexing' => 'All frame indices are 1-based within this attached batch, not the whole gallery.',
+            ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            try {
+                $attachments = array_map(
+                    fn (array $candidate, int $index) => app(VisionImagePreparer::class)->thumbnail(
+                        $candidate['image'],
+                        'frame-'.($index + 1).'.webp',
+                        (string) config('product-images.vision_detail', 'low'),
+                    ),
+                    $frames,
+                    array_keys($frames),
+                );
+                $data = app(VisionService::class)->checkGalleryFrames(
                     $prompt,
-                    attachments: $attachments,
-                    provider: $provider,
-                    model: $model,
-                    timeout: $timeout,
-                ),
-            );
-            $data = $response->toArray();
-            $rejected = collect($data['foreign_text_frames'] ?? [])
-                ->filter(fn (mixed $index): bool => is_int($index) || ctype_digit((string) $index))
-                ->map(fn (mixed $index): int => (int) $index - 1)
-                ->filter(fn (int $index): bool => $index >= 0 && $index < count($frames))
-                ->unique();
-            $run->update([
-                'invocation_id' => $response->invocationId,
-                'status' => 'completed',
-                'response' => $data,
-                'usage' => $response->usage->toArray(),
-                'completed_at' => now(),
-            ]);
+                    $attachments,
+                    new VisionCallContext($runId, $settings->imageVisionTimeoutSeconds(), provider: $provider, model: $model),
+                );
+                if ($data['uncertain_content_frames'] !== []) {
+                    // Preserve the set as pending. Uncertainty must not publish
+                    // a logo as the cover, nor silently destroy a real photo.
+                    return null;
+                }
+                $indices = [...$data['foreign_text_frames'], ...$data['non_product_frames']];
+                $rejected = array_fill_keys(array_unique(array_map('intval', $indices)), true);
+                foreach ($frames as $index => $candidate) {
+                    if (! isset($rejected[$index + 1])) {
+                        $accepted[] = $candidate;
+                    }
+                }
+            } catch (ProductSearchCancelled $exception) {
+                throw $exception;
+            } catch (Throwable $exception) {
+                report($exception);
 
-            if ($rejected->isEmpty()) {
-                return $candidates;
+                return null;
             }
-
-            return collect($frames)
-                ->reject(fn (array $candidate, int $index): bool => $rejected->contains($index))
-                ->values()
-                ->all();
-        } catch (Throwable $exception) {
-            report($exception);
-            $run->update(['status' => 'failed', 'error' => $exception->getMessage(), 'completed_at' => now()]);
-
-            return null;
-        }
-    }
-
-    private function thumbnail(GdImage $image): string
-    {
-        $ratio = min(640 / imagesx($image), 640 / imagesy($image), 1);
-        $width = max(1, (int) round(imagesx($image) * $ratio));
-        $height = max(1, (int) round(imagesy($image) * $ratio));
-        $thumbnail = imagescale($image, $width, $height);
-
-        ob_start();
-        imagewebp($thumbnail, null, 78);
-        $bytes = ob_get_clean();
-        imagedestroy($thumbnail);
-
-        if (! is_string($bytes) || $bytes === '') {
-            throw new \RuntimeException('Could not prepare an image thumbnail for Vision.');
         }
 
-        return $bytes;
+        return $accepted;
     }
 }

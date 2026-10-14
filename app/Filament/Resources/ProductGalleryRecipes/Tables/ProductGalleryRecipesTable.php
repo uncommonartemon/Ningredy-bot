@@ -22,24 +22,24 @@ class ProductGalleryRecipesTable
             ->columns([
                 TextColumn::make('id')->label('#')->sortable()->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('domain')
-                    ->label('Домен')
+                    ->label(__('Домен'))
                     ->searchable()
                     ->copyable()
                     ->sortable(),
                 TextColumn::make('path_pattern')
-                    ->label('Шаблон пути')
+                    ->label(__('Шаблон пути'))
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('region')
-                    ->label('Регион')
+                    ->label(__('Регион'))
                     ->placeholder('—')
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('status')
-                    ->label('Состояние')
+                    ->label(__('Состояние'))
                     ->badge()
                     ->formatStateUsing(fn (string $state): string => match ($state) {
-                        'active' => 'Активен',
-                        'learning' => 'Обучается',
-                        'disabled' => 'Отключён',
+                        'active' => __('Активен'),
+                        'learning' => __('Обучается'),
+                        'disabled' => __('Отключён'),
                         default => $state,
                     })
                     ->color(fn (string $state): string => match ($state) {
@@ -49,62 +49,62 @@ class ProductGalleryRecipesTable
                         default => 'gray',
                     }),
                 IconColumn::make('source_blocked')
-                    ->label('Источник заблокирован')
+                    ->label(__('Источник заблокирован'))
                     ->boolean()
                     ->sortable(),
                 TextColumn::make('success_count')
-                    ->label('Успехов')
+                    ->label(__('Успехов'))
                     ->numeric()
                     ->sortable(),
                 TextColumn::make('failure_count')
-                    ->label('Ошибок')
+                    ->label(__('Ошибок'))
                     ->numeric()
                     ->sortable()
                     ->color(fn (int $state): string => $state > 0 ? 'danger' : 'gray'),
                 TextColumn::make('last_success_at')
-                    ->label('Последний успех')
+                    ->label(__('Последний успех'))
                     ->dateTime('d.m.Y H:i:s')
                     ->placeholder('—')
                     ->sortable(),
                 TextColumn::make('last_failure_at')
-                    ->label('Последняя ошибка')
+                    ->label(__('Последняя ошибка'))
                     ->dateTime('d.m.Y H:i:s')
                     ->placeholder('—')
                     ->sortable()
                     ->toggleable(),
                 TextColumn::make('last_error')
-                    ->label('Ошибка')
+                    ->label(__('Ошибка'))
                     ->limit(70)
                     ->placeholder('—')
                     ->tooltip(fn ($record): ?string => $record->last_error)
                     ->toggleable(),
                 TextColumn::make('last_failure_kind')
-                    ->label('Тип сбоя')
+                    ->label(__('Тип сбоя'))
                     ->badge()
                     ->placeholder('—')
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('retry_after')
-                    ->label('Повтор не раньше')
+                    ->label(__('Повтор не раньше'))
                     ->dateTime('d.m.Y H:i:s')
                     ->placeholder('—')
                     ->toggleable(isToggledHiddenByDefault: true),
             ])
             ->filters([
                 SelectFilter::make('status')
-                    ->label('Состояние')
+                    ->label(__('Состояние'))
                     ->options([
-                        'active' => 'Активные',
-                        'learning' => 'Обучаются',
-                        'disabled' => 'Отключённые',
+                        'active' => __('Активные'),
+                        'learning' => __('Обучаются'),
+                        'disabled' => __('Отключённые'),
                     ]),
             ])
             ->recordActions([
                 ViewAction::make(),
                 ActionGroup::make([
-                    EditAction::make()->label('Быстрое редактирование'),
+                    EditAction::make()->label(__('Быстрое редактирование')),
                     DeleteAction::make()
-                        ->label('Удалить и обучить заново')
-                        ->modalDescription('При следующем обращении к домену Playwright автоматически создаст новый рецепт.'),
+                        ->label(__('Удалить и обучить заново'))
+                        ->modalDescription(__('При следующем обращении к домену Playwright автоматически создаст новый рецепт.')),
                 ]),
             ]);
     }

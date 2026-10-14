@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Ai\Agents\TelegramPhotoTextAgent;
 use App\Jobs\ProcessTelegramMessage;
 use App\Jobs\TranscribeTelegramPhoto;
+use App\Models\AiRun;
 use App\Models\TelegramUpdate;
 use App\Services\Ai\AiErrorPresenter;
 use App\Services\Telegram\TelegramClient;
@@ -30,7 +31,7 @@ class TranscribeTelegramPhotoTest extends TestCase
                 return Http::response(['ok' => true, 'result' => ['file_path' => 'photo/test.jpg']]);
             }
             if (str_contains($request->url(), '/file/bot')) {
-                return Http::response('fake-jpeg-bytes');
+                return Http::response($this->jpeg());
             }
 
             return Http::response(['ok' => true, 'result' => []]);
@@ -60,6 +61,22 @@ class TranscribeTelegramPhotoTest extends TestCase
         Queue::assertPushed(ProcessTelegramMessage::class, fn ($job) => $job->telegramUpdateId === $update->id);
         Http::assertSent(fn ($request) => str_contains($request->url(), '/getFile')
             && $request['file_id'] === 'large-file');
+        $run = AiRun::sole();
+        $this->assertSame($update->id, $run->telegram_update_id);
+        $this->assertSame('read_text', $run->activity['vision_operation']);
+        $this->assertSame('completed', $run->status);
+        $this->assertNotNull($run->usage);
+    }
+
+    private function jpeg(): string
+    {
+        $image = imagecreatetruecolor(32, 16);
+        ob_start();
+        imagejpeg($image);
+        $bytes = ob_get_clean();
+        imagedestroy($image);
+
+        return $bytes;
     }
 
     public function test_a_photo_without_a_file_id_is_rejected_without_calling_vision(): void

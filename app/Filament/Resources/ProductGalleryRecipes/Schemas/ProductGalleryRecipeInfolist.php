@@ -16,22 +16,22 @@ class ProductGalleryRecipeInfolist
             : (json_encode($state, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?: '—');
 
         return $schema->components([
-            Section::make('Сайт и состояние')
+            Section::make(__('Сайт и состояние'))
                 ->schema([
-                    TextEntry::make('domain')->label('Домен')->copyable(),
-                    TextEntry::make('path_pattern')->label('Шаблон пути'),
+                    TextEntry::make('domain')->label(__('Домен'))->copyable(),
+                    TextEntry::make('path_pattern')->label(__('Шаблон пути')),
                     TextEntry::make('compatible_path_patterns')
-                        ->label('Подтверждённые совместимые path')
+                        ->label(__('Подтверждённые совместимые path'))
                         ->formatStateUsing($json)
                         ->placeholder('—')
                         ->columnSpanFull(),
                     TextEntry::make('status')
-                        ->label('Состояние')
+                        ->label(__('Состояние'))
                         ->badge()
                         ->formatStateUsing(fn (string $state): string => match ($state) {
-                            'active' => 'Активен',
-                            'learning' => 'Обучается',
-                            'disabled' => 'Отключён',
+                            'active' => __('Активен'),
+                            'learning' => __('Обучается'),
+                            'disabled' => __('Отключён'),
                             default => $state,
                         })
                         ->color(fn (string $state): string => match ($state) {
@@ -40,44 +40,44 @@ class ProductGalleryRecipeInfolist
                             'disabled' => 'gray',
                             default => 'gray',
                         }),
-                    IconEntry::make('source_blocked')->label('Источник заблокирован')->boolean(),
-                    TextEntry::make('source_block_reason')->label('Причина блокировки')->placeholder('—')->columnSpanFull(),
+                    IconEntry::make('source_blocked')->label(__('Источник заблокирован'))->boolean(),
+                    TextEntry::make('source_block_reason')->label(__('Причина блокировки'))->placeholder('—')->columnSpanFull(),
                 ])
                 ->columns(4)
                 ->columnSpanFull(),
-            Section::make('Диагностика')
-                ->description('Устойчивые признаки шаблона страницы, использованные для повторного применения и переобучения рецепта.')
+            Section::make(__('Диагностика'))
+                ->description(__('Устойчивые признаки шаблона страницы, использованные для повторного применения и переобучения рецепта.'))
                 ->schema([
-                    TextEntry::make('region')->label('Регион')->placeholder('—'),
-                    TextEntry::make('sample_path')->label('Пример пути')->placeholder('—')->copyable(),
+                    TextEntry::make('region')->label(__('Регион'))->placeholder('—'),
+                    TextEntry::make('sample_path')->label(__('Пример пути'))->placeholder('—')->copyable(),
                     TextEntry::make('layout_fingerprint')->label('Layout fingerprint')->placeholder('—')->copyable()->fontFamily('mono'),
-                    TextEntry::make('last_observed_layout_fingerprint')->label('Последний наблюдённый fingerprint')->placeholder('—')->copyable()->fontFamily('mono'),
-                    TextEntry::make('last_failure_kind')->label('Тип последнего сбоя')->placeholder('—')->badge(),
-                    TextEntry::make('retry_after')->label('Повтор не раньше')->dateTime('d.m.Y H:i:s')->placeholder('—'),
-                    TextEntry::make('consecutive_hard_blocks')->label('Подряд жёстких блокировок')->placeholder('0'),
-                    TextEntry::make('hard_block_urls')->label('URL с жёсткой блокировкой')->formatStateUsing($json)->columnSpanFull(),
+                    TextEntry::make('last_observed_layout_fingerprint')->label(__('Последний наблюдённый fingerprint'))->placeholder('—')->copyable()->fontFamily('mono'),
+                    TextEntry::make('last_failure_kind')->label(__('Тип последнего сбоя'))->placeholder('—')->badge(),
+                    TextEntry::make('retry_after')->label(__('Повтор не раньше'))->dateTime('d.m.Y H:i:s')->placeholder('—'),
+                    TextEntry::make('consecutive_hard_blocks')->label(__('Подряд жёстких блокировок'))->placeholder('0'),
+                    TextEntry::make('hard_block_urls')->label(__('URL с жёсткой блокировкой'))->formatStateUsing($json)->columnSpanFull(),
                 ])
                 ->columns(3)
                 ->collapsible()
                 ->columnSpanFull(),
-            Section::make('Статистика запусков')
+            Section::make(__('Статистика запусков'))
                 ->schema([
-                    TextEntry::make('success_count')->label('Успехов'),
-                    TextEntry::make('failure_count')->label('Ошибок'),
-                    TextEntry::make('last_success_at')->label('Последний успех')->dateTime('d.m.Y H:i:s')->placeholder('—'),
-                    TextEntry::make('last_failure_at')->label('Последняя ошибка')->dateTime('d.m.Y H:i:s')->placeholder('—'),
-                    TextEntry::make('last_error')->label('Текст последней ошибки')->placeholder('—')->columnSpanFull(),
+                    TextEntry::make('success_count')->label(__('Успехов')),
+                    TextEntry::make('failure_count')->label(__('Ошибок')),
+                    TextEntry::make('last_success_at')->label(__('Последний успех'))->dateTime('d.m.Y H:i:s')->placeholder('—'),
+                    TextEntry::make('last_failure_at')->label(__('Последняя ошибка'))->dateTime('d.m.Y H:i:s')->placeholder('—'),
+                    TextEntry::make('last_error')->label(__('Текст последней ошибки'))->placeholder('—')->columnSpanFull(),
                 ])
                 ->columns(4)
                 ->columnSpanFull(),
-            Section::make('AI-рецепт')
-                ->description('Разрешены только CSS-селекторы, атрибуты изображений и жёстко ограниченные клики. Ручное изменение — через отдельное опасное действие в шапке страницы.')
+            Section::make(__('AI-рецепт'))
+                ->description(__('Разрешены только CSS-селекторы, атрибуты изображений и жёстко ограниченные клики. Ручное изменение — через отдельное опасное действие в шапке страницы.'))
                 ->schema([
-                    TextEntry::make('recipe.reason')->label('Объяснение AI')->placeholder('—')->columnSpanFull(),
-                    TextEntry::make('recipe.confidence')->label('Уверенность AI')->placeholder('—'),
-                    TextEntry::make('recipe.gallery_present')->label('Галерея подтверждена')->placeholder('—'),
-                    TextEntry::make('recipe.expected_image_count')->label('Ожидается фото')->placeholder('—'),
-                    TextEntry::make('recipe')->label('Полный JSON-рецепт')->formatStateUsing($json)->copyable()->columnSpanFull(),
+                    TextEntry::make('recipe.reason')->label(__('Объяснение AI'))->placeholder('—')->columnSpanFull(),
+                    TextEntry::make('recipe.confidence')->label(__('Уверенность AI'))->placeholder('—'),
+                    TextEntry::make('recipe.gallery_present')->label(__('Галерея подтверждена'))->placeholder('—'),
+                    TextEntry::make('recipe.expected_image_count')->label(__('Ожидается фото'))->placeholder('—'),
+                    TextEntry::make('recipe')->label(__('Полный JSON-рецепт'))->formatStateUsing($json)->copyable()->columnSpanFull(),
                 ])
                 ->columns(3)
                 ->collapsed()

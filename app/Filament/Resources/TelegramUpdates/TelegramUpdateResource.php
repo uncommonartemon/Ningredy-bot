@@ -2,13 +2,13 @@
 
 namespace App\Filament\Resources\TelegramUpdates;
 
+use App\Filament\Resources\LocalizedResource as Resource;
 use App\Filament\Resources\TelegramUpdates\Pages\ListTelegramUpdates;
 use App\Filament\Resources\TelegramUpdates\Pages\ViewTelegramUpdate;
 use App\Filament\Resources\TelegramUpdates\Schemas\TelegramUpdateInfolist;
 use App\Filament\Resources\TelegramUpdates\Tables\TelegramUpdatesTable;
 use App\Models\TelegramUpdate;
 use BackedEnum;
-use Filament\Resources\Resource;
 use Filament\Schemas\Schema;
 use Filament\Support\Icons\Heroicon;
 use Filament\Tables\Table;

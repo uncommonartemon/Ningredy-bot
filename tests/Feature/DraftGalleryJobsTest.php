@@ -294,6 +294,76 @@ class DraftGalleryJobsTest extends TestCase
         ))->handle($images, $presenter, $telegram);
     }
 
+    public function test_time_slice_renews_and_chains_with_the_same_money_ledger(): void
+    {
+        Queue::fake();
+        $draft = $this->draft();
+        $id = $draft->telegram_update_id;
+        $this->mock(\App\Services\Ai\ProductSearchCostBudget::class, function (MockInterface $mock) use ($id): void {
+            $mock->shouldReceive('hasRemaining')->with($id)->twice()->andReturn(true);
+        });
+        $this->mock(\App\Services\Ai\ProductSearchTimeBudget::class, function (MockInterface $mock) use ($id): void {
+            $mock->shouldReceive('canStart')->with($id, 120)->once()->andReturn(false);
+            $mock->shouldReceive('restartSession')->with($id)->once();
+        });
+        $images = $this->mock(ProductImageStorage::class);
+        $images->shouldReceive('continueStage')->once()->andReturnUsing(function (ProductDraft $argument, mixed $progress, int $updateId) use ($id): int {
+            $this->assertSame($id, $updateId);
+            $argument->update(['gallery_status' => 'missing', 'gallery_search_stop_reason' => 'time_budget']);
+
+            return 0;
+        });
+        $presenter = $this->mock(DraftTelegramPresenter::class);
+        $presenter->shouldNotReceive('sendReview');
+        (new ContinueDraftGallerySearch($draft->id, '100', $id, $id))->handle($images, $presenter, $this->telegramMock());
+        Queue::assertPushed(ContinueDraftGallerySearch::class, fn ($job): bool => $job->telegramUpdateId === $id && $job->expectedDraftTelegramUpdateId === $id);
+        $this->assertSame('processing', $draft->telegramUpdate->fresh()->status);
+        $this->assertNull($draft->telegramUpdate->fresh()->processed_at);
+    }
+
+    public function test_time_slice_does_not_renew_or_chain_when_money_is_spent(): void
+    {
+        Queue::fake();
+        $draft = $this->draft();
+        $id = $draft->telegram_update_id;
+        $this->mock(\App\Services\Ai\ProductSearchCostBudget::class, function (MockInterface $mock) use ($id): void {
+            $mock->shouldReceive('hasRemaining')->with($id)->twice()->andReturn(false);
+        });
+        $this->mock(\App\Services\Ai\ProductSearchTimeBudget::class, function (MockInterface $mock) use ($id): void {
+            $mock->shouldReceive('canStart')->with($id, 120)->once()->andReturn(false);
+            $mock->shouldNotReceive('restartSession');
+        });
+        $images = $this->mock(ProductImageStorage::class);
+        $images->shouldReceive('continueStage')->once()->andReturnUsing(function (ProductDraft $argument): int {
+            $argument->update(['gallery_status' => 'missing', 'gallery_search_stop_reason' => 'time_budget']);
+
+            return 0;
+        });
+        $presenter = $this->mock(DraftTelegramPresenter::class);
+        $presenter->shouldReceive('sendReview')->once();
+        (new ContinueDraftGallerySearch($draft->id, '100', $id, $id))->handle($images, $presenter, $this->telegramMock());
+        Queue::assertNotPushed(ContinueDraftGallerySearch::class);
+    }
+
+    public function test_presenter_queues_one_continuation_instead_of_sending_a_pause(): void
+    {
+        Queue::fake();
+        $draft = $this->draft();
+        $draft->update(['gallery_status' => 'missing', 'gallery_search_stop_reason' => 'time_budget']);
+        $this->mock(\App\Services\Ai\ProductSearchCostBudget::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('hasRemaining')->twice()->andReturn(true);
+        });
+        $telegram = $this->mock(TelegramClient::class);
+        $telegram->shouldNotReceive('sendMessage');
+        $telegram->shouldNotReceive('sendMediaGroupFiles');
+        $presenter = app(DraftTelegramPresenter::class);
+        $presenter->sendReview($telegram, '100', $draft);
+        $presenter->sendReview($telegram, '100', $draft);
+        Queue::assertPushed(ContinueDraftGallerySearch::class, 1);
+        $this->assertSame('processing', $draft->telegramUpdate->fresh()->status);
+        $this->assertNull($draft->telegramUpdate->fresh()->processed_at);
+    }
+
     private function draft(): ProductDraft
     {
         $update = TelegramUpdate::query()->create([

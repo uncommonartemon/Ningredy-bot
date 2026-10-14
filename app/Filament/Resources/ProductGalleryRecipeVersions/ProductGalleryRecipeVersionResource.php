@@ -2,11 +2,11 @@
 
 namespace App\Filament\Resources\ProductGalleryRecipeVersions;
 
+use App\Filament\Resources\LocalizedResource as Resource;
 use App\Filament\Resources\ProductGalleryRecipeVersions\Pages\ListProductGalleryRecipeVersions;
 use App\Filament\Resources\ProductGalleryRecipeVersions\Tables\ProductGalleryRecipeVersionsTable;
 use App\Models\ProductGalleryRecipeVersion;
 use BackedEnum;
-use Filament\Resources\Resource;
 use Filament\Support\Icons\Heroicon;
 use Filament\Tables\Table;
 use UnitEnum;

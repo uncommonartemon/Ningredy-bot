@@ -3,85 +3,87 @@
 namespace App\Filament\Resources\Products\Tables;
 
 use App\Filament\Resources\Products\ProductResource;
+use App\Filament\Schemas\ProductCommercialAction;
+use App\Filament\Support\ProductOptions;
+use App\Models\Product;
+use Filament\Actions\ActionGroup;
 use Filament\Actions\EditAction;
 use Filament\Actions\ViewAction;
-use Filament\Tables\Columns\ImageColumn;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Columns\ToggleColumn;
 use Filament\Tables\Filters\SelectFilter;
 use Filament\Tables\Filters\TernaryFilter;
 use Filament\Tables\Table;
-use Illuminate\Support\Facades\Storage;
+use Illuminate\Database\Eloquent\Builder;
 
 class ProductsTable
 {
     public static function configure(Table $table): Table
     {
-        return $table->modifyQueryUsing(fn ($query) => $query->with(['primaryMedia', 'media']))
+        return $table->modifyQueryUsing(fn ($query) => $query->with(['defaultVariant', 'category', 'brand']))
+            ->extraAttributes(['class' => 'products-table-compact'])
+            ->reorderableColumns()
+            ->defaultPaginationPageOption(50)
             ->defaultSort('id', 'desc')->columns([
-                ImageColumn::make('cover')->label('Фото')
-                    ->state(fn ($record): array => $record->media
-                        ->where('type', 'image')
-                        ->map(fn ($media): ?string => $media->path ?: $media->url)
-                        ->filter()
-                        ->values()
-                        ->all())
-                    ->disk('public')
-                    ->square()
-                    ->imageSize(54)
-                    ->stacked()
-                    ->overlap(2)
-                    ->ring(2)
-                    ->limit(3)
-                    ->limitedRemainingText()
-                    ->url(fn (?string $state): ?string => filled($state)
-                        ? (filter_var($state, FILTER_VALIDATE_URL) ? $state : Storage::disk('public')->url($state))
-                        : null, true)
-                    ->placeholder('Нет фото'),
-                TextColumn::make('image_verification')->label('Проверка фото')
-                    ->state(fn ($record): ?string => ($record->primaryMedia ?: $record->media->firstWhere('type', 'image'))?->verification_status)
-                    ->badge()->formatStateUsing(fn (?string $state): string => match ($state) {
-                        'verified' => 'Vision', 'source_verified' => 'Подтверждено источником', 'manual' => 'Вручную', 'rejected' => 'Отклонено', 'hint_override' => 'Нарушает подсказку', default => 'Не проверено',
-                    })->color(fn (?string $state): string => match ($state) {
-                        'verified' => 'success', 'source_verified' => 'success', 'manual' => 'info', 'rejected' => 'danger', 'hint_override' => 'warning', default => 'warning',
+                TextColumn::make('id')->label('#')->sortable()->toggleable(),
+                TextColumn::make('title')->label(__('Название'))
+                    ->searchable(['title', 'model', 'description'])->sortable()
+                    ->extraCellAttributes(['class' => 'products-title-cell'])
+                    ->extraAttributes(fn (Product $record): array => ['title' => $record->title])
+                    ->tooltip(fn (Product $record): string => $record->title),
+                TextColumn::make('defaultVariant.sku')->label('SKU')->placeholder('—')->copyable()
+                    ->extraCellAttributes(['class' => 'products-sku-cell'])
+                    ->extraAttributes(fn (Product $record): array => ['title' => $record->defaultVariant?->sku ?? ''])
+                    ->searchable(query: fn (Builder $query, string $search): Builder => $query
+                        ->whereHas('variants', fn (Builder $variant): Builder => $variant
+                            ->where('sku', 'like', '%'.$search.'%')
+                            ->orWhere('mpn', 'like', '%'.$search.'%')
+                            ->orWhere('gtin', 'like', '%'.$search.'%')))
+                    ->tooltip(fn (Product $record): string => implode(' · ', array_filter([
+                        $record->defaultVariant?->sku, __('product-table.primary_variant'),
+                    ])))->toggleable(),
+                TextColumn::make('category.name')->label(__('Категория'))->sortable()->toggleable(),
+                TextColumn::make('defaultVariant.price')->label(__('Цена'))->numeric(decimalPlaces: 2)
+                    ->suffix(fn (Product $record): string => filled($record->defaultVariant?->currency) ? ' '.$record->defaultVariant->currency : '')
+                    ->tooltip(__('product-table.primary_variant'))->placeholder('—')->alignEnd()->toggleable(),
+                TextColumn::make('visibility')->label(__('product-table.visibility'))->badge()
+                    ->state(fn (Product $record): string => $record->status === 'published'
+                        ? ($record->is_active ? 'visible' : 'hidden') : $record->status)
+                    ->formatStateUsing(fn (string $state): string => match ($state) {
+                        'visible' => __('product-table.visible'), 'hidden' => __('product-table.hidden'),
+                        default => ProductOptions::statuses()[$state] ?? __('Черновик'),
+                    })
+                    ->color(fn (string $state): string => match ($state) {
+                        'visible' => 'success', 'draft' => 'warning', default => 'gray',
                     })->toggleable(),
-                TextColumn::make('id')->label('#')->sortable(),
-                TextColumn::make('title')->label('Название')->searchable(['title', 'model', 'description'])->sortable()->wrap()->limit(70),
-                TextColumn::make('brand.name')->label('Бренд')->searchable()->sortable(),
-                TextColumn::make('model')->label('Модель')->searchable()->toggleable(),
-                TextColumn::make('category.name')->label('Категория')->sortable(),
-                TextColumn::make('product_type')->label('Тип')->badge()->formatStateUsing(fn (string $state): string => match ($state) {
-                    'laptop' => 'Ноутбук', 'desktop' => 'Готовый ПК', 'component' => 'Комплектующая', default => 'Другая техника',
-                })->toggleable(isToggledHiddenByDefault: true),
-                TextColumn::make('variants_count')->label('Варианты')->counts('variants')->badge(),
-                TextColumn::make('defaultVariant.price')->label('Цена')->numeric(decimalPlaces: 2)->placeholder('—'),
-                TextColumn::make('defaultVariant.currency')->label('Валюта')->toggleable(),
-                TextColumn::make('status')->label('Статус')->badge()->formatStateUsing(fn (string $state): string => match ($state) {
-                    'published' => 'Опубликован', 'archived' => 'Архив', default => 'Черновик',
-                })->color(fn (string $state): string => match ($state) {
-                    'published' => 'success', 'archived' => 'gray', default => 'warning',
-                }),
-                ToggleColumn::make('is_active')->label('На сайте')->sortable(),
-                ToggleColumn::make('is_featured')->label('Рекомендуемый')->sortable()->toggleable(),
+                TextColumn::make('brand.name')->label(__('Бренд'))->searchable()->sortable()->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('model')->label(__('Модель'))->searchable()->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('product_type')->label(__('Тип'))->badge()
+                    ->formatStateUsing(fn (string $state): string => ProductOptions::types()[$state] ?? __('Другая техника'))
+                    ->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('variants_count')->label(__('Варианты'))->counts('variants')->badge()->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('status')->label(__('Статус'))->badge()
+                    ->formatStateUsing(fn (string $state): string => ProductOptions::statuses()[$state] ?? __('Черновик'))
+                    ->color(fn (string $state): string => match ($state) {
+                        'published' => 'success', 'archived' => 'gray', default => 'warning',
+                    })->toggleable(isToggledHiddenByDefault: true),
+                ToggleColumn::make('is_active')->label(__('product-table.show_on_site'))->sortable()->toggleable(isToggledHiddenByDefault: true),
+                ToggleColumn::make('is_featured')->label(__('Рекомендуемый'))->sortable()->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('slug')->label('Slug')->copyable()->toggleable(isToggledHiddenByDefault: true),
-                TextColumn::make('canonical_key')->label('Ключ дедупликации')->copyable()->toggleable(isToggledHiddenByDefault: true),
-                TextColumn::make('confidence')->label('Увер. AI')->numeric(decimalPlaces: 2)->toggleable(isToggledHiddenByDefault: true),
-                TextColumn::make('sort_order')->label('Порядок')->sortable()->toggleable(isToggledHiddenByDefault: true),
-                TextColumn::make('published_at')->label('Публикация')->dateTime('d.m.Y H:i')->sortable(),
-                TextColumn::make('created_at')->label('Создан')->dateTime('d.m.Y H:i')->sortable()->toggleable(isToggledHiddenByDefault: true),
-                TextColumn::make('updated_at')->label('Изменён')->since()->sortable()->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('canonical_key')->label(__('Ключ дедупликации'))->copyable()->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('confidence')->label(__('Увер. AI'))->numeric(decimalPlaces: 2)->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('sort_order')->label(__('Порядок'))->sortable()->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('published_at')->label(__('Публикация'))->dateTime('d.m.Y H:i')->sortable()->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('created_at')->label(__('Создан'))->dateTime('d.m.Y H:i')->sortable()->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('updated_at')->label(__('Изменён'))->since()->sortable()->toggleable(isToggledHiddenByDefault: true),
             ])->filters([
-                SelectFilter::make('status')->label('Статус')->options([
-                    'published' => 'Опубликован', 'draft' => 'Черновик', 'archived' => 'Архив',
-                ]),
-                SelectFilter::make('category_id')->label('Категория')->relationship('category', 'name'),
-                SelectFilter::make('brand_id')->label('Бренд')->relationship('brand', 'name'),
-                SelectFilter::make('product_type')->label('Тип')->options([
-                    'laptop' => 'Ноутбук', 'desktop' => 'Готовый ПК', 'component' => 'Комплектующая', 'other' => 'Другая техника',
-                ]),
-                TernaryFilter::make('is_active')->label('Показывается на сайте'),
-                TernaryFilter::make('is_featured')->label('Рекомендуемый'),
-            ])->recordActions([ViewAction::make(), EditAction::make()])
+                SelectFilter::make('status')->label(__('Статус'))->options(ProductOptions::statuses()),
+                SelectFilter::make('category_id')->label(__('Категория'))->relationship('category', 'name'),
+                SelectFilter::make('brand_id')->label(__('Бренд'))->relationship('brand', 'name'),
+                SelectFilter::make('product_type')->label(__('Тип'))->options(ProductOptions::types()),
+                TernaryFilter::make('is_active')->label(__('product-table.show_on_site')),
+                TernaryFilter::make('is_featured')->label(__('Рекомендуемый')),
+            ])->recordActions([ActionGroup::make([ProductCommercialAction::make(), ViewAction::make(), EditAction::make()])])
             ->recordUrl(fn ($record): string => ProductResource::getUrl('view', ['record' => $record]));
     }
 }

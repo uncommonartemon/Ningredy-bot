@@ -3,6 +3,7 @@
 namespace App\Services\Products;
 
 use App\Services\Ai\AiSettings;
+use App\Services\Photos\ImageUrls;
 
 class ProductGalleryRecipeResultValidator
 {
@@ -45,12 +46,55 @@ class ProductGalleryRecipeResultValidator
         $minSuccessCount = min($limit, max(1, $minimumSuccessCount ?? $this->settings->galleryMinSuccessCount()));
 
         $structure = $this->validateStructure($recipe, $result, $limit, $minimumSuccessCount, $countedOnThisPage);
+        $unexploredControl = $this->unexploredMediaControl($result);
 
         return [
             ...$structure,
             'min_success_count' => $minSuccessCount,
             'meets_image_minimum' => $structure['extracted'] >= $minSuccessCount,
+            'unexplored_media_control' => $unexploredControl,
+            // A complete one-photo gallery is not broken. But observed frames
+            // available only as thumbnails may still have undiscovered originals.
+            'needs_source_quality_diagnosis' => ($structure['passed'] ?? false)
+                && (($structure['extracted'] < $minSuccessCount
+                    && ($structure['rejected_frames'] ?? 0) > 0) || $unexploredControl !== null),
         ];
+    }
+
+    private function unexploredMediaControl(array $result): ?array
+    {
+        $evidence = collect(data_get($result, 'diagnostics.validated_image_evidence', []))
+            ->filter(fn (mixed $item): bool => is_array($item) && (int) ($item['width'] ?? 0) > 0);
+        if ($evidence->isEmpty() || $evidence->max(fn (array $item): int => max((int) $item['width'], (int) ($item['height'] ?? 0))) > 1000) {
+            return null;
+        }
+        $trace = collect($result['action_trace'] ?? [])->filter(fn (mixed $item): bool => is_array($item));
+        if ($trace->contains(fn (array $item): bool => ($item['expanded_gallery_visible_after'] ?? false) === true)) {
+            return null;
+        }
+        // A search magnifier or an arbitrary zoom label is not evidence of a
+        // media opportunity. Return the observed gallery control to the agent,
+        // without asserting that it opens or that a larger file must exist.
+        $control = collect(data_get($result, 'post_interaction_scout.action_candidates', []))->first(
+            fn (mixed $item): bool => is_array($item)
+                && ($item['within_media'] ?? false) === true
+                && ($item['in_viewport'] ?? false) === true
+                && ($item['disabled'] ?? false) !== true
+                && ($item['contains_image'] ?? false) === true
+                && (int) data_get($item, 'rect.width', 0) >= 160
+                && (int) data_get($item, 'rect.height', 0) >= 160
+                && trim((string) ($item['selector'] ?? '')) !== ''
+                && preg_match('/zoom|enlarge|magnif|full.?screen|view all|open gallery/i', implode(' ', [
+                    $item['text'] ?? '', $item['aria_label'] ?? '', $item['title'] ?? '',
+                ])) === 1,
+        );
+
+        return is_array($control) ? [
+            'selector' => $control['selector'], 'selector_index' => $control['selector_index'] ?? 0,
+            'reason' => 'A visible main-image control offers an enlarged view, but this execution has not opened it. '
+                .'The current frames are at most 1000px. Investigate the actual click outcome and obstacles; '
+                .'this is an unresolved opportunity, not proof that larger files exist or that this recipe is incompatible.',
+        ] : null;
     }
 
     /** @return array{passed: bool, expected: int, extracted: int, reason: string} */
@@ -68,7 +112,7 @@ class ProductGalleryRecipeResultValidator
             // count as the AI preflight gate that turned out to be fooled by
             // two renditions of one CDN photo - keep this gate immune to that
             // even if the extractor-side key ever misses a pattern it should.
-            ->unique(fn (string $image): string => ProductImageStorage::imageAssetKey($image))
+            ->unique(fn (string $image): string => ImageUrls::imageAssetKey($image))
             ->values();
         $extracted = $images->count();
         $minSuccessCount = min(
@@ -154,7 +198,7 @@ class ProductGalleryRecipeResultValidator
                 ->filter(fn (array $item): bool => ($item['source'] ?? null) === 'recipe_dom')
                 ->pluck('url')
                 ->filter(fn (mixed $url): bool => is_string($url) && $url !== '')
-                ->unique(fn (string $url): string => ProductImageStorage::imageAssetKey($url))
+                ->unique(fn (string $url): string => ImageUrls::imageAssetKey($url))
                 ->count();
 
             if ($recipeDomImages < $extracted) {
@@ -177,14 +221,14 @@ class ProductGalleryRecipeResultValidator
         $rejections = collect(data_get($result, 'diagnostics.rejected_candidates', []))
             ->filter(fn (mixed $item): bool => is_array($item)
                 && is_string($item['url'] ?? null) && filter_var($item['url'], FILTER_VALIDATE_URL))
-            ->groupBy(fn (array $item): string => ProductImageStorage::imageAssetKey($item['url']));
+            ->groupBy(fn (array $item): string => ImageUrls::imageAssetKey($item['url']));
         $rejectedFrameUrls = $rejections->filter(fn ($variants): bool => $variants->every(
             fn (array $item): bool => ($item['source'] ?? null) === 'recipe_dom'
                 && ($item['reason'] ?? null) === 'dimensions_below_minimum'
                 && (int) ($item['width'] ?? 0) > 0 && (int) ($item['height'] ?? 0) > 0,
         ))->map(fn ($variants): string => $variants->first()['url']);
         $collected = $images->concat($rejectedFrameUrls)
-            ->unique(fn (string $url): string => ProductImageStorage::imageAssetKey($url))->count();
+            ->unique(fn (string $url): string => ImageUrls::imageAssetKey($url))->count();
 
         if ($collected < $targetCount) {
             return $this->failure(
@@ -220,7 +264,7 @@ class ProductGalleryRecipeResultValidator
     {
         $needsPerFrameFollowup = collect($recipe['actions'] ?? [])->contains(
             fn (mixed $action): bool => is_array($action)
-                && ($action['kind'] ?? null) === 'click_each'
+                && in_array($action['kind'] ?? null, ['click_each', 'scroll_each'], true)
                 && trim((string) ($action['after_each_selector'] ?? '')) === '',
         );
 
@@ -253,7 +297,7 @@ class ProductGalleryRecipeResultValidator
 
         return $selector === '' ? null
             : 'Higher-resolution control '.$selector.' remained unused for each low-resolution frame; '
-                .'attach it as click_each.after_each_selector and verify the larger observed URLs.';
+                .'attach it as the traversal action\'s after_each_selector and verify the larger observed URLs.';
     }
 
     private function incompleteActionPlan(array $recipe, array $result): ?string
@@ -278,6 +322,10 @@ class ProductGalleryRecipeResultValidator
             // rule below, so marking the gallery opener if_present buys nothing.
             if (($action['when'] ?? 'always') === 'if_present'
                 && $actionTrace->contains(fn (array $item): bool => ($item['optional_absent'] ?? false) === true)) {
+                if ($kind === 'scroll_each') {
+                    return 'Action plan incomplete at step '.($actionIndex + 1).': required traversal selector_missing.';
+                }
+
                 continue;
             }
 
@@ -301,12 +349,36 @@ class ProductGalleryRecipeResultValidator
                 if (! $traversalResult['traversal_complete']) {
                     return 'Gallery traversal interrupted: '.($traversalResult['traversal_stop_reason'] ?? 'unknown').'.';
                 }
+                if ($kind === 'scroll_each') {
+                    // A list that shrinks while being enumerated does not prove
+                    // that the removed or reindexed elements were visited.
+                    $selectorMatches = max(0, (int) ($traversalResult['traversal_match_count'] ?? 0),
+                        (int) ($primaryTrace->max('selector_match_count') ?? 0));
+                    $startIndex = max(0, (int) ($action['index'] ?? 0));
+                    $requiredElements = max(0, $selectorMatches - $startIndex);
+                    $visitedElements = $completedTrace
+                        ->pluck('index')
+                        ->filter(fn (mixed $index): bool => is_int($index)
+                            && $index >= $startIndex && $index < $selectorMatches)
+                        ->unique()->count();
+
+                    if ($requiredElements < 1 || $visitedElements < $requiredElements) {
+                        return 'Gallery traversal incomplete: scrolled '.$visitedElements
+                            .' of '.$requiredElements.' required current elements.';
+                    }
+                }
                 $afterEachError = $this->incompleteAfterEachAction($action, $actionTrace, $completedTrace->count());
                 if ($afterEachError !== null) {
                     return $afterEachError;
                 }
 
                 continue;
+            }
+
+            if ($kind === 'scroll_each'
+                || (in_array($kind, ['click_each', 'click_until_no_change'], true)
+                    && in_array($action['iteration_mode'] ?? 'auto', ['elements', 'repeat'], true))) {
+                return 'Action plan incomplete at step '.($actionIndex + 1).': traversal_not_confirmed.';
             }
 
             if (in_array($kind, ['click', 'hover', 'scroll_into_view'], true)) {

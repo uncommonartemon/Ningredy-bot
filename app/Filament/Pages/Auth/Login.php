@@ -13,7 +13,7 @@ class Login extends BaseLogin
     protected function getEmailFormComponent(): Component
     {
         return TextInput::make('name')
-            ->label('Логин')
+            ->label(__('Логин'))
             ->required()
             ->autocomplete('username')
             ->autofocus();
@@ -30,7 +30,7 @@ class Login extends BaseLogin
     protected function throwFailureValidationException(): never
     {
         throw ValidationException::withMessages([
-            'data.name' => 'Неверный логин или пароль.',
+            'data.name' => __('Неверный логин или пароль.'),
         ]);
     }
 }

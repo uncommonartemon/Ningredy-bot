@@ -5,6 +5,7 @@ namespace App\Ai\Tools;
 use App\Models\AiOperation;
 use App\Models\Product;
 use App\Models\TelegramUpdate;
+use App\Services\Telegram\TelegramCatalogDeletion;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
 use Laravel\Ai\Contracts\Tool;
 use Laravel\Ai\Tools\Request;
@@ -47,6 +48,8 @@ class PrepareProductDeletion implements Tool
                     'brand' => $product->brand?->name,
                     'variants_count' => $product->variants_count,
                     'media_count' => $product->media_count,
+                    'catalog_fingerprint' => app(TelegramCatalogDeletion::class)->fingerprint($product),
+                    'expires_at' => now()->addMinutes(10)->getTimestamp(),
                 ],
             ],
         );

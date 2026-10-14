@@ -9,6 +9,284 @@ use Tests\TestCase;
 
 class ProductIdentityMatcherTest extends TestCase
 {
+    public function test_a_shared_family_does_not_hide_a_conflicting_explicit_model(): void
+    {
+        $draft = $this->explicitStealthDraft();
+        $matcher = new ProductIdentityMatcher;
+        $source = [
+            'url' => 'https://shop.example/stealth-16-ai-a2hwgg-008it',
+            'title' => 'MSI Stealth 16 AI A2HWGG-008IT',
+        ];
+
+        // A2HWGG is useful for discovery, never an excuse to ignore the
+        // different whole code explicitly supplied by the operator.
+        $this->assertTrue($matcher->supportsSource($draft, $source));
+        $this->assertFalse($matcher->confirmsExactIdentifier($draft, $source));
+        $this->assertTrue($matcher->conflictsSource($draft, $source));
+    }
+
+    public function test_a_different_regional_model_remains_unconfirmed_for_the_identity_judge(): void
+    {
+        $draft = $this->explicitStealthDraft();
+        $matcher = new ProductIdentityMatcher;
+
+        foreach (['MSI Stealth 16 AI A2HWGG-008US', 'MSI Stealth 16 AI A2HWGG'] as $title) {
+            $source = ['url' => 'https://shop.example/product/1', 'title' => $title];
+
+            $this->assertTrue($matcher->supportsSource($draft, $source));
+            $this->assertFalse($matcher->confirmsExactIdentifier($draft, $source));
+        }
+
+        // Outside the conservative conflict rule, a different regional code
+        // is unknown to this matcher, not permission to use another variant.
+        $this->assertFalse($matcher->conflictsSource($draft, [
+            'url' => 'https://shop.example/product/1',
+            'title' => 'MSI Stealth 16 AI A2HWGG-008US',
+        ]));
+    }
+
+    public function test_a_matching_mpn_does_not_hide_a_conflicting_explicit_model(): void
+    {
+        $draft = $this->explicitStealthDraft();
+        $matcher = new ProductIdentityMatcher;
+        $source = [
+            'url' => 'https://shop.example/product/1',
+            'title' => 'MSI Stealth 16 AI A2HWGG-008IT',
+            '_preflight_identity_evidence' => 'MPN: 9S7-15F515-009',
+        ];
+
+        // Contradictory evidence must be inspected even when a different
+        // dedicated identifier agrees. Callers check conflict before trust.
+        $this->assertTrue($matcher->conflictsSource($draft, $source));
+    }
+
+    public function test_derived_repeated_family_tokens_do_not_invent_a_conflicting_identifier(): void
+    {
+        $draft = new ProductDraft([
+            'model' => 'Stealth 16 AI A2HWGG-009IT',
+            'specifications' => [['key' => 'mpn', 'value' => '9S7-15F515-009']],
+        ]);
+        $matcher = new ProductIdentityMatcher;
+
+        // No original-request relation: the matcher considers the settled
+        // values. It must not fabricate A2HWGG009ITA2HWGG by appending a
+        // hyphenated code's own first atom, making it look more specific.
+        $this->assertNull($matcher->conflictingIdentifierInSource($draft, [
+            'url' => 'https://shop.example/product/123',
+            '_preflight_identity_evidence' => 'Stealth 16 AI A2HWGG-008US',
+        ]));
+    }
+
+    public function test_the_correct_full_model_without_the_dedicated_mpn_is_not_rejected(): void
+    {
+        $draft = $this->explicitStealthDraft();
+        $matcher = new ProductIdentityMatcher;
+        $source = [
+            'url' => 'https://shop.example/product/1',
+            'title' => 'MSI Stealth 16 AI A2HWGG-009IT',
+        ];
+
+        // A missing second identifier is not a contradiction. The correct
+        // full model remains eligible for the identity judge.
+        $this->assertFalse($matcher->conflictsSource($draft, $source));
+        $this->assertFalse($matcher->confirmsExactIdentifier($draft, $source));
+
+        $source['_preflight_identity_evidence'] = 'MPN: 9S7-15F515-009; SKU: BBU9285H32GXXDX11MA';
+        $this->assertTrue($matcher->confirmsExactIdentifier($draft, $source));
+        $this->assertFalse($matcher->conflictsSource($draft, $source));
+    }
+
+    public function test_one_matching_dedicated_code_does_not_confirm_other_unverified_operator_identifiers(): void
+    {
+        $draft = $this->explicitStealthDraft();
+        $matcher = new ProductIdentityMatcher;
+
+        foreach (['MSI Stealth 16 AI A2HWGG-008US', 'MSI Stealth 16 AI A2HWGG'] as $title) {
+            $source = [
+                'url' => 'https://shop.example/product/1',
+                'title' => $title,
+                '_preflight_identity_evidence' => 'MPN: 9S7-15F515-009; SKU: BBU9285H32GXXDX11MA',
+            ];
+
+            // The remaining explicit model is not confirmed. That removes
+            // the free exact shortcut; it does not turn missing evidence
+            // into a deterministic rejection.
+            $this->assertFalse($matcher->confirmsExactIdentifier($draft, $source));
+            $this->assertFalse($matcher->conflictsSource($draft, $source));
+        }
+    }
+
+    public function test_a_single_explicit_mpn_can_still_confirm_without_other_inferred_identifiers(): void
+    {
+        $draft = $this->explicitStealthDraft();
+        $draft->setRelation('telegramUpdate', new TelegramUpdate([
+            'text' => 'найди 9S7-15F515-009',
+        ]));
+        $matcher = new ProductIdentityMatcher;
+        $source = [
+            'url' => 'https://shop.example/product/1',
+            '_preflight_identity_evidence' => 'MPN: 9S7-15F515-009',
+        ];
+
+        $this->assertTrue($matcher->confirmsExactIdentifier($draft, $source));
+        $this->assertFalse($matcher->conflictsSource($draft, $source));
+    }
+
+    public function test_an_explicit_code_inside_the_model_cannot_be_overridden_by_an_inferred_mpn(): void
+    {
+        $matcher = new ProductIdentityMatcher;
+        foreach (['A2HWGG-009IT', '009IT'] as $request) {
+            $draft = $this->explicitStealthDraft();
+            $draft->setRelation('telegramUpdate', new TelegramUpdate(['text' => $request]));
+            $source = [
+                'url' => 'https://shop.example/product/1',
+                'title' => 'MSI Stealth 16 AI A2HWGG-008US',
+                '_preflight_identity_evidence' => 'MPN: 9S7-15F515-009',
+            ];
+
+            $this->assertFalse($matcher->confirmsExactIdentifier($draft, $source), $request);
+            $source['title'] = 'MSI Stealth 16 AI A2HWGG-009IT';
+            $this->assertTrue($matcher->confirmsExactIdentifier($draft, $source), $request);
+        }
+    }
+
+    public function test_an_explicit_full_model_and_matching_mpn_do_not_require_an_inferred_sku(): void
+    {
+        $draft = $this->explicitStealthDraft();
+        $draft->setRelation('telegramUpdate', new TelegramUpdate([
+            'text' => 'MSI Stealth 16 AI A2HWGG-009IT ищи',
+        ]));
+        $matcher = new ProductIdentityMatcher;
+
+        $this->assertTrue($matcher->confirmsExactIdentifier($draft, [
+            'url' => 'https://shop.example/product/1',
+            'title' => 'MSI Stealth 16 AI A2HWGG-009IT',
+            '_preflight_identity_evidence' => 'MPN: 9S7-15F515-009',
+        ]));
+    }
+
+    public function test_a_generic_family_request_does_not_make_the_selected_regional_code_mandatory(): void
+    {
+        $draft = $this->explicitStealthDraft();
+        $draft->setRelation('telegramUpdate', new TelegramUpdate([
+            'text' => 'MSI Stealth 16 AI ищи',
+        ]));
+        $matcher = new ProductIdentityMatcher;
+        $source = [
+            'url' => 'https://shop.example/product/1',
+            'title' => 'MSI Stealth 16 AI A2HWGG-008US',
+        ];
+
+        $this->assertFalse($matcher->conflictsSource($draft, $source));
+        $this->assertFalse($matcher->confirmsExactIdentifier($draft, $source));
+        $this->assertTrue($matcher->supportsSource($draft, $source));
+        $this->assertFalse($matcher->requiresExactIdentifier($draft));
+    }
+
+    public function test_only_real_operator_code_tokens_make_identifier_confirmation_mandatory(): void
+    {
+        $matcher = new ProductIdentityMatcher;
+        foreach (['A2HWGG-009IT', '009IT', '9S7-15F515-009'] as $request) {
+            $draft = $this->explicitStealthDraft();
+            $draft->setRelation('telegramUpdate', new TelegramUpdate(['text' => 'найди '.$request]));
+            $this->assertTrue($matcher->requiresExactIdentifier($draft), $request);
+        }
+
+        $draft = new ProductDraft([
+            'model' => 'MacBook Air 15 M4',
+            'specifications' => [['key' => 'mpn', 'value' => 'MC7A4LL/A']],
+        ]);
+        $draft->setRelation('telegramUpdate', new TelegramUpdate(['text' => 'найди MC7A4LL/A']));
+        $this->assertTrue($matcher->requiresExactIdentifier($draft));
+    }
+
+    public function test_a_number_is_mandatory_only_when_it_is_a_whole_explicit_dedicated_identifier(): void
+    {
+        $matcher = new ProductIdentityMatcher;
+        $draft = new ProductDraft([
+            'model' => 'Laptop 2025 16 GB',
+            'specifications' => [['key' => 'gtin', 'value' => '0199291000008']],
+        ]);
+        $draft->setRelation('telegramUpdate', new TelegramUpdate(['text' => 'Laptop 2025 16 GB']));
+        $this->assertFalse($matcher->requiresExactIdentifier($draft));
+        $draft->setRelation('telegramUpdate', new TelegramUpdate(['text' => 'найди 0199291000008']));
+        $this->assertTrue($matcher->requiresExactIdentifier($draft));
+        $draft->setRelation('telegramUpdate', new TelegramUpdate(['text' => 'найди 01992910000081']));
+        $this->assertFalse($matcher->requiresExactIdentifier($draft));
+    }
+
+    public function test_missing_original_text_preserves_the_conservative_identifier_requirement(): void
+    {
+        $draft = new ProductDraft(['model' => 'A2HWGG-009IT']);
+        $this->assertTrue((new ProductIdentityMatcher)->requiresExactIdentifier($draft));
+    }
+
+    public function test_a_page_naming_the_requested_code_beside_its_siblings_is_for_the_judge(): void
+    {
+        // Request #94: the G14 (2024) spec page lists every configuration. It
+        // was refused as "another product" and the card had nothing left to be
+        // built from, although the requested GA403UV build was on it.
+        $draft = new ProductDraft([
+            'brand' => 'ASUS',
+            'model' => 'ROG Zephyrus G14 GA403UV-G14.R94060',
+            'specifications' => [['key' => 'sku', 'value' => 'GA403UV-G14.R94060']],
+        ]);
+        $draft->setRelation('telegramUpdate', new TelegramUpdate(['text' => 'ASUS ROG Zephyrus G14 GA403UV ищи']));
+        $matcher = new ProductIdentityMatcher;
+        $familyPage = [
+            'url' => 'https://rog.asus.com/us/laptops/rog-zephyrus/rog-zephyrus-g14-2024/spec/',
+            'title' => 'ROG Zephyrus G14 (2024) | Gaming Laptops',
+            '_preflight_identity_evidence' => 'Tech Specs GA403UI-XS96 GA403UV-G14.R94060 GA403UI-G14.R94070',
+        ];
+
+        $this->assertFalse($matcher->conflictsSource($draft, $familyPage), 'the requested build is on the page');
+        $this->assertFalse($matcher->confirmsExactIdentifier($draft, $familyPage), 'nor does the page confirm it is the one sold');
+
+        // Only the sibling, without the requested code, is still another product.
+        $this->assertTrue($matcher->conflictsSource($draft, [
+            'url' => 'https://shop.example/rog-zephyrus-g14-ga403ui',
+            'title' => 'ASUS ROG Zephyrus G14 GA403UI-XS96',
+        ]));
+        $this->assertTrue($matcher->confirmsExactIdentifier($draft, [
+            'url' => 'https://shop.example/rog-zephyrus-g14',
+            'title' => 'ASUS ROG Zephyrus G14 GA403UV-G14.R94060',
+        ]));
+    }
+
+    public function test_short_regional_siblings_are_ambiguous_without_becoming_a_conflict(): void
+    {
+        $draft = new ProductDraft([
+            'brand' => 'Acme', 'model' => 'Orbit Pro 14 Q14-512EU',
+            'specifications' => [['key' => 'mpn', 'value' => 'Q14-512EU']],
+        ]);
+        $draft->setRelation('telegramUpdate', new TelegramUpdate(['text' => 'Orbit Pro 14 Q14-512EU']));
+        $matcher = new ProductIdentityMatcher;
+        foreach (['Orbit Pro 14', '14 inch Orbit Pro'] as $name) {
+            $source = ['url' => 'https://shop.example/product', 'title' => $name.' Q14-512EU'];
+            $this->assertTrue($matcher->confirmsExactIdentifier($draft, $source));
+            $source['title'] .= ' or Q14-512US';
+            $this->assertFalse($matcher->confirmsExactIdentifier($draft, $source));
+            $this->assertFalse($matcher->conflictsSource($draft, $source));
+        }
+    }
+
+    private function explicitStealthDraft(): ProductDraft
+    {
+        $draft = new ProductDraft([
+            'brand' => 'MSI',
+            'model' => 'Stealth 16 AI A2HWGG-009IT',
+            'specifications' => [
+                ['key' => 'sku', 'value' => 'BBU9285H32GXXDX11MA'],
+                ['key' => 'mpn', 'value' => '9S7-15F515-009'],
+            ],
+        ]);
+        $draft->setRelation('telegramUpdate', new TelegramUpdate([
+            'text' => "MSI Stealth 16 AI A2HWGG\nMKT: Stealth 16 AI A2HWGG-009IT\nSKU: BBU9285H32GXXDX11MA\n9S7-15F515-009",
+        ]));
+
+        return $draft;
+    }
+
     public function test_it_rejects_a_generic_asset_that_only_shares_two_incidental_words(): void
     {
         // Real production bug (2026-07-23): an Apple color-swatch banner

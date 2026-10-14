@@ -21,33 +21,33 @@ class ProductGalleryRecipeForm
         return $schema
             ->columns(1)
             ->components([
-                Section::make('Сайт и состояние')
-                    ->description('Диагностика, статистика и AI-рецепт доступны на странице просмотра. Здесь редактируются только безопасные поля.')
+                Section::make(__('Сайт и состояние'))
+                    ->description(__('Диагностика, статистика и AI-рецепт доступны на странице просмотра. Здесь редактируются только безопасные поля.'))
                     ->schema([
                         TextInput::make('domain')
-                            ->label('Домен')
+                            ->label(__('Домен'))
                             ->required()
                             ->maxLength(255),
                         TextInput::make('path_pattern')
-                            ->label('Шаблон пути')
-                            ->helperText('* означает все товарные страницы домена.')
+                            ->label(__('Шаблон пути'))
+                            ->helperText(__('* означает все товарные страницы домена.'))
                             ->required()
                             ->unique(ignoreRecord: true, modifyRuleUsing: fn (Unique $rule, Get $get): Unique => $rule->where('domain', $get('domain')))
                             ->maxLength(255),
                         Select::make('status')
-                            ->label('Состояние')
+                            ->label(__('Состояние'))
                             ->options([
-                                'active' => 'Активен',
-                                'learning' => 'Обучается',
-                                'disabled' => 'Отключён',
+                                'active' => __('Активен'),
+                                'learning' => __('Обучается'),
+                                'disabled' => __('Отключён'),
                             ])
                             ->required()
                             ->native(false),
                         Toggle::make('source_blocked')
-                            ->label('Полностью исключить источник')
-                            ->helperText('Домен не попадёт ни в Web Search, ни в HTML/Playwright-обработку.'),
+                            ->label(__('Исключить область этого рецепта'))
+                            ->helperText(__('Блокируется только указанный шаблон пути. Для всего домена используйте «Заблокировать домен» на странице просмотра. Шаблон * действует на весь домен.')),
                         Textarea::make('source_block_reason')
-                            ->label('Причина блокировки источника')
+                            ->label(__('Причина блокировки источника'))
                             ->rows(3)
                             ->columnSpanFull(),
                     ])

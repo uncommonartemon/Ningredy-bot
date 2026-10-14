@@ -2,18 +2,21 @@
 
 namespace App\Models;
 
+use App\Jobs\DeleteUnreferencedMedia;
+use App\Models\Concerns\InvalidatesStaleTextTranslations;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
-use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
-use Throwable;
 
 class Product extends Model
 {
+    use InvalidatesStaleTextTranslations;
+
     protected $fillable = [
+        'translations',
         'category_id', 'brand_id', 'canonical_key', 'product_type', 'status', 'slug',
         'title', 'model', 'description', 'confidence', 'is_active', 'is_featured',
         'sort_order', 'published_at',
@@ -22,6 +25,7 @@ class Product extends Model
     protected function casts(): array
     {
         return [
+            'translations' => 'array',
             'confidence' => 'decimal:4',
             'is_active' => 'boolean',
             'is_featured' => 'boolean',
@@ -31,12 +35,8 @@ class Product extends Model
 
     protected static function booted(): void
     {
-        static::deleting(function (Product $product): void {
-            try {
-                Storage::disk('public')->deleteDirectory("products/{$product->id}");
-            } catch (Throwable $exception) {
-                report($exception);
-            }
+        static::deleted(function (Product $product): void {
+            DeleteUnreferencedMedia::dispatch('public', "products/{$product->id}", (int) $product->id);
         });
 
         static::creating(function (Product $product): void {
@@ -92,10 +92,17 @@ class Product extends Model
 
     public function catalogMedia(): HasOne
     {
+        $selectedVariant = ProductVariant::query()->available()->select('id')
+            ->whereColumn('product_variants.product_id', 'product_media.product_id')
+            ->orderByDesc('is_default')->orderBy('id')->limit(1);
+
         return $this->hasOne(ProductMedia::class)
+            ->where('type', 'image')
             ->whereIn('verification_status', ['verified', 'source_verified', 'manual'])
+            ->where(fn (Builder $query) => $query->where('product_variant_id', $selectedVariant)->orWhereNull('product_variant_id'))
+            ->orderByRaw('product_media.product_variant_id IS NULL')
             ->orderByDesc('is_primary')
-            ->orderBy('sort_order');
+            ->orderBy('sort_order')->orderBy('id');
     }
 
     public function sources(): HasMany

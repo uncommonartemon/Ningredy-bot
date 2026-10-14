@@ -32,7 +32,8 @@ class AbandonGalleryTrainingAttempt implements Tool
             .'failures already visible in attempt_history) that further rounds will not succeed - e.g. a '
             .'download-layer problem no recipe change can fix, or materially different approaches already tried '
             .'without progress. This ends the whole training session for this URL, not just the current round - '
-            .'use only when confident, never as a first resort, and never merely because one round failed.';
+            .'use when evidence is conclusive, never merely because one round failed. Evidence already '
+            .'collected by a prior recipe execution can be enough; do not repeat paid rounds to prove it again.';
     }
 
     public function handle(Request $request): Stringable|string
@@ -41,7 +42,7 @@ class AbandonGalleryTrainingAttempt implements Tool
         throw_if($reason === '', RuntimeException::class, 'reason is required.');
         $reason = mb_substr($reason, 0, 1000);
         $failureKind = (string) $request->string('failure_kind', 'agent_abandoned');
-        $failureKind = in_array($failureKind, ['agent_abandoned', 'recipe_mismatch', 'dom_unusable'], true)
+        $failureKind = in_array($failureKind, ['agent_abandoned', 'recipe_mismatch', 'dom_unusable', 'source_frames_too_small', 'source_has_no_product_media'], true)
             ? $failureKind
             : 'agent_abandoned';
 
@@ -70,10 +71,15 @@ class AbandonGalleryTrainingAttempt implements Tool
             'reason' => $schema->string()->max(1000)->required()->description(
                 'Concrete evidence for why this URL cannot be trained further this session.',
             ),
-            'failure_kind' => $schema->string()->enum(['agent_abandoned', 'recipe_mismatch', 'dom_unusable'])
+            'failure_kind' => $schema->string()->enum(['agent_abandoned', 'recipe_mismatch', 'dom_unusable', 'source_frames_too_small', 'source_has_no_product_media'])
                 ->description(
                     'Defaults to agent_abandoned. Only override with recipe_mismatch/dom_unusable if that is a '
-                    .'more precise match for the evidence.',
+                    .'more precise match for the evidence. source_frames_too_small: photo_size_evidence shows the '
+                    .'photographs still below the minimum are at their real size - the page is not wrong and the '
+                    .'recipe is not blamed; the publishable ones are kept and the page is not trained again soon. '
+                    .'source_has_no_product_media: the inspected product gallery/viewer contains no product photographs '
+                    .'(for example only placeholders); this is a fact about this URL, not broken selectors. '
+                    .'An unloaded image, timeout, untried viewer or missing selector alone does not prove absence.',
                 ),
         ];
     }

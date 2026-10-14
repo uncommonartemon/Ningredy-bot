@@ -16,34 +16,34 @@ class TelegramUpdateInfolist
 
         return $schema
             ->components([
-                Section::make('Обновление')
+                Section::make(__('Обновление'))
                     ->schema([
                         TextEntry::make('update_id')->label('#')->numeric(),
                         TextEntry::make('chat_id')->label('Chat ID')->placeholder('—')->copyable(),
                         TextEntry::make('telegram_user_id')->label('Telegram user')->placeholder('—'),
-                        TextEntry::make('username')->label('Пользователь')->placeholder('—'),
+                        TextEntry::make('username')->label(__('Пользователь'))->placeholder('—'),
                         TextEntry::make('message_id')->label('Message ID')->numeric()->placeholder('—'),
                         TextEntry::make('status')
-                            ->label('Статус')
+                            ->label(__('Статус'))
                             ->badge()
                             ->formatStateUsing(fn (string $state): string => match ($state) {
-                                'processed' => 'Обработано',
-                                'received' => 'Получено',
-                                'failed' => 'Ошибка',
-                                'cancelled' => 'Отменено',
+                                'processed' => __('Обработано'),
+                                'received' => __('Получено'),
+                                'failed' => __('Ошибка'),
+                                'cancelled' => __('Отменено'),
                                 default => $state,
                             }),
-                        TextEntry::make('text')->label('Текст')->placeholder('—')->columnSpanFull(),
-                        TextEntry::make('reply_to_text')->label('В ответ на')->placeholder('—')->columnSpanFull(),
+                        TextEntry::make('text')->label(__('Текст'))->placeholder('—')->columnSpanFull(),
+                        TextEntry::make('reply_to_text')->label(__('В ответ на'))->placeholder('—')->columnSpanFull(),
                     ])
                     ->columns(4)
                     ->columnSpanFull(),
-                Section::make('Обработка')
+                Section::make(__('Обработка'))
                     ->schema([
-                        TextEntry::make('created_at')->label('Получено')->dateTime('d.m.Y H:i:s'),
-                        TextEntry::make('processed_at')->label('Обработано')->dateTime('d.m.Y H:i:s')->placeholder('—'),
-                        TextEntry::make('cancel_requested_at')->label('Запрошена отмена')->dateTime('d.m.Y H:i:s')->placeholder('—'),
-                        TextEntry::make('error')->label('Ошибка')->placeholder('—')->columnSpanFull(),
+                        TextEntry::make('created_at')->label(__('Получено'))->dateTime('d.m.Y H:i:s'),
+                        TextEntry::make('processed_at')->label(__('Обработано'))->dateTime('d.m.Y H:i:s')->placeholder('—'),
+                        TextEntry::make('cancel_requested_at')->label(__('Запрошена отмена'))->dateTime('d.m.Y H:i:s')->placeholder('—'),
+                        TextEntry::make('error')->label(__('Ошибка'))->placeholder('—')->columnSpanFull(),
                     ])
                     ->columns(3)
                     ->columnSpanFull(),

@@ -27,35 +27,35 @@ class ProductDraftsTable
             ->defaultSort('id', 'desc')
             ->columns([
                 ImageColumn::make('preview')
-                    ->label('Фото')
+                    ->label(__('Фото'))
                     ->state(fn (ProductDraft $record): ?string => $record->media->first()?->path)
                     ->disk('public')
                     ->square(),
                 TextColumn::make('id')->label('#')->sortable(),
-                TextColumn::make('title')->label('Название')->searchable()->sortable()->wrap(),
-                TextColumn::make('brand')->label('Бренд')->searchable(),
-                TextColumn::make('model')->label('Модель')->searchable()->toggleable(),
-                TextColumn::make('color')->label('Цвет')->toggleable(isToggledHiddenByDefault: true),
-                TextColumn::make('product_type')->label('Тип')->toggleable(isToggledHiddenByDefault: true),
-                TextColumn::make('category')->label('Категория')->toggleable(isToggledHiddenByDefault: true),
-                TextColumn::make('status')->label('Статус')->badge()->formatStateUsing(fn (string $state): string => match ($state) {
-                    'approved' => 'Подтверждён',
-                    'rejected' => 'Отклонён',
-                    default => 'Ожидает проверки',
+                TextColumn::make('title')->label(__('Название'))->searchable()->sortable()->wrap(),
+                TextColumn::make('brand')->label(__('Бренд'))->searchable(),
+                TextColumn::make('model')->label(__('Модель'))->searchable()->toggleable(),
+                TextColumn::make('color')->label(__('Цвет'))->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('product_type')->label(__('Тип'))->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('category')->label(__('Категория'))->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('status')->label(__('Статус'))->badge()->formatStateUsing(fn (string $state): string => match ($state) {
+                    'approved' => __('Подтверждён'),
+                    'rejected' => __('Отклонён'),
+                    default => __('Ожидает проверки'),
                 })->color(fn (string $state): string => match ($state) {
                     'approved' => 'success',
                     'rejected' => 'danger',
                     default => 'warning',
                 }),
-                TextColumn::make('media_count')->label('Фото')->badge()->sortable(),
+                TextColumn::make('media_count')->label(__('Фото'))->badge()->sortable(),
                 TextColumn::make('gallery_status')
-                    ->label('Галерея')
+                    ->label(__('Галерея'))
                     ->badge()
                     ->formatStateUsing(fn (?string $state): string => match ($state) {
-                        'complete' => 'Полная',
-                        'partial' => 'Частичная',
-                        'missing' => 'Не найдена',
-                        default => 'Ожидание',
+                        'complete' => __('Полная'),
+                        'partial' => __('Частичная'),
+                        'missing' => __('Не найдена'),
+                        default => __('Ожидание'),
                     })
                     ->color(fn (?string $state): string => match ($state) {
                         'complete' => 'success',
@@ -64,30 +64,30 @@ class ProductDraftsTable
                         default => 'gray',
                     }),
                 TextColumn::make('gallery_search_stop_reason')
-                    ->label('Причина остановки')
+                    ->label(__('Причина остановки'))
                     ->formatStateUsing(fn (?string $state): string => match ($state) {
-                        'cost_budget' => 'Денежный лимит',
-                        'time_budget' => 'Временной лимит',
-                        'exhausted' => 'Источники исчерпаны',
-                        'specifications_unreconciled' => 'Характеристики не сверены',
+                        'cost_budget' => __('Денежный лимит'),
+                        'time_budget' => __('Временной лимит'),
+                        'exhausted' => __('Источники исчерпаны'),
+                        'specifications_unreconciled' => __('Характеристики не сверены'),
                         default => '—',
                     })
                     ->toggleable(),
                 TextColumn::make('primary_source_url')
-                    ->label('Источник')
+                    ->label(__('Источник'))
                     ->formatStateUsing(fn (?string $state): string => $state ? (parse_url($state, PHP_URL_HOST) ?: $state) : '—')
                     ->toggleable(),
                 TextColumn::make('confidence')->label('AI')->numeric(decimalPlaces: 2)->sortable()->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('requested_by_telegram_user_id')->label('Telegram user')->toggleable(isToggledHiddenByDefault: true),
-                TextColumn::make('product.id')->label('Товар')->formatStateUsing(fn ($state): string => $state ? "#{$state}" : '—')->toggleable(isToggledHiddenByDefault: true),
-                TextColumn::make('created_at')->label('Создан')->dateTime('d.m.Y H:i')->sortable(),
-                TextColumn::make('reviewed_at')->label('Проверен')->dateTime('d.m.Y H:i')->sortable()->placeholder('—')->toggleable(),
+                TextColumn::make('product.id')->label(__('Товар'))->formatStateUsing(fn ($state): string => $state ? "#{$state}" : '—')->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('created_at')->label(__('Создан'))->dateTime('d.m.Y H:i')->sortable(),
+                TextColumn::make('reviewed_at')->label(__('Проверен'))->dateTime('d.m.Y H:i')->sortable()->placeholder('—')->toggleable(),
             ])
             ->filters([
-                SelectFilter::make('status')->label('Статус')->options([
-                    'pending_review' => 'Ожидает проверки',
-                    'approved' => 'Подтверждён',
-                    'rejected' => 'Отклонён',
+                SelectFilter::make('status')->label(__('Статус'))->options([
+                    'pending_review' => __('Ожидает проверки'),
+                    'approved' => __('Подтверждён'),
+                    'rejected' => __('Отклонён'),
                 ]),
                 Filter::make('telegram_update_id')
                     ->schema([TextInput::make('value')->label('Telegram update ID')])
@@ -98,7 +98,7 @@ class ProductDraftsTable
             ])
             ->recordActions([
                 Action::make('approve')
-                    ->label('Апрув')
+                    ->label(__('Апрув'))
                     ->icon('heroicon-o-check-circle')
                     ->color('success')
                     ->requiresConfirmation()
@@ -107,28 +107,40 @@ class ProductDraftsTable
                         || self::specificationsUnreconciled($record))
                     ->tooltip(function (ProductDraft $record): ?string {
                         if (! $record->media()->exists()) {
-                            return 'Нельзя опубликовать черновик без пригодных фото.';
+                            return __('Нельзя опубликовать черновик без пригодных фото.');
                         }
 
                         return self::specificationsUnreconciled($record)
-                            ? 'Характеристики ещё не сверены с источником выбранных фото.'
+                            ? __('Характеристики ещё не сверены с источником выбранных фото.')
                             : null;
                     })
                     ->action(function (ProductDraft $record): void {
-                        app(ProductDraftWorkflow::class)->approve($record, auth()->user());
-                        Notification::make()->title('Черновик опубликован как товар')->success()->send();
+                        try {
+                            app(ProductDraftWorkflow::class)->approve($record, auth()->user());
+                        } catch (\RuntimeException $exception) {
+                            Notification::make()->title(__('Не удалось подтвердить черновик'))->body($exception->getMessage())->warning()->send();
+
+                            return;
+                        }
+                        Notification::make()->title(__('Черновик опубликован как товар'))->success()->send();
                     }),
                 Action::make('reject')
-                    ->label('Отклонить')
+                    ->label(__('Отклонить'))
                     ->icon('heroicon-o-x-circle')
                     ->color('danger')
                     ->schema([
-                        Textarea::make('reason')->label('Причина')->rows(3),
+                        Textarea::make('reason')->label(__('Причина'))->rows(3),
                     ])
                     ->visible(fn (ProductDraft $record): bool => $record->status === 'pending_review')
                     ->action(function (ProductDraft $record, array $data): void {
-                        app(ProductDraftWorkflow::class)->reject($record, auth()->user(), reason: $data['reason'] ?? null);
-                        Notification::make()->title('Черновик отклонён')->danger()->send();
+                        try {
+                            app(ProductDraftWorkflow::class)->reject($record, auth()->user(), reason: $data['reason'] ?? null);
+                        } catch (\RuntimeException $exception) {
+                            Notification::make()->title(__('Черновик уже обработан'))->body($exception->getMessage())->warning()->send();
+
+                            return;
+                        }
+                        Notification::make()->title(__('Черновик отклонён'))->danger()->send();
                     }),
                 ViewAction::make(),
                 ActionGroup::make([

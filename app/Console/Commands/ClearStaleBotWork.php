@@ -2,6 +2,15 @@
 
 namespace App\Console\Commands;
 
+use App\Jobs\ContinueDraftGallerySearch;
+use App\Jobs\ProcessDraftPhotoActions;
+use App\Jobs\ProcessTelegramMessage;
+use App\Jobs\RestageDraftGalleryPhotos;
+use App\Jobs\TopUpDraftGalleryPhotos;
+use App\Jobs\TrainDraftGalleryRecipe;
+use App\Jobs\TrainProductGalleryRecipe;
+use App\Jobs\TranscribeTelegramPhoto;
+use App\Jobs\TranscribeTelegramVoice;
 use App\Models\TelegramUpdate;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
@@ -24,7 +33,7 @@ class ClearStaleBotWork extends Command
 {
     protected $signature = 'bot:clear-stale';
 
-    protected $description = 'Drop queued jobs and cancel in-flight requests left behind by a previous run.';
+    protected $description = 'Cancel stale interactive work, preserving catalog writes and unrelated queued jobs.';
 
     /** How recent application activity has to be to mean another bot is running. */
     private const ALIVE_WITHIN_SECONDS = 120;
@@ -46,10 +55,30 @@ class ClearStaleBotWork extends Command
             return self::SUCCESS;
         }
 
-        $jobs = Schema::hasTable('jobs') ? DB::table('jobs')->count() : 0;
-
-        if ($jobs > 0) {
-            DB::table('jobs')->delete();
+        $jobs = 0;
+        if (Schema::hasTable('jobs')) {
+            // Cancel interactive work, not durable catalog writes. In particular
+            // StoreProductImages must survive a restart after draft approval.
+            DB::table('jobs')->orderBy('id')->chunkById(100, function ($rows) use (&$jobs): void {
+                foreach ($rows as $row) {
+                    $payload = json_decode($row->payload, true);
+                    $class = is_array($payload) ? data_get($payload, 'data.commandName') : null;
+                    $interactive = [
+                        ProcessTelegramMessage::class,
+                        TranscribeTelegramPhoto::class,
+                        TranscribeTelegramVoice::class,
+                        ContinueDraftGallerySearch::class,
+                        TrainDraftGalleryRecipe::class,
+                        TrainProductGalleryRecipe::class,
+                        TopUpDraftGalleryPhotos::class,
+                        RestageDraftGalleryPhotos::class,
+                        ProcessDraftPhotoActions::class,
+                    ];
+                    if (in_array($class, $interactive, true)) {
+                        $jobs += DB::table('jobs')->where('id', $row->id)->delete();
+                    }
+                }
+            });
         }
 
         // Only updates that never reached a terminal state: a finished request

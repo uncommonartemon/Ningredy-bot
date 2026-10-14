@@ -3,15 +3,22 @@
 namespace App\Services\Products;
 
 use App\Ai\Agents\ProductImageDiscoveryAgent;
+use App\Exceptions\ProductSearchCancelled;
 use App\Models\AiRun;
 use App\Models\Category;
 use App\Models\ProductDraft;
+use App\Models\ProductSourceAttempt;
 use App\Services\Ai\AiErrorPresenter;
 use App\Services\Ai\AiSettings;
 use App\Services\Ai\OpenAiHeavyOperationGate;
+use App\Services\Ai\ProductSearchCancellation;
 use App\Services\Ai\ProductSearchTimeBudget;
+use App\Services\Photos\ImageUrls;
+use App\Services\ProductSearch\Discovery\DiscoveryRecoveryState;
+use App\Services\ProductSearch\Discovery\DiscoveryResponseParser;
+use App\Services\ProductSearch\Discovery\InvalidDiscoveryResponse;
+use App\Services\ProductSearch\Recovery\RecoveryContext;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\Validator;
 use Throwable;
 
 class ProductImageCandidateDiscovery
@@ -38,17 +45,21 @@ class ProductImageCandidateDiscovery
         private readonly AiErrorPresenter $errors,
         private readonly ProductIdentityMatcher $identityMatcher,
         private readonly ProductSourceAttemptRecorder $attempts,
+        private readonly ProductSourceIdentityJudge $identityJudge,
+        private readonly ProductGalleryRecipeRouter $recipeRouter,
+        private readonly DiscoveryResponseParser $responseParser,
+        private readonly DiscoveryRecoveryState $recovery,
     ) {}
 
     public function sourcePageForImage(string $imageUrl): ?string
     {
-        return $this->sourcePagesByImageUrl[ProductImageStorage::normalizeCandidateUrl($imageUrl)] ?? null;
+        return $this->sourcePagesByImageUrl[ImageUrls::normalizeCandidateUrl($imageUrl)] ?? null;
     }
 
     /** @return array<string, mixed>|null */
     public function sourceContextForImage(string $imageUrl): ?array
     {
-        return $this->sourceContextsByImageUrl[ProductImageStorage::normalizeCandidateUrl($imageUrl)] ?? null;
+        return $this->sourceContextsByImageUrl[ImageUrls::normalizeCandidateUrl($imageUrl)] ?? null;
     }
 
     public function hasTerminalFailure(): bool
@@ -73,14 +84,16 @@ class ProductImageCandidateDiscovery
         // measure time budget and AI-cost attribution against a search that
         // already ended, making canStart() report zero time left immediately.
         $telegramUpdateId ??= $draft->telegram_update_id;
+        app(ProductSearchCancellation::class)->throwIfCancelled($telegramUpdateId);
         $searchKey = $draft->id.':'.$telegramUpdateId;
+        $this->recovery->begin($searchKey);
         if ($this->pendingSearchKey !== $searchKey) {
             $this->pendingSources = [];
             $this->pendingSearchKey = $searchKey;
         }
         $this->sourcePagesByImageUrl = [];
         $this->sourceContextsByImageUrl = [];
-        $this->terminalFailure = false;
+        $this->terminalFailure = $this->recovery->stopped();
         $this->yieldedGallery = false;
         $excludedUrls = collect($excludedUrls)
             ->filter(fn (mixed $url): bool => is_string($url) && $url !== '')
@@ -106,14 +119,14 @@ class ProductImageCandidateDiscovery
         if ($this->pendingSources !== []) {
             $pending = array_values(array_filter(
                 $this->pendingSources,
-                fn (array $source): bool => ! $this->sourceExcluded((string) ($source['url'] ?? ''), $pendingExcludedSourceUrls),
+                fn (array $source): bool => ! $this->pendingSourceExcluded((string) ($source['url'] ?? ''), $pendingExcludedSourceUrls),
             ));
             $this->pendingSources = [];
             if ($pending !== []) {
                 // No new paid Web Search until its already found pages have
                 // had a chance. The caller still performs download and Vision.
                 return $this->withoutExcluded(
-                    $this->resolveSourcesIndividually($pending, $draft, $progress, $telegramUpdateId),
+                    $this->resolveSourcesIndividually($pending, $draft, $progress, $telegramUpdateId, sourcesAlreadyQueued: true),
                     $excludedUrls,
                 );
             }
@@ -154,6 +167,10 @@ class ProductImageCandidateDiscovery
         $settings = app(AiSettings::class);
         $timeBudget = app(ProductSearchTimeBudget::class);
 
+        if ($this->recovery->stopped()) {
+            return $availableUrls;
+        }
+
         if (! $timeBudget->canStart($telegramUpdateId, 30)) {
             $progress?->__invoke('Резерв времени достигнут: дополнительный AI-поиск источников пропущен, сохраняю уже полученный результат.');
 
@@ -166,13 +183,21 @@ class ProductImageCandidateDiscovery
         );
         $provider = $settings->providerFor('product_image_discovery');
         $model = $settings->modelFor('product_image_discovery');
-        $prompt = $this->prompt($draft, $excludedUrls, $excludedSourceUrls, $searchAttempt);
+        $prompt = $this->prompt($draft, $excludedUrls, $excludedSourceUrls, $searchAttempt, $telegramUpdateId);
+        // History changes after an answer; that must not invalidate delivery
+        // retries of the same pass. A new autonomous pass has a new attempt id.
+        $cacheKey = hash('sha256', json_encode([
+            $draft->id, $draft->title, $draft->brand, $draft->model, $draft->color,
+            $draft->specifications, $draft->primary_source_url, $draft->gallery_search_stop_reason,
+            $excludedUrls, $excludedSourceUrls, $searchAttempt, $this->recovery->promptFeedback(),
+            data_get(\App\Models\TelegramUpdate::query()->find($telegramUpdateId)?->payload, '_product_search_started_at'),
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
         $cached = AiRun::query()
             ->where('telegram_update_id', $telegramUpdateId)
             ->where('provider', $provider)
             ->where('model', $model)
             ->where('status', 'completed')
-            ->where('prompt', $prompt)
+            ->where('activity->discovery_cache_key', $cacheKey)
             ->latest('id')
             ->first();
 
@@ -189,89 +214,89 @@ class ProductImageCandidateDiscovery
             'model' => $model,
             'status' => 'running',
             'prompt' => $prompt,
+            'activity' => ['discovery_cache_key' => $cacheKey],
             'started_at' => now(),
         ]);
+        $webSearchItems = [];
 
         try {
             $response = app(OpenAiHeavyOperationGate::class)->run(
                 $provider,
                 $discoveryTimeout,
-                fn () => ProductImageDiscoveryAgent::make()->prompt(
-                    $prompt,
-                    provider: $provider,
-                    model: $model,
-                    timeout: $discoveryTimeout,
-                ),
+                function () use ($telegramUpdateId, $prompt, $provider, $model, $discoveryTimeout, $settings, &$webSearchItems) {
+                    app(ProductSearchCancellation::class)->throwIfCancelled($telegramUpdateId);
+
+                    return app(\App\Services\Ai\StreamingProductResearch::class)->prompt(
+                        ProductImageDiscoveryAgent::make(), $prompt, $provider, $model, $discoveryTimeout,
+                        min($discoveryTimeout, $settings->productResearchIdleTimeoutSeconds()),
+                        function ($event) use (&$webSearchItems, $telegramUpdateId): void {
+                            if ($event instanceof \Laravel\Ai\Streaming\Events\ProviderToolEvent
+                                && $event->type === 'web_search_call' && $event->itemId !== '') {
+                                $webSearchItems[$event->itemId] = $event->data;
+                            }
+                            app(ProductSearchCancellation::class)->throwIfCancelled($telegramUpdateId);
+                        },
+                    );
+                },
             );
-            $normalizedResponse = $response->toArray();
-
-            foreach (['image_urls', 'page_urls'] as $urlField) {
-                $candidates = collect($normalizedResponse[$urlField] ?? [])
-                    ->filter(fn (mixed $url): bool => is_string($url))
-                    ->map(fn (string $url): string => trim($url))
-                    ->filter(fn (string $url): bool => mb_strlen($url) <= 2048
-                        && filter_var($url, FILTER_VALIDATE_URL) !== false
-                        && in_array(parse_url($url, PHP_URL_SCHEME), ['http', 'https'], true));
-
-                // Only image_urls can be two renditions of one photo (Scene7
-                // wid/hei, $PRESET$, ...) - page_urls are product page links,
-                // where that CDN-size normalization doesn't apply.
-                if ($urlField === 'image_urls') {
-                    $candidates = $candidates->map(fn (string $url): string => ProductImageStorage::normalizeCandidateUrl($url));
-                }
-
-                $normalizedResponse[$urlField] = $candidates->unique()->take(12)->values()->all();
-            }
-
-            $normalizedResponse['sources'] = collect($normalizedResponse['sources'] ?? [])
-                ->filter(fn (mixed $source): bool => is_array($source))
-                ->map(function (array $source): array {
-                    $pageUrl = is_string($source['page_url'] ?? null) ? trim($source['page_url']) : '';
-                    $imageUrls = collect($source['image_urls'] ?? [])
-                        ->filter(fn (mixed $url): bool => is_string($url))
-                        ->map(fn (string $url): string => trim($url))
-                        ->filter(fn (string $url): bool => mb_strlen($url) <= 2048
-                            && filter_var($url, FILTER_VALIDATE_URL) !== false
-                            && in_array(parse_url($url, PHP_URL_SCHEME), ['http', 'https'], true))
-                        ->map(fn (string $url): string => ProductImageStorage::normalizeCandidateUrl($url))
-                        ->unique()
-                        ->take(12)
-                        ->values()
-                        ->all();
-
-                    return ['page_url' => $pageUrl, 'image_urls' => $imageUrls];
-                })
-                ->filter(fn (array $source): bool => filter_var($source['page_url'], FILTER_VALIDATE_URL) !== false
-                    && in_array(parse_url($source['page_url'], PHP_URL_SCHEME), ['http', 'https'], true))
-                ->unique('page_url')
-                ->take(8)
-                ->values()
-                ->all();
-
-            $data = Validator::make($normalizedResponse, [
-                'sources' => ['sometimes', 'array', 'max:8'],
-                'sources.*.page_url' => ['required', 'url:http,https', 'max:2048'],
-                'sources.*.image_urls' => ['present', 'array', 'max:12'],
-                'sources.*.image_urls.*' => ['url:http,https', 'max:2048'],
-                'image_urls' => ['present', 'array', 'max:12'],
-                'image_urls.*' => ['url:http,https', 'max:2048'],
-                'page_urls' => ['present', 'array', 'max:12'],
-                'page_urls.*' => ['url:http,https', 'max:2048'],
-            ])->validate();
+            // Persist measured usage even when parsing fails. An invalid
+            // answer is paid work, not a successful empty result or free retry.
+            $run->update([
+                'invocation_id' => $response->invocationId,
+                'response' => $response->toArray(),
+                'usage' => [...$response->usage->toArray(), 'web_search_calls' => count($webSearchItems)],
+                'activity' => [
+                    'discovery_cache_key' => $cacheKey,
+                    'response_text' => mb_substr($response->text, 0, 6000),
+                    'provider_meta' => $response->meta->toArray(),
+                    'provider_web_search_items' => $webSearchItems,
+                ],
+            ]);
+            app(ProductSearchCancellation::class)->throwIfCancelled($telegramUpdateId);
+            $data = $this->responseParser->parse($response->toArray());
             $run->update([
                 'invocation_id' => $response->invocationId,
                 'status' => 'completed',
                 'response' => $data,
-                'usage' => $response->usage->toArray(),
+                'usage' => [...$response->usage->toArray(), 'web_search_calls' => count($webSearchItems)],
                 'completed_at' => now(),
             ]);
 
-            return $this->withoutExcluded($this->sourcePriority->sortUrls([
+            $resolved = $this->withoutExcluded($this->sourcePriority->sortUrls([
                 ...$availableUrls,
                 ...$this->candidateUrls($data, $draft, $sources, $progress, $telegramUpdateId, $excludedSourceUrls),
             ], $draft->brand, $sources), $excludedUrls);
+            $this->recovery->succeeded();
+
+            return $resolved;
+        } catch (ProductSearchCancelled $exception) {
+            $run->update(['status' => 'cancelled', 'error' => $exception->getMessage(), 'completed_at' => now()]);
+            throw $exception;
         } catch (Throwable $exception) {
+            if ($exception instanceof \App\Services\ProductSearch\Research\InvalidResearchResponse
+                && $exception->usage !== null) {
+                $run->update(['usage' => [...$exception->usage, 'web_search_calls' => count($webSearchItems)]]);
+            }
             $presented = $this->errors->present($exception);
+            if (! $exception instanceof InvalidDiscoveryResponse
+                && ($presented['kind'] ?? '') === 'unknown') {
+                $recovery = new RecoveryContext('image_discovery', 'operation_failed',
+                    mb_substr($exception->getMessage(), 0, 2000),
+                    ['web_search', 'return_source_candidates'], ['image_urls' => $availableUrls],
+                    ['exception_type' => $exception::class]);
+                $presented['retryable'] = $this->recovery->failedOperation($recovery);
+                $presented['message'] = $presented['retryable']
+                    ? 'Дополнительный поиск прервался; передаю причину агенту для исправления в пределах бюджета.'
+                    : 'Попытка исправления повторила сбой без результата; найденное сохранено.';
+                $run->update(['activity' => [...($run->activity ?? []), 'recovery' => $recovery->toArray()]]);
+            }
+            if ($exception instanceof InvalidDiscoveryResponse) {
+                $retryable = $this->recovery->failed($exception);
+                $presented = ['retryable' => $retryable, 'message' => $retryable
+                    ? 'Модель не вернула корректный список источников; передаю причину для исправления ответа.'
+                    : 'Модель повторила ту же ошибку ответа без результата; найденное сохранено, одинаковый запрос больше не повторяю.'];
+                $run->update(['activity' => [...($run->activity ?? []), 'response_failure' => $exception->reason]]);
+            }
             $this->terminalFailure = ! ($presented['retryable'] ?? false);
             $run->update([
                 'status' => 'failed',
@@ -285,7 +310,9 @@ class ProductImageCandidateDiscovery
             ]);
             $progress?->__invoke($this->terminalFailure
                 ? 'Дополнительный AI-поиск остановлен: '.($presented['message'] ?? $exception->getMessage())
-                : 'Дополнительный AI-поиск временно недоступен; сохраняю текущий результат.');
+                : ($exception instanceof InvalidDiscoveryResponse
+                    ? $presented['message']
+                    : 'Дополнительный AI-поиск временно недоступен; сохраняю текущий результат.'));
 
             return $availableUrls;
         }
@@ -385,7 +412,7 @@ class ProductImageCandidateDiscovery
     }
 
     /** @param array<int, string> $excludedUrls @param array<int, string> $excludedSourceUrls */
-    private function prompt(ProductDraft $draft, array $excludedUrls = [], array $excludedSourceUrls = [], int $searchAttempt = 0): string
+    private function prompt(ProductDraft $draft, array $excludedUrls = [], array $excludedSourceUrls = [], int $searchAttempt = 0, ?int $telegramUpdateId = null): string
     {
         $specifications = collect($draft->specifications ?? [])
             ->map(fn (mixed $item): string => is_array($item)
@@ -404,15 +431,52 @@ class ProductImageCandidateDiscovery
         $attemptInstruction = $searchAttempt > 0
             ? "Independent fallback search pass: {$searchAttempt}. Return new sources not excluded above."
             : '';
+        $recoveryInstruction = $this->recovery->promptFeedback();
+        $originalRequest = ProductRequestContext::forDraft($draft)->originalRequest() ?? '';
+        $searchHistory = AiRun::query()->where('telegram_update_id', $telegramUpdateId ?? $draft->telegram_update_id)
+            ->where('prompt', 'like', '%[product-image-discovery:%')
+            ->whereIn('status', ['completed', 'failed'])->latest('id')->limit(8)->get()
+            ->map(fn (AiRun $run): array => [
+                'run_id' => $run->id, 'status' => $run->status,
+                'queries_tried' => $run->response['queries_tried'] ?? [],
+                'returned_page_urls' => collect($run->response['sources'] ?? [])->pluck('page_url')
+                    ->merge($run->response['page_urls'] ?? [])->filter()->take(12)->values()->all(),
+                'returned_image_count' => collect($run->response['image_urls'] ?? [])->count(),
+                'error' => $run->error ? mb_substr($run->error, 0, 350) : null,
+            ])->reverse()->values()->all();
+        $sourceHistory = ProductSourceAttempt::query()->where('product_draft_id', $draft->id)
+            ->where(function ($query): void {
+                $query->whereIn('status', ['failed', 'blocked', 'interrupted'])
+                    ->orWhereIn('decision', ['blocked', 'http_403', 'unconfirmed_access_gate'])
+                    ->orWhere('decision', 'like', 'reject_%');
+            })
+            ->whereIn('phase', ['gallery_preflight', 'source_selection', 'source_resolution', 'image_verification'])
+            ->latest('id')->limit(15)->get(['product_url', 'action', 'status', 'decision'])
+            ->toArray();
+        $searchJournal = json_encode(['previous_search_results' => $searchHistory, 'previous_source_failures' => $sourceHistory],
+            JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        $cardRecovery = $draft->reconciliationPending()
+            ? ProductSourceAttempt::where('product_draft_id', $draft->id)
+                ->where('action', 'recover_with_another_source')->latest('id')->first()
+            : null;
+        $cardRecoveryInstruction = $cardRecovery ? json_encode([
+            'stage' => 'card_assembly_recovery',
+            'original_operator_request' => ProductRequestContext::forDraft($draft)->originalRequest(),
+            'failed_source_url' => $cardRecovery->product_url,
+            'failure_context' => data_get($cardRecovery->output, 'failure_context'),
+            'saved_photo_count' => data_get($cardRecovery->output, 'saved_file_count'),
+            'next_action' => 'Find another product page that supports a coherent card and gallery. Preserve the operator requirements; an inferred research offer is not an additional operator requirement. Do not retry excluded pages.',
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) : '';
 
         return <<<PROMPT
-            [product-image-discovery:v8]
+            [product-image-discovery:v9]
             Find current, downloadable professional catalog image candidates for this exact product:
             Title: {$draft->title}
             Brand: {$draft->brand}
             Exact model: {$draft->model}
             Required color/version: {$draft->color}
             Identifying specifications: {$specifications}
+            Original operator requirements: {$originalRequest}
             Already known product pages:
             {$knownPages}
             Previously rejected image URLs that must not be returned again:
@@ -420,6 +484,16 @@ class ProductImageCandidateDiscovery
             Previously rejected source pages/domains that must not be searched again:
             {$excludedSources}
             {$attemptInstruction}
+            {$recoveryInstruction}
+            {$cardRecoveryInstruction}
+            Persistent history from this same search, including earlier queue jobs:
+            {$searchJournal}
+            Empty previous results are feedback: change your search queries, retailer, language or market instead
+            of repeating the same unsuccessful approach. Previously blocked sources need a concrete new access
+            method before another visit. Requirements stated by the operator remain mandatory. Research-inferred
+            regional codes are not extra operator requirements: if another coherent offer satisfies the original
+            request, return its exact page for explicit identity validation and whole-card offer adoption; never
+            silently label another offer's photos as the current offer. Do not invent missing query history or URLs.
 
             Search the exact model and required color/version using professional manufacturer, retailer, or marketplace
             product pages. Do not prefer a source by its type; extraction history is ranked by the application. Never use
@@ -447,6 +521,40 @@ class ProductImageCandidateDiscovery
                 $host,
                 ProductSourcePriority::host($excluded),
             ));
+    }
+
+    /**
+     * A failed page does not exhaust other pages already found on its store.
+     * Bare domain exclusions still apply to every pending page of that host.
+     *
+     * @param  array<int, string>  $excludedSourceUrls
+     */
+    private function pendingSourceExcluded(string $url, array $excludedSourceUrls): bool
+    {
+        $host = ProductSourcePriority::host($url);
+        if ($host === '' || $this->recipeRouter->domainIsBlocked($url)) {
+            return true;
+        }
+
+        foreach ($excludedSourceUrls as $excluded) {
+            if (parse_url($excluded, PHP_URL_HOST) === null) {
+                $excluded = 'https://'.$excluded;
+            }
+            $excludedHost = ProductSourcePriority::host($excluded);
+            $excludedPath = rtrim((string) parse_url($excluded, PHP_URL_PATH), '/');
+            $excludedQuery = (string) parse_url($excluded, PHP_URL_QUERY);
+            if ($excludedPath === '' && $excludedQuery === '') {
+                if (ProductSourcePriority::hostsMatch($host, $excludedHost)) {
+                    return true;
+                }
+            } elseif ($host === $excludedHost
+                && rtrim((string) parse_url($url, PHP_URL_PATH), '/') === $excludedPath
+                && (string) parse_url($url, PHP_URL_QUERY) === $excludedQuery) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /** @param array<int, string> $urls @param array<int, string> $excludedUrls @return array<int, string> */
@@ -489,7 +597,7 @@ class ProductImageCandidateDiscovery
                 return collect($source['image_urls'] ?? [])
                     ->filter(fn (mixed $url): bool => is_string($url))
                     ->each(function (string $url) use ($pageUrl): void {
-                        $key = ProductImageStorage::normalizeCandidateUrl($url);
+                        $key = ImageUrls::normalizeCandidateUrl($url);
                         $this->sourcePagesByImageUrl[$key] = $pageUrl;
                         $this->sourceContextsByImageUrl[$key] = ['url' => $pageUrl];
                     })
@@ -527,7 +635,7 @@ class ProductImageCandidateDiscovery
      * @param  array<int, array<string, mixed>>  $sources
      * @return array<int, string>
      */
-    private function resolveSourcesIndividually(array $sources, ProductDraft $draft, ?callable $progress = null, ?int $telegramUpdateId = null): array
+    private function resolveSourcesIndividually(array $sources, ProductDraft $draft, ?callable $progress = null, ?int $telegramUpdateId = null, bool $sourcesAlreadyQueued = false): array
     {
         $telegramUpdateId ??= $draft->telegram_update_id;
         $resolved = [];
@@ -538,6 +646,15 @@ class ProductImageCandidateDiscovery
         $minimumVerifiedImages = $category?->minimumVerifiedImages() ?? 3;
         $activeRecipeOnly = $categoryStrategy === Category::GALLERY_SEARCH_VISION_FIRST;
         $resolveLimit = (int) config('product-images.resolve_limit', 16);
+
+        if (! $sourcesAlreadyQueued) {
+            $sources = array_map(fn (array $source): array => [
+                ...$source,
+                '_preflight_active_recipe' => $this->recipeRouter->activeRecipeForUrl((string) ($source['url'] ?? '')) !== null,
+                '_preflight_known_recipe_domain' => $this->recipeRouter->domainHasActiveRecipe((string) ($source['url'] ?? '')),
+            ], $sources);
+            $sources = $this->sourcePriority->reuseFirstQueue($sources, $activeRecipeOnly);
+        }
 
         foreach (array_values($sources) as $sourceIndex => $source) {
             $pageUrl = is_string($source['url'] ?? null) ? $source['url'] : null;
@@ -595,19 +712,43 @@ class ProductImageCandidateDiscovery
                 continue;
             }
 
+            // A family fragment is not an exact configuration. The main
+            // source loop already asks this judge; fallback must not spend
+            // minutes training a conflicting retail variant before asking.
+            // Silence/uncertainty still allows the browser to gather evidence.
+            if ($preflightEvidence !== null
+                && ! $this->identityMatcher->confirmsExactIdentifier($draft, $preflightEvidence)
+                && $this->identityJudge->judge($draft, $preflightEvidence, $telegramUpdateId) === 'conflicting') {
+                $this->attempts->record([
+                    'telegram_update_id' => $telegramUpdateId, 'product_draft_id' => $draft->id,
+                    'product_url' => $pageUrl, 'actor' => 'identity_validator', 'phase' => 'source_selection',
+                    'action' => 'validate_discovery_page_identity', 'status' => 'failed',
+                    'decision' => 'reject_conflicting_identifier_before_browser',
+                    'output' => ['method' => 'ai_judge', 'source_evidence' => $preflightEvidence],
+                ]);
+                $progress?->__invoke('Источник пропущен до обучения: проверка страницы выявила другую комплектацию · '.$pageUrl);
+
+                continue;
+            }
+
             $pageImages = $progress
                 ? $this->resolver->resolve(
                     [$source],
                     $resolveLimit,
                     fn (string $level, string $message) => $progress($message),
                     $telegramUpdateId,
-                    activeRecipeOnly: $activeRecipeOnly,
+                    activeRecipeOnly: $activeRecipeOnly || (bool) ($source['_reuse_only'] ?? false),
                 )
                 : $this->resolver->resolve(
-                    [$source], $resolveLimit, telegramUpdateId: $telegramUpdateId, activeRecipeOnly: $activeRecipeOnly
+                    [$source], $resolveLimit, telegramUpdateId: $telegramUpdateId,
+                    activeRecipeOnly: $activeRecipeOnly || (bool) ($source['_reuse_only'] ?? false),
                 );
 
-            $runtimeContext = collect($pageImages)
+            if ($pageImages === []) {
+                continue;
+            }
+
+            $runtimeContext = $this->resolver->sourceContextForPage($pageUrl) ?? collect($pageImages)
                 ->map(fn (string $imageUrl): ?array => $this->resolver->sourceContextForImage($imageUrl))
                 ->first(fn (mixed $context): bool => is_array($context));
             // Some stores use opaque/numeric product URLs and the browser
@@ -620,9 +761,12 @@ class ProductImageCandidateDiscovery
                 ? $runtimeContext['url']
                 : $pageUrl;
             $runtimeContext = [...$runtimeContext, 'url' => $finalPageUrl];
-            $identityRejected = $this->identityMatcher->conflictsSource($draft, $runtimeContext)
-                || ($this->identityMatcher->requiresExactIdentifier($draft)
-                    && ! $this->identityMatcher->supportsSource($draft, $runtimeContext));
+            // A shared family fragment ranks a candidate; it does not prove
+            // the requested retail variant. Missing evidence goes to the same
+            // judge as the main queue, and is not itself a contradiction.
+            $identityVerdict = app(ProductSourceIdentityGate::class)->assess($draft, $runtimeContext, $telegramUpdateId);
+            $identityRejected = $identityVerdict === 'conflicting'
+                || ($identityVerdict === 'uncertain' && $this->identityMatcher->requiresExactIdentifier($draft));
 
             if ($identityRejected) {
                 $this->attempts->record([
@@ -633,9 +777,9 @@ class ProductImageCandidateDiscovery
                     'phase' => 'source_selection',
                     'action' => 'validate_discovery_runtime_identity',
                     'status' => 'failed',
-                    'decision' => 'reject_runtime_identifier_mismatch',
+                    'decision' => $identityVerdict === 'conflicting' ? 'reject_runtime_identifier_mismatch' : 'reject_unconfirmed_identifier',
                     'input' => ['requested_url' => $pageUrl],
-                    'output' => ['final_source_context' => $runtimeContext],
+                    'output' => ['final_source_context' => $runtimeContext, 'identity_verdict' => $identityVerdict],
                 ]);
                 $progress?->__invoke('Страница резервного поиска пропущена после открытия: конечная карточка не подтверждает точную модель/SKU · '.$finalPageUrl);
 
@@ -643,7 +787,7 @@ class ProductImageCandidateDiscovery
             }
 
             foreach ($pageImages as $imageUrl) {
-                $key = ProductImageStorage::normalizeCandidateUrl($imageUrl);
+                $key = ImageUrls::normalizeCandidateUrl($imageUrl);
                 $context = $this->resolver->sourceContextForImage($imageUrl) ?? $runtimeContext;
                 $finalPageUrl = is_string($context['url'] ?? null) ? $context['url'] : $pageUrl;
                 $this->sourcePagesByImageUrl[$key] = $finalPageUrl;
@@ -699,6 +843,9 @@ class ProductImageCandidateDiscovery
         return [
             ...$source,
             'url' => (string) ($preflight['final_url'] ?? $source['url']),
+            // The actual title is already part of identity_evidence. A stale
+            // search title must not confirm a code absent from the real page.
+            'title' => null,
             '_preflight_identity_evidence' => $evidence,
             '_preflight_specification_text' => trim((string) ($preflight['specification_text'] ?? '')),
         ];
@@ -715,7 +862,7 @@ class ProductImageCandidateDiscovery
         $kept = collect($urls)
             ->values()
             ->map(function (string $url, int $index): array {
-                $key = ProductImageStorage::normalizeCandidateUrl($url);
+                $key = ImageUrls::normalizeCandidateUrl($url);
                 $pageUrl = $this->sourceContextsByImageUrl[$key]['url']
                     ?? $this->sourcePagesByImageUrl[$key]
                     ?? null;
@@ -771,7 +918,7 @@ class ProductImageCandidateDiscovery
     private function recordCappedSources(array $all, array $kept): void
     {
         $pageOf = function (string $url): ?string {
-            $key = ProductImageStorage::normalizeCandidateUrl($url);
+            $key = ImageUrls::normalizeCandidateUrl($url);
             $page = $this->sourceContextsByImageUrl[$key]['url'] ?? $this->sourcePagesByImageUrl[$key] ?? null;
 
             return is_string($page) && $page !== '' ? rtrim($page, '/') : null;

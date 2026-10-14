@@ -2,10 +2,17 @@
 
 namespace App\Services\Telegram;
 
+use App\Jobs\ContinueDraftGallerySearch;
 use App\Models\Category;
 use App\Models\ProductDraft;
+use App\Models\TelegramUpdate;
 use App\Services\Ai\AiSettings;
+use App\Services\Ai\ProductSearchCancellation;
+use App\Services\Ai\ProductSearchCostBudget;
+use App\Services\Catalog\AttributePresentation;
+use App\Services\Products\ProductCondition;
 use App\Services\Products\ProductSourcePriority;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Storage;
 
 class DraftTelegramPresenter
@@ -21,6 +28,28 @@ class DraftTelegramPresenter
         string $usageFootnote = '',
     ): void {
         $draft->load('media');
+        if ($draft->status === 'pending_review'
+            && $draft->gallery_status !== 'complete'
+            && $draft->gallery_search_stop_reason === 'time_budget'
+            && ! app(ProductSearchCancellation::class)->isCancelled($draft->telegram_update_id)
+            && app(ProductSearchCostBudget::class)->hasRemaining($draft->telegram_update_id)) {
+            // No paused card or approval controls while the original money remains.
+            if (Cache::add("draft-gallery-continue:{$draft->id}:queued", true, 2100)) {
+                $claimed = TelegramUpdate::query()->whereKey($draft->telegram_update_id)
+                    ->whereNull('cancel_requested_at')->where('status', '!=', 'cancelled')
+                    ->update(['status' => 'processing', 'processed_at' => null]);
+                if (! $claimed) {
+                    Cache::forget("draft-gallery-continue:{$draft->id}:queued");
+
+                    return;
+                }
+                ContinueDraftGallerySearch::dispatch(
+                    $draft->id, $chatId, $draft->telegram_update_id, $draft->telegram_update_id,
+                )->afterCommit();
+            }
+
+            return;
+        }
         if ($this->reconciliationPending($draft)) {
             // A stopped search is not an approval-ready product album.
             // Clearing Telegram messages does not delete the saved files.
@@ -31,6 +60,9 @@ class DraftTelegramPresenter
                 'time_budget' => 'Время поиска закончилось.',
                 default => 'Не удалось завершить проверку карточки по выбранному источнику после автоматического восстановления.',
             };
+            if (! $budgetStopped && ! app(AiSettings::class)->specificationReconciliationEnabled()) {
+                $reason = 'Сборка карточки выключена в настройках AI. Проверка не запускалась; повтор поиска не поможет. Найденное сохранено.';
+            }
             $text = "⏸ Поиск #{$draft->id} не завершён: {$draft->title}\n"
                 .$reason."\nНайденные фото сохранены: {$draft->media->count()}. Товар не отправлен на подтверждение."
                 .($budgetStopped ? "\nПродолжение выдаст новый бюджет поиска." : '')
@@ -88,12 +120,25 @@ class DraftTelegramPresenter
 
     public function sendControls(TelegramClient $telegram, string $chatId, ProductDraft $draft): array
     {
+        // The card is written in English (CatalogLocales::CONTENT_SOURCE);
+        // there is no Russian translation to prefer any more.
+        $description = trim((string) $draft->description);
+        // Truncate raw text before escaping; never cut an HTML entity/tag.
+        $description = mb_substr($description, 0, 1800);
+        while (strlen(htmlspecialchars($description, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8')) > 3500) {
+            $description = mb_substr($description, 0, max(0, mb_strlen($description) - 100));
+        }
+        $description = htmlspecialchars($description, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+        $details = $description !== '' && ! $this->reconciliationPending($draft)
+            ? "\n\n<blockquote expandable>".$description."</blockquote>\n" : '';
+
         return $this->messageLifecycle->replaceControlMessage(
             $telegram,
             $draft,
             $chatId,
-            "📋 Итого: черновик #{$draft->id}\nВыберите действие:",
+            "📋 Итого: черновик #{$draft->id}".$details."\nВыберите действие:",
             $this->controlMarkup($draft),
+            parseMode: 'HTML',
         );
     }
 
@@ -126,13 +171,27 @@ class DraftTelegramPresenter
     public function sendEditMenu(TelegramClient $telegram, string $chatId, ProductDraft $draft): array
     {
         $rows = [];
+        if ($draft->isManualUpload()) {
+            $rows[] = [['text' => '✏️ Текст, характеристики и цена', 'callback_data' => "draft:fields:{$draft->id}"]];
+            $rows[] = [['text' => '📎 Загрузить ещё фото', 'callback_data' => "draft:upload:{$draft->id}"]];
+            $rows[] = [['text' => '🌐 Дополнить информацию', 'callback_data' => "draft:enrich:{$draft->id}"]];
+            $rows[] = [['text' => '🔎 Подобрать фото в интернете', 'callback_data' => "draft:webphotos:{$draft->id}"]];
+            $rows[] = [['text' => '🖼 Управление загруженными фото', 'callback_data' => "draft:photos:{$draft->id}"]];
+            $rows[] = [['text' => '← Вернуться к черновику', 'callback_data' => "draft:review:{$draft->id}"]];
+
+            return $this->messageLifecycle->replaceControlMessage($telegram, $draft, $chatId,
+                "✏️ Ручная карточка #{$draft->id}. Выберите данные или фотографии для изменения. Поиск в интернете — отдельное подтверждённое действие.",
+                ['inline_keyboard' => $rows]);
+        }
         if ($draft->media()->exists()) {
             $rows[] = [['text' => '🖼 Выбрать фото для изменения', 'callback_data' => "draft:photos:{$draft->id}"]];
         }
         $rows[] = [['text' => '🔄 Найти другие фото', 'callback_data' => "draft:restage:{$draft->id}"]];
         $rows[] = [['text' => '➕ Найти ещё фото', 'callback_data' => "draft:findmore:{$draft->id}"]];
         $rows[] = [['text' => '✏️ Уточнить товар и найти заново', 'callback_data' => "draft:query:{$draft->id}"]];
-        $rows[] = [['text' => '🔧 Проблема со сбором на сайте', 'callback_data' => "draft:source:{$draft->id}"]];
+        if (filled($draft->primary_source_url)) {
+            $rows[] = [['text' => '🔧 Проблема со сбором на сайте', 'callback_data' => "draft:source:{$draft->id}"]];
+        }
         $rows[] = [['text' => '← Вернуться к черновику', 'callback_data' => "draft:review:{$draft->id}"]];
 
         return $this->messageLifecycle->replaceControlMessage($telegram, $draft, $chatId,
@@ -203,6 +262,27 @@ class DraftTelegramPresenter
     private function controlMarkup(ProductDraft $draft): array
     {
         $mediaCount = $draft->media()->count();
+        if ($draft->isManualUpload()) {
+            $intake = $draft->manualIntake();
+            $rows = [];
+            if (($intake['status'] ?? '') === 'ready' && $mediaCount > 0) {
+                $rows[] = [[
+                    'text' => isset($intake['target_product_id']) ? '✅ Сохранить изменения товара' : '✅ Добавить в каталог',
+                    'callback_data' => "draft:add:{$draft->id}",
+                ]];
+            }
+            $rows[] = [['text' => '✏️ Исправить данные', 'callback_data' => "draft:fields:{$draft->id}"],
+                ['text' => '📎 Добавить фото', 'callback_data' => "draft:upload:{$draft->id}"]];
+            $rows[] = [['text' => '🌐 Доп. информация', 'callback_data' => "draft:enrich:{$draft->id}"],
+                ['text' => '🔎 Фото в интернете', 'callback_data' => "draft:webphotos:{$draft->id}"]];
+            if ($mediaCount > 0) {
+                $rows[] = [['text' => '🖼 Управление фото', 'callback_data' => "draft:photos:{$draft->id}"]];
+            }
+            $rows[] = [['text' => '📋 Все данные и уточнения', 'callback_data' => "draft:details:{$draft->id}"]];
+            $rows[] = [['text' => '✖ Отклонить', 'callback_data' => "draft:reject:{$draft->id}"]];
+
+            return ['inline_keyboard' => $rows];
+        }
         $searchPaused = in_array($draft->gallery_search_stop_reason, ['cost_budget', 'time_budget', 'exhausted'], true);
 
         if ($searchPaused && $mediaCount === 0) {
@@ -319,6 +399,15 @@ class DraftTelegramPresenter
             [['text' => '🗑 Удалить', 'callback_data' => "draft:delete:{$draft->id}"]],
             [['text' => '← Назад', 'callback_data' => "draft:review:{$draft->id}"]],
         ];
+        if ($draft->isManualUpload()) {
+            $buttons = [
+                [['text' => '📎 Загрузить ещё', 'callback_data' => "draft:upload:{$draft->id}"],
+                    ['text' => '🗑 Удалить', 'callback_data' => "draft:delete:{$draft->id}"]],
+                [['text' => '✨ Улучшить', 'callback_data' => "draft:enhance:{$draft->id}"],
+                    ['text' => '🔎 Подобрать в интернете', 'callback_data' => "draft:webphotos:{$draft->id}"]],
+                [['text' => '← Назад', 'callback_data' => "draft:review:{$draft->id}"]],
+            ];
+        }
 
         return $this->messageLifecycle->replaceControlMessage(
             $telegram,
@@ -377,18 +466,18 @@ class DraftTelegramPresenter
 
     private function caption(ProductDraft $draft, string $usageFootnote): string
     {
-        $specifications = collect($draft->specifications)->take(6)
-            ->map(fn (array $item): string => sprintf(
+        $specifications = implode("\n", AttributePresentation::lines(
+            AttributePresentation::specifications($draft->specifications ?? [])->take(6),
+            fn (array $item): string => sprintf(
                 '%s %s: %s',
                 SpecificationEmoji::for((string) ($item['key'] ?? $item['name'] ?? '')),
                 $item['name'],
                 $item['value'],
-            ))
-            ->implode("\n");
+            )));
         $galleryCount = $draft->media()->count();
         $primarySourceUrl = trim((string) $draft->primary_source_url);
         $reconciliationPending = $this->reconciliationPending($draft);
-        $partialNotice = $draft->gallery_status === 'partial' && ! $reconciliationPending
+        $partialNotice = $draft->gallery_status === 'partial' && ! $reconciliationPending && ! $draft->isManualUpload()
             ? 'Частичный успех: полный цикл завершён, сохранены лучшие доступные проверенные фото.'
             : null;
         // A structured column, not a string match against gallery_notes'
@@ -411,8 +500,32 @@ class DraftTelegramPresenter
                 ? "⏸ Черновик #{$draft->id}: сверка не завершена"
                 : "🆕 Черновик #{$draft->id} готов к добавлению",
             "🏷 {$draft->title}",
+            '📦 '.(ProductCondition::options()[$draft->condition ?? 'new'] ?? $draft->condition),
             implode(' · ', array_filter([$draft->brand, $draft->model, $draft->color])),
         ]));
+        if ($draft->isManualUpload()) {
+            $intake = $draft->manualIntake();
+            $commercial = $intake['commercial'] ?? [];
+            $header = (($intake['status'] ?? '') === 'ready'
+                ? "📥 Черновик #{$draft->id}: проверьте перед сохранением"
+                : "📝 Черновик #{$draft->id}: нужны уточнения")
+                ."\n🏷 {$draft->title}"
+                ."\n📦 ".(ProductCondition::options()[$draft->condition ?? ''] ?? 'Состояние не указано');
+            if (($commercial['price_amount'] ?? null) !== null) {
+                $header .= "\n💰 ".$commercial['price_amount'].' '.($commercial['currency'] ?? '');
+            }
+            $footer .= "\n📎 Материалы пользователя; интернет-проверка отдельно.";
+            if (! empty($intake['missing_fields'])) {
+                $labels = ['title' => 'название', 'category' => 'категория', 'condition' => 'состояние', 'product_photo' => 'фото товара'];
+                $footer .= "\nУточните: ".implode(', ', array_map(fn ($field) => $labels[$field] ?? $field, $intake['missing_fields']));
+            }
+            if (! empty($intake['conflicts'])) {
+                $footer .= "\n⚠️ Есть противоречия — исправьте данные перед добавлением.";
+            }
+            if (! empty($intake['extra_photos'])) {
+                $footer .= "\nВ галерее показаны первые 10 фото; остальные оригиналы сохранены.";
+            }
+        }
         $searchPaused = in_array($draft->gallery_search_stop_reason, ['cost_budget', 'time_budget', 'exhausted'], true);
         // images_staged_at stays null only when staging never ran to its own
         // completion at all - e.g. the job was killed by its hard timeout
@@ -421,7 +534,7 @@ class DraftTelegramPresenter
         // the latter.
         $searchInterrupted = $draft->images_staged_at === null;
 
-        if (($searchPaused || $searchInterrupted) && $galleryCount === 0) {
+        if (! $draft->isManualUpload() && ($searchPaused || $searchInterrupted) && $galleryCount === 0) {
             $header = "⏸ Черновик #{$draft->id}: поиск фотографий приостановлен\n"
                 ."🏷 {$draft->title}\n"
                 .implode(' / ', array_filter([$draft->brand, $draft->model, $draft->color]));
@@ -457,5 +570,35 @@ class DraftTelegramPresenter
             10 => '🔟',
             default => (string) $number,
         };
+    }
+
+    public function sendDetails(TelegramClient $telegram, string $chatId, ProductDraft $draft): void
+    {
+        $lines = ["📋 Черновик #{$draft->id}: {$draft->title}", (string) $draft->description];
+        $lines = array_merge($lines, AttributePresentation::lines(
+            AttributePresentation::specifications($draft->specifications ?? []),
+            fn (array $spec): string => SpecificationEmoji::for($spec['key'] ?? $spec['name'] ?? '').' '.($spec['name'] ?? '').': '.($spec['value'] ?? '')
+                .(filled($spec['source_url'] ?? null) ? "\n".$spec['source_url'] : ''),
+        ));
+        if ($draft->isManualUpload()) {
+            $intake = $draft->manualIntake();
+            $commercial = $intake['commercial'] ?? [];
+            if (($commercial['quantity'] ?? null) !== null) {
+                $lines[] = '📦 Количество: '.$commercial['quantity'];
+            }
+            if (($commercial['warranty_months'] ?? null) !== null) {
+                $lines[] = '🛡 Гарантия: '.$commercial['warranty_months'].' мес.';
+            }
+            foreach ($intake['conflicts'] ?? [] as $conflict) {
+                $lines[] = '⚠️ '.(is_string($conflict) ? $conflict : json_encode($conflict, JSON_UNESCAPED_UNICODE));
+            }
+            $lines[] = 'Исходные фото и сведения пользователя сохранены. Интернет-источники указаны у добавленных характеристик.';
+        }
+        $text = implode("\n\n", array_filter($lines));
+        while ($text !== '') {
+            $telegram->sendMessage($chatId, mb_substr($text, 0, 3500));
+            $text = mb_substr($text, 3500);
+        }
+        $this->sendControls($telegram, $chatId, $draft);
     }
 }

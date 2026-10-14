@@ -7,7 +7,7 @@ use App\Models\AiRun;
 use App\Models\ProductDraft;
 use App\Models\ProductSourcePageEvidence;
 use App\Models\TelegramUpdate;
-use App\Services\Ai\ProductSearchCostBudget;
+use App\Services\Ai\ProductSearchTimeBudget;
 use App\Services\Products\BrowserProductGalleryExtractor;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
@@ -18,6 +18,18 @@ use Tests\TestCase;
 class FetchProductSourcePageTextToolTest extends TestCase
 {
     use RefreshDatabase;
+
+    public function test_explicit_text_enrichment_can_read_another_public_source_but_not_private_addresses(): void
+    {
+        Http::fake(['*' => Http::response('<html><body>Three USB ports for Laptop X</body></html>', 200, ['Content-Type' => 'text/html'])]);
+        $tool = new FetchProductSourcePageText('shop.example', allowAdditionalSources: true);
+        $result = json_decode((string) $tool->handle(new ToolRequest(['url' => 'https://93.184.216.34/specs'])), true);
+        $this->assertTrue($result['fetched']);
+        $this->assertStringContainsString('Three USB ports', $result['specification_text']);
+        $result = json_decode((string) $tool->handle(new ToolRequest(['url' => 'http://127.0.0.1/private'])), true);
+        $this->assertFalse($result['fetched']);
+        Http::assertSentCount(1);
+    }
 
     private function seedDraft(): ProductDraft
     {
@@ -145,7 +157,7 @@ class FetchProductSourcePageTextToolTest extends TestCase
         // actually named, filling every skipped position with its own
         // default (the unfilled $context default included).
         $browser->shouldReceive('scout')->once()
-            ->with('https://93.184.216.40/specs', null, null, [], '93.184.216.40')
+            ->with('https://93.184.216.40/specs', null, null, ['card_assembly' => true], '93.184.216.40')
             ->andReturn([]);
         $browser->shouldReceive('lastSpecificationText')->andReturn('RAM: 64 GB (captured by browser)');
 
@@ -165,7 +177,7 @@ class FetchProductSourcePageTextToolTest extends TestCase
         Http::fake(['*' => Http::response('should never be requested', 200, ['Content-Type' => 'text/html'])]);
         $browser = $this->mockBrowser();
         $browser->shouldReceive('scoutAfterOpening')->once()
-            ->with('https://93.184.216.42/product', '.tab-characteristics', null, null, [], '93.184.216.42')
+            ->with('https://93.184.216.42/product', '.tab-characteristics', null, null, ['card_assembly' => true], '93.184.216.42')
             ->andReturn([]);
         $browser->shouldReceive('lastSpecificationText')->andReturn('GPU: RTX 4060 (revealed by tab)');
 
@@ -191,7 +203,7 @@ class FetchProductSourcePageTextToolTest extends TestCase
         )]);
         $browser = $this->mockBrowser();
         $browser->shouldReceive('scout')->once()
-            ->with('https://93.184.216.43/product', null, null, [], '93.184.216.43')
+            ->with('https://93.184.216.43/product', null, null, ['card_assembly' => true], '93.184.216.43')
             ->andReturn([]);
         $browser->shouldReceive('lastSpecificationText')->andReturn('RAM: 32 GB (full page via browser)');
 
@@ -217,7 +229,7 @@ class FetchProductSourcePageTextToolTest extends TestCase
         )]);
         $browser = $this->mockBrowser();
         $browser->shouldReceive('scout')->once()
-            ->with('https://93.184.216.44/product', null, 777, [], '93.184.216.44')
+            ->with('https://93.184.216.44/product', null, 777, ['card_assembly' => true], '93.184.216.44')
             ->andReturn([]);
         $browser->shouldReceive('lastSpecificationText')->andReturn('');
 
@@ -226,20 +238,20 @@ class FetchProductSourcePageTextToolTest extends TestCase
         ]));
     }
 
-    public function test_it_refuses_to_fetch_once_the_shared_search_budget_is_exhausted(): void
+    public function test_it_refuses_to_fetch_once_the_jobs_time_for_assembly_is_gone(): void
     {
-        // The underlying fetch can launch a real browser session - not a
-        // free per-call tool, so it must answer to the same shared search
-        // budget as the reconciliation call that spawned it.
+        // The tool belongs to card assembly, which the money limit does not
+        // stop. The job running it still has a clock, and a browser session
+        // started after it would be killed mid-flight.
         Http::fake(['*' => Http::response('should never be requested', 200, ['Content-Type' => 'text/html'])]);
-        $this->mock(ProductSearchCostBudget::class)->shouldReceive('exceeded')->andReturn(true);
+        $this->mock(ProductSearchTimeBudget::class)->shouldReceive('assemblyCanStart')->andReturn(false);
 
         $result = json_decode((string) (new FetchProductSourcePageText('93.184.216.41', 999))->handle(new ToolRequest([
             'url' => 'https://93.184.216.41/specs',
         ])), true, flags: JSON_THROW_ON_ERROR);
 
         $this->assertFalse($result['fetched']);
-        $this->assertSame('search budget exhausted', $result['reason']);
+        $this->assertSame('search time exhausted', $result['reason']);
         Http::assertNothingSent();
     }
 

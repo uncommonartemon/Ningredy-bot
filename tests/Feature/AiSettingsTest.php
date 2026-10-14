@@ -38,6 +38,24 @@ class AiSettingsTest extends TestCase
         $this->assertSame('gpt-image-1-mini', $settings->modelFor('image_upscale'));
     }
 
+    public function test_card_assembly_keeps_its_own_model_under_a_cheap_main_model(): void
+    {
+        // Request #99: gpt-6-luna paraphrased every quote card assembly must
+        // copy verbatim, and the operator got "search not finished".
+        $settings = app(AiSettings::class);
+        $settings->saveModel('gpt-6-luna');
+        $settings->saveCardAssemblyModel('gpt-6-sol');
+
+        $this->assertSame('gpt-6-sol', $settings->modelFor('product_specification_reconciliation'));
+        $this->assertSame('gpt-6-luna', $settings->modelFor('product_research'));
+        $this->assertSame('gpt-6-luna', $settings->modelFor('server_assistant'));
+
+        $settings->saveCardAssemblyModel(null);
+        $this->assertSame('gpt-6-luna', $settings->modelFor('product_specification_reconciliation'), 'unset follows the main model');
+        $settings->saveCardAssemblyModel('other-provider-model');
+        $this->assertNull($settings->cardAssemblyModel());
+    }
+
     public function test_invalid_model_is_not_saved(): void
     {
         $settings = app(AiSettings::class);

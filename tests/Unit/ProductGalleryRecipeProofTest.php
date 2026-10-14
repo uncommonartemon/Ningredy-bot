@@ -12,6 +12,38 @@ class ProductGalleryRecipeProofTest extends TestCase
 {
     use RefreshDatabase;
 
+    public function test_original_control_is_not_displaced_by_a_recent_regional_success(): void
+    {
+        $recipe = ProductGalleryRecipe::create(['domain' => 'proof.example', 'path_pattern' => '*',
+            'status' => 'active', 'recipe' => ['collect_selectors' => ['#gallery img']]]);
+        $proof = app(ProductGalleryRecipeProof::class);
+        $proof->remember($recipe, 'https://proof.example/original', ['passed' => true, 'extracted' => 2]);
+        $proof->remember($recipe, 'https://proof.example/recent', ['passed' => true, 'extracted' => 9]);
+
+        $this->assertSame('https://proof.example/original', $proof->provenUrl($recipe, 'https://proof.example/current'));
+        $this->assertSame('https://proof.example/recent', $proof->provenUrl($recipe, 'https://proof.example/original'));
+    }
+
+    public function test_scope_decision_is_not_part_of_executable_recipe_fingerprint(): void
+    {
+        $proof = app(ProductGalleryRecipeProof::class);
+        $body = ['collect_selectors' => ['#gallery img']];
+        $this->assertSame($proof->fingerprint($body), $proof->fingerprint([
+            ...$body, 'recipe_scope' => 'page_family', 'scope_reason' => 'Different observed layout.',
+        ]));
+    }
+
+    public function test_fragment_and_trailing_slash_are_not_a_different_control_but_product_query_is(): void
+    {
+        $recipe = ProductGalleryRecipe::create(['domain' => 'proof.example', 'path_pattern' => '*',
+            'status' => 'active', 'recipe' => ['collect_selectors' => ['#gallery img']]]);
+        $proof = app(ProductGalleryRecipeProof::class);
+        $proof->remember($recipe, 'https://proof.example/product/?id=A#gallery', ['passed' => true]);
+        $this->assertNull($proof->provenUrl($recipe, 'https://proof.example/product?id=A#details'));
+        $proof->remember($recipe, 'https://proof.example/product?id=B', ['passed' => true]);
+        $this->assertSame('https://proof.example/product?id=B', $proof->provenUrl($recipe, 'https://proof.example/product?id=A'));
+    }
+
     public function test_photo_verification_annotation_does_not_erase_the_control_page(): void
     {
         $recipe = ProductGalleryRecipe::create(['domain' => 'proof.example', 'path_pattern' => '*',

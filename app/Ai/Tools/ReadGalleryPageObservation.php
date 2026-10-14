@@ -2,6 +2,7 @@
 
 namespace App\Ai\Tools;
 
+use App\Services\GalleryRecipes\Training\ObservationPresenter;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
 use Laravel\Ai\Contracts\Tool;
 use Laravel\Ai\Tools\Request;
@@ -38,11 +39,11 @@ class ReadGalleryPageObservation implements Tool
                 'items' => is_array($items) ? array_slice($items, $offset, $limit) : []];
         }
 
-        return json_encode([
+        return json_encode((new ObservationPresenter)->textPayload([
             'snapshot' => $which,
             'available' => $observation !== [],
             'observation' => $observation,
-        ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        ]), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
     }
 
     public function schema(JsonSchema $schema): array

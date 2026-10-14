@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Jobs\DeleteUnreferencedMedia;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Support\Facades\Storage;
@@ -51,23 +52,29 @@ class ProductMedia extends Model
             $disk = Storage::disk($media->disk);
             $target = $directory.'/'.basename($media->path);
 
-            if ($disk->exists($media->path) && $disk->move($media->path, $target)) {
+            // Copy first: a rolled-back insert must not remove the original upload.
+            if ($disk->exists($target)) {
+                $target = $directory.'/'.Str::uuid().'-'.basename($media->path);
+            }
+            if ($disk->exists($media->path) && $disk->copy($media->path, $target)) {
+                $originalPath = $media->path;
                 $url = $media->disk === 'public' ? '/storage/'.$target : $disk->url($target);
                 $media->forceFill(['path' => $target, 'url' => $url])->saveQuietly();
+                DeleteUnreferencedMedia::dispatch($media->disk, $originalPath);
             }
         });
 
-        static::updating(function (ProductMedia $media): void {
+        static::updated(function (ProductMedia $media): void {
             $oldPath = $media->getOriginal('path');
 
-            if ($oldPath && $oldPath !== $media->path) {
-                Storage::disk($media->getOriginal('disk') ?: 'public')->delete($oldPath);
+            if ($oldPath && ($oldPath !== $media->path || $media->wasChanged('disk'))) {
+                DeleteUnreferencedMedia::dispatch($media->getOriginal('disk') ?: 'public', $oldPath);
             }
         });
 
-        static::deleting(function (ProductMedia $media): void {
+        static::deleted(function (ProductMedia $media): void {
             if ($media->disk && $media->path) {
-                Storage::disk($media->disk)->delete($media->path);
+                DeleteUnreferencedMedia::dispatch($media->disk, $media->path);
             }
         });
     }

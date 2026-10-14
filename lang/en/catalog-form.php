@@ -1,0 +1,26 @@
+<?php
+
+return [
+    'paste_from_excel' => 'Paste from Excel',
+    'paste_heading' => 'Paste specifications',
+    'paste_submit' => 'Insert into form',
+    'paste_table' => 'Specification table',
+    'paste_help' => 'Copy two or three Excel columns: attribute, value, unit. Two columns keep the current unit; an empty third column clears it. You can also paste “name: value” lines.',
+    'replace_filled' => 'Replace existing values',
+    'replace_help' => 'Existing values are kept by default; empty rows are filled.',
+    'create_missing' => 'Create missing attributes',
+    'create_help' => 'New names are added to the attribute list. Product values are saved only when you save the form.',
+    'pasted' => 'Specifications inserted',
+    'paste_result' => 'Added: :added. Filled: :updated. Kept unchanged: :skipped. New attributes: :created.',
+    'ambiguous_attribute' => 'The name “:name” is ambiguous. Use the exact attribute name or key.',
+    'duplicate_attribute' => 'The attribute “:name” occurs twice. Keep one row.',
+    'missing_attributes' => 'Attributes not found: :names. Enable creation of missing attributes or use existing names.',
+    'too_many' => 'Paste at most 100 specifications at a time.',
+    'invalid_columns' => 'Row :line needs two columns: attribute and value; the optional third column is the unit.',
+    'empty_cell' => 'Row :line: fill in both the name and value.',
+    'too_long' => 'Row :line is too long: name up to 255, value up to 2000, unit up to 24 characters.',
+    'empty_table' => 'Paste at least one attribute with a value.',
+    'copy_variant' => 'Copy configuration',
+    'copy_variant_help' => 'Specifications are copied. Enter the price, availability and identifiers for the new configuration separately.',
+    'invalid_quotes' => 'Check the table quotes: quoted text must be closed; write a quote inside quoted text twice.',
+];

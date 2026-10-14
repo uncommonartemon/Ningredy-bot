@@ -1,0 +1,31 @@
+/* Capture after the response arrives; shared chrome stays visually stable. */
+.catalog-masthead { view-transition-name: catalog-header; }
+html[data-page-transition='results'] .products-stage,
+html[data-page-transition='page-next'] .products-stage,
+html[data-page-transition='page-previous'] .products-stage { view-transition-name: catalog-results; }
+::view-transition-group(root) { animation-duration: 280ms; }
+::view-transition-old(root) { animation: page-leave 170ms ease-out both; }
+::view-transition-new(root) { animation: page-enter 300ms cubic-bezier(.2,.7,.2,1) both; }
+html[data-page-transition='back']::view-transition-new(root) { animation-name: page-return; }
+::view-transition-group(catalog-header) { animation-duration: 280ms; }
+::view-transition-old(catalog-header) { display: none; }
+::view-transition-new(catalog-header) { animation: none; }
+html:is([data-page-transition='results'], [data-page-transition='page-next'], [data-page-transition='page-previous'])::view-transition-old(root) { display: none; }
+html:is([data-page-transition='results'], [data-page-transition='page-next'], [data-page-transition='page-previous'])::view-transition-new(root) { animation: none; }
+::view-transition-group(catalog-results) { animation: none; }
+::view-transition-old(catalog-results) { animation: results-leave 170ms ease-out both; }
+::view-transition-new(catalog-results) { animation: results-enter 300ms cubic-bezier(.2,.7,.2,1) both; }
+html[data-page-transition='page-previous']::view-transition-old(catalog-results) { animation-name: results-leave-reverse; }
+html[data-page-transition='page-previous']::view-transition-new(catalog-results) { animation-name: results-enter-reverse; }
+html[data-page-transition] :is(.catalog-cards-enter-active, .catalog-cards-leave-active, .catalog-cards-move) { transition: none; }
+html[data-page-transition] :is(.catalog-cards-enter-from, .catalog-cards-leave-to) { opacity: 1; transform: none; }
+@keyframes page-leave { to { opacity: 0; } }
+@keyframes page-enter { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+@keyframes page-return { from { opacity: 0; transform: translateY(-12px); } to { opacity: 1; transform: none; } }
+@keyframes results-leave { to { opacity: 0; transform: translateX(-18px); } }
+@keyframes results-enter { from { opacity: 0; transform: translateX(18px); } to { opacity: 1; transform: none; } }
+@keyframes results-leave-reverse { to { opacity: 0; transform: translateX(18px); } }
+@keyframes results-enter-reverse { from { opacity: 0; transform: translateX(-18px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) {
+    ::view-transition-group(*), ::view-transition-old(*), ::view-transition-new(*) { animation: none !important; }
+}

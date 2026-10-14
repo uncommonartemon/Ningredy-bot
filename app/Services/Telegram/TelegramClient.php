@@ -2,6 +2,7 @@
 
 namespace App\Services\Telegram;
 
+use App\Models\AiOperation;
 use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Support\Facades\Http;
 use RuntimeException;
@@ -79,15 +80,33 @@ class TelegramClient
         return $this->post('sendPhoto', $payload);
     }
 
+    /**
+     * Only stops the spinner on the pressed button. Telegram refuses the
+     * answer once the press is older than a few seconds - a webhook delivered
+     * late after a restart or a slow tunnel - and that refusal used to throw
+     * out of the webhook before the pressed action ever ran.
+     */
     public function answerCallbackQuery(string $callbackQueryId, string $text): array
     {
-        return $this->post('answerCallbackQuery', [
-            'callback_query_id' => $callbackQueryId,
-            'text' => mb_substr($text, 0, 200),
-        ]);
+        try {
+            return $this->post('answerCallbackQuery', [
+                'callback_query_id' => $callbackQueryId,
+                'text' => mb_substr($text, 0, 200),
+            ]);
+        } catch (RuntimeException $exception) {
+            report($exception);
+
+            return ['ok' => false, 'description' => $exception->getMessage()];
+        }
     }
 
     public function sendPhotoFile(string $chatId, string $path, ?string $caption = null, ?array $replyMarkup = null): array
+    {
+        return TelegramWebhookDelivery::send('sendPhotoFile', compact('chatId', 'path', 'caption', 'replyMarkup'),
+            fn (): array => $this->deliverPhotoFile($chatId, $path, $caption, $replyMarkup));
+    }
+
+    private function deliverPhotoFile(string $chatId, string $path, ?string $caption, ?array $replyMarkup): array
     {
         if (! is_file($path) || ! is_readable($path)) {
             throw new RuntimeException('Local Telegram photo is not readable.');
@@ -135,6 +154,12 @@ class TelegramClient
     /** @param array<int, string> $paths */
     public function sendMediaGroupFiles(string $chatId, array $paths, ?string $caption = null): array
     {
+        return TelegramWebhookDelivery::send('sendMediaGroupFiles', compact('chatId', 'paths', 'caption'),
+            fn (): array => $this->deliverMediaGroupFiles($chatId, $paths, $caption));
+    }
+
+    private function deliverMediaGroupFiles(string $chatId, array $paths, ?string $caption): array
+    {
         $paths = array_values(array_filter($paths, fn (string $path): bool => is_file($path) && is_readable($path)));
 
         if ($paths === []) {
@@ -142,7 +167,7 @@ class TelegramClient
         }
 
         if (count($paths) === 1) {
-            return [$this->sendPhotoFile($chatId, $paths[0], $caption)];
+            return [$this->deliverPhotoFile($chatId, $paths[0], $caption, null)];
         }
 
         $paths = array_slice($paths, 0, 10);
@@ -340,11 +365,26 @@ class TelegramClient
     private function post(string $method, array $payload): array
     {
         try {
-            return $this->request()->post($method, $payload)->throw()->json();
+            return TelegramWebhookDelivery::send($method, $payload,
+                fn (): array => $this->request()->post($method, $payload)->throw()->json());
         } catch (Throwable $exception) {
             $token = (string) config('services.telegram.bot_token');
             $message = $token === '' ? $exception->getMessage() : str_replace($token, '[redacted]', $exception->getMessage());
             throw new RuntimeException($message, (int) $exception->getCode());
+        }
+    }
+
+    public function retryWebhookDeliveries(int $updateId): void
+    {
+        foreach (AiOperation::query()->where('telegram_update_id', $updateId)
+            ->where('action', 'telegram_webhook_delivery')->whereIn('status', ['running', 'failed'])->orderBy('id')->get() as $receipt) {
+            $method = $receipt->payload['method'];
+            $body = $receipt->payload['body'];
+            match ($method) {
+                'sendPhotoFile' => $this->sendPhotoFile(...$body),
+                'sendMediaGroupFiles' => $this->sendMediaGroupFiles(...$body),
+                default => $this->post($method, $body),
+            };
         }
     }
 

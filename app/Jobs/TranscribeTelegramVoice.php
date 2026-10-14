@@ -29,7 +29,10 @@ class TranscribeTelegramVoice implements ShouldQueue
 
     public function handle(TelegramClient $telegram, AiErrorPresenter $errors): void
     {
-        $update = TelegramUpdate::query()->findOrFail($this->telegramUpdateId);
+        $update = TelegramUpdate::query()->find($this->telegramUpdateId);
+        if (! $update || $update->processed_at || $update->status === 'cancelled') {
+            return;
+        }
         $voice = data_get($update->payload, 'message.voice', []);
         $fileId = (string) data_get($voice, 'file_id');
         $duration = (int) data_get($voice, 'duration', 0);
@@ -51,12 +54,18 @@ class TranscribeTelegramVoice implements ShouldQueue
 
         try {
             $file = $telegram->getFile($fileId);
+            if ($update->refresh()->processed_at || $update->status === 'cancelled') {
+                return;
+            }
             $filePath = (string) data_get($file, 'result.file_path');
             throw_if($filePath === '', RuntimeException::class, 'Telegram did not return voice file_path.');
             if (! is_dir(dirname($path))) {
                 mkdir(dirname($path), 0775, true);
             }
             file_put_contents($path, $telegram->downloadFile($filePath));
+            if ($update->refresh()->processed_at || $update->status === 'cancelled') {
+                return;
+            }
 
             $transcription = Transcription::fromPath($path, 'audio/ogg')
                 ->timeout(120)
@@ -67,10 +76,18 @@ class TranscribeTelegramVoice implements ShouldQueue
             $text = trim($transcription->text);
             throw_if($text === '', RuntimeException::class, 'Voice transcription is empty.');
 
-            $update->update(['text' => $text, 'status' => 'transcribed', 'error' => null]);
+            $saved = TelegramUpdate::query()->whereKey($update->id)->whereNull('processed_at')
+                ->where('status', '!=', 'cancelled')
+                ->update(['text' => $text, 'status' => 'transcribed', 'error' => null]);
+            if (! $saved) {
+                return;
+            }
             $telegram->sendMessage($update->chat_id, "🎙 Распознано:\n{$text}");
             ProcessTelegramMessage::dispatch($update->id)->afterCommit();
         } catch (Throwable $exception) {
+            if ($update->refresh()->processed_at || $update->status === 'cancelled') {
+                return;
+            }
             $presented = $errors->present($exception);
             $update->update([
                 'status' => 'failed',

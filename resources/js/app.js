@@ -6,8 +6,10 @@ import '@fontsource-variable/space-grotesk';
 import { createInertiaApp } from '@inertiajs/vue3';
 import { resolvePageComponent } from 'laravel-vite-plugin/inertia-helpers';
 import { createApp, h } from 'vue';
+import { navigationVisitOptions } from './navigationTransitions';
 
 createInertiaApp({
+    defaults: { visitOptions: navigationVisitOptions },
     title: (title) => (title ? `${title} — Ningredy` : 'Ningredy'),
     resolve: (name) => resolvePageComponent(`./Pages/${name}.vue`, import.meta.glob('./Pages/**/*.vue')),
     setup({ el, App, props, plugin }) {

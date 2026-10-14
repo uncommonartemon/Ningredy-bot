@@ -15,6 +15,27 @@ class SearchCatalogToolTest extends TestCase
 {
     use RefreshDatabase;
 
+    public function test_condition_and_memory_must_match_one_variant(): void
+    {
+        $product = $this->product('Laptop X', 'laptop', ['ram' => ['32 GB', 32]]);
+        $variant = $product->variants()->create(['condition' => 'open_box', 'sku' => 'OPEN-123',
+            'currency' => 'CZK', 'stock_status' => 'in_stock', 'is_active' => true, 'is_default' => false]);
+        $variant->attributes()->create(['attribute_definition_id' => AttributeDefinition::where('key', 'ram')->value('id'), 'value' => '8 GB', 'numeric_value' => 8]);
+        $result = json_decode((string) (new SearchCatalog)->handle(new ToolRequest(['query' => 'Laptop X', 'condition' => 'open_box', 'ram_min' => 32])), true);
+        $this->assertSame(0, $result['count']);
+    }
+
+    public function test_requested_condition_returns_that_variant_not_the_default(): void
+    {
+        $product = $this->product('Laptop X', 'laptop', []);
+        $variant = $product->variants()->create(['condition' => 'open_box', 'sku' => 'OPEN-123', 'price' => 700,
+            'currency' => 'CZK', 'stock_status' => 'in_stock', 'is_active' => true, 'is_default' => false]);
+        $result = json_decode((string) (new SearchCatalog)->handle(new ToolRequest(['query' => 'Laptop X', 'condition' => 'open_box'])), true);
+        $this->assertSame(1, $result['count']);
+        $this->assertSame($variant->id, $result['products'][0]['variant_id']);
+        $this->assertSame('open_box', $result['products'][0]['condition']);
+    }
+
     public function test_conversational_request_finds_laptop_by_ram(): void
     {
         $matching = $this->product('Laptop with 8 GB', 'laptop', ['ram' => ['8 GB', 8]]);

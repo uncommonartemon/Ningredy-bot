@@ -88,11 +88,15 @@ test('canonical evidence preserves product queries, host and path case', async (
     }
 });
 
-test('an equal name is not proof, an unequal one is', () => {
+test('names alone establish neither a match nor a mismatch', () => {
     // Every configuration of a laptop shares its name, so equality proves
     // nothing - the previous version accepted it and a test locked that in.
     assert.equal(sameProductIdentity({ name: 'thinkpad x1' }, { name: 'thinkpad x1' }), null);
-    assert.equal(sameProductIdentity({ name: 'thinkpad x1' }, { name: 'thinkpad x13' }), false);
+    assert.equal(sameProductIdentity({ name: 'thinkpad x1' }, { name: 'thinkpad x13' }), null);
+    assert.equal(sameProductIdentity(
+        { name: 'stealth 16 ai a2hw', og_url: 'https://shop.example/@Request:fullUrl()' },
+        { name: 'stealth 16 ai a2hw – slim sharp stylish', og_url: 'https://shop.example/laptop/gallery' },
+    ), null, 'A changed slogan must leave exploration possible, without confirming the product.');
 });
 
 test('no comparable evidence is not a verdict', () => {
@@ -106,7 +110,7 @@ test('different OpenGraph tab URLs are unknown, not a different-product verdict'
     const expected = { og_url: 'https://shop.example/laptop/specification', name: 'laptop a' };
     const gallery = { og_url: 'https://shop.example/laptop/gallery', name: 'laptop a' };
     assert.equal(sameProductIdentity(expected, gallery), null);
-    assert.equal(sameProductIdentity(expected, { ...gallery, name: 'laptop b' }), false);
+    assert.equal(sameProductIdentity(expected, { ...gallery, name: 'laptop b' }), null);
     assert.equal(sameProductIdentity(
         { ...expected, identifiers: { sku: 'a' } },
         { ...gallery, identifiers: { sku: 'b' } },

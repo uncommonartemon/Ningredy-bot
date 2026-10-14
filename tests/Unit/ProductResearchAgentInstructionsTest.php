@@ -34,9 +34,9 @@ class ProductResearchAgentInstructionsTest extends TestCase
 
         $this->assertTrue(Strict::isAppliedTo($agent));
 
-        $this->assertStringContainsString('Always search only for a new, factory-sealed product', $instructions);
-        $this->assertStringContainsString('Never select used, refurbished, renewed, recertified, second-hand, or open-box', $instructions);
-        $this->assertStringContainsString('even when the request mentions such a condition', $instructions);
+        $this->assertStringContainsString('open_box', $instructions);
+        $this->assertStringContainsString('refurbished', $instructions);
+        $this->assertStringNotContainsString('even when the request mentions such a condition', $instructions);
         $this->assertStringContainsString('professional manufacturer or new-retail page', $instructions);
         $this->assertStringContainsString('Never use user-generated', $instructions);
         $this->assertStringContainsString('Never ask a clarification question', $instructions);

@@ -43,6 +43,18 @@ class RecoverStuckDraftGallerySearchesTest extends TestCase
         Queue::assertNotPushed(ContinueDraftGallerySearch::class);
     }
 
+    public function test_it_does_not_requeue_a_search_whose_original_time_budget_has_expired(): void
+    {
+        Queue::fake();
+        $draft = $this->draft(imagesStagedAt: null, createdMinutesAgo: 90);
+        $draft->aiRun->update(['started_at' => now()->subMinutes(90)]);
+
+        $this->artisan('gallery:recover-stuck-drafts')->assertSuccessful();
+
+        Queue::assertNotPushed(ContinueDraftGallerySearch::class);
+        $this->assertFalse(Cache::has("draft-gallery-recovery-attempts:{$draft->id}"));
+    }
+
     public function test_it_ignores_a_draft_whose_search_already_completed_a_pass(): void
     {
         Queue::fake();

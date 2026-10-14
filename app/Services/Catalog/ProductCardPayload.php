@@ -2,8 +2,8 @@
 
 namespace App\Services\Catalog;
 
-use App\Models\AttributeValue;
 use App\Models\Product;
+use App\Models\ProductVariant;
 use Illuminate\Support\Facades\Storage;
 
 /**
@@ -15,14 +15,22 @@ use Illuminate\Support\Facades\Storage;
 class ProductCardPayload
 {
     /** @return array<string, mixed> */
-    public function for(Product $product): array
+    public function for(Product $product, ?ProductVariant $selectedVariant = null): array
     {
-        $variant = $product->variants->firstWhere('is_default', true) ?: $product->variants->first();
+        $variants = $product->variants->where('is_active', true)->sortBy('id');
+        $variant = $selectedVariant ?? ($variants->firstWhere('is_default', true) ?: $variants->first());
+        $attributes = $product->relationLoaded('attributes')
+            ? $product->attributes->whereNull('product_variant_id') : collect();
+        $attributes = $attributes->concat($variant?->attributes ?? [])->keyBy('attribute_definition_id');
 
         return [
             'id' => $product->id,
             'slug' => $product->slug,
+            'variant_id' => $variant?->id,
+            'url' => '/products/'.$product->slug.($variant ? '?variant='.$variant->id : ''),
             'title' => $product->title,
+            'translations' => array_replace_recursive($product->translations ?? [], $variant?->translations ?? []),
+            'condition' => $variant?->condition ?? 'new',
             'brand' => $product->brand?->name,
             'model' => $product->model,
             'type' => $product->product_type,
@@ -35,18 +43,17 @@ class ProductCardPayload
             'compare_at_price' => $variant?->compare_at_price !== null ? (float) $variant->compare_at_price : null,
             'currency' => $variant?->currency ?: 'CZK',
             'stock_status' => $variant?->stock_status ?: 'unknown',
-            'image' => $this->imageUrl($product),
-            'attributes' => $variant?->attributes->map(fn (AttributeValue $attribute) => [
-                'key' => $attribute->definition->key,
-                'label' => $attribute->definition->label,
-                'value' => $attribute->value,
-            ])->values() ?? collect(),
+            'image' => $this->imageUrl($product, $variant),
+            'attributes' => AttributePresentation::values($attributes),
         ];
     }
 
-    private function imageUrl(Product $product): ?string
+    private function imageUrl(Product $product, ?ProductVariant $variant): ?string
     {
-        $media = $product->catalogMedia;
+        $media = $product->relationLoaded('media')
+            ? ($product->media->firstWhere('product_variant_id', $variant?->id)
+                ?? $product->media->firstWhere('product_variant_id', null))
+            : $product->catalogMedia;
 
         if (! $media?->path || ! $media?->disk) {
             return $media?->url;

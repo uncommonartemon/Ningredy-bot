@@ -1,7 +1,31 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { observedGalleryRenditions, rememberGalleryLayer, selectGalleryFrames } from '../../scripts/gallery-observation.mjs';
+import { observedGalleryRenditions, rememberGalleryLayer, selectGalleryFrames, unresolvedGalleryImageProbes } from '../../scripts/gallery-observation.mjs';
+import { imageAssetKey } from '../../scripts/product-gallery-utils.mjs';
+
+test('only unresolved gallery files interrupt verification, not failed ads or other renditions', () => {
+    const front = 'https://cdn.example/image?id=front&width=1600';
+    const back = 'https://cdn.example/image?id=back&width=1600';
+    const probes = [
+        { url: front, reason: 'image_load_failed' },
+        { url: 'https://cdn.example/image?id=front&width=900', ok: true, width: 900, height: 900 },
+        { url: back, reason: 'probe_timeout' },
+        { url: 'https://cdn.example/ad.jpg', reason: 'image_load_failed' },
+    ];
+    assert.deepEqual(unresolvedGalleryImageProbes(probes, new Set([front, back].map(imageAssetKey))), [probes[2]]);
+});
+
+test('a decoded thumbnail cannot resolve a failed full-resolution rendition', () => {
+    const failed = { url: 'https://cdn.example/image?id=front&width=1600', reason: 'image_load_failed' };
+    const small = { url: 'https://cdn.example/image?id=front&width=180', ok: false, reason: 'dimensions_below_minimum', width: 180, height: 180 };
+    assert.deepEqual(unresolvedGalleryImageProbes([failed, small], new Set([imageAssetKey(failed.url)])), [failed]);
+});
+
+test('a probe failure cannot become a measured frame simply by reporting zero dimensions', () => {
+    const probe = { url: 'https://cdn.example/laptop.jpg', reason: 'probe_failed', width: 0, height: 0 };
+    assert.deepEqual(unresolvedGalleryImageProbes([probe], new Set([imageAssetKey(probe.url)])), [probe]);
+});
 
 test('all strict gallery frames reach filtering even when caller needs only four', () => {
     const frames = Array.from({ length: 13 }, (_, i) => ({ url: 'frame-' + i }));

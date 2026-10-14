@@ -5,7 +5,9 @@ namespace App\Services\Products;
 use App\Ai\Agents\ProductGalleryPreflightAgent;
 use App\Ai\Agents\ProductGalleryRecipeTrainerAgent;
 use App\Exceptions\InvalidGalleryRecipeException;
+use App\Exceptions\ProductSearchCancelled;
 use App\Models\AiRun;
+use App\Models\ProductDraft;
 use App\Models\ProductGalleryRecipe;
 use App\Models\ProductGalleryRecipeVersion;
 use App\Models\ProductSourceAttempt;
@@ -13,8 +15,18 @@ use App\Models\ProductSourceDomain;
 use App\Models\TelegramUpdate;
 use App\Services\Ai\AiSettings;
 use App\Services\Ai\OpenAiHeavyOperationGate;
+use App\Services\Ai\ProductSearchCancellation;
 use App\Services\Ai\ProductSearchCostBudget;
 use App\Services\Ai\ProductSearchTimeBudget;
+use App\Services\GalleryRecipes\RecipeContract;
+use App\Services\GalleryRecipes\RecipePortability;
+use App\Services\GalleryRecipes\RecipeReplayFailure;
+use App\Services\GalleryRecipes\RecipeReplayPlan;
+use App\Services\GalleryRecipes\Training\ObservationPresenter;
+use App\Services\GalleryRecipes\Training\RecipeExecution;
+use App\Services\GalleryRecipes\Training\RecipeRepairFeedback;
+use App\Services\Photos\ImageUrls;
+use App\Services\ProductSearch\Recovery\RecoveryContext;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Validator;
@@ -35,6 +47,12 @@ class ProductGalleryRecipeTrainer
         private readonly ProductSourcePageRules $pageRules,
         private readonly ProductGalleryRecipeRouter $recipeRouter,
         private readonly ProductImageResolver $resolver,
+        private readonly RecipeContract $recipeContract,
+        private readonly RecipePortability $recipePortability,
+        private readonly RecipeReplayPlan $replayPlan,
+        private readonly ObservationPresenter $observations,
+        private readonly RecipeExecution $execution,
+        private readonly RecipeRepairFeedback $repairFeedback,
     ) {}
 
     /**
@@ -76,7 +94,9 @@ class ProductGalleryRecipeTrainer
         string $trainingUrl,
         ?int $telegramUpdateId,
         ?callable $debug,
+        ?ProductGalleryRecipeVersion $version = null,
     ): array {
+        app(ProductSearchCancellation::class)->throwIfCancelled($telegramUpdateId);
         if ((int) $recipe->success_count < 1) {
             return ['status' => 'not_required', 'reason' => 'No previous successful recipe.'];
         }
@@ -90,7 +110,7 @@ class ProductGalleryRecipeTrainer
         // No unfinished control replay may replace the old working recipe.
         // Current-page photographs remain available to the caller.
         if (! $this->timeBudget->canStart($telegramUpdateId, 40) || $this->costBudget->exceeded($telegramUpdateId)) {
-            return ['status' => 'interrupted', 'reason' => 'Insufficient budget for the control replay.'];
+            return ['status' => 'interrupted', 'url' => $provenUrl, 'reason' => 'Insufficient budget for the control replay.'];
         }
 
         $debug?->__invoke('step', 'Проверяю починенный рецепт на прежде рабочей странице: '.$provenUrl);
@@ -100,9 +120,12 @@ class ProductGalleryRecipeTrainer
             // identity or specification text on the shared extractor.
             $controlBrowser = clone $this->browser;
             $result = $controlBrowser->executeRecipe($provenUrl, $candidate, 20, null, $telegramUpdateId);
+            app(ProductSearchCancellation::class)->throwIfCancelled($telegramUpdateId);
+        } catch (ProductSearchCancelled $exception) {
+            throw $exception;
         } catch (Throwable $exception) {
             // A timeout is not proof of another layout.
-            return ['status' => 'interrupted', 'reason' => $exception->getMessage()];
+            return ['status' => 'interrupted', 'url' => $provenUrl, 'reason' => $exception->getMessage()];
         }
 
         $failure = trim((string) ($result['failure_kind'] ?? ''));
@@ -112,18 +135,71 @@ class ProductGalleryRecipeTrainer
             || ($failure !== '' && $failure !== 'recipe_mismatch')
             || data_get($result, 'diagnostics.partial') === true
             || ! empty($result['error'])) {
-            return ['status' => 'interrupted', 'reason' => $failure ?: (string) ($result['error'] ?? 'Partial control replay.')];
+            return ['status' => 'interrupted', 'url' => $provenUrl, 'reason' => $failure ?: (string) ($result['error'] ?? 'Partial control replay.')];
         }
         $validation = $this->resultValidator->validate($candidate, $result, countedOnThisPage: false);
+        $audit = $this->attempts->record([
+            'telegram_update_id' => $telegramUpdateId,
+            'product_gallery_recipe_version_id' => $version?->id,
+            'product_url' => $provenUrl, 'actor' => 'playwright', 'phase' => 'gallery_training',
+            'action' => 'control_recipe_execution', 'status' => 'completed',
+            'decision' => $validation['passed'] ? 'control_passed' : 'control_incompatible',
+            'input' => ['recipe' => $candidate], 'output' => ['validation' => $validation, ...$result],
+        ]);
+        $diagnostics = array_intersect_key($result['diagnostics'] ?? [], array_flip([
+            'observed_gallery_count', 'distinct_dom_assets', 'validated_candidates',
+            'strict_recipe', 'partial', 'recipe_action_outcome',
+            'network_candidates', 'collection_capability_feedback',
+        ]));
+        $diagnostics['rejected_candidates'] = array_slice($result['diagnostics']['rejected_candidates'] ?? [], 0, 5);
 
-        return ['status' => $validation['passed'] ? 'passed' : 'incompatible', 'reason' => $validation['reason']];
+        return [
+            'status' => $validation['passed'] ? 'passed' : 'incompatible',
+            'reason' => $validation['reason'],
+            'url' => $provenUrl,
+            'validation' => $validation,
+            'audit_attempt_id' => $audit?->id,
+            'action_trace' => $this->observations->textPayload(array_slice($result['action_trace'] ?? [], -20)),
+            'diagnostics' => $this->observations->textPayload($diagnostics),
+            'observation' => $this->observationForAgent($result['post_interaction_scout'] ?? $result['scout'] ?? []),
+            'progress_signature' => $this->trainingProgressSignature($result),
+        ];
+    }
+
+    private function canaryCacheKey(array $candidate): string
+    {
+        // Narration is not a new executable hypothesis. Historical proof
+        // fingerprints remain unchanged; this key is local to one session.
+        unset($candidate['reason'], $candidate['confidence'], $candidate['expected_count_evidence'],
+            $candidate['page_kind'], $candidate['page_assessment_evidence'], $candidate['training_decision']);
+
+        return app(ProductGalleryRecipeProof::class)->fingerprint($candidate);
+    }
+
+    private function pageFamilyScopeConflict(ProductGalleryRecipe $recipe, string $trainingUrl, string $controlUrl): ?string
+    {
+        $targetPattern = $this->recipeRouter->pathPatternForUrl($trainingUrl);
+        $controlPattern = $this->recipeRouter->pathPatternForUrl($controlUrl);
+        $target = ProductGalleryRecipe::query()->where('domain', $recipe->domain)
+            ->where('path_pattern', $targetPattern)->first();
+        $patterns = [$targetPattern, ...($target?->compatible_path_patterns ?? [])];
+
+        return in_array($controlPattern, $patterns, true)
+            ? 'The requested page-family route '.$targetPattern.' also selects the incompatible control page. '
+                .'This route cannot safely separate these layouts; the shared recipe still needs a portable plan.'
+            : null;
+    }
+
+    private function minimumPhotoWidth(array $context): int
+    {
+        return (int) ($context['minimum_image_width'] ?? 0) > 0
+            ? (int) $context['minimum_image_width']
+            : $this->settings->imageMinimumWidth();
     }
 
     private function measureDownloadableFrames(array $urls, array $context, string $pageUrl, ?int $telegramUpdateId = null): array
     {
-        $minimumWidth = (int) ($context['minimum_image_width'] ?? 0) > 0
-            ? (int) $context['minimum_image_width']
-            : $this->settings->imageMinimumWidth();
+        $minimumWidth = $this->minimumPhotoWidth($context);
         $minimumHeight = ($context['minimum_image_height'] ?? null) === null
             ? $this->settings->imageMinimumHeight()
             : max(0, (int) $context['minimum_image_height']);
@@ -131,7 +207,7 @@ class ProductGalleryRecipeTrainer
         // Keep a wall-clock bound and explicitly report anything not measured.
         $sample = collect($urls)
             ->filter(fn (mixed $url): bool => is_string($url) && filter_var($url, FILTER_VALIDATE_URL) !== false)
-            ->unique(fn (string $url): string => ProductImageStorage::imageAssetKey($url))
+            ->unique(fn (string $url): string => ImageUrls::imageAssetKey($url))
             ->values();
         $usable = 0;
         $fetched = 0;
@@ -201,7 +277,9 @@ class ProductGalleryRecipeTrainer
         ?array $previousRecipeImages = null,
         ?string $userHint = null,
         array $repairFrom = [],
+        ?callable $onBrowserObservation = null,
     ): array {
+        app(ProductSearchCancellation::class)->throwIfCancelled($telegramUpdateId);
         $host = strtolower((string) parse_url($url, PHP_URL_HOST));
         $categorySlug = trim((string) ($context['category_slug'] ?? ''));
         $categorySlug = $categorySlug !== '' ? $categorySlug : null;
@@ -267,6 +345,34 @@ class ProductGalleryRecipeTrainer
                 return [];
             }
 
+            // Reuse a recent, explicit agent decision for this page, not an
+            // old server guess based on repeated small measurements. Forced
+            // retraining, a user hint or a repair can still revisit the page.
+            $knownCeiling = $force || trim((string) $userHint) !== '' || $repairFrom !== []
+                ? null
+                : $this->knownSourceMediaVerdict($recipe, $url);
+            if ($knownCeiling !== null) {
+                $noProductMedia = $knownCeiling->result['failure_kind'] === 'source_has_no_product_media';
+                $verdict = $knownCeiling->result[$noProductMedia ? 'source_media_verdict' : 'size_verdict'];
+                $minimumPhotoWidth = $this->minimumPhotoWidth($context);
+                $publishable = $noProductMedia ? [] : GalleryPhotoSizeEvidence::publishableUrls($knownCeiling->result['attempts'] ?? [], $minimumPhotoWidth);
+                $this->attempts->record([
+                    'telegram_update_id' => $telegramUpdateId,
+                    'product_draft_id' => $context[ProductRequestContext::CONTEXT_KEY] ?? null,
+                    'product_gallery_recipe_version_id' => $knownCeiling->id,
+                    'product_url' => $url, 'actor' => 'server', 'phase' => 'gallery_training',
+                    'action' => $noProductMedia ? 'reuse_source_media_verdict' : 'reuse_photo_size_verdict', 'status' => 'skipped',
+                    'decision' => $knownCeiling->result['failure_kind'],
+                    'output' => ['publishable_urls' => $publishable, 'measured_at' => $knownCeiling->created_at?->toIso8601String()],
+                ]);
+                $debug?->__invoke('step', 'Использую вывод AI-тренера по этой странице от '.$knownCeiling->created_at?->format('d.m H:i')
+                    .': '.$verdict['reason']
+                    .($noProductMedia ? '. Фотографии товара не обнаружены' : '. Фото не меньше '.$minimumPhotoWidth.'px — '.count($publishable))
+                    .'. Обучение не повторяю, передаю найденное на дальнейшую проверку.');
+
+                return $publishable;
+            }
+
             $provider = $this->settings->providerFor('gallery_recipe_training');
             $model = $this->settings->modelFor('gallery_recipe_training');
             $version = ProductGalleryRecipeVersion::query()->create([
@@ -292,6 +398,7 @@ class ProductGalleryRecipeTrainer
 
             $debug?->__invoke('step', "AI-тренер: Playwright собирает DOM, интерактивные элементы и сетевые изображения {$host}.");
             $scout = $this->browser->scout($url, $debug, $telegramUpdateId, $context);
+            app(ProductSearchCancellation::class)->throwIfCancelled($telegramUpdateId);
             $pageScout = is_array($scout['scout'] ?? null) ? $scout['scout'] : [];
             // The work is visual, and until now the agent did it blind: it read
             // a description of a layout it had never seen. One picture costs a
@@ -314,6 +421,37 @@ class ProductGalleryRecipeTrainer
                 $failureKind = 'access_gate';
                 $reason = (string) ($pageScout['access_gate_reason'] ?? 'captcha_or_waf');
                 throw new RuntimeException("Playwright обнаружил защитную страницу: {$reason}.");
+            }
+
+            // HTTP/search evidence can describe the requested product while
+            // the rendered page (or a redirect) describes another variant.
+            // Ask before paying for preflight/training, without blaming the
+            // reusable gallery recipe for this product-specific disagreement.
+            $identity = $this->scoutedProductIdentity($url, $scout, $context, $telegramUpdateId);
+            if ($identity !== null) {
+                $version->update(['result' => ['source_identity' => $identity]]);
+                $this->attempts->record([
+                    'telegram_update_id' => $telegramUpdateId,
+                    'product_draft_id' => $context[ProductRequestContext::CONTEXT_KEY],
+                    'product_gallery_recipe_version_id' => $version->id,
+                    'product_url' => $identity['source']['url'], 'actor' => 'identity_validator',
+                    'phase' => 'source_selection', 'action' => 'validate_scout_product_identity',
+                    'status' => $identity['verdict'] === 'conflicting' ? 'failed' : 'completed',
+                    'decision' => $identity['verdict'] === 'conflicting'
+                        ? 'reject_conflicting_product_before_training' : $identity['verdict'],
+                    'output' => $identity,
+                ]);
+                if ($identity['verdict'] === 'conflicting') {
+                    $this->browser->rememberSourceIdentityAssessment([
+                        ...$identity,
+                        'product_draft_id' => (int) $context[ProductRequestContext::CONTEXT_KEY],
+                        'telegram_update_id' => $telegramUpdateId,
+                    ]);
+                    $version->update(['status' => 'skipped', 'error' => 'Rendered page conflicts with the requested product.']);
+                    $debug?->__invoke('warning', 'Браузер открыл другую комплектацию: обучение на этой странице не запускаю; рецепт магазина не меняю.');
+
+                    return [];
+                }
             }
 
             $hasFragments = ($pageScout['fragments'] ?? []) !== [];
@@ -342,7 +480,7 @@ class ProductGalleryRecipeTrainer
             $preflightDecision = 'train_playwright';
 
             if (! $forceInteractive) {
-                $preflight = $this->preflight($url, $pageScout, $scout['diagnostics'] ?? [], $context, $domainHint, $autoDomainHint, $provider, $model, $version, $telegramUpdateId, $debug, $productRequest);
+                $preflight = $this->preflight($url, $pageScout, $scout['diagnostics'] ?? [], $context, $domainHint, $autoDomainHint, $provider, $model, $version, $telegramUpdateId, $debug, $productRequest, $repairFrom);
 
                 // An interrupted classification is a call that never reached the
                 // agent, and everything downstream reads it as "the gallery was
@@ -355,10 +493,11 @@ class ProductGalleryRecipeTrainer
                 // One retry, and only while the budget can pay for it. A second
                 // failure is a real answer about the provider, not about the page.
                 if (($preflight['decision'] ?? null) === 'interrupted'
+                    && ($preflight['failure_kind'] ?? null) !== 'invalid_response'
                     && $this->timeBudget->canStart($telegramUpdateId, 20)
                     && ! $this->costBudget->exceeded($telegramUpdateId)) {
                     $debug?->__invoke('warning', 'AI-предфильтр не состоялся технически; повторяю один раз.');
-                    $preflight = $this->preflight($url, $pageScout, $scout['diagnostics'] ?? [], $context, $domainHint, $autoDomainHint, $provider, $model, $version, $telegramUpdateId, $debug, $productRequest);
+                    $preflight = $this->preflight($url, $pageScout, $scout['diagnostics'] ?? [], $context, $domainHint, $autoDomainHint, $provider, $model, $version, $telegramUpdateId, $debug, $productRequest, $repairFrom);
                 }
 
                 $preflightDecision = (string) ($preflight['decision'] ?? 'no_gallery');
@@ -438,28 +577,37 @@ class ProductGalleryRecipeTrainer
             }
 
             if ($preflightDecision === 'interrupted') {
-                $version->update([
-                    'status' => 'interrupted',
-                    'result' => ['preflight' => $preflight],
-                    'error' => $preflight['reason'] ?? null,
-                ]);
+                if (($preflight['failure_kind'] ?? null) === 'invalid_response'
+                    && $this->timeBudget->canStart($telegramUpdateId, 30)
+                    && ! $this->costBudget->exceeded($telegramUpdateId)) {
+                    // The page was observed; only the classifier's answer was
+                    // invalid. Let the existing trainer inspect it and decide.
+                    $preflightDecision = 'train_playwright';
+                    $debug?->__invoke('warning', 'Ответ предфильтра некорректен; передаю страницу и причину тренеру для решения.');
+                } else {
+                    $version->update([
+                        'status' => 'interrupted',
+                        'result' => ['preflight' => $preflight],
+                        'error' => $preflight['reason'] ?? null,
+                    ]);
 
-                // Provider/transport/schema failure is not evidence about
-                // the page. Preserve real observations as provisional
-                // candidates, but do not train or publish a semantic rule.
-                return $this->staticGalleryCandidates($pageScout, $context);
+                    return $this->staticGalleryCandidates($pageScout, $context);
+                }
             }
 
             if ($preflightDecision === 'blocked') {
-                $failureKind = 'access_gate';
-                $this->recordFailure(
-                    $recipe,
-                    new RuntimeException((string) ($preflight['reason'] ?? 'AI detected an access gate.')),
-                    $failureKind,
-                    $url,
-                    $debug,
-                );
-                $failureRecorded = true;
+                // An AI classification can stop this page attempt, but it is
+                // not browser evidence of a domain-wide CAPTCHA. Concrete
+                // access_gate/rate_limited observations are handled above.
+                // Real counterexamples: a 410 page and a country chooser.
+                $this->attempts->record([
+                    'telegram_update_id' => $telegramUpdateId,
+                    'product_gallery_recipe_version_id' => $version->id,
+                    'product_url' => $url, 'actor' => 'server', 'phase' => 'gallery_preflight',
+                    'action' => 'classify_access_failure', 'status' => 'skipped',
+                    'decision' => 'unconfirmed_access_gate',
+                    'output' => ['preflight' => $preflight, 'domain_blocked' => false],
+                ]);
             }
 
             if ($preflightDecision !== 'train_playwright') {
@@ -488,6 +636,7 @@ class ProductGalleryRecipeTrainer
                 $oldImages = $previousRecipeImages;
             } elseif (is_array($recipe->recipe) && $recipe->recipe !== []) {
                 $oldResult = $this->browser->executeRecipe($url, $recipe->recipe, 20, null, $telegramUpdateId, $context);
+                app(ProductSearchCancellation::class)->throwIfCancelled($telegramUpdateId);
                 $this->recordExecutionTrace($url, $version, 0, $recipe->recipe, $oldResult, $telegramUpdateId);
                 $oldImages = $oldResult['images'] ?? [];
             }
@@ -501,10 +650,13 @@ class ProductGalleryRecipeTrainer
             // three days, four rounds each, every round returning a real
             // gallery, and arrived at the fourth search knowing nothing.
             //
-            // A share of the budget is the right way to stop one domain eating
-            // a whole search. Losing the work when it triggers is not.
+            // The overall search budget may interrupt this work; its
+            // observations must survive for the next attempt.
             $resumed = $repairFrom === [] ? $this->interruptedTrainingProgress($recipe) : [];
             $attempts = $resumed['attempts'] ?? [];
+            // Every earlier round of the interrupted session, for photograph
+            // sizes only. Repeats of the rounds in $attempts measure the same.
+            $sizeHistory = $resumed['size_history'] ?? [];
             // A stored recipe that stopped working is not a blank page. It
             // opened this site correctly a dozen times, and what changed is
             // knowable: the selector that matched nothing, the traversal that
@@ -515,24 +667,10 @@ class ProductGalleryRecipeTrainer
             //
             // Seeded as the first round's feedback, so round one is a repair
             // with evidence rather than a guess.
-            $feedback = $repairFrom === [] ? null : [
-                'rejected_recipe' => ($repairFrom['mode'] ?? null) === 'execution_recovery' ? null : ($repairFrom['recipe'] ?? null),
-                'previous_recipe' => $repairFrom['recipe'] ?? null,
-                'mode' => $repairFrom['mode'] ?? 'recipe_repair',
-                'error' => (($repairFrom['mode'] ?? null) === 'execution_recovery'
-                    ? 'Execution was interrupted; recipe compatibility is unknown: '
-                    : 'This stored recipe stopped working on this page: ')
-                    .($repairFrom['reason'] ?? 'unknown reason'),
-                'action_trace' => $repairFrom['action_trace'] ?? [],
-                'diagnostics' => $repairFrom['diagnostics'] ?? [],
-                'candidate_count' => count($repairFrom['images'] ?? []),
-                'instruction' => ($repairFrom['mode'] ?? null) === 'execution_recovery'
-                    ? 'Inspect the recorded failure. Choose whether to retry the existing plan unchanged or investigate and change it. An interrupted execution does not prove a selector mismatch.'
-                    : 'This recipe already works on other pages of this site. Repair the step that '
-                    .'failed here rather than describing the gallery from scratch, and keep every step that '
-                    .'still executed correctly - a replacement that only fits this page breaks the pages the '
-                    .'recipe already opens.',
-            ];
+            $feedback = $this->repairFeedback->fromPreviousAttempt($repairFrom);
+            if (isset($preflight['recovery'])) {
+                $feedback = [...($feedback ?? []), 'preflight_recovery' => $preflight['recovery']];
+            }
 
             if ($feedback === null && ($resumed['feedback'] ?? null) !== null) {
                 $feedback = $resumed['feedback'];
@@ -545,6 +683,11 @@ class ProductGalleryRecipeTrainer
             $candidateResult = [];
             $observationFocusSelector = '';
             $candidateImages = [];
+            $canary = null;
+            $canaryCache = [];
+            $priorPortabilityFailure = null;
+            $scopeDecision = null;
+            $controlReplayInterrupted = false;
             $bestPartialImages = $oldImages;
             $bestPartialResult = $oldImages === [] ? [] : ['images' => $oldImages];
             $promote = false;
@@ -570,15 +713,7 @@ class ProductGalleryRecipeTrainer
                 || ! $telegramUpdateId
                 || $this->costBudget->limit() <= 0
                 || $this->costBudget->unmeasurable($telegramUpdateId);
-            // A source is normally allowed to spend freely until the whole
-            // search's budget runs out (see stage()'s "a source is atomic"
-            // comment) - but that lets one stubborn domain alone burn the
-            // entire search budget on training before any other candidate
-            // source ever gets a turn (seen live: 9 rounds on one Lenovo
-            // page spent the full $1 cap and left literally nothing for the
-            // other known sources). Capping how much THIS training session
-            // alone may spend, as a share of the total limit, guarantees at
-            // least a couple of other sources still get tried.
+            // The agent owns source selection within the shared budget.
             $previousCandidate = null;
             $previousCandidateResult = null;
             $previousProgressSignature = null;
@@ -587,8 +722,14 @@ class ProductGalleryRecipeTrainer
             $identicalFailures = 0;
             $lastFailureSignature = null;
             $requestWasRejected = false;
+            $providerInterruption = null;
+            $executionInterruption = null;
+            $latestPageObservation = [];
             $photoOutcome = $this->previousPhotoOutcome($host, $url);
-            $stalled = false;
+            $minimumPhotoWidth = $this->minimumPhotoWidth($context);
+            // Only the agent can conclude that this page has no useful larger
+            // rendition. Repeated small downloads alone do not prove that.
+            $agentSizeVerdict = false;
             $budgetDeferred = false;
             $downloadInterrupted = false;
             $abandonmentReviewPending = false;
@@ -604,6 +745,7 @@ class ProductGalleryRecipeTrainer
             $structuralTraversalOk = false;
 
             for ($attempt = 1; $safetyLimited ? $attempt <= $safetyRounds : true; $attempt++) {
+                app(ProductSearchCancellation::class)->throwIfCancelled($telegramUpdateId);
                 $structuralTraversalOk = false;
                 $costExceeded = ! $safetyLimited && $this->costBudget->exceeded($telegramUpdateId);
 
@@ -642,7 +784,7 @@ class ProductGalleryRecipeTrainer
                 // from this payload, despite most of it being unchanged
                 // between its 3 rounds.
                 $roundLabel = $safetyLimited ? "{$attempt}/{$safetyRounds}" : (string) $attempt;
-                $prompt = json_encode([
+                $prompt = json_encode($this->observations->textPayload([
                     'auto_domain_hint' => $autoDomainHint,
                     'url' => $url,
                     'max_attempts' => $safetyLimited ? $safetyRounds : null,
@@ -689,8 +831,13 @@ class ProductGalleryRecipeTrainer
                     // --- everything below changes every round ---
                     'attempt' => $attempt,
                     'attempt_history' => $attempts,
+                    // The sizes attempt_history holds, gathered per photograph.
+                    // Scattered over rounds they did not tell the agent that
+                    // store.acer.com's own full-size URLs were 500px too: it
+                    // spent two sessions on renditions that do not exist.
+                    'photo_size_evidence' => GalleryPhotoSizeEvidence::forAgent([...$sizeHistory, ...$attempts], $minimumPhotoWidth),
                     'previous_attempt_feedback' => $feedback,
-                ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+                ]), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
 
                 $debug?->__invoke(
                     'step',
@@ -722,7 +869,7 @@ class ProductGalleryRecipeTrainer
                     $response = app(OpenAiHeavyOperationGate::class)->run(
                         $provider,
                         $recipeTimeout,
-                        fn () => ProductGalleryRecipeTrainerAgent::make(
+                        fn () => $this->unlessCancelled($telegramUpdateId, fn () => ProductGalleryRecipeTrainerAgent::make(
                             url: $url,
                             domain: $host,
                             telegramUpdateId: $telegramUpdateId,
@@ -735,11 +882,10 @@ class ProductGalleryRecipeTrainer
                             abandonSignal: $abandonSignal,
                             visionImageUrls: $this->observedImageUrls($pageScout, [
                                 'feedback' => $feedback,
-                                'latest_observation' => $candidateResult['post_interaction_scout'] ?? [],
+                                'latest_observation' => $latestPageObservation,
                             ]),
                             initialPageObservation: $pageScout,
-                            latestPageObservation: $candidateResult['post_interaction_scout']['full_page_observation']
-                                ?? $candidateResult['post_interaction_scout'] ?? [],
+                            latestPageObservation: $latestPageObservation,
                         )->prompt(
                             $prompt ?: '{}',
                             // The media type is not optional: without it the
@@ -758,7 +904,7 @@ class ProductGalleryRecipeTrainer
                             provider: $provider,
                             model: $model,
                             timeout: $recipeTimeout,
-                        ),
+                        )),
                     );
                     $run?->update([
                         'invocation_id' => $response->invocationId,
@@ -775,6 +921,10 @@ class ProductGalleryRecipeTrainer
                     $identicalFailures = 0;
                     $lastFailureSignature = null;
                     $requestWasRejected = false;
+                    $providerInterruption = null;
+                } catch (ProductSearchCancelled $exception) {
+                    $run?->update(['status' => 'cancelled', 'error' => $exception->getMessage(), 'completed_at' => now()]);
+                    throw $exception;
                 } catch (Throwable $exception) {
                     $run?->update([
                         'status' => 'failed',
@@ -782,7 +932,8 @@ class ProductGalleryRecipeTrainer
                         'completed_at' => now(),
                     ]);
                     $failureKind = $this->failureKindForException($exception);
-                    $attempts[] = ['attempt' => $attempt, 'error' => 'ai_call_failed: '.$exception->getMessage()];
+                    $providerInterruption = ['failure_kind' => $failureKind, 'error' => mb_substr($exception->getMessage(), 0, 5000)];
+                    $attempts[] = ['attempt' => $attempt, 'failure_kind' => $failureKind, 'error' => 'ai_call_failed: '.$exception->getMessage()];
                     $feedback = ['error' => 'The previous attempt failed to produce a response: '.mb_substr($exception->getMessage(), 0, 300)];
 
                     // A round is retried because the next one might go
@@ -819,10 +970,14 @@ class ProductGalleryRecipeTrainer
                     continue;
                 }
 
+                app(ProductSearchCancellation::class)->throwIfCancelled($telegramUpdateId);
                 if ($abandonSignal->abandoned) {
-                    $agentAbandoned = true;
                     $agentAbandonReason = $abandonSignal->reason;
                     $failureKind = $abandonSignal->failureKind ?? 'agent_abandoned';
+                    // A source-quality verdict is not recipe breakage. Keep
+                    // its agent origin and reason so later reuse is auditable.
+                    $agentSizeVerdict = $failureKind === 'source_frames_too_small';
+                    $agentAbandoned = ! $agentSizeVerdict;
                     $debug?->__invoke(
                         'warning',
                         "AI-тренер: агент сам решил прекратить обучение на этом URL ({$agentAbandonReason}); перехожу к следующему источнику.",
@@ -844,10 +999,11 @@ class ProductGalleryRecipeTrainer
                         (array) ($pageScout['product_headings'] ?? []));
 
                     if (($candidate['training_decision'] ?? 'propose_recipe') === 'abandon_page') {
+                        $sessionOnly = in_array($candidate['page_kind'] ?? 'unknown', ['product_card', 'unknown'], true);
                         // A terminal page verdict cannot silently discard an
                         // unexplored gallery prospect. This is a contradiction
                         // review, not a server guess based on link vocabulary.
-                        $unexploredProspect = $previousCandidateResult === null
+                        $unexploredProspect = ! $sessionOnly && $previousCandidateResult === null
                             && ($preflight['gallery_likely'] ?? false)
                             && (($pageScout['action_candidates'] ?? []) !== []
                                 || ($pageScout['interactive_controls'] ?? []) !== []);
@@ -894,11 +1050,27 @@ class ProductGalleryRecipeTrainer
                         );
 
                         if (! $pageRule) {
-                            throw new InvalidGalleryRecipeException(
-                                'Отказ от страницы не подтверждён: нужны тип страницы, уверенность и наблюдаемые доказательства.',
-                                'abandon_page requires a terminal page kind, confidence >= 0.85 and at least two concrete evidence items. Use AbandonGalleryTrainingAttempt to stop only this attempt without declaring the page unsuitable.',
-                                ['abandon_page.evidence'],
-                            );
+                            // Stopping this attempt does not assert that the
+                            // URL (let alone the domain) is permanently bad.
+                            // The stricter page-rule contract still governs
+                            // persistence, not the agent's right to move on.
+                            $agentAbandoned = true;
+                            $agentAbandonReason = (string) $candidate['reason'];
+                            $failureKind = 'agent_abandoned';
+                            $attempts[] = ['attempt' => $attempt, 'selectors_tried' => $candidate,
+                                'error' => 'agent_abandoned: '.$agentAbandonReason];
+                            $this->attempts->record([
+                                'telegram_update_id' => $telegramUpdateId,
+                                'product_gallery_recipe_version_id' => $version->id,
+                                'product_url' => $url, 'actor' => 'ai', 'phase' => 'gallery_training',
+                                'action' => 'abandon_training_attempt', 'status' => 'skipped',
+                                'decision' => 'agent_abandoned', 'round' => $attempt,
+                                'output' => ['assessment' => $candidate, 'persistent_page_rule' => false],
+                            ]);
+                            $debug?->__invoke('warning', 'Агент завершил попытку на этой странице: '.$agentAbandonReason
+                                .' Найденное сохраняю; рецепт домена не отключаю.');
+
+                            break;
                         }
 
                         $this->attempts->record([
@@ -989,7 +1161,17 @@ class ProductGalleryRecipeTrainer
                 if ($observationFocusSelector !== '') {
                     $executionContext['observation_focus_selector'] = $observationFocusSelector;
                 }
-                $candidateResult = $this->browser->executeRecipe($url, $candidate, 20, $debug, $telegramUpdateId, $executionContext);
+                app(ProductSearchCancellation::class)->throwIfCancelled($telegramUpdateId);
+                $candidateResult = $this->execution->run($this->browser, $url, $candidate, $debug, $telegramUpdateId, $executionContext);
+                app(ProductSearchCancellation::class)->throwIfCancelled($telegramUpdateId);
+                $executionInterruption = RecipeReplayFailure::inspect($candidateResult, false)->interrupted
+                    ? ['failure_kind' => $candidateResult['failure_kind'] ?? 'execution_interrupted',
+                        'error' => $candidateResult['error'] ?? 'Browser execution did not finish.']
+                    : null;
+                if (! empty($candidateResult['post_interaction_scout'])) {
+                    $latestPageObservation = $candidateResult['post_interaction_scout']['full_page_observation']
+                        ?? $candidateResult['post_interaction_scout'];
+                }
                 // Never pair a new DOM observation with the old initial-page picture.
                 $pageImage = is_string($candidateResult['screenshot'] ?? null) ? $candidateResult['screenshot'] : null;
                 $abandonmentReviewPending = false;
@@ -1007,21 +1189,8 @@ class ProductGalleryRecipeTrainer
                 // of URLs actually observed across rounds instead of keeping
                 // only the largest individual round. Downstream verification
                 // still decides which candidates are safe to store.
-                $mergedPartialImages = collect([
-                    ...$bestPartialImages,
-                    ...$candidateImages,
-                ])
-                    ->filter(fn (mixed $image): bool => is_string($image) && $image !== '')
-                    ->unique(fn (string $image): string => ProductImageStorage::imageAssetKey($image))
-                    ->values()
-                    ->all();
-                if (count($mergedPartialImages) > count($bestPartialImages)) {
-                    $bestPartialImages = $mergedPartialImages;
-                    $bestPartialResult = [
-                        ...$candidateResult,
-                        'images' => $bestPartialImages,
-                    ];
-                }
+                $bestPartialResult = $this->mergePartialResult($bestPartialResult, $candidateResult);
+                $bestPartialImages = $bestPartialResult['images'];
                 $contextMinimum = max(0, (int) ($context['minimum_verified_images'] ?? 0));
                 $validation = $this->resultValidator->validate(
                     $candidate,
@@ -1038,6 +1207,11 @@ class ProductGalleryRecipeTrainer
                 // $validation['passed'], to decide whether a domain's
                 // Playwright gets disabled over it.
                 $structuralTraversalOk = $validation['passed'];
+                if ($executionInterruption !== null) {
+                    $structuralTraversalOk = false;
+                    $validation = [...$validation, 'passed' => false,
+                        'reason' => $executionInterruption['error']];
+                }
                 // Only worth the bandwidth once the plan itself is sound: a
                 // recipe already going back for structural repair learns
                 // nothing extra from the size of frames it will not keep.
@@ -1118,34 +1292,62 @@ class ProductGalleryRecipeTrainer
                     ];
                 }
 
-                // A candidate that legitimately passes its own validation used
-                // to still be refused for producing fewer raw URLs than the
-                // recipe it would replace - which blocks a genuine fix (fewer,
-                // larger, correctly-deduplicated photos; a product that today
-                // has fewer real variants) for a reason unrelated to whether it
-                // actually works. The real protection for the previous working
-                // recipe is the canary replay below: it re-runs this candidate
-                // on a page the old recipe is known to have opened, and only a
-                // demonstrated break there keeps the old version (or narrows
-                // the new one to its own page family). That is evidence about
-                // this candidate; a smaller number never was.
+                if (($validation['unexplored_media_control'] ?? null) !== null && $structuralTraversalOk) {
+                    $validation = [...$validation, 'passed' => false,
+                        'reason' => $validation['unexplored_media_control']['reason']];
+                }
                 $promote = $validation['passed'];
+                $canary = null;
+                $scopeDecision = null;
+                if ($promote) {
+                    // A control failure is feedback for this same agent, not
+                    // automatic evidence of a different page family. The
+                    // current product's successful validation stays intact.
+                    if (($candidate['recipe_scope'] ?? 'domain') === 'page_family'
+                        && $priorPortabilityFailure !== null) {
+                        $canary = $priorPortabilityFailure;
+                        $scopeConflict = $this->pageFamilyScopeConflict($recipe, $url, $canary['url']);
+                        if ($scopeConflict === null) {
+                            $scopeDecision = ['scope' => 'page_family', 'reason' => $candidate['scope_reason']];
+                        } else {
+                            $promote = false;
+                            $canary = [...$canary, 'scope_error' => $scopeConflict];
+                            $priorPortabilityFailure = $canary;
+                        }
+                    } else {
+                        $fingerprint = $this->canaryCacheKey($candidate);
+                        $canary = $canaryCache[$fingerprint] ??= $this->canaryFailure(
+                            $recipe, $candidate, $url, $telegramUpdateId, $debug, $version,
+                        );
+                        app(ProductSearchCancellation::class)->throwIfCancelled($telegramUpdateId);
+                        $promote = in_array($canary['status'], ['passed', 'not_required'], true);
+                        $controlReplayInterrupted = $canary['status'] === 'interrupted';
+                        if ($canary['status'] === 'incompatible') {
+                            $priorPortabilityFailure = $canary;
+                        }
+                    }
+                }
                 $attempts[] = [
                     'attempt' => $attempt,
                     'download_probe' => $downloadProbe,
                     'selectors_tried' => $candidate,
                     'candidate_count' => count($candidateImages),
                     'validation' => $validation,
+                    'portability_validation' => $canary,
+                    'scope_decision' => $scopeDecision,
                     'diagnostics' => $candidateResult['diagnostics'] ?? [],
-                    'failure_kind' => $stalled ? 'page_stalled' : ($candidateResult['failure_kind'] ?? null),
+                    'failure_kind' => $candidateResult['failure_kind'] ?? null,
                     'error' => $candidateResult['error'] ?? null,
                 ];
 
-                if ($promote) {
+                if ($promote || $controlReplayInterrupted) {
                     break;
                 }
 
-                $progressSignature = $this->trainingProgressSignature($candidateResult);
+                $progressSignature = hash('sha256', json_encode([
+                    $this->trainingProgressSignature($candidateResult),
+                    $canary['progress_signature'] ?? null,
+                ]));
                 if ($previousProgressSignature !== null && hash_equals($previousProgressSignature, $progressSignature)) {
                     $stagnantRounds++;
                 } else {
@@ -1153,15 +1355,9 @@ class ProductGalleryRecipeTrainer
                 }
                 $previousProgressSignature = $progressSignature;
 
-                if ($stagnantRounds >= 2) {
-                    $stalled = true;
-                    $debug?->__invoke(
-                        'warning',
-                        'AI-тренер три раунда подряд не получил новых фото, нового DOM-состояния или успешного перехода; прекращаю этот URL и перехожу к следующему источнику.',
-                    );
-
-                    break;
-                }
+                // Repeated outcomes are evidence for the agent, not a verdict
+                // that this page cannot work. The operator permits returning to
+                // a promising viewer while the shared cost/time budget remains.
 
                 // Counted for the round report, and for nothing else.
                 //
@@ -1172,10 +1368,8 @@ class ProductGalleryRecipeTrainer
                 // look like. Reaching a genuinely new DOM state and collecting
                 // nothing from it is progress towards a recipe, not proof there
                 // is nothing to find, and a fourth round did produce the gallery
-                // where this rule had already given up. What bounds a page that
-                // truly cannot be scraped is the stagnation rule above - three
-                // rounds with no new state at all - plus the round cap, the time
-                // and money budgets, and the agent's own tool for abandoning it.
+                // where this rule had already given up. Time and money budgets,
+                // cancellation and the agent's own abandonment decision bound it.
                 $emptyRounds = count($candidateImages) === 0 ? $emptyRounds + 1 : 0;
 
                 $postInteractionScout = $candidateResult['post_interaction_scout'] ?? [];
@@ -1186,7 +1380,20 @@ class ProductGalleryRecipeTrainer
                         || ($postInteractionScout['action_candidates'] ?? []) !== []
                     );
                 $feedback = [
-                    'rejected_recipe' => $candidate,
+                    'consecutive_unchanged_outcomes' => $stagnantRounds + 1,
+                    'autonomy' => 'You may retry or revisit this viewer while budget remains. Explain your next hypothesis using the action errors and current page state. Repeated outcomes alone do not prove that the viewer is unavailable; decide whether to investigate, change the plan or abandon this source.',
+                    'current_page_validation' => $validation,
+                    'portability_validation' => $priorPortabilityFailure,
+                    'rejected_recipe' => $executionInterruption === null ? $candidate : null,
+                    'previous_recipe' => $candidate,
+                    'recovery' => (new RecoveryContext(
+                        $canary !== null ? 'portability_validation' : ($executionInterruption === null ? 'gallery_validation' : 'recipe_execution'),
+                        $canary !== null ? 'control_page_incompatible' : ($executionInterruption['failure_kind'] ?? ($downloadInterrupted ? 'download_interrupted' : 'validation_failed')),
+                        (string) ($canary['reason'] ?? $candidateResult['error'] ?? $validation['reason']),
+                        ['ReadGalleryPageObservation', 'GetCandidateRejectionDetail', 'propose_recipe', 'abandon_page'],
+                        ['images' => $bestPartialImages, 'latest_observation_available' => $latestPageObservation !== []],
+                        ['action_trace' => $candidateResult['action_trace'] ?? [], 'download_probe' => $downloadProbe],
+                    ))->toArray(),
                     'candidate_count' => count($candidateImages),
                     // The pixels behind the URLs this round produced, measured
                     // by the downloader that decides what the catalog keeps.
@@ -1200,38 +1407,49 @@ class ProductGalleryRecipeTrainer
                                 .'worth keeping. Look for the full-size source behind the same photographs - a zoom '
                                 .'or lightbox control, a data attribute holding a larger rendition, or a URL '
                                 .'parameter the page itself uses for the large view. Collecting more thumbnails '
-                                .'does not help; the same photographs at their real size do.'
+                                .'does not help; the same photographs at their real size do. If the page\'s own '
+                                .'large view has been tried and photo_size_evidence shows they still do not grow, '
+                                .'end the page as source_frames_too_small.'
                             : 'These are the real sizes the downloader measured for the frames you collected.',
                     ],
                     'previous_working_count' => count($oldImages),
                     'diagnostics' => $candidateResult['diagnostics'] ?? [],
-                    'failure_kind' => $stalled ? 'page_stalled' : ($candidateResult['failure_kind'] ?? null),
-                    'error' => $candidateResult['error'] ?? $validation['reason'],
+                    'failure_kind' => $candidateResult['failure_kind'] ?? null,
+                    'error' => $canary['reason'] ?? $candidateResult['error'] ?? $validation['reason'],
                     'action_trace' => $candidateResult['action_trace'] ?? [],
                     // The initial page remains the replay starting point;
                     // this sanitized post-action snapshot is observation only.
                     'previous_attempt_observation' => is_array($postInteractionScout) && $postInteractionScout !== []
                         ? $this->observationForAgent($postInteractionScout)
                         : null,
-                    'instruction' => $postInteractionScoutUsable
+                    'instruction' => $executionInterruption !== null
+                        ? 'Execution was interrupted, not disproven. Use the retained observations and exact failure to choose a safe retry, another plan or abandonment. Previously found photos remain available; every execution starts from the original URL.'
+                        : ($postInteractionScoutUsable
                         ? 'The page field is the fresh initial page. previous_attempt_observation is the DOM revealed by the last execution and is diagnostic only. Return a complete recipe that replays all prerequisites from the fresh page before using newly revealed controls.'
-                        : 'The page field is the fresh initial page. Use the action trace and diagnostics to return a materially corrected, complete recipe; every execution starts from that fresh page.',
+                        : 'The page field is the fresh initial page. Use the action trace and diagnostics to return a materially corrected, complete recipe; every execution starts from that fresh page.'),
                 ];
                 $previousCandidate = $candidate;
                 $previousCandidateResult = $candidateResult;
             }
 
             $hasPartial = ! $promote && count($bestPartialImages) > 0;
+            if ($agentAbandoned || $agentSizeVerdict) {
+                $executionInterruption = null;
+            }
+            app(ProductSearchCancellation::class)->throwIfCancelled($telegramUpdateId);
             $score = $this->score($promote ? $candidateResult : $bestPartialResult);
             $version->update([
                 'status' => match (true) {
                     $promote => 'promoted',
                     $abandonmentReviewPending => 'interrupted',
                     $downloadInterrupted => 'interrupted',
+                    $controlReplayInterrupted => 'interrupted',
                     // Not a verdict on the recipe: the session was rationed, not
                     // judged. The row keeps the candidate and the round history
                     // so the next search resumes from it.
                     $budgetDeferred => 'deferred',
+                    $providerInterruption !== null => 'interrupted',
+                    $executionInterruption !== null => 'interrupted',
                     $hasPartial => 'partial',
                     default => 'rejected',
                 },
@@ -1239,21 +1457,37 @@ class ProductGalleryRecipeTrainer
                 'result' => [
                     'candidate_count' => count($candidateImages),
                     'best_partial_count' => count($bestPartialImages),
+                    'best_partial_result' => [
+                        'images' => $bestPartialImages,
+                        'diagnostics' => ['validated_image_evidence' => data_get($bestPartialResult, 'diagnostics.validated_image_evidence', [])],
+                    ],
                     'previous_count' => count($oldImages),
                     'preflight' => $preflight,
                     'validation' => $validation ?? null,
+                    'control_replay' => $canary,
+                    'scope_decision' => $scopeDecision,
                     'attempts' => $attempts,
                     'diagnostics' => $candidateResult['diagnostics'] ?? [],
                     'action_trace' => $candidateResult['action_trace'] ?? [],
                     'failure_kind' => match (true) {
                         $abandonmentReviewPending => 'unexplored_gallery_prospect',
                         $downloadInterrupted => 'download_interrupted',
-                        $stalled => 'page_stalled',
+                        $controlReplayInterrupted => 'control_replay_interrupted',
+                        $priorPortabilityFailure !== null && ! $promote => 'control_page_incompatible',
+                        $providerInterruption !== null => $providerInterruption['failure_kind'],
+                        $executionInterruption !== null => $executionInterruption['failure_kind'],
+                        $agentSizeVerdict => 'source_frames_too_small',
                         $agentAbandoned => $failureKind,
                         $stuckOnValidation => 'recipe_mismatch',
                         default => $candidateResult['failure_kind'] ?? null,
                     },
-                    'error' => $candidateResult['error'] ?? null,
+                    'size_verdict' => $agentSizeVerdict
+                        ? ['origin' => 'agent', 'reason' => $agentAbandonReason]
+                        : null,
+                    'source_media_verdict' => $agentAbandoned && $failureKind === 'source_has_no_product_media'
+                        ? ['origin' => 'agent', 'reason' => $agentAbandonReason]
+                        : null,
+                    'error' => $providerInterruption['error'] ?? $candidateResult['error'] ?? null,
                 ],
                 'score' => $score,
                 'promoted_at' => $promote ? now() : null,
@@ -1261,15 +1495,19 @@ class ProductGalleryRecipeTrainer
                     $promote => null,
                     $abandonmentReviewPending => 'Gallery prospect remains unverified: abandonment was not backed by an executed candidate. Review history is preserved.',
                     $downloadInterrupted => $validation['reason'],
+                    $controlReplayInterrupted => 'Control replay did not finish: '.$canary['reason'],
+                    $priorPortabilityFailure !== null && ! $promote => 'Recipe portability remains unconfirmed: '.$priorPortabilityFailure['reason'],
                     $budgetDeferred => 'Обучение отложено: достигнут общий денежный или временной лимит поиска. Кандидат и история раундов сохранены.',
-                    $stalled => 'Обучение остановлено: три последовательных раунда не дали материального прогресса.',
+                    $providerInterruption !== null => 'Обучение прервано при вызове AI: '.$providerInterruption['error'],
+                    $executionInterruption !== null => 'Исполнение прервано: '.$executionInterruption['error'],
+                    $agentSizeVerdict => 'AI-тренер завершил поиск более крупных фото на этой странице: '.($agentAbandonReason ?? ''),
                     $agentAbandoned => 'Обучение остановлено по решению AI-агента: '.($agentAbandonReason ?? ''),
                     $stuckOnValidation => 'Обучение остановлено: '.self::MAX_IDENTICAL_VALIDATION_FAILURES.' раунда подряд одна и та же ошибка валидации ('.implode(', ', $lastValidationSignature ?? []).').',
                     default => 'Все разрешённые раунды завершены без полной подтверждённой галереи.',
                 },
             ]);
 
-            if (! $promote && ($budgetDeferred || $downloadInterrupted || $abandonmentReviewPending)) {
+            if (! $promote && ($budgetDeferred || $downloadInterrupted || $controlReplayInterrupted || $abandonmentReviewPending || $providerInterruption !== null || $executionInterruption !== null)) {
                 // A deferred candidate must never fall through to the active
                 // recipe update below. Keep the last working version intact.
                 // These URLs are provisional, not a working recipe. Preserve
@@ -1278,6 +1516,23 @@ class ProductGalleryRecipeTrainer
             }
 
             if (! $promote) {
+                if ($priorPortabilityFailure !== null) {
+                    $debug?->__invoke('warning', 'Переносимость нового рецепта не подтверждена; прежний рецепт сохранён, найденные фото не теряются.');
+
+                    return $bestPartialImages;
+                }
+                if ($agentAbandoned && in_array($failureKind, ['agent_abandoned', 'source_has_no_product_media'], true)) {
+                    // A page-specific decision is not recipe incompatibility.
+                    // Keep the working recipe and do not escalate it into a
+                    // domain-wide cooldown/disable after two different pages.
+                    return $bestPartialImages;
+                }
+                if ($agentSizeVerdict) {
+                    // Small photographs are the source's, not the recipe's fault:
+                    // no failure is recorded, so the domain is neither paused nor
+                    // brought closer to having Playwright disabled.
+                    return $bestPartialImages;
+                }
                 if ($structuralTraversalOk) {
                     // Source quality is not recipe incompatibility. Preserve
                     // the previous version and do not publish an unproven one.
@@ -1315,44 +1570,14 @@ class ProductGalleryRecipeTrainer
                 return $oldImages;
             }
 
-            // A repaired recipe replaces one that already worked elsewhere on
-            // this site, and nothing ever checked that it still does. A fix
-            // shaped around the page in front of the agent can quietly break
-            // every other page the recipe opened - and the breakage only
-            // surfaces later, as a domain that mysteriously stopped producing
-            // photographs. So it is tried once on a page it is known to have
-            // worked on, and a failure there keeps the version that works.
-            $canary = $this->canaryFailure($recipe, $candidate, $url, $telegramUpdateId, $debug);
+            // Current-page validation and the control replay already ran in
+            // the agent loop. Do not pay for the same successful replay twice.
+            app(ProductSearchCancellation::class)->throwIfCancelled($telegramUpdateId);
 
-            $version->update(['result' => [...($version->result ?? []), 'control_replay' => $canary]]);
-            if ($canary['status'] === 'interrupted') {
-                $version->update([
-                    'status' => 'interrupted',
-                    'promoted_at' => null,
-                    'error' => 'Control replay did not finish: '.$canary['reason'],
-                ]);
-                $debug?->__invoke('warning', 'Контрольная проверка не завершилась; прежний рецепт сохранён, найденные фото не теряются.');
-
-                return $candidateImages;
-            }
-
-            if ($canary['status'] === 'incompatible') {
+            if ($scopeDecision !== null) {
                 $canary = $canary['reason'];
-                // Two recipes, both correct, for two page families of one shop.
-                //
-                // The candidate opens the page in front of it and breaks the
-                // page the stored one already opened, which is exactly the
-                // evidence that this shop does not have a single template. Now
-                // that a recipe belongs to the whole shop, simply rejecting the
-                // candidate would leave that family permanently unopenable -
-                // and promoting it would break the rest of the site on the next
-                // search, then be repaired back, forever.
-                //
-                // So the shop keeps the recipe that still works everywhere
-                // else, and this family gets its own, which recipeForUrl()
-                // prefers where it applies. This is the one way a narrower
-                // scope is created, and it is created from evidence rather than
-                // from the shape of a URL.
+                // The agent explicitly requested a separate layout after it
+                // received the measured incompatibility and its observations.
                 $narrower = $this->recipeRouter->recipeForTraining($url, scopeToPath: true);
 
                 if ($narrower->is($recipe)) {
@@ -1367,7 +1592,11 @@ class ProductGalleryRecipeTrainer
                             .'); оставляю прежнюю версию без изменений.',
                     );
 
-                    return $oldImages;
+                    // The candidate passed on this product. Refusing to
+                    // replace the shared instruction must not discard those
+                    // photographs; the extractor keeps a rejected version's
+                    // frames provisional instead of borrowing old trust.
+                    return $candidateImages;
                 }
 
                 $narrower->update([
@@ -1428,10 +1657,28 @@ class ProductGalleryRecipeTrainer
                 'source_block_reason' => null,
                 'source_blocked_at' => null,
             ]);
+            // This control really ran the new body. Preserve that fresh proof
+            // before the training page so the next repair still protects the
+            // original control, rather than only this most recent product.
+            if ($canary['status'] === 'passed') {
+                app(ProductGalleryRecipeProof::class)->remember(
+                    $recipe, $canary['url'], $canary['validation'], $telegramUpdateId, $version->id,
+                );
+            }
             app(ProductGalleryRecipeProof::class)->remember($recipe, $url, $validation, $telegramUpdateId, $version->id);
             $debug?->__invoke('done', 'AI-рецепт проверен и опубликован. Фото: '.count($candidateImages).'.');
 
             return $candidateImages;
+        } catch (ProductSearchCancelled $exception) {
+            if (isset($version)) {
+                $partial = $this->mergePartialResult($bestPartialResult ?? [], $candidateResult ?? []);
+                $version->update([
+                    'status' => 'interrupted', 'promoted_at' => null, 'error' => $exception->getMessage(),
+                    'result' => [...($version->result ?? []), 'failure_kind' => 'cancelled',
+                        'best_partial_result' => ['images' => $partial['images'], 'diagnostics' => $partial['diagnostics']]],
+                ]);
+            }
+            throw $exception;
         } catch (Throwable $exception) {
             isset($version) && $version->update([
                 'status' => 'failed',
@@ -1458,22 +1705,114 @@ class ProductGalleryRecipeTrainer
             return [];
         } finally {
             $lock->release();
+            if ($onBrowserObservation !== null && isset($scout)) {
+                // The trainer and resolver have separate browser instances.
+                // Transfer this page's facts even when the scout rejected it
+                // before training and returned no images. Canary uses a clone.
+                $onBrowserObservation($this->browser->exportObservation());
+            }
         }
     }
 
+    /** Check again after waiting for the shared provider lock. */
+    private function unlessCancelled(?int $telegramUpdateId, callable $operation): mixed
+    {
+        app(ProductSearchCancellation::class)->throwIfCancelled($telegramUpdateId);
+
+        return $operation();
+    }
+
+    /** Preserve complementary frames and measured rendition upgrades, not just count growth. */
+    private function mergePartialResult(array $previous, array $current): array
+    {
+        $frames = [];
+        foreach ([$previous, $current] as $result) {
+            $evidence = collect(data_get($result, 'diagnostics.validated_image_evidence', []))
+                ->filter(fn (mixed $item): bool => is_array($item) && is_string($item['url'] ?? null))
+                ->keyBy('url');
+
+            foreach ($result['images'] ?? [] as $url) {
+                if (! is_string($url) || $url === '') {
+                    continue;
+                }
+                $key = ImageUrls::imageAssetKey($url);
+                $measurement = $evidence->get($url, []);
+                $pixels = max(0, (int) ($measurement['width'] ?? 0))
+                    * max(0, (int) ($measurement['height'] ?? 0));
+                // No URL guessing: dimensions come from decoded browser images.
+                // With no measurement on either side prefer the fresh observed
+                // URL, but never replace a measured original with an unknown.
+                if (! isset($frames[$key]) || $pixels > $frames[$key]['pixels']
+                    || ($pixels === 0 && $frames[$key]['pixels'] === 0)) {
+                    $frames[$key] = ['url' => $url, 'pixels' => $pixels, 'evidence' => $measurement];
+                }
+            }
+        }
+
+        return [
+            ...$current,
+            'images' => array_values(array_column($frames, 'url')),
+            'diagnostics' => [
+                ...($current['diagnostics'] ?? []),
+                'validated_image_evidence' => array_values(array_filter(array_column($frames, 'evidence'))),
+            ],
+        ];
+    }
+
+    /** Evaluate only this rendered page, never a search title from before a redirect. */
+    private function scoutedProductIdentity(string $url, array $scout, array $context, ?int $runId): ?array
+    {
+        $draftId = $context[ProductRequestContext::CONTEXT_KEY] ?? null;
+        $draft = is_numeric($draftId) ? ProductDraft::find((int) $draftId) : null;
+        if ($draft === null) {
+            return null;
+        }
+        $page = is_array($scout['scout'] ?? null) ? $scout['scout'] : [];
+        $identity = is_array($scout['product_identity'] ?? null) ? $scout['product_identity'] : [];
+        $source = [
+            'url' => $scout['product_page_url'] ?? $page['final_url'] ?? $url,
+            'title' => $page['title'] ?? $identity['name'] ?? null,
+            // Put structured identifiers first so long descriptive text cannot
+            // push them beyond the judge's compact evidence window.
+            '_preflight_identity_evidence' => implode("\n", array_filter([
+                $identity === [] ? '' : json_encode($identity, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+                implode("\n", array_filter($page['product_headings'] ?? [], 'is_string')),
+                is_string($page['specification_text'] ?? null) ? $page['specification_text'] : '',
+            ])),
+        ];
+
+        return ['verdict' => app(ProductSourceIdentityGate::class)->assess($draft, $source, $runId), 'source' => $source];
+    }
+
     /**
-     * What an interrupted training session already learned about this domain.
-     *
-     * A session stopped by the per-source budget share is rationed, not judged:
-     * its rounds ran, cost money and produced real candidates. cdw.com was
-     * trained on three separate days, four rounds each, every round returning a
-     * gallery - and each new search began at round one, because the stop wrote
-     * nothing but the word "deferred".
-     *
-     * The stored history is handed back as round one's feedback, so the next
-     * session continues the argument instead of restarting it. Only the last
-     * few rounds, and only the parts an agent can act on: the whole history
-     * carries page diagnostics measured in hundreds of kilobytes.
+     * Reuse only an explicit agent media verdict for this exact page. Legacy
+     * automatic stops share the failure kind but are not evidence that the
+     * agent investigated and rejected larger renditions.
+     */
+    private function knownSourceMediaVerdict(ProductGalleryRecipe $recipe, string $url): ?ProductGalleryRecipeVersion
+    {
+        $latest = ProductGalleryRecipeVersion::query()
+            ->where('product_gallery_recipe_id', $recipe->id)
+            ->where('product_url', $url)
+            ->where('created_at', '>=', now()->subDays(7))
+            ->latest('id')
+            ->first();
+
+        $kind = $latest?->result['failure_kind'] ?? null;
+        $verdict = $latest?->result[$kind === 'source_has_no_product_media' ? 'source_media_verdict' : 'size_verdict'] ?? null;
+
+        return in_array($kind, ['source_frames_too_small', 'source_has_no_product_media'], true)
+            && is_array($verdict)
+            && ($verdict['origin'] ?? null) === 'agent'
+            && is_string($verdict['reason'] ?? null)
+            && trim($verdict['reason']) !== ''
+                ? $latest
+                : null;
+    }
+
+    /**
+     * Resume the useful history of an interrupted or deferred paid session.
+     * Carry only recent actionable feedback, not the entire large DOM history.
      *
      * @return array{attempts: array<int, mixed>, feedback: array<string, mixed>|null}
      */
@@ -1489,14 +1828,23 @@ class ProductGalleryRecipeTrainer
         $attempts = is_array($version?->result['attempts'] ?? null) ? $version->result['attempts'] : [];
 
         if ($attempts === []) {
-            return ['attempts' => [], 'feedback' => null];
+            return ['attempts' => [], 'size_history' => [], 'feedback' => null];
         }
+        // Measured sizes are facts about the page, not prompt history: the
+        // round that proved store.acer.com's photographs at their real size
+        // was older than the three rounds a resumed session carries.
+        $sizeHistory = $attempts;
 
+        // Provider errors have no recipe observation. Do not let their tail
+        // erase the last plan the browser actually inspected from resume
+        // feedback, even when it is outside the short history window.
+        $last = collect($attempts)->reverse()->first(fn (mixed $attempt): bool => is_array($attempt)
+            && is_array($attempt['selectors_tried'] ?? null)) ?? end($attempts);
         $attempts = array_slice($attempts, -3);
-        $last = end($attempts);
 
         return [
             'attempts' => $attempts,
+            'size_history' => $sizeHistory,
             'feedback' => [
                 'rejected_recipe' => $last['selectors_tried'] ?? null,
                 'candidate_count' => (int) ($last['candidate_count'] ?? 0),
@@ -1514,155 +1862,14 @@ class ProductGalleryRecipeTrainer
         ];
     }
 
-    /**
-     * Every selector the recipe will run, wherever it is stored.
-     *
-     * @param  array<string, mixed>  $recipe
-     * @return array<int, string>
-     */
-    private function selectorsIn(array $recipe): array
-    {
-        $selectors = [];
-
-        foreach (['active_image_selector', 'position_selector', 'gallery_scope_selector'] as $key) {
-            if (is_string($recipe[$key] ?? null) && $recipe[$key] !== '') {
-                $selectors[] = $recipe[$key];
-            }
-        }
-
-        foreach (['collect_selectors', 'exclude_selectors', 'thumbnail_selectors', 'next_selectors', 'pre_click_selectors', 'open_selectors', 'frame_selectors'] as $key) {
-            foreach (is_array($recipe[$key] ?? null) ? $recipe[$key] : [] as $selector) {
-                if (is_string($selector)) {
-                    $selectors[] = $selector;
-                }
-            }
-        }
-
-        foreach (is_array($recipe['actions'] ?? null) ? $recipe['actions'] : [] as $action) {
-            foreach ($action['frame_selectors'] ?? [] as $selector) {
-                if (is_string($selector)) {
-                    $selectors[] = $selector;
-                }
-            }
-            foreach (['selector', 'after_each_selector'] as $key) {
-                if (is_string($action[$key] ?? null)) {
-                    $selectors[] = $action[$key];
-                }
-            }
-        }
-
-        return $selectors;
-    }
-
-    /**
-     * The words a phrase is made of, for comparing one against another.
-     *
-     * @return array<int, string>
-     */
-    private function significantWords(string $text): array
-    {
-        $words = preg_split('/[^\p{L}\p{N}]+/u', mb_strtolower($text), -1, PREG_SPLIT_NO_EMPTY) ?: [];
-
-        return array_values(array_unique(array_filter(
-            $words,
-            fn (string $word): bool => mb_strlen($word) >= 3,
-        )));
-    }
-
-    /**
-     * A recipe is how to open a gallery, so it must not name the product.
-     *
-     * Live on dell.com: a page held two colourways in one gallery block, and
-     * the agent separated them the only way it saw - by putting the product's
-     * own name inside the selector:
-     *
-     *     button[aria-label*="Notebook Dell 14 Premium con touch-screen"]
-     *
-     * That matches on exactly one page of one shop in one language. Every
-     * other Dell laptop trains a second recipe beside it, and the domain
-     * accumulates a recipe per product instead of one that opens the site.
-     * The page already marked the right group structurally - aria-checked on
-     * the selected swatch - which is the same fact expressed in a way that
-     * survives the next product.
-     *
-     * Detected by comparing against the page's own title rather than against
-     * any list of shops or models: a literal inside a selector that shares
-     * three or more words with the product's title is describing this product,
-     * whatever the shop or the language.
-     *
-     * @param  array<string, mixed>  $recipe
-     */
     private function rejectProductSpecificSelectors(array $recipe, string $productPageTitle): void
     {
-        $titleWords = $this->significantWords($productPageTitle);
-
-        if (count($titleWords) < 3) {
-            return;
-        }
-
-        foreach ($this->selectorsIn($recipe) as $selector) {
-            // Quotes are paired by kind rather than by proximity. Matching any
-            // quote to any other let a short literal earlier in the selector
-            // swallow the opening quote of the long one after it, so
-            // [aria-label^="Thumbnail "]:not([aria-label*="<the product>"])
-            // read as one harmless fragment and the name inside the exclusion
-            // was never seen.
-            preg_match_all('/"([^"]*)"|\'([^\']*)\'/u', $selector, $matches, PREG_SET_ORDER);
-
-            foreach ($matches as $match) {
-                $literal = $match[2] ?? '';
-                $literal = $literal !== '' ? $literal : ($match[1] ?? '');
-
-                if (mb_strlen($literal) < 12) {
-                    continue;
-                }
-
-                $literalWords = $this->significantWords($literal);
-                $shared = array_intersect($literalWords, $titleWords);
-
-                if (count($literalWords) >= 3 && count($shared) >= 3) {
-                    throw new InvalidGalleryRecipeException(
-                        'Селектор описывает конкретный товар, а не устройство галереи: "'.mb_substr($literal, 0, 80).'".',
-                        'The selector '.mb_substr($selector, 0, 200).' matches on this product\'s own name ('
-                            .implode(', ', array_slice($shared, 0, 5)).'), which exists on this page and no other. '
-                            .'A recipe is how to open and walk this shop\'s gallery, so it must survive the next '
-                            .'product. When a gallery block holds more than one variant, select the active group by '
-                            .'the state the page itself marks it with - aria-checked="true", aria-selected="true", '
-                            .'[data-group] on the chosen swatch, a class the page adds to the selected group - and '
-                            .'never by the words naming the product.',
-                        ['selector_names_the_product'],
-                    );
-                }
-            }
-        }
+        $this->recipePortability->rejectProductSpecificSelectors($recipe, $productPageTitle);
     }
 
-    /**
-     * The recipe as it leaves training, with what it counted left behind.
-     *
-     * expected_image_count is the agent saying "this page shows seven photos".
-     * That is true, useful, and checked - on the page it was learned on. It is
-     * meaningless on the next product, and the validator has to be told so
-     * through a boolean at every call site. It was told wrong once already, and
-     * a recipe that carries a number is a recipe someone will read the number
-     * from.
-     *
-     * So the domain's stored recipe does not carry it at all. The version row
-     * still does - that is the audit trail of what the agent believed while it
-     * was learning, and it is not what later products are opened with.
-     *
-     * The traversal bounds stay. They are ceilings rather than targets - see
-     * traversalCeiling() in the browser runner - and zero among them is a
-     * structural statement ("this gallery has no carousel") that must survive.
-     *
-     * @param  array<string, mixed>  $candidate
-     * @return array<string, mixed>
-     */
     private function withoutTrainingCounts(array $candidate): array
     {
-        unset($candidate['expected_image_count']);
-
-        return $candidate;
+        return $this->recipePortability->withoutTrainingCounts($candidate);
     }
 
     private function regionForUrl(string $url): ?string
@@ -1696,7 +1903,7 @@ class ProductGalleryRecipeTrainer
             'actor' => 'ai',
             'phase' => 'gallery_training',
             'action' => 'propose_recipe',
-            'status' => 'completed',
+            'status' => RecipeReplayFailure::inspect($result, false)->interrupted ? 'interrupted' : 'completed',
             'decision' => 'execute_candidate',
             'round' => $round,
             'input' => ['recipe' => $recipe],
@@ -1704,6 +1911,9 @@ class ProductGalleryRecipeTrainer
                 'images' => $result['images'] ?? [],
                 'diagnostics' => $result['diagnostics'] ?? [],
                 'post_interaction_scout' => $result['post_interaction_scout'] ?? [],
+                'failure_kind' => $result['failure_kind'] ?? null,
+                'error' => $result['error'] ?? null,
+                'recovery' => $result['recovery'] ?? null,
             ],
         ]);
 
@@ -1795,7 +2005,7 @@ class ProductGalleryRecipeTrainer
         $walk($observation);
 
         return collect($urls)
-            ->map(fn (string $url): string => ProductImageStorage::normalizeCandidateUrl($url))
+            ->map(fn (string $url): string => ImageUrls::normalizeCandidateUrl($url))
             ->unique()
             ->values()
             ->all();
@@ -1814,6 +2024,7 @@ class ProductGalleryRecipeTrainer
         ?int $telegramUpdateId,
         ?callable $debug,
         ?ProductRequestContext $productRequest = null,
+        array $previousExecution = [],
     ): array {
         $payload = [
             'url' => $url,
@@ -1823,6 +2034,10 @@ class ProductGalleryRecipeTrainer
             ...($productRequest ?? ProductRequestContext::unavailable())->forAgent(),
             'page' => $this->scoutForAgent($pageScout, false),
             'diagnostics' => $diagnostics,
+            // Observations from the actual replay are not present in a fresh
+            // scout. Keep them separate: a loading failure or rejected frame
+            // is evidence for the agent, not an automatic verdict on the recipe.
+            'previous_recipe_execution' => $previousExecution === [] ? null : $previousExecution,
             'domain_hint' => $domainHint,
             'auto_domain_hint' => $autoDomainHint,
             // Two raw URLs can still be the exact same photo at another size
@@ -1833,11 +2048,11 @@ class ProductGalleryRecipeTrainer
             // headcount consistent with the one downloadCandidates() uses.
             'static_image_urls' => collect($context['static_image_urls'] ?? [])
                 ->filter(fn (mixed $url): bool => is_string($url) && $url !== '')
-                ->map(fn (string $url): string => ProductImageStorage::normalizeCandidateUrl($url))
-                ->unique(fn (string $url): string => ProductImageStorage::imageAssetKey($url))
+                ->map(fn (string $url): string => ImageUrls::normalizeCandidateUrl($url))
+                ->unique(fn (string $url): string => ImageUrls::imageAssetKey($url))
                 ->take(20)->values()->all(),
         ];
-        $prompt = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?: '{}';
+        $prompt = json_encode($this->observations->textPayload($payload), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?: '{}';
         $startedAt = hrtime(true);
         $run = $telegramUpdateId ? AiRun::query()->create([
             'telegram_update_id' => $telegramUpdateId,
@@ -1856,14 +2071,17 @@ class ProductGalleryRecipeTrainer
             $response = app(OpenAiHeavyOperationGate::class)->run(
                 $provider,
                 $preflightTimeout,
-                fn () => ProductGalleryPreflightAgent::make()->prompt(
+                fn () => $this->unlessCancelled($telegramUpdateId, fn () => ProductGalleryPreflightAgent::make()->prompt(
                     $prompt,
                     provider: $provider,
                     model: $model,
                     timeout: $preflightTimeout,
-                ),
+                )),
             );
             $preflightResponse = $response->toArray();
+            // Invalid output was still paid work. Preserve it before validation.
+            $run?->update(['invocation_id' => $response->invocationId,
+                'response' => $preflightResponse, 'usage' => $response->usage->toArray()]);
             $preflightResponse['page_kind'] = is_string($preflightResponse['page_kind'] ?? null)
                 ? $preflightResponse['page_kind']
                 : 'unknown';
@@ -1899,6 +2117,9 @@ class ProductGalleryRecipeTrainer
                 'completed_at' => now(),
             ]);
             $status = 'completed';
+        } catch (ProductSearchCancelled $exception) {
+            $run?->update(['status' => 'cancelled', 'error' => $exception->getMessage(), 'completed_at' => now()]);
+            throw $exception;
         } catch (Throwable $exception) {
             $run?->update([
                 'status' => 'failed',
@@ -1915,6 +2136,14 @@ class ProductGalleryRecipeTrainer
                 'evidence' => [],
                 'confidence' => 0,
                 'reason' => 'AI preflight failed: '.$exception->getMessage(),
+                'failure_kind' => $exception instanceof ValidationException ? 'invalid_response' : $this->failureKindForException($exception),
+                'recovery' => (new RecoveryContext('gallery_preflight',
+                    $exception instanceof ValidationException ? 'invalid_response' : $this->failureKindForException($exception),
+                    mb_substr($exception->getMessage(), 0, 2000),
+                    ['ReadGalleryPageObservation', 'propose_recipe', 'abandon_page'],
+                    ['page_observation_available' => $pageScout !== []],
+                    ['validation_errors' => $exception instanceof ValidationException ? $exception->errors() : []],
+                ))->toArray(),
             ];
             $status = 'interrupted';
         }
@@ -1958,20 +2187,6 @@ class ProductGalleryRecipeTrainer
      * does not reach the model, so there is nobody to reason about it.
      */
     private const MAX_IDENTICAL_TECHNICAL_FAILURES = 3;
-
-    /**
-     * How many entries of each ranked page list reach the agent on a round that
-     * is still making progress. The counts an omitted-tail marker reports back,
-     * so the agent knows it is looking at a head and can ask the round to widen
-     * by failing to progress - see scoutForAgent().
-     */
-    private const AGENT_PAGE_LIST_LIMITS = [
-        'container_candidates' => 16,
-        'image_candidates' => 20,
-        'action_candidates' => 24,
-        'fragments' => 16,
-        'network_image_samples' => 12,
-    ];
 
     private const DOWNLOAD_FAILURE_KIND = 'download_unreachable';
 
@@ -2137,8 +2352,18 @@ class ProductGalleryRecipeTrainer
         // history can. Playwright that has already succeeded here proves the
         // browser is acceptable to this site, which leaves reputation/rate as
         // the explanation, and that decays on its own. A domain that has never
-        // once let Playwright through gets the original treatment, because
-        // waiting for a fingerprint block to expire never ends.
+        // once let Playwright through is given up on sooner, because waiting
+        // for a fingerprint block to expire never ends - but not on the first
+        // sighting. One challenge page is not yet a stable block: it can be a
+        // burst of requests, an interstitial on one page, or a category page
+        // that should not have been opened. Disabling here blocks the
+        // domain's '*' row, which the router treats as "never use this shop",
+        // so one sighting used to ban a shop from research for good (archived
+        // test run: bestbuy, target, idealo.it and three pccomponentes
+        // domains, the latter three within one minute; target's challenge was
+        // on a category page). The first sighting pauses the domain with the
+        // backoff below; the same gate again on a later attempt, after that
+        // pause, is the confirmation.
         $playwrightWorkedHereBefore = $kind === 'access_gate' && ProductGalleryRecipe::query()
             ->where('domain', $recipe->domain)
             ->where('success_count', '>', 0)
@@ -2146,7 +2371,7 @@ class ProductGalleryRecipeTrainer
 
         $disableAfter = match (true) {
             $playwrightWorkedHereBefore => 4,
-            $kind === 'access_gate' => 1,
+            $kind === 'access_gate' => 2,
             in_array($kind, ['recipe_mismatch', 'dom_unusable', 'agent_abandoned'], true) => 2,
             in_array($kind, ['browser_timeout', 'browser_protocol'], true) => 3,
             default => PHP_INT_MAX,
@@ -2250,432 +2475,22 @@ class ProductGalleryRecipeTrainer
         };
     }
 
-    /** @return array<string, mixed> */
     private function validateRecipe(array $data, string $productPageTitle = '', array $productPageHeadings = []): array
     {
-        $data['training_decision'] = is_string($data['training_decision'] ?? null)
-            ? $data['training_decision']
-            : 'propose_recipe';
-        $data['page_kind'] = is_string($data['page_kind'] ?? null)
-            ? $data['page_kind']
-            : 'unknown';
-        $data['page_assessment_evidence'] = collect(
-            is_array($data['page_assessment_evidence'] ?? null)
-                ? $data['page_assessment_evidence']
-                : [],
-        )
-            ->filter(fn (mixed $item): bool => is_string($item) && trim($item) !== '')
-            ->map(fn (string $item): string => mb_substr(trim($item), 0, 500))
-            ->unique()
-            ->values()
-            ->all();
-        // Stored recipes and test fixtures created before ordered actions
-        // remain valid; new strict AI responses always include this field.
-        $data['actions'] = is_array($data['actions'] ?? null) ? $data['actions'] : [];
-        // Same backward-compatibility rule for exclude_selectors: recipes
-        // trained before this field existed simply exclude nothing.
-        $data['exclude_selectors'] = is_array($data['exclude_selectors'] ?? null) ? $data['exclude_selectors'] : [];
-        $data['actions'] = collect($data['actions'])
-            ->map(function (mixed $action): mixed {
-                if (! is_array($action)) {
-                    return $action;
-                }
-
-                if (is_string($action['purpose'] ?? null)) {
-                    $action['purpose'] = mb_substr(trim($action['purpose']), 0, 200);
-                }
-
-                return $action;
-            })
-            ->values()
-            ->all();
-        $data['wait_after_click_ms'] = $this->clampInt($data['wait_after_click_ms'] ?? null, 50, 1000, 150);
-        $data['max_thumbnail_clicks'] = $this->clampInt($data['max_thumbnail_clicks'] ?? null, 0, 20, 5);
-        $data['max_next_clicks'] = $this->clampInt($data['max_next_clicks'] ?? null, 0, 15, 5);
-        // Free-text reasoning fields: truncate an overlong AI answer instead of
-        // rejecting an otherwise-usable recipe outright over field length.
-        if (is_string($data['expected_count_evidence'] ?? null)) {
-            $data['expected_count_evidence'] = mb_substr($data['expected_count_evidence'], 0, 500);
-        }
-        if (is_string($data['reason'] ?? null)) {
-            $data['reason'] = mb_substr($data['reason'], 0, 1000);
-        }
-
-        // Scout exposes the DOM property as `current_src`, while the browser
-        // runner already reads element.currentSrc automatically and recipe
-        // attributes are deliberately limited to real HTML attribute names.
-        // Normalize that observation alias before validation so one harmless
-        // naming mismatch cannot burn every paid correction round.
-        $data['attributes'] = collect(is_array($data['attributes'] ?? null) ? $data['attributes'] : [])
-            ->filter(fn (mixed $attribute): bool => is_string($attribute))
-            ->map(function (string $attribute): string {
-                $attribute = strtolower(trim($attribute));
-
-                return match ($attribute) {
-                    'currentsrc', 'current_src', 'current-src' => 'src',
-                    'source_srcset', 'source-srcset' => 'srcset',
-                    default => str_starts_with($attribute, 'data_')
-                        ? str_replace('_', '-', $attribute)
-                        : $attribute,
-                };
-            })
-            ->unique()
-            ->values()
-            ->all();
-
-        try {
-            $data = Validator::make(
-                $data,
-                $this->recipeValidationRules(),
-                $this->recipeValidationMessages(app()->getLocale()),
-            )->validate();
-        } catch (ValidationException $exception) {
-            throw new InvalidGalleryRecipeException(
-                $exception->getMessage(),
-                $this->englishValidationMessage($data),
-                self::validationRuleSignature($exception),
-            );
-        }
-
-        foreach (['pre_click_selectors', 'collect_selectors', 'thumbnail_selectors', 'open_selectors', 'next_selectors', 'exclude_selectors'] as $key) {
-            $data[$key] = collect($data[$key] ?? [])
-                ->filter(fn (mixed $selector): bool => is_string($selector) && $this->safeSelector($selector))
-                ->map(fn (string $selector): string => trim($selector))
-                ->unique()->values()->all();
-        }
-        foreach (['active_image_selector', 'position_selector', 'gallery_scope_selector'] as $key) {
-            if (! empty($data[$key]) && ! $this->safeSelector($data[$key])) {
-                throw new InvalidGalleryRecipeException('Небезопасный селектор наблюдения.', 'Unsafe observation selector: '.$key, [$key]);
-            }
-        }
-
-        foreach (array_merge([$data['frame_selectors'] ?? []], array_column($data['actions'], 'frame_selectors')) as $path) {
-            foreach ($path ?? [] as $selector) {
-                if (preg_match('/(?:javascript:|https?:|file:|xpath|\x00)/i', $selector)) {
-                    throw new InvalidGalleryRecipeException('Небезопасный путь iframe.', 'Unsafe frame path.', ['frame_selectors']);
-                }
-            }
-        }
-
-        // Prefer a selector scoped to the product gallery over its broad suffix.
-        // AI may return both `img.foo` and `.gallery img.foo`; executing both can
-        // collect unrelated recommendation, recently-viewed or cart images that
-        // happen to share the same utility classes with the real gallery.
-        $collectSelectors = collect($data['collect_selectors']);
-        $data['collect_selectors'] = $collectSelectors
-            ->reject(function (string $selector) use ($collectSelectors): bool {
-                return $collectSelectors->contains(function (string $other) use ($selector): bool {
-                    if ($other === $selector || ! str_ends_with($other, $selector)) {
-                        return false;
-                    }
-
-                    $prefix = substr($other, 0, -strlen($selector));
-
-                    return preg_match('/(?:\\s|>|\\+|~)\\s*$/', $prefix) === 1;
-                });
-            })
-            ->values()
-            ->all();
-
-        $data['actions'] = collect($data['actions'])
-            ->filter(fn (mixed $action): bool => is_array($action)
-                && is_string($action['selector'] ?? null)
-                && $this->safeSelector($action['selector']))
-            ->map(fn (array $action): array => $this->sanitizedAction($action))
-            ->values()
-            ->all();
-
-        $data['attributes'] = collect($data['attributes'] ?? [])
-            ->map(fn (string $attribute): string => strtolower(trim($attribute)))
-            ->unique()->values()->all();
-
-        if (($data['training_decision'] ?? 'propose_recipe') === 'propose_recipe' && $data['collect_selectors'] === []) {
-            throw new InvalidGalleryRecipeException(
-                'AI не вернул безопасный селектор сбора изображений.',
-                'No safe image collection selector remains. Select an observed product gallery element.',
-                ['collect_selectors.safe'],
-            );
-        }
-
-        // Last, so it sees the selectors as they will actually run - after the
-        // unsafe ones are dropped and the redundant ones folded away.
-        $this->rejectProductSpecificSelectors($data, $productPageTitle);
-        // A shop can leave <title> generic while its visible H1 names the
-        // product. Check each observed heading independently, never guessed
-        // product names or a concatenation of unrelated page text.
-        foreach ($productPageHeadings as $heading) {
-            if (is_string($heading)) {
-                $this->rejectProductSpecificSelectors($data, $heading);
-            }
-        }
-
-        return $data;
+        return $this->recipeContract->validateRecipe($data, $productPageTitle, $productPageHeadings);
     }
 
-    /**
-     * Every field of one action, and nothing else, on its way to the browser.
-     *
-     * The set is read off the validation rules rather than written out a second
-     * time. A hand-kept copy is how after_each_selector came to be asked for in
-     * the prompt, accepted by the rules and checked by the validator while the
-     * browser never once received it: the field was added to the contract and
-     * to everything that reads it, and the one list that had to repeat it was
-     * missed. Whatever the rules admit now passes; anything invented still does
-     * not, which is the only reason this list exists.
-     *
-     * @param  array<string, mixed>  $action
-     * @return array<string, mixed>
-     */
-    private function sanitizedAction(array $action): array
-    {
-        $sanitized = [];
-
-        foreach ($this->recipeActionFields() as $field) {
-            $value = $action[$field] ?? null;
-            $sanitized[$field] = is_string($value) ? trim($value) : $value;
-        }
-
-        // A step the page only sometimes puts up - a consent wall a returning
-        // visitor no longer sees, a region or age gate. Absent means skipped,
-        // not failed, so one recipe holds for a first visit and for every later
-        // one. Anything else, including a missing value, stays mandatory.
-        if (array_key_exists('when', $sanitized)) {
-            $sanitized['when'] = $sanitized['when'] === 'if_present' ? 'if_present' : 'always';
-        }
-
-        // The one check the rules cannot make: a selector may be well-formed and
-        // still unsafe. An unsafe follow-up drops with its own settings, never
-        // leaving a limit pointing at a selector that will not run.
-        if (array_key_exists('after_each_selector', $sanitized)
-            && ! (is_string($sanitized['after_each_selector']) && $this->safeSelector($sanitized['after_each_selector']))) {
-            $sanitized['after_each_selector'] = null;
-            $sanitized['after_each_limit'] = null;
-            $sanitized['after_each_wait_after_ms'] = null;
-        }
-
-        return $sanitized;
-    }
-
-    /**
-     * The action fields the contract admits, in declaration order.
-     *
-     * @return array<int, string>
-     */
     public function recipeActionFields(): array
     {
-        return collect(array_keys($this->recipeValidationRules()))
-            ->filter(fn (string $rule): bool => str_starts_with($rule, 'actions.*.') && ! str_contains(substr($rule, strlen('actions.*.')), '.'))
-            ->map(fn (string $rule): string => substr($rule, strlen('actions.*.')))
-            ->values()
-            ->all();
+        return $this->recipeContract->recipeActionFields();
     }
 
-    /** @return array<string, array<int, string>> */
-    private function recipeValidationRules(): array
-    {
-        return [
-            'training_decision' => ['required', 'in:propose_recipe,abandon_page'],
-            'page_kind' => ['required', 'in:product_card,product_family_landing,editorial_marketing,listing_or_comparison,non_product_page,unknown'],
-            'page_assessment_evidence' => ['present', 'array', 'max:8'],
-            'page_assessment_evidence.*' => ['string', 'max:500'],
-            'gallery_present' => ['required', 'boolean'],
-            'expected_image_count' => ['required', 'integer', 'min:0'],
-            'expected_count_evidence' => ['required', 'string', 'max:500'],
-            'content_confirmed_product' => ['required', 'boolean'],
-            'actions' => ['present', 'array', 'max:12'],
-            'actions.*.kind' => ['required', 'in:click,click_each,click_until_no_change,hover,scroll_into_view'],
-            'actions.*.selector' => ['required', 'string', 'max:300'],
-            // index addresses ONE specific element among a selector's
-            // matches, not a repeat count - a page can reasonably have more
-            // than 20 elements matching a broad selector (real case,
-            // 2026-09-14: techbuy.com.au, selector "a", needed index 25/46).
-            // The actual safety ceiling belongs to limit/max_thumbnail_clicks/
-            // max_next_clicks below (how many actions run), never to which
-            // element one specific action addresses.
-            'actions.*.index' => ['required', 'integer', 'between:0,200'],
-            'actions.*.limit' => ['required', 'integer', 'between:1,20'],
-            'actions.*.wait_after_ms' => ['required', 'integer', 'between:50,1500'],
-            'actions.*.when' => ['nullable', 'in:always,if_present'],
-            'actions.*.frame_selectors' => ['sometimes', 'array'],
-            'actions.*.frame_selectors.*' => ['string', 'max:300'],
-            'actions.*.after_each_selector' => ['nullable', 'string', 'max:300'],
-            'actions.*.after_each_limit' => ['nullable', 'integer', 'between:1,20'],
-            'actions.*.after_each_wait_after_ms' => ['nullable', 'integer', 'between:50,1500'],
-            'actions.*.purpose' => ['required', 'string', 'max:200'],
-            'pre_click_selectors' => ['present', 'array'],
-            'collect_selectors' => ['present', 'array'],
-            'active_image_selector' => ['nullable', 'string', 'max:300'],
-            'position_selector' => ['nullable', 'string', 'max:300'],
-            'gallery_scope_selector' => ['nullable', 'string', 'max:300'],
-            'frame_selectors' => ['sometimes', 'array'],
-            'frame_selectors.*' => ['string', 'max:300'],
-            'thumbnail_selectors' => ['present', 'array'],
-            'open_selectors' => ['present', 'array'],
-            'next_selectors' => ['present', 'array'],
-            'exclude_selectors' => ['present', 'array'],
-            'pre_click_selectors.*' => ['string', 'max:300'],
-            'collect_selectors.*' => ['string', 'max:300'],
-            'thumbnail_selectors.*' => ['string', 'max:300'],
-            'open_selectors.*' => ['string', 'max:300'],
-            'next_selectors.*' => ['string', 'max:300'],
-            'exclude_selectors.*' => ['string', 'max:300'],
-            'attributes' => ['present', 'array', 'max:12'],
-            'attributes.*' => ['regex:/^(?:src|href|srcset|data-[a-z0-9_-]+)$/i', 'max:80'],
-            'max_thumbnail_clicks' => ['required', 'integer', 'between:0,20'],
-            'max_next_clicks' => ['required', 'integer', 'between:0,15'],
-            'wait_after_click_ms' => ['required', 'integer', 'between:50,1000'],
-            'confidence' => ['required', 'numeric', 'between:0,1'],
-            'reason' => ['required', 'string', 'max:1000'],
-        ];
-    }
-
-    /**
-     * The app locale is Russian (operator-facing Telegram text), but this
-     * message is fed back to the AI trainer as previous_attempt_feedback and
-     * attempt_history, alongside an otherwise entirely English prompt - so it
-     * is rendered in English regardless of APP_LOCALE.
-     */
-    private function englishValidationMessage(array $data): string
-    {
-        $locale = app()->getLocale();
-        app()->setLocale('en');
-
-        try {
-            Validator::make($data, $this->recipeValidationRules(), $this->recipeValidationMessages('en'))->validate();
-
-            return 'The recipe failed schema validation.';
-        } catch (ValidationException $exception) {
-            return $exception->getMessage();
-        } finally {
-            app()->setLocale($locale);
-        }
-    }
-
-    /**
-     * Identifies which rule(s) failed independent of which array index or
-     * value triggered them ("actions.1.index" and "actions.0.index" are the
-     * same recurring mistake, not two different ones) - this is what lets
-     * the training loop notice "stuck repeating this" instead of only ever
-     * seeing the message text change because the bad value itself changed.
-     *
-     * @return array<int, string>
-     */
-    private static function validationRuleSignature(ValidationException $exception): array
-    {
-        return collect($exception->validator->errors()->keys())
-            ->map(fn (string $key): string => preg_replace('/\.\d+(?=\.|$)/', '.*', $key) ?? $key)
-            ->unique()
-            ->sort()
-            ->values()
-            ->all();
-    }
-
-    /**
-     * Laravel's default regex-failure message ("the attributes.2 field
-     * format is invalid") doesn't say what format IS valid, which let the AI
-     * repeat the same rejected value for all 3 rounds of a real training run
-     * (it kept adding "alt" - not a URL-bearing attribute - to identify a
-     * placeholder/logo carousel slide, a case the app already handles by
-     * URL pattern after collection; see instructions() for the matching
-     * prompt guidance). Only this one rule gets a clearer message; the rest
-     * already get Laravel's normal localized text.
-     *
-     * @return array<string, string>
-     */
-    private function recipeValidationMessages(string $locale): array
-    {
-        return [
-            'attributes.*.regex' => $locale === 'ru'
-                ? 'Каждый элемент attributes должен быть ровно "src", "href", "srcset" либо именем атрибута "data-*" - другие атрибуты (например "alt") сюда не годятся; заглушки/логотипы приложение и так отсеивает по URL после сбора.'
-                : 'Each attributes entry must be exactly "src", "href", "srcset", or a "data-*" attribute name - other attributes such as "alt" are not accepted here; the app already filters placeholder/logo images by URL pattern after collection, so there is no need to identify them via attributes.',
-        ];
-    }
-
-    /**
-     * A correction is proposed from post-interaction evidence but executed in
-     * a fresh browser. Preserve the successful click prefix that produced the
-     * observed state unless the correction already contains that exact step.
-     * This is generic replay protection, not a domain-specific selector rule.
-     *
-     * @param  array<string, mixed>  $candidate
-     * @param  array<string, mixed>|null  $previousCandidate
-     * @param  array<string, mixed>|null  $previousResult
-     * @return array<string, mixed>
-     */
     private function makeRecipeReplayable(
         array $candidate,
         ?array $previousCandidate,
         ?array $previousResult,
     ): array {
-        if (! $previousCandidate || ! $previousResult) {
-            return $candidate;
-        }
-
-        $previousActions = is_array($previousCandidate['actions'] ?? null)
-            ? $previousCandidate['actions']
-            : [];
-        $trace = collect(is_array($previousResult['action_trace'] ?? null)
-            ? $previousResult['action_trace']
-            : []);
-        $candidateActions = collect(is_array($candidate['actions'] ?? null)
-            ? $candidate['actions']
-            : []);
-
-        $successfulPrefix = [];
-        foreach ($previousActions as $actionIndex => $action) {
-            if (! is_array($action) || ($action['kind'] ?? null) !== 'click') {
-                break;
-            }
-
-            $selector = (string) ($action['selector'] ?? '');
-            $purpose = (string) ($action['purpose'] ?? '');
-            $opensGallery = in_array($selector, $previousCandidate['open_selectors'] ?? [], true)
-                || preg_match('/(?:open|expand|full.?screen|lightbox|zoom|viewer|view.?all)/i', $purpose) === 1;
-            $worked = $trace->contains(fn (mixed $item): bool => is_array($item)
-                && (int) ($item['action_index'] ?? -1) === $actionIndex
-                && ($item['action'] ?? null) === 'click'
-                && ($item['clicked'] ?? false) === true
-                && ($item['unsafe_control'] ?? false) !== true
-                && ($item['navigation_blocked'] ?? false) !== true
-                && ($item['navigated_away'] ?? false) !== true
-                && (! $opensGallery
-                    || ($item['changed'] ?? false) === true
-                    || ($item['expanded_gallery_visible_after'] ?? false) === true));
-            if (! $worked) {
-                break;
-            }
-
-            $successfulPrefix[] = $action;
-        }
-
-        if ($successfulPrefix === []) {
-            return $candidate;
-        }
-
-        $prefixKeys = collect($successfulPrefix)
-            ->map(fn (array $action): string => 'click|'.($action['selector'] ?? '').'|'.($action['index'] ?? 0))
-            ->all();
-        $remainingActions = $candidateActions
-            ->reject(function (array $action) use ($prefixKeys): bool {
-                $key = ($action['kind'] ?? '').'|'.($action['selector'] ?? '').'|'.($action['index'] ?? 0);
-
-                return in_array($key, $prefixKeys, true);
-            })
-            ->values()->all();
-        $candidate['actions'] = array_slice([
-            ...$successfulPrefix,
-            ...$remainingActions,
-        ], 0, 12);
-        $candidate['open_selectors'] = collect($candidate['open_selectors'] ?? [])
-            ->merge($previousCandidate['open_selectors'] ?? [])
-            ->filter(fn (mixed $selector): bool => is_string($selector))
-            ->unique()->take(5)->values()->all();
-        $candidate['pre_click_selectors'] = collect($candidate['pre_click_selectors'] ?? [])
-            ->merge($previousCandidate['pre_click_selectors'] ?? [])
-            ->filter(fn (mixed $selector): bool => is_string($selector))
-            ->unique()->take(5)->values()->all();
-
-        return $candidate;
+        return $this->replayPlan->makeRecipeReplayable($candidate, $previousCandidate, $previousResult);
     }
 
     /**
@@ -2756,7 +2571,7 @@ class ProductGalleryRecipeTrainer
                 && (int) ($candidate['natural_height'] ?? 0) >= $minimumHeight)
             ->map(function (array $candidate): array {
                 $url = trim((string) ($candidate['current_src'] ?? ''));
-                $candidate['measured_url'] = ProductImageStorage::normalizeCandidateUrl(
+                $candidate['measured_url'] = ImageUrls::normalizeCandidateUrl(
                     $url !== '' ? $url : trim((string) ($candidate['src'] ?? '')),
                 );
 
@@ -2764,7 +2579,7 @@ class ProductGalleryRecipeTrainer
             })
             ->filter(fn (array $candidate): bool => filter_var($candidate['measured_url'], FILTER_VALIDATE_URL) !== false
                 && in_array(parse_url($candidate['measured_url'], PHP_URL_SCHEME), ['http', 'https'], true))
-            ->groupBy(fn (array $candidate): string => ProductImageStorage::imageAssetKey($candidate['measured_url']))
+            ->groupBy(fn (array $candidate): string => ImageUrls::imageAssetKey($candidate['measured_url']))
             // Keep frame order, choosing the largest actually observed rendition
             // within each frame. Never construct a higher-resolution URL.
             ->map(fn ($renditions): string => $renditions->sortByDesc(
@@ -2789,8 +2604,8 @@ class ProductGalleryRecipeTrainer
             ...($context['static_image_urls'] ?? []),
         ])
             ->filter(fn (mixed $url): bool => is_string($url) && $url !== '')
-            ->map(fn (string $url): string => ProductImageStorage::normalizeCandidateUrl($url))
-            ->unique(fn (string $url): string => ProductImageStorage::imageAssetKey($url))
+            ->map(fn (string $url): string => ImageUrls::normalizeCandidateUrl($url))
+            ->unique(fn (string $url): string => ImageUrls::imageAssetKey($url))
             ->take(max(20, count($measured)))->values()->all();
     }
 
@@ -2901,61 +2716,24 @@ class ProductGalleryRecipeTrainer
 
     private function scoutForAgent(array $pageScout, bool $complete): array
     {
-        if ($complete) {
-            return $pageScout;
-        }
-
-        if (isset($pageScout['frame_observations'])) {
-            $pageScout['frame_observations'] = array_map(fn (array $frame): array => [
-                'frame_selectors' => $frame['frame_selectors'] ?? [],
-                'final_url' => $frame['final_url'] ?? null,
-                'title' => $frame['title'] ?? null,
-                'action_candidates' => array_slice($frame['action_candidates'] ?? [], 0, 5),
-                'image_candidates' => array_slice($frame['image_candidates'] ?? [], 0, 5),
-                'error' => $frame['error'] ?? null,
-                'more' => 'ReadGalleryPageObservation(section=frame_observations) has the captured details.',
-            ], $pageScout['frame_observations']);
-        }
-
-        foreach (self::AGENT_PAGE_LIST_LIMITS as $key => $keep) {
-            if (is_array($pageScout[$key] ?? null) && count($pageScout[$key]) > $keep) {
-                $pageScout[$key.'_omitted'] = count($pageScout[$key]) - $keep;
-                $pageScout[$key] = array_slice($pageScout[$key], 0, $keep);
-            }
-        }
-
-        return $pageScout;
+        return $this->observations->scoutForAgent($pageScout, $complete);
     }
 
     private function initialObservationForAgent(array $initial, ?array $feedback, bool $complete): array
     {
-        $focus = $feedback['previous_attempt_observation']['observation_focus'] ?? [];
-        if ($complete || ($focus['mode'] ?? null) !== 'focused') {
-            return $this->scoutForAgent($initial, $complete);
-        }
-
-        return [
-            'final_url' => $initial['final_url'] ?? null,
-            'title' => $initial['title'] ?? null,
-            'observation_omitted' => 'Initial page is stored on the server. Use ReadGalleryPageObservation(initial) '
-                .'for prerequisites or controls outside the focused latest observation. Every recipe still replays from this initial URL.',
-        ];
+        return $this->observations->initialObservationForAgent($initial, $feedback, $complete);
     }
 
     private function observationForAgent(array $observation): array
     {
-        // The full snapshot stays in execution audit and is available as a tool,
-        // but must not be nested inside the supposedly focused paid prompt.
-        unset($observation['full_page_observation']);
-
-        return $this->scoutForAgent($observation, false);
+        return $this->observations->observationForAgent($observation);
     }
 
     private function trainingProgressSignature(array $result): string
     {
         $images = collect(is_array($result['images'] ?? null) ? $result['images'] : [])
             ->filter(fn (mixed $url): bool => is_string($url) && $url !== '')
-            ->map(fn (string $url): string => ProductImageStorage::imageAssetKey($url))
+            ->map(fn (string $url): string => ImageUrls::imageAssetKey($url))
             ->unique()
             ->sort()
             ->values()
@@ -3007,20 +2785,9 @@ class ProductGalleryRecipeTrainer
         ], JSON_UNESCAPED_SLASHES) ?: '{}');
     }
 
-    private function clampInt(mixed $value, int $min, int $max, int $default): int
-    {
-        if (! is_numeric($value)) {
-            return $default;
-        }
-
-        return max($min, min($max, (int) $value));
-    }
-
     private function safeSelector(string $selector): bool
     {
-        return trim($selector) !== ''
-            && ! str_contains($selector, "\0")
-            && ! preg_match('/(?:javascript:|https?:|file:|xpath|script\b|iframe\b)/i', $selector);
+        return $this->recipeContract->safeSelector($selector);
     }
 
     private function score(array $result): float

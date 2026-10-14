@@ -2,16 +2,17 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\AttributeValue;
 use App\Models\Product;
 use App\Models\ProductMedia;
+use App\Services\Catalog\AttributePresentation;
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use Inertia\Inertia;
 use Inertia\Response;
 
 class ProductController extends Controller
 {
-    public function __invoke(Product $product): Response
+    public function __invoke(Product $product, Request $request): Response
     {
         abort_unless($product->status === 'published' && $product->is_active, 404);
 
@@ -19,11 +20,16 @@ class ProductController extends Controller
             'brand:id,name,country,website_url',
             'category:id,name,slug',
             'category.translations:id,category_id,locale,name',
-            'attributes.definition:id,key,label,default_unit,sort_order',
-            'media',
+            'attributes' => fn ($query) => $query->whereNull('product_variant_id'),
+            'attributes.definition:id,key,label,default_unit,sort_order,translations,attribute_group_id',
+            'attributes.definition.group',
+            'media' => fn ($query) => $query->where(fn ($media) => $media
+                ->whereNull('product_variant_id')
+                ->orWhereIn('product_variant_id', $product->variants()->available()->select('id'))),
             'sources:id,product_id,title,url,domain,source_type,retrieved_at',
             'variants' => fn ($query) => $query->available()->with([
-                'attributes.definition:id,key,label,default_unit,sort_order',
+                'attributes.definition:id,key,label,default_unit,sort_order,translations,attribute_group_id',
+                'attributes.definition.group',
             ])->orderByDesc('is_default')->orderBy('id'),
         ]);
 
@@ -31,9 +37,11 @@ class ProductController extends Controller
             'product' => [
                 'id' => $product->id,
                 'slug' => $product->slug,
+                'selected_variant_id' => $product->variants->firstWhere('id', $request->integer('variant'))?->id,
                 'title' => $product->title,
                 'model' => $product->model,
                 'description' => $product->description,
+                'translations' => $product->translations ?? [],
                 'type' => $product->product_type,
                 'brand' => $product->brand?->only(['name', 'country', 'website_url']),
                 'category' => $product->category ? [
@@ -46,6 +54,7 @@ class ProductController extends Controller
                 'media' => $product->media->where('type', 'image')
                     ->whereIn('verification_status', ['verified', 'source_verified', 'manual'])->map(fn (ProductMedia $media) => [
                         'id' => $media->id,
+                        'variant_id' => $media->product_variant_id,
                         'url' => $this->mediaUrl($media),
                         'alt' => $media->alt ?: $product->title,
                         'role' => $media->role,
@@ -60,6 +69,7 @@ class ProductController extends Controller
                     'gtin' => $variant->gtin,
                     'color' => $variant->color,
                     'condition' => $variant->condition,
+                    'translations' => $variant->translations ?? [],
                     'price' => $variant->price !== null ? (float) $variant->price : null,
                     'compare_at_price' => $variant->compare_at_price !== null ? (float) $variant->compare_at_price : null,
                     'currency' => $variant->currency ?: 'CZK',
@@ -78,12 +88,7 @@ class ProductController extends Controller
 
     private function attributes($attributes): array
     {
-        return $attributes->sortBy('definition.sort_order')->map(fn (AttributeValue $attribute) => [
-            'key' => $attribute->definition->key,
-            'label' => $attribute->definition->label,
-            'value' => $attribute->value,
-            'unit' => $attribute->unit ?: $attribute->definition->default_unit,
-        ])->values()->all();
+        return AttributePresentation::values($attributes);
     }
 
     private function mediaUrl(ProductMedia $media): string

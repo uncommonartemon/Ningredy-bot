@@ -2,8 +2,7 @@
 
 namespace Tests\Unit;
 
-use App\Services\Products\ProductGalleryRecipeTrainer;
-use ReflectionMethod;
+use App\Services\GalleryRecipes\RecipePortability;
 use Tests\TestCase;
 
 /**
@@ -57,8 +56,6 @@ class StoredRecipeCarriesNoCountTest extends TestCase
      */
     private function strip(array $candidate): array
     {
-        $method = new ReflectionMethod(ProductGalleryRecipeTrainer::class, 'withoutTrainingCounts');
-
-        return $method->invoke(app(ProductGalleryRecipeTrainer::class), $candidate);
+        return (new RecipePortability)->withoutTrainingCounts($candidate);
     }
 }

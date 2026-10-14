@@ -124,6 +124,7 @@ class DraftTelegramMessageLifecycle
         string $chatId,
         string $text,
         array $replyMarkup,
+        ?string $parseMode = null,
     ): array {
         $draft->refresh();
         $existingIds = collect($draft->telegram_control_message_ids ?? [])
@@ -134,7 +135,7 @@ class DraftTelegramMessageLifecycle
 
         if ($primaryId !== null) {
             try {
-                $response = $telegram->editMessageText($chatId, $primaryId, $text, replyMarkup: $replyMarkup);
+                $response = $telegram->editMessageText($chatId, $primaryId, $text, parseMode: $parseMode, replyMarkup: $replyMarkup);
                 $this->deleteStrayControlMessages($telegram, $chatId, $existingIds->slice(1));
                 $this->rememberControlMessageIds($draft, $chatId, [$primaryId]);
 
@@ -147,7 +148,7 @@ class DraftTelegramMessageLifecycle
         }
 
         $this->deleteStrayControlMessages($telegram, $chatId, $existingIds);
-        $response = $telegram->sendMessage($chatId, $text, $replyMarkup);
+        $response = $telegram->sendMessage($chatId, $text, $replyMarkup, parseMode: $parseMode);
         $this->rememberControlMessageIds($draft, $chatId, $this->extractMessageIds($response));
 
         return $response;

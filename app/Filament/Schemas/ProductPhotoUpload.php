@@ -11,7 +11,7 @@ final class ProductPhotoUpload
     public static function make(string $name): FileUpload
     {
         return FileUpload::make($name)
-            ->label('Фотографии')
+            ->label(__('Фотографии'))
             ->disk('public')
             ->visibility('public')
             ->image()
@@ -31,6 +31,6 @@ final class ProductPhotoUpload
             ->reorderable()
             ->appendFiles()
             ->storeFiles(false)
-            ->helperText('Перетащите фотографии сюда. Можно изменить порядок и обрезать изображение. JPEG, PNG, WebP или AVIF, до 8 МБ на файл. Новые фото добавятся к существующим; первая фотография пустой галереи станет главной.');
+            ->helperText(__('Перетащите фотографии сюда. Можно изменить порядок и обрезать изображение. JPEG, PNG, WebP или AVIF, до 8 МБ на файл. Новые фото добавятся к существующим; первая фотография пустой галереи станет главной.'));
     }
 }

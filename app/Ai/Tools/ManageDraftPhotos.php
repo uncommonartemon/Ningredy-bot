@@ -6,6 +6,7 @@ use App\Ai\Tools\Concerns\RecordsOperations;
 use App\Jobs\ProcessDraftPhotoActions;
 use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
+use App\Services\Telegram\DraftAccess;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Support\Facades\Cache;
@@ -37,6 +38,8 @@ class ManageDraftPhotos implements Tool
         ];
         $draft = ProductDraft::query()->with('media')->find($draftId);
         throw_if(! $draft, ModelNotFoundException::class, 'Draft not found.');
+        throw_unless(app(DraftAccess::class)->belongsToContext($draft, $this->update), RuntimeException::class,
+            'Draft belongs to a different chat or user.');
         throw_unless($draft->status === 'pending_review', RuntimeException::class, 'Draft is no longer pending review.');
         $ordered = $draft->media->sortBy([
             ['is_primary', 'desc'],
@@ -53,22 +56,28 @@ class ManageDraftPhotos implements Tool
         }
 
         throw_if($actions === [], RuntimeException::class, 'No photo operations were provided.');
-        $queuedKey = "draft-photo-actions:{$draft->id}:queued";
-        throw_unless(Cache::add($queuedKey, $this->update->id, now()->addMinutes(12)), RuntimeException::class, 'Draft photos are already being processed.');
-
         $result = $this->recordOperation(
             $this->update,
             class_basename(self::class),
             'manage_draft_photos',
             ['draft_id' => $draft->id, 'actions' => $actions],
             function () use ($draft, $actions): array {
-                ProcessDraftPhotoActions::dispatch(
-                    $draft->id,
-                    $actions,
-                    $this->update->id,
-                    (string) $this->update->chat_id,
-                    expectedDraftTelegramUpdateId: $draft->telegram_update_id,
-                );
+                $queuedKey = "draft-photo-actions:{$draft->id}:queued";
+                throw_unless(Cache::add($queuedKey, $this->update->id, now()->addMinutes(12)), RuntimeException::class, 'Draft photos are already being processed.');
+                try {
+                    ProcessDraftPhotoActions::dispatch(
+                        $draft->id,
+                        $actions,
+                        $this->update->id,
+                        (string) $this->update->chat_id,
+                        expectedDraftTelegramUpdateId: $draft->telegram_update_id,
+                    );
+                } catch (\Throwable $exception) {
+                    if (Cache::get($queuedKey) === $this->update->id) {
+                        Cache::forget($queuedKey);
+                    }
+                    throw $exception;
+                }
 
                 return ['ok' => true, 'queued' => true, 'draft_id' => $draft->id, 'actions' => $actions];
             },

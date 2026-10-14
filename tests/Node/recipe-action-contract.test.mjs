@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { normalizeRecipeActions } from '../../scripts/product-gallery-utils.mjs';
+import { normalizeRecipeActions, recipeActionRequestedIndex, recipeActionPlanStatus } from '../../scripts/product-gallery-utils.mjs';
 
 // The other half of tests/Feature/RecipeActionContractTest.php. One action of a
 // recipe crosses two whitelists that cannot read each other - PHP on the way out
@@ -14,6 +14,7 @@ const contract = JSON.parse(readFileSync(new URL('../contracts/recipe-action-fie
 const maximalAction = {
     kind: 'click_each',
     when: 'if_present',
+    iteration_mode: 'elements',
     selector: '.gallery .thumb',
     index: 0,
     limit: 3,
@@ -47,4 +48,51 @@ test('an invented field is still dropped', () => {
     const [normalized] = normalizeRecipeActions([{ ...maximalAction, evaluate: 'fetch("https://evil.example")' }]);
 
     assert.ok(!Object.hasOwn(normalized, 'evaluate'));
+});
+
+test('iteration mode keeps its meaning across normalization and remains optional for old recipes', () => {
+    for (const iteration_mode of ['elements', 'repeat', 'auto']) {
+        const [normalized] = normalizeRecipeActions([{ ...maximalAction, iteration_mode }]);
+        assert.equal(normalized.iteration_mode, iteration_mode);
+    }
+
+    const { iteration_mode, ...legacyAction } = maximalAction;
+    const [legacy] = normalizeRecipeActions([legacyAction]);
+    assert.ok(!Object.hasOwn(legacy, 'iteration_mode'));
+});
+
+test('scroll_each enumerates current elements even when the training gallery had one', () => {
+    const [action] = normalizeRecipeActions([{ ...maximalAction, kind: 'scroll_each', iteration_mode: 'repeat' }]);
+    assert.ok(action, 'The browser must receive the scroll traversal action');
+    assert.equal(recipeActionRequestedIndex(action, 0, 1), 0);
+    assert.equal(recipeActionRequestedIndex(action, 4, 9), 4);
+    const [legacy] = normalizeRecipeActions([{ ...maximalAction, kind: 'scroll_into_view' }]);
+    assert.equal(recipeActionRequestedIndex(legacy, 4, 9), 0);
+});
+
+test('scroll_each requires actual traversal proof, not just a successful scroll', () => {
+    const action = { ...maximalAction, kind: 'scroll_each', after_each_selector: '' };
+    const trace = { action: 'scroll_each', action_index: 0, clicked: true, selector_match_count: 9 };
+    assert.equal(recipeActionPlanStatus({ actions: [action], actionTrace: [trace] }).complete, false);
+    assert.equal(recipeActionPlanStatus({ actions: [action], actionTrace: [{ ...trace,
+        traversal_complete: false, traversal_stop_reason: 'safety_ceiling_reached' }] }).complete, false);
+});
+
+test('scroll_each cannot use a smaller final count or optional absence to hide unvisited elements', () => {
+    const action = { ...maximalAction, kind: 'scroll_each', after_each_selector: '' };
+    const traces = [0, 1].map((index) => ({ action: 'scroll_each', action_index: 0,
+        clicked: true, index, selector_match_count: 4 - index }));
+    Object.assign(traces[1], { traversal_complete: true, traversal_match_count: 2 });
+    assert.equal(recipeActionPlanStatus({ actions: [action], actionTrace: traces }).complete, false);
+    assert.equal(recipeActionPlanStatus({ actions: [action], actionTrace: [{ action: 'scroll_each',
+        action_index: 0, optional_absent: true, clicked: false }] }).complete, false);
+});
+
+test('scroll_each counts gallery elements independently of matching zoom controls', () => {
+    const action = { ...maximalAction, kind: 'scroll_each', after_each_limit: 1 };
+    const traces = [{ action: 'scroll_each', action_index: 0, clicked: true, index: 0,
+        selector_match_count: 1, traversal_complete: true, traversal_match_count: 1 },
+    { action: 'scroll_each', action_index: 0, parent_repetition: 0, after_each: true,
+        clicked: true, changed: true, selector_match_count: 2 }];
+    assert.equal(recipeActionPlanStatus({ actions: [action], actionTrace: traces }).complete, true);
 });

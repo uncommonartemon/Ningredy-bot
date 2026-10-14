@@ -2,6 +2,7 @@
 
 namespace App\Filament\Resources\Categories\Schemas;
 
+use App\Filament\Schemas\RelatedCatalogForms;
 use App\Models\Category;
 use Filament\Forms\Components\Repeater;
 use Filament\Forms\Components\Select;
@@ -25,15 +26,24 @@ class CategoryForm
             // of those two tracks, halving the usable width for no reason.
             ->columns(1)
             ->components([
-                Grid::make(3)
+                Grid::make(['default' => 1, 'lg' => 3])
                     ->schema([
                         Group::make([
-                            Section::make('Поиск фотографий')
+                            Section::make(__('Характеристики нового товара'))
+                                ->description(__('Эти строки появятся пустыми после выбора категории. Значения заполняются у товара; состав и порядок можно изменить здесь.'))
+                                ->schema([
+                                    RelatedCatalogForms::defaultAttributes()->dehydrated(false)
+                                        ->afterStateHydrated(fn (Select $component, ?Category $record) => $component->state(
+                                            $record?->attributeDefinitions()->wherePivot('is_default', true)->pluck('attribute_definitions.id')->all() ?? []
+                                        ))
+                                        ->saveRelationshipsUsing(fn (Category $record, ?array $state) => $record->syncDefaultAttributes($state ?? [])),
+                                ]),
+                            Section::make(__('Поиск фотографий'))
                                 ->schema([
                                     ToggleButtons::make('gallery_search_strategy')
-                                        ->label('Стратегия')
+                                        ->label(__('Стратегия'))
                                         ->options([
-                                            Category::GALLERY_SEARCH_AUTO => 'Авто',
+                                            Category::GALLERY_SEARCH_AUTO => __('Авто'),
                                             Category::GALLERY_SEARCH_VISION_FIRST => 'Vision-first',
                                             Category::GALLERY_SEARCH_PLAYWRIGHT_FIRST => 'Playwright-first',
                                         ])
@@ -43,17 +53,17 @@ class CategoryForm
                                             Category::GALLERY_SEARCH_PLAYWRIGHT_FIRST => 'heroicon-o-cursor-arrow-rays',
                                         ])
                                         ->tooltips([
-                                            Category::GALLERY_SEARCH_AUTO => 'Стандартный сценарий: Playwright обучается, когда статики не хватает.',
-                                            Category::GALLERY_SEARCH_VISION_FIRST => 'Только статичные фото и уже готовый рецепт домена — новый рецепт не обучается.',
-                                            Category::GALLERY_SEARCH_PLAYWRIGHT_FIRST => 'Галерея сразу раскрывается браузером.',
+                                            Category::GALLERY_SEARCH_AUTO => __('Стандартный сценарий: Playwright обучается, когда статики не хватает.'),
+                                            Category::GALLERY_SEARCH_VISION_FIRST => __('Только статичные фото и уже готовый рецепт домена — новый рецепт не обучается.'),
+                                            Category::GALLERY_SEARCH_PLAYWRIGHT_FIRST => __('Галерея сразу раскрывается браузером.'),
                                         ])
                                         ->default(Category::GALLERY_SEARCH_AUTO)
                                         ->inline()
                                         ->required()
                                         ->columnSpanFull(),
                                     TextInput::make('minimum_verified_images')
-                                        ->label('Минимум проверенных фото')
-                                        ->helperText('Успех при этом количестве; если источник отдаёт больше, галерея заполняется до общего лимита 10.')
+                                        ->label(__('Минимум проверенных фото'))
+                                        ->helperText(__('Успех при этом количестве; если источник отдаёт больше, галерея заполняется до общего лимита 10.'))
                                         ->numeric()
                                         ->minValue(1)
                                         ->maxValue(10)
@@ -61,75 +71,77 @@ class CategoryForm
                                         ->required()
                                         ->columnSpanFull(),
                                     Textarea::make('product_search_hint')
-                                        ->label('Подсказка агенту при поиске')
-                                        ->helperText('Например: «не используй фото товара в коробке». Агент видит правило после определения категории.')
+                                        ->label(__('Подсказка агенту при поиске'))
+                                        ->helperText(__('Например: «не используй фото товара в коробке». Агент видит правило после определения категории.'))
                                         ->rows(3)
                                         ->maxLength(2000)
                                         ->columnSpanFull(),
                                     TextInput::make('minimum_image_width')
-                                        ->label('Мин. ширина фото, px')
-                                        ->helperText('Пусто = глобальное значение из настроек AI.')
+                                        ->label(__('Мин. ширина фото, px'))
+                                        ->helperText(__('Пусто = глобальное значение из настроек AI.'))
                                         ->numeric()
                                         ->minValue(100)
                                         ->maxValue(4000)
                                         ->suffix('px'),
                                     TextInput::make('minimum_image_height')
-                                        ->label('Мин. высота фото, px')
-                                        ->helperText('Пусто = глобальное значение (по умолчанию — любая).')
+                                        ->label(__('Мин. высота фото, px'))
+                                        ->helperText(__('Пусто = глобальное значение (по умолчанию — любая).'))
                                         ->numeric()
                                         ->minValue(0)
                                         ->maxValue(4000)
                                         ->suffix('px'),
                                 ])
                                 ->columns(2),
-                            Section::make('Переводы')
+                            Section::make(__('Переводы'))
                                 ->schema([
                                     Repeater::make('translations')
                                         ->relationship()
-                                        ->label('Названия категории')
+                                        ->label(__('Названия категории'))
                                         ->schema([
-                                            Select::make('locale')->label('Язык')->options([
+                                            Select::make('locale')->label(__('Язык'))->options([
                                                 'en' => 'English',
                                                 'cs' => 'Čeština',
-                                                'uk' => 'Українська',
+                                                'uk' => __('Українська'),
                                             ])->disableOptionsWhenSelectedInSiblingRepeaterItems()->required(),
-                                            TextInput::make('name')->label('Название')->required(),
+                                            TextInput::make('name')->label(__('Название'))->required()->maxLength(255),
                                         ])
                                         ->columns(2)
                                         ->defaultItems(0)
-                                        ->addActionLabel('Добавить перевод')
+                                        ->addActionLabel(__('Добавить перевод'))
                                         ->columnSpanFull(),
                                 ]),
-                        ])->columnSpan(2),
+                        ])->columnSpan(['default' => 1, 'lg' => 2]),
                         Group::make([
-                            Section::make('Категория')
+                            Section::make(__('Категория'))
                                 ->schema([
                                     TextInput::make('name')
-                                        ->label('Название на английском')
-                                        ->helperText('Каноническое имя и запасной вариант для API.')
-                                        ->required(),
-                                    TextInput::make('slug')
-                                        ->label('Slug')
-                                        ->helperText('Стабильное английское значение для URL и фильтров.')
-                                        ->unique(ignoreRecord: true)
-                                        ->required(),
+                                        ->label(__('Название на английском'))
+                                        ->helperText(__('Каноническое имя и запасной вариант для API.'))
+                                        ->required()->maxLength(255),
                                     Select::make('product_type_affinity')
-                                        ->label('Тип товаров категории')
-                                        ->helperText('Агент и валидатор используют это поле, чтобы категория не противоречила типу товара.')
+                                        ->label(__('Тип товаров категории'))
+                                        ->helperText(__('Агент и валидатор используют это поле, чтобы категория не противоречила типу товара.'))
                                         ->options([
-                                            'laptop' => 'Ноутбук',
-                                            'desktop' => 'Настольный компьютер',
-                                            'component' => 'Компонент / периферия',
-                                            'other' => 'Другая техника',
+                                            'laptop' => __('Ноутбук'),
+                                            'desktop' => __('Настольный компьютер'),
+                                            'component' => __('Компонент / периферия'),
+                                            'other' => __('Другая техника'),
                                         ])
                                         ->required(),
                                     Select::make('parent_id')
-                                        ->label('Родительская категория')
-                                        ->relationship('parent', 'name')
+                                        ->label(__('Родительская категория'))
+                                        ->relationship('parent', 'name', modifyQueryUsing: fn ($query, ?Category $record) => $query->whereNotIn('id', $record?->excludedParentIds() ?? []))
+                                        ->rules([fn (?Category $record): \Closure => function (string $attribute, $value, \Closure $fail) use ($record): void {
+                                            if (filled($value) && ! ($record ?? new Category)->acceptsParent((int) $value)) {
+                                                $fail(__('Категория не может быть родителем самой себя или своего предка.'));
+                                            }
+                                        }])
+                                        ->createOptionForm(RelatedCatalogForms::category())
+                                        ->createOptionUsing(fn (array $data): int => RelatedCatalogForms::createCategory($data))
                                         ->searchable()
                                         ->preload(),
-                                    Toggle::make('is_active')->label('Активна')->default(true),
-                                    TextInput::make('sort_order')->label('Порядок')->numeric()->minValue(0)->default(0),
+                                    Toggle::make('is_active')->label(__('Активна'))->default(true),
+                                    TextInput::make('sort_order')->label(__('Порядок'))->numeric()->minValue(0)->default(0),
                                 ]),
                         ])->columnSpan(1),
                     ]),

@@ -2,8 +2,7 @@
 
 namespace Tests\Unit;
 
-use App\Services\Products\ProductGalleryRecipeTrainer;
-use ReflectionMethod;
+use App\Services\GalleryRecipes\Training\ObservationPresenter;
 use Tests\TestCase;
 
 class TrainerPagePayloadTest extends TestCase
@@ -66,8 +65,45 @@ class TrainerPagePayloadTest extends TestCase
      */
     private function scoutForAgent(array $page, bool $complete): array
     {
-        $trainer = app(ProductGalleryRecipeTrainer::class);
+        return (new ObservationPresenter)->scoutForAgent($page, $complete);
+    }
 
-        return (new ReflectionMethod($trainer, 'scoutForAgent'))->invoke($trainer, $page, $complete);
+    public function test_text_payload_keeps_inline_image_identity_without_sending_binary_as_tokens(): void
+    {
+        $uri = 'data:image/jpeg;base64,'.base64_encode(str_repeat('binary image', 20000));
+        $url = 'https://cdn.example/image?id=front&width=1600';
+        $payload = ['diagnostics' => ['raw_dom_samples' => [$url, $uri]],
+            'previous_attempt_feedback' => ['images' => [$uri], 'error' => 'click intercepted'],
+            'attempt_history' => [['selector' => '.next', 'index' => 46]], 'count' => 0];
+
+        $projected = (new ObservationPresenter)->textPayload($payload);
+
+        $marker = $projected['diagnostics']['raw_dom_samples'][1];
+        $this->assertStringContainsString('inline-image', $marker);
+        $this->assertStringContainsString('image/jpeg', $marker);
+        $this->assertStringContainsString(hash('sha256', $uri), $marker);
+        $this->assertSame($marker, $projected['previous_attempt_feedback']['images'][0]);
+        $this->assertSame($url, $projected['diagnostics']['raw_dom_samples'][0]);
+        $this->assertSame($payload['attempt_history'], $projected['attempt_history']);
+        $this->assertSame('click intercepted', $projected['previous_attempt_feedback']['error']);
+        $this->assertSame(0, $projected['count']);
+        $this->assertLessThan(2000, strlen(json_encode($projected)));
+        $this->assertSame($uri, $payload['diagnostics']['raw_dom_samples'][1]);
+    }
+
+    public function test_inline_image_inside_html_is_compact_but_controls_and_distinct_assets_survive(): void
+    {
+        $front = 'data:image/png;base64,'.base64_encode('front image');
+        $back = 'data:image/png;base64,'.base64_encode('back image');
+        $payload = ['fragments' => ['<img src="'.$front.'"><button class="next">Next</button>'],
+            'image_candidates' => [['src' => $front], ['src' => $back]],
+            'visible_overlays' => [['text' => 'Accept cookies']]];
+
+        $result = (new ObservationPresenter)->textPayload($payload);
+
+        $this->assertStringNotContainsString($front, $result['fragments'][0]);
+        $this->assertStringContainsString('<button class="next">Next</button>', $result['fragments'][0]);
+        $this->assertNotSame($result['image_candidates'][0]['src'], $result['image_candidates'][1]['src']);
+        $this->assertSame($payload['visible_overlays'], $result['visible_overlays']);
     }
 }

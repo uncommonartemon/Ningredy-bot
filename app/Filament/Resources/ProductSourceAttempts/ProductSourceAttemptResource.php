@@ -2,13 +2,13 @@
 
 namespace App\Filament\Resources\ProductSourceAttempts;
 
+use App\Filament\Resources\LocalizedResource as Resource;
 use App\Filament\Resources\ProductSourceAttempts\Pages\ListProductSourceAttempts;
 use App\Filament\Resources\ProductSourceAttempts\Pages\ViewProductSourceAttempt;
 use App\Filament\Resources\ProductSourceAttempts\Schemas\ProductSourceAttemptInfolist;
 use App\Filament\Resources\ProductSourceAttempts\Tables\ProductSourceAttemptsTable;
 use App\Models\ProductSourceAttempt;
 use BackedEnum;
-use Filament\Resources\Resource;
 use Filament\Schemas\Schema;
 use Filament\Support\Icons\Heroicon;
 use Filament\Tables\Table;

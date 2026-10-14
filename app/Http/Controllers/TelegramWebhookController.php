@@ -2,13 +2,17 @@
 
 namespace App\Http\Controllers;
 
+use App\Ai\Tools\GetSystemStatus;
+use App\Ai\Tools\PrepareProductDeletion;
 use App\Exceptions\LowResolutionDraftMediaException;
 use App\Exceptions\MissingDraftMediaException;
 use App\Exceptions\UnreconciledDraftSpecificationsException;
 use App\Exceptions\UnverifiedDraftMediaException;
 use App\Jobs\ContinueDraftGallerySearch;
+use App\Jobs\EnrichTelegramProductDraft;
 use App\Jobs\ProcessDraftPhotoActions;
 use App\Jobs\ProcessTelegramMessage;
+use App\Jobs\ProposeTelegramDraftEdit;
 use App\Jobs\RestageDraftGalleryPhotos;
 use App\Jobs\TopUpDraftGalleryPhotos;
 use App\Jobs\TrainDraftGalleryRecipe;
@@ -19,18 +23,28 @@ use App\Models\AppSetting;
 use App\Models\Product;
 use App\Models\ProductDraft;
 use App\Models\ProductDraftMedia;
-use App\Models\TelegramChatState;
 use App\Models\TelegramUpdate;
 use App\Services\Products\ProductDraftWorkflow;
 use App\Services\Products\ProductGalleryRecipeRouter;
 use App\Services\Products\ProductSourcePriority;
+use App\Services\Telegram\CatalogTelegramNavigation;
+use App\Services\Telegram\DraftAccess;
 use App\Services\Telegram\DraftTelegramActionConfirmation;
 use App\Services\Telegram\DraftTelegramInteractionState;
 use App\Services\Telegram\DraftTelegramPresenter;
+use App\Services\Telegram\ProductCardPresenter;
+use App\Services\Telegram\TelegramCatalogDeletion;
+use App\Services\Telegram\TelegramCatalogEditor;
 use App\Services\Telegram\TelegramClient;
+use App\Services\Telegram\TelegramConversationScope;
+use App\Services\Telegram\TelegramDraftEditor;
+use App\Services\Telegram\TelegramProductUploadIntake;
+use App\Services\Telegram\TelegramWebhookDelivery;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\ValidationException;
 use Throwable;
 
 class TelegramWebhookController extends Controller
@@ -42,6 +56,29 @@ class TelegramWebhookController extends Controller
     ) {}
 
     public function __invoke(Request $request): JsonResponse
+    {
+        $this->verifyWebhookSecret($request);
+        $id = $request->json('update_id');
+        if (! is_int($id)) {
+            return response()->json(['ok' => true, 'ignored' => true]);
+        }
+        $lock = Cache::lock('telegram-webhook:'.$id, 120);
+        abort_unless($lock->get(), 503, 'This Telegram update is being handled; retry delivery.');
+        try {
+            $result = $this->routeUpdate($request);
+            $update = TelegramUpdate::where('update_id', $id)->first();
+            if ($update && ! data_get($update->payload, '_webhook_routed')) {
+                $update->update(['payload' => [...($update->payload ?? []), '_webhook_routed' => true]]);
+            }
+
+            return $result;
+        } finally {
+            TelegramWebhookDelivery::end();
+            $lock->release();
+        }
+    }
+
+    private function routeUpdate(Request $request): JsonResponse
     {
         $this->verifyWebhookSecret($request);
         $payload = $request->json()->all();
@@ -64,6 +101,7 @@ class TelegramWebhookController extends Controller
         );
         $hasVoice = is_array(data_get($payload, 'message.voice'));
         $hasPhoto = is_array(data_get($payload, 'message.photo'));
+        $hasImageDocument = str_starts_with((string) data_get($payload, 'message.document.mime_type'), 'image/');
         $isAllowed = $this->isAllowed($telegramUserId);
 
         if (! $isCallback && is_string($text)) {
@@ -84,7 +122,13 @@ class TelegramWebhookController extends Controller
             ],
         );
 
-        if (! $update->wasRecentlyCreated) {
+        TelegramWebhookDelivery::begin($update->id);
+        if (! $update->wasRecentlyCreated && (data_get($update->payload, '_webhook_routed')
+            || $update->processed_at !== null || in_array($update->status, ['processing', 'cancelled', 'rejected'], true))) {
+            if ($isAllowed) {
+                $this->telegram->retryWebhookDeliveries($update->id);
+            }
+
             return response()->json(['ok' => true, 'duplicate' => true]);
         }
 
@@ -100,14 +144,54 @@ class TelegramWebhookController extends Controller
             return response()->json(['ok' => true]);
         }
 
-        if (($hasVoice || $hasPhoto) && $chatId !== null
-            && in_array(app(DraftTelegramInteractionState::class)->get((string) $chatId, (string) $telegramUserId)['kind'] ?? '', ['source_hint', 'new_search'], true)) {
+        $inputState = $chatId !== null ? app(DraftTelegramInteractionState::class)->get((string) $chatId, (string) $telegramUserId) : null;
+        if (($hasVoice || $hasPhoto || $hasImageDocument) && $chatId !== null
+            && (in_array($inputState['kind'] ?? '', ['source_hint', 'new_search', 'manual_fields', 'confirmation', 'processing'], true)
+                || ($hasVoice && ($inputState['kind'] ?? '') === 'manual_photos'))) {
             $this->telegram->sendMessage((string) $chatId, 'Сейчас ожидаю текст для выбранного черновика. Напишите его текстом или нажмите «Отменить ввод». Фото и голос не отправлены в новый поиск.');
             $this->markCommandProcessed($update);
 
             return response()->json(['ok' => true]);
         }
+        if (($hasVoice || $hasPhoto || $hasImageDocument) && $chatId !== null
+            && $this->expiredManualInput((string) $chatId, (string) $telegramUserId)) {
+            $this->telegram->sendMessage((string) $chatId, 'Время ввода истекло. Откройте нужную карточку или /add заново. Материалы не отправлены в интернет-поиск.');
+            $this->markCommandProcessed($update);
 
+            return response()->json(['ok' => true]);
+        }
+
+        if (($hasPhoto || $hasImageDocument) && $chatId !== null) {
+            $pending = app(DraftTelegramInteractionState::class)->get((string) $chatId, (string) $telegramUserId);
+            $caption = trim((string) data_get($payload, 'message.caption', ''));
+            $createKey = "telegram-manual-create:{$chatId}:{$telegramUserId}";
+            if (($pending['kind'] ?? '') === 'manual_photos') {
+                $draft = ProductDraft::find($pending['draft_id']);
+                if (! $draft || ! $draft->isManualUpload() || $draft->status !== 'pending_review'
+                    || (int) $draft->telegram_update_id !== (int) $pending['generation']
+                    || ! $this->draftBelongsToContext($draft, $update)) {
+                    $this->telegram->sendMessage((string) $chatId, 'Карточка для загрузки фото уже недоступна. Откройте её заново.');
+                    $this->markCommandProcessed($update);
+                } else {
+                    app(TelegramProductUploadIntake::class)->queue($update, $caption, $draft->id);
+                }
+
+                return response()->json(['ok' => true, 'upload' => true]);
+            }
+            if (Cache::has($createKey) || $hasImageDocument || $caption !== '' || filled(data_get($payload, 'message.media_group_id'))) {
+                $this->clearManualCreate((string) $chatId, (string) $telegramUserId);
+                app(TelegramProductUploadIntake::class)->queue($update, $caption);
+
+                return response()->json(['ok' => true, 'upload' => true]);
+            }
+        }
+
+        if ($hasVoice && $chatId !== null && Cache::has("telegram-manual-create:{$chatId}:{$telegramUserId}")) {
+            $this->telegram->sendMessage((string) $chatId, 'Для загрузки своего товара отправьте описание текстом и фото. Голос не отправлен в интернет-поиск. /cancel — отменить ввод.');
+            $this->markCommandProcessed($update);
+
+            return response()->json(['ok' => true]);
+        }
         if ($hasVoice && $chatId !== null) {
             TranscribeTelegramVoice::dispatch($update->id)->afterCommit();
 
@@ -131,6 +215,12 @@ class TelegramWebhookController extends Controller
         }
 
         if ($this->handlePendingDraftInput(trim($text), (string) $chatId, $update)) {
+            return response()->json(['ok' => true]);
+        }
+        if ($this->expiredManualInput((string) $chatId, (string) $telegramUserId)) {
+            $this->telegram->sendMessage((string) $chatId, 'Время ввода истекло. Откройте ручную карточку или /add заново. Для нового поиска используйте /find. Поиск сейчас не запущен.');
+            $this->markCommandProcessed($update);
+
             return response()->json(['ok' => true]);
         }
 
@@ -176,6 +266,53 @@ class TelegramWebhookController extends Controller
 
     private function handleCommand(string $text, string $chatId, string $telegramUserId, TelegramUpdate $update): bool
     {
+        $createKey = "telegram-manual-create:{$chatId}:{$telegramUserId}";
+        if (preg_match('/^\/(?:edit|delete|product|catalog|drafts|find|new|reset)(?:@\w+)?(?:\s|$)/iu', $text) === 1
+            || in_array($text, ['📦 Каталог', '📋 Черновики', '🔎 Найти товар', '🔄 Сброс'], true)) {
+            $this->clearManualCreate($chatId, $telegramUserId);
+            app(DraftTelegramInteractionState::class)->clear($chatId, $telegramUserId);
+        }
+        if (preg_match('/^\/(?:cancel|new|reset)(?:@\w+)?$/iu', $text) === 1 || $text === '🔄 Сброс') {
+            $this->clearManualCreate($chatId, $telegramUserId);
+        }
+        if (preg_match('/^\/cancel(?:@\w+)?$/iu', $text) === 1) {
+            $active = app(DraftTelegramInteractionState::class)->get($chatId, $telegramUserId);
+            if (($active['kind'] ?? '') === 'processing' && isset($active['input_update_id'])) {
+                TelegramUpdate::query()->whereKey($active['input_update_id'])->where('chat_id', $chatId)
+                    ->where('telegram_user_id', $telegramUserId)->whereNull('processed_at')
+                    ->update(['status' => 'cancelled', 'cancel_requested_at' => now(), 'processed_at' => now()]);
+            }
+            app(DraftTelegramInteractionState::class)->clear($chatId, $telegramUserId);
+            $this->telegram->sendMessage($chatId, 'Ввод отменён. Сохранённые карточки остаются.', $this->mainKeyboard());
+            $this->markCommandProcessed($update);
+
+            return true;
+        }
+        if (preg_match('/^\/add(?:@\w+)?(?:\s+(.*))?$/isu', $text, $add) === 1 || $text === '📥 Загрузить товар') {
+            app(DraftTelegramInteractionState::class)->clear($chatId, $telegramUserId);
+            $description = trim((string) ($add[1] ?? ''));
+            if ($description !== '') {
+                app(TelegramProductUploadIntake::class)->queue($update, $description);
+            } else {
+                Cache::put($createKey, true, now()->addMinutes(10));
+                Cache::put($createKey.':expires_at', now()->addMinutes(10)->getTimestamp(), now()->addDay());
+                $this->telegram->sendMessage($chatId,
+                    "📥 Отправьте фотографии одним альбомом с описанием в подписи. Можно начать с текста, затем добавить фото к черновику.\nУкажите модель, состояние, характеристики и при необходимости цену с валютой и количество.\nБот подготовит карточку; добавление в каталог — только после вашего подтверждения. /cancel — отменить ввод.");
+                $this->markCommandProcessed($update);
+            }
+
+            return true;
+        }
+        if (preg_match('/^\/edit(?:@\w+)?\s+#?(\d+)(?:\s+#?(\d+))?$/iu', $text, $editProduct) === 1) {
+            $this->openCatalogEditor((int) $editProduct[1], $update, isset($editProduct[2]) ? (int) $editProduct[2] : null);
+
+            return true;
+        }
+        if (preg_match('/^\/delete(?:@\w+)?\s+#?(\d+)$/iu', $text, $deleteProduct) === 1) {
+            $this->prepareCatalogDeletion((int) $deleteProduct[1], $update);
+
+            return true;
+        }
         if (preg_match('/^\/(start|help)(?:@\w+)?$/iu', $text) === 1 || $text === 'ℹ️ Помощь') {
             $this->telegram->sendMessage($chatId, $this->helpText(), $this->mainKeyboard());
             $this->markCommandProcessed($update);
@@ -184,8 +321,11 @@ class TelegramWebhookController extends Controller
         }
 
         if (preg_match('/^\/new(?:@\w+)?$/iu', $text) === 1) {
-            app(DraftTelegramInteractionState::class)->clear($chatId, $telegramUserId);
-            TelegramChatState::query()->where('chat_id', $chatId)->delete();
+            if (! data_get($update->payload, '_new_context_cleared')) {
+                app(DraftTelegramInteractionState::class)->clear($chatId, $telegramUserId);
+                TelegramConversationScope::clear($chatId, $telegramUserId);
+                $update->update(['payload' => [...$update->payload, '_new_context_cleared' => true]]);
+            }
             $this->telegram->sendMessage($chatId, 'Контекст диалога очищен. Начинаем с чистого листа.', $this->mainKeyboard());
             $this->markCommandProcessed($update);
 
@@ -193,20 +333,28 @@ class TelegramWebhookController extends Controller
         }
 
         if (preg_match('/^\/reset(?:@\w+)?$/iu', $text) === 1 || $text === '🔄 Сброс') {
-            app(DraftTelegramInteractionState::class)->clear($chatId, $telegramUserId);
-            // A ProcessTelegramMessage job whose update already shows processed_at
-            // returns immediately without doing anything (see the job's handle()) -
-            // this is enough to neutralize a stuck/queued job even if the worker
-            // was down when it was dispatched and only picks it up later.
-            $cancelled = TelegramUpdate::query()
-                ->where('chat_id', $chatId)
-                ->whereNull('processed_at')
-                ->where('id', '!=', $update->id)
-                ->update(['status' => 'cancelled', 'processed_at' => now()]);
-            TelegramChatState::query()->where('chat_id', $chatId)->delete();
-            $message = $cancelled > 0
-                ? "Сброс выполнен: отменено зависших запросов — {$cancelled}. Контекст диалога очищен. Можно начинать заново."
-                : 'Сброс выполнен: зависших запросов не было. Контекст диалога очищен. Можно начинать заново.';
+            $message = data_get($update->payload, '_reset_result');
+            if (! is_string($message)) {
+                $message = DB::transaction(function () use ($chatId, $telegramUserId, $update): string {
+                    app(DraftTelegramInteractionState::class)->clear($chatId, $telegramUserId);
+                    // A ProcessTelegramMessage job whose update already shows processed_at
+                    // returns immediately. cancel_requested_at also reaches a job or
+                    // research tool already waiting for the provider's response.
+                    $cancelled = TelegramUpdate::query()
+                        ->where('chat_id', $chatId)
+                        ->where('telegram_user_id', $telegramUserId)
+                        ->whereNull('processed_at')
+                        ->where('id', '!=', $update->id)
+                        ->update(['status' => 'cancelled', 'cancel_requested_at' => now(), 'processed_at' => now()]);
+                    TelegramConversationScope::clear($chatId, $telegramUserId);
+                    $message = $cancelled > 0
+                        ? "Сброс выполнен: отменено зависших запросов — {$cancelled}. Контекст диалога очищен. Можно начинать заново."
+                        : 'Сброс выполнен: зависших запросов не было. Контекст диалога очищен. Можно начинать заново.';
+                    $update->update(['payload' => [...$update->payload, '_reset_result' => $message]]);
+
+                    return $message;
+                });
+            }
             $this->telegram->sendMessage($chatId, $message, $this->mainKeyboard());
             $this->markCommandProcessed($update);
 
@@ -242,16 +390,73 @@ class TelegramWebhookController extends Controller
             return true;
         }
 
+        if (preg_match('/^\/status(?:@\w+)?$/iu', $text) === 1 || $text === '🖥 Статус') {
+            $status = json_decode(app(GetSystemStatus::class)->handle(new \Laravel\Ai\Tools\Request([])), true);
+            $this->telegram->sendMessage($chatId, implode("\n", [
+                '🖥 Состояние проекта',
+                'Товаров: '.$status['catalog']['total'].' · опубликовано: '.$status['catalog']['active'],
+                'Черновиков: '.$status['pending_drafts'],
+                'В очереди: '.$status['queue']['pending'].' · упавших заданий: '.$status['queue']['failed'],
+                'Ошибок AI за сутки: '.$status['ai_failures_last_24h'],
+                'Наличие заданий не подтверждает, что воркер сейчас работает.',
+                $status['catalog_url'] ? 'Каталог: '.$status['catalog_url'] : 'Публичный адрес пока не установлен.',
+            ]), $this->mainKeyboard());
+            $this->markCommandProcessed($update);
+
+            return true;
+        }
+
+        if (preg_match('/^\/admin(?:@\w+)?$/iu', $text) === 1 || $text === '🛠 Админка') {
+            $navigation = app(CatalogTelegramNavigation::class)->catalog();
+            $this->telegram->sendMessage($chatId, $navigation !== null
+                ? '🛠 Управление каталогом. Создание и редактирование вручную не расходуют AI-бюджет. Откроется админка; потребуется обычный вход.'
+                : 'Публичный адрес админки пока не настроен. Проверьте туннель и настройки Telegram.',
+                $navigation ?? $this->mainKeyboard());
+            $this->markCommandProcessed($update);
+
+            return true;
+        }
+
+        if (preg_match('/^\/product(?:@\w+)?\s+#?(\d+)$/iu', $text, $showProduct) === 1) {
+            app(ProductCardPresenter::class)->sendMany($this->telegram, $chatId, [(int) $showProduct[1]], withManagementLinks: true,
+                telegramUserId: $update->telegram_user_id);
+            $this->markCommandProcessed($update);
+
+            return true;
+        }
+        if (preg_match('/^\/catalog(?:@\w+)?(?:\s+(.*))?$/isu', $text, $catalogQuery) === 1 || $text === '📦 Каталог') {
+            $navigation = app(CatalogTelegramNavigation::class)->catalog() ?? $this->mainKeyboard();
+            $query = trim((string) ($catalogQuery[1] ?? ''));
+            $ids = Product::query()->visibleInCatalog()->when($query !== '', fn ($products) => $products
+                ->where(fn ($search) => $search->where('title', 'like', '%'.$query.'%')->orWhere('model', 'like', '%'.$query.'%')))
+                ->latest('id')->limit(10)->pluck('id')->all();
+            if ($ids === []) {
+                $this->telegram->sendMessage($chatId, 'В каталоге пока нет опубликованных товаров.', $navigation);
+            } else {
+                app(ProductCardPresenter::class)->sendMany($this->telegram, $chatId, $ids, withManagementLinks: true,
+                    telegramUserId: $update->telegram_user_id);
+                $this->telegram->sendMessage($chatId, 'Товары каталога. /catalog название — найти в базе; /product номер — открыть; /edit номер — редактировать с подтверждением. Для полного управления вариантами доступен Filament.', $navigation);
+            }
+            $this->markCommandProcessed($update);
+
+            return true;
+        }
+
         $preset = match (true) {
-            preg_match('/^\/status(?:@\w+)?$/iu', $text) === 1, $text === '🖥 Статус' => 'Проверь состояние сервера, очереди и каталога.',
             preg_match('/^\/errors(?:@\w+)?$/iu', $text) === 1, $text === '⚠️ Ошибки' => 'Покажи последние ошибки AI и очереди.',
-            $text === '📦 Каталог' => 'Покажи последние активные товары локального каталога.',
             default => null,
         };
         if ($preset !== null) {
             $update->update(['text' => $preset]);
 
             return false;
+        }
+
+        if (! str_starts_with($text, '/') && Cache::has($createKey)) {
+            $this->clearManualCreate($chatId, $telegramUserId);
+            app(TelegramProductUploadIntake::class)->queue($update, $text);
+
+            return true;
         }
 
         if (preg_match('/^\/find(?:@\w+)?(?:\s+(.*))?$/isu', $text, $matches) === 1) {
@@ -263,6 +468,11 @@ class TelegramWebhookController extends Controller
                 return true;
             }
             $update->update(['text' => $query]);
+        } elseif (str_starts_with($text, '/')) {
+            $this->telegram->sendMessage($chatId, 'Команда не распознана. /add — загрузить товар; /edit номер — редактировать; /find название — поиск; /help — все команды. Поиск не запущен.');
+            $this->markCommandProcessed($update);
+
+            return true;
         }
 
         return false;
@@ -275,6 +485,34 @@ class TelegramWebhookController extends Controller
         $chatId = (string) data_get($callback, 'message.chat.id');
         $messageId = data_get($callback, 'message.message_id');
 
+        if (str_starts_with($data, 'product:')) {
+            $this->clearManualCreate($chatId, (string) $update->telegram_user_id);
+            app(DraftTelegramInteractionState::class)->clear($chatId, (string) $update->telegram_user_id);
+        }
+
+        if ($data === 'product:create') {
+            $this->handleCommand('/add', $chatId, (string) $update->telegram_user_id, $update);
+            $this->telegram->answerCallbackQuery($callbackId, 'Отправьте описание и фото.');
+
+            return;
+        }
+        if (preg_match('/^product:variants:(\d+):(\d+)$/', $data, $variantPage) === 1) {
+            $this->openCatalogEditor((int) $variantPage[1], $update, null, (int) $variantPage[2]);
+            $this->telegram->answerCallbackQuery($callbackId, 'Выберите комплектацию.');
+
+            return;
+        }
+        if (preg_match('/^product:(tgedit|remove):(\d+)(?::(\d+))?$/', $data, $catalogAction) === 1) {
+            if ($catalogAction[1] === 'tgedit') {
+                $this->openCatalogEditor((int) $catalogAction[2], $update, isset($catalogAction[3]) ? (int) $catalogAction[3] : null);
+            } else {
+                $this->prepareCatalogDeletion((int) $catalogAction[2], $update);
+            }
+            $this->telegram->answerCallbackQuery($callbackId, 'Карточка открыта.');
+
+            return;
+        }
+
         if (preg_match('/^draft:open:(\d+):(\d+)$/', $data, $open) === 1) {
             $draft = ProductDraft::query()->find((int) $open[1]);
             if (! $draft || (int) $draft->telegram_update_id !== (int) $open[2]
@@ -283,10 +521,34 @@ class TelegramWebhookController extends Controller
             } elseif ($this->draftHasQueuedWork($draft->id)) {
                 $this->telegram->answerCallbackQuery($callbackId, 'Этот черновик сейчас обрабатывается. Дождитесь результата.');
             } else {
+                $this->clearManualCreate($chatId, (string) $update->telegram_user_id);
                 app(DraftTelegramInteractionState::class)->clear($chatId, (string) $update->telegram_user_id);
                 $this->telegram->answerCallbackQuery($callbackId, 'Открываю актуальную карточку.');
                 $this->draftPresenter->clearForSearchContinuation($this->telegram, $draft);
                 $this->draftPresenter->sendReview($this->telegram, $chatId, $draft);
+            }
+            $this->markCommandProcessed($update);
+
+            return;
+        }
+
+        if (preg_match('/^draft:resume-edit:(\d+):([A-Za-z0-9]{12})$/', $data, $resume) === 1) {
+            $draft = ProductDraft::find((int) $resume[1]);
+            $key = "draft-edit-proposal:{$chatId}:{$update->telegram_user_id}:{$resume[1]}:{$resume[2]}";
+            $proposal = Cache::get($key);
+            if (! $draft || ! is_array($proposal) || $draft->status !== 'pending_review'
+                || ! $this->draftBelongsToContext($draft, $update)
+                || (int) ($proposal['generation'] ?? 0) !== (int) $draft->telegram_update_id
+                || ! hash_equals((string) ($proposal['fingerprint'] ?? ''), app(TelegramDraftEditor::class)->fingerprint($draft))
+                || $this->draftHasQueuedWork($draft->id)) {
+                $this->telegram->answerCallbackQuery($callbackId, 'Изменения устарели или карточка обрабатывается. Откройте редактор заново.');
+            } else {
+                Cache::forget($key);
+                $this->clearManualCreate($chatId, (string) $update->telegram_user_id);
+                app(DraftTelegramInteractionState::class)->clear($chatId, (string) $update->telegram_user_id);
+                (new ProposeTelegramDraftEdit($draft->id, $update->id, $draft->telegram_update_id, ''))
+                    ->presentProposal($draft, $update, $proposal, $this->telegram, $this->draftPresenter);
+                $this->telegram->answerCallbackQuery($callbackId, 'Проверьте предложенные изменения.');
             }
             $this->markCommandProcessed($update);
 
@@ -310,7 +572,12 @@ class TelegramWebhookController extends Controller
         $confirmedHint = null;
         $confirmedQuery = null;
         if ($isConfirmation) {
-            $state = app(DraftTelegramInteractionState::class)->consume($chatId, (string) $update->telegram_user_id, $confirmation[2]);
+            // Once consumed, retain this update's receipt durably. A failed Telegram
+            // delivery before dispatch can retry without consuming another token.
+            $savedConfirmation = data_get($update->payload, '_consumed_draft_confirmation');
+            $state = is_array($savedConfirmation) && hash_equals((string) ($savedConfirmation['token'] ?? ''), $confirmation[2])
+                ? $savedConfirmation
+                : app(DraftTelegramInteractionState::class)->consume($chatId, (string) $update->telegram_user_id, $confirmation[2]);
             $draft = ProductDraft::query()->find((int) $confirmation[1]);
             if (! $state || ($state['kind'] ?? '') !== 'confirmation' || ! $draft
                 || $draft->status !== 'pending_review'
@@ -332,13 +599,14 @@ class TelegramWebhookController extends Controller
             $confirmedQuery = $state['query'] ?? null;
             $update->update([
                 'text' => $data,
-                'payload' => [...($update->payload ?? []), 'draft_action_confirmation' => [
+                'payload' => [...($update->payload ?? []), '_consumed_draft_confirmation' => $state, 'draft_action_confirmation' => [
                     'action' => $data, 'draft_id' => $draft->id, 'generation' => $state['generation'],
                     'budget' => $state['budget'] ?? null, 'input_update_id' => $state['input_update_id'] ?? null,
                 ]],
             ]);
             $confirmed = true;
         } elseif (str_starts_with($data, 'draft:')) {
+            $this->clearManualCreate($chatId, (string) $update->telegram_user_id);
             app(DraftTelegramInteractionState::class)->clear($chatId, (string) $update->telegram_user_id);
         }
 
@@ -356,6 +624,69 @@ class TelegramWebhookController extends Controller
             return;
         }
 
+        if (preg_match('/^draft:apply-edit:(\d+)$/', $data, $applyEdit) === 1 && $confirmed) {
+            try {
+                $draft = app(TelegramDraftEditor::class)->apply($draft, $update, $state['proposal'] ?? []);
+                $this->draftPresenter->clearForSearchContinuation($this->telegram, $draft);
+                $this->draftPresenter->sendReview($this->telegram, $chatId, $draft->fresh());
+                $this->telegram->answerCallbackQuery($callbackId, 'Черновик обновлён. Сохранение в каталог отдельно.');
+            } catch (\RuntimeException|ValidationException $error) {
+                $this->telegram->sendMessage($chatId, 'Изменения не применены: '.mb_substr($error->getMessage(), 0, 1000));
+                $this->telegram->answerCallbackQuery($callbackId, 'Карточка изменилась. Откройте редактор заново.');
+            }
+            $this->markCommandProcessed($update);
+
+            return;
+        }
+        if (preg_match('/^draft:(fields|upload):(\d+)$/', $data, $manualInput) === 1) {
+            $draft = ProductDraft::find((int) $manualInput[2]);
+            if ($draft?->status === 'pending_review' && $draft->isManualUpload()) {
+                app(DraftTelegramInteractionState::class)->remember($chatId, (string) $update->telegram_user_id, $draft,
+                    $manualInput[1] === 'fields' ? 'manual_fields' : 'manual_photos');
+                $this->draftPresenter->sendInputPrompt($this->telegram, $chatId, $draft,
+                    $manualInput[1] === 'fields'
+                        ? 'Напишите изменения одним сообщением. Например: «цена: 15000 CZK», «состояние: б/у», «RAM: 32 GB». Для нового описания: «описание: …». Покажу изменения перед применением. /cancel — отмена.'
+                        : 'Отправьте фото или альбом для этой карточки. Фото без сжатия можно отправить файлами. /cancel — отмена.');
+            }
+            $this->telegram->answerCallbackQuery($callbackId, 'Ожидаю материалы.');
+            $this->markCommandProcessed($update);
+
+            return;
+        }
+        if (preg_match('/^draft:(enrich|webphotos):(\d+)$/', $data, $manualSearch) === 1 && $confirmed) {
+            if (! $draft->isManualUpload()) {
+                $this->markCommandProcessed($update);
+
+                return;
+            }
+            if ($manualSearch[1] === 'enrich') {
+                $processing = app(DraftTelegramInteractionState::class)->remember($chatId, (string) $update->telegram_user_id,
+                    $draft, 'processing', ['input_update_id' => $update->id, 'operation' => 'draft-enrich']);
+                Cache::put("draft-enrich:{$draft->id}:queued", $update->id, 960);
+                EnrichTelegramProductDraft::dispatch($draft->id, $update->id, $draft->telegram_update_id, $processing['token'])->afterCommit();
+                $this->telegram->answerCallbackQuery($callbackId, 'Поиск характеристик поставлен в очередь.');
+            } else {
+                $query = json_encode($draft->only(['title', 'brand', 'model', 'color', 'condition', 'specifications']), JSON_UNESCAPED_UNICODE);
+                $update->update(['text' => 'Найди в интернете именно этот товар и подготовь отдельную карточку с проверенной галереей. Исходную ручную карточку не меняй: '.$query,
+                    'status' => 'received', 'processed_at' => null,
+                    'payload' => [...$update->payload, '_manual_original_draft_id' => $draft->id]]);
+                ProcessTelegramMessage::dispatch($update->id, freshConversation: true)->afterCommit();
+                $this->telegram->answerCallbackQuery($callbackId, 'Подбор интернет-галереи поставлен в очередь.');
+            }
+
+            return;
+        }
+
+        if (preg_match('/^draft:details:(\d+)$/', $data, $details) === 1) {
+            $draft = ProductDraft::find((int) $details[1]);
+            if ($draft?->status === 'pending_review') {
+                $this->draftPresenter->sendDetails($this->telegram, $chatId, $draft);
+            }
+            $this->telegram->answerCallbackQuery($callbackId, 'Полные данные карточки.');
+            $this->markCommandProcessed($update);
+
+            return;
+        }
         if (preg_match('/^draft:edit:(\d+)$/', $data, $edit) === 1) {
             $draft = ProductDraft::query()->find((int) $edit[1]);
             if ($draft?->status === 'pending_review') {
@@ -508,12 +839,18 @@ class TelegramWebhookController extends Controller
         }
 
         if (preg_match('/^draft:source-block-(confirm|cancel):(\d+)$/', $data, $blockConfirmMatches) === 1) {
+            if ($blockConfirmMatches[1] === 'confirm' && ! $confirmed) {
+                $this->handleDraftSourceBlockPrompt((int) $blockConfirmMatches[2], $callbackId, $chatId, $update);
+
+                return;
+            }
             $this->handleDraftSourceBlockDecision(
                 draftId: (int) $blockConfirmMatches[2],
                 confirmed: $blockConfirmMatches[1] === 'confirm',
                 callbackId: $callbackId,
                 chatId: $chatId,
                 update: $update,
+                expectedHost: $state['host'] ?? null,
             );
 
             return;
@@ -662,9 +999,12 @@ class TelegramWebhookController extends Controller
             'status' => 'completed',
             'executed_at' => now(),
         ]);
+
         $update->update(['status' => 'completed', 'processed_at' => now()]);
         $result = $approved
-            ? "✅ Товар #{$product->id} добавлен в каталог и активен. Операция #{$operation->id}."
+            ? ($draft->isManualUpload() && data_get($draft->manualIntake(), 'target_product_id')
+                ? "✅ Изменения товара #{$product->id} сохранены. Операция #{$operation->id}."
+                : "✅ Товар #{$product->id} добавлен в каталог и активен. Операция #{$operation->id}.")
             : "✖ Черновик #{$draft->id} отклонён. Операция #{$operation->id}.";
         $this->telegram->answerCallbackQuery($callbackId, $result);
 
@@ -828,7 +1168,7 @@ class TelegramWebhookController extends Controller
         $position = $position === false ? 1 : $position + 1;
         $labels = ['enhance' => 'Улучшаю', 'replace' => 'Ищу замену для', 'delete' => 'Удаляю'];
         $limits = ['enhance' => 180, 'replace' => 180, 'delete' => 10];
-        $operation = AiOperation::query()->create([
+        $operation = AiOperation::query()->firstOrCreate(['idempotency_key' => "{$action}-draft-photo:{$update->id}"], [
             'telegram_update_id' => $update->id,
             'telegram_user_id' => $update->telegram_user_id,
             'tool' => 'TelegramCallback',
@@ -840,12 +1180,19 @@ class TelegramWebhookController extends Controller
             'status' => 'running',
         ]);
 
+        if ($operation->status === 'completed') {
+            $this->markCommandProcessed($update);
+
+            return;
+        }
+
         try {
             $this->telegram->answerCallbackQuery($callbackId, "Операция поставлена в очередь: фото {$position}.");
             $this->draftPresenter->clearControls($this->telegram, $draft, $chatId);
             $this->telegram->sendMessage(
                 $chatId,
                 "⏳ {$labels[$action]} фото {$position} черновика #{$draft->id} · лимит {$limits[$action]} сек.",
+                ['inline_keyboard' => [[['text' => 'Отменить обработку', 'callback_data' => "search:cancel:{$update->id}"]]]],
             );
             ProcessDraftPhotoActions::dispatch(
                 $draft->id,
@@ -944,7 +1291,7 @@ class TelegramWebhookController extends Controller
 
         $queuedKey = "draft-gallery-retrain:{$draft->id}:queued";
 
-        if (! Cache::add($queuedKey, true, now()->addMinutes(35))) {
+        if (! Cache::add($queuedKey, $update->id, now()->addMinutes(35))) {
             $this->telegram->answerCallbackQuery($callbackId, 'Переобучение этого источника уже идёт.');
 
             return;
@@ -1012,7 +1359,10 @@ class TelegramWebhookController extends Controller
         }
 
         $this->telegram->answerCallbackQuery($callbackId, 'Подтвердите бан источника.');
-        $this->draftPresenter->sendSourceBlockConfirm($this->telegram, $chatId, $draft, $host);
+        $state = app(DraftTelegramInteractionState::class)->remember($chatId, (string) $update->telegram_user_id,
+            $draft, 'confirmation', ['callback' => "draft:source-block-confirm:{$draft->id}", 'host' => $host]);
+        $this->draftPresenter->sendActionConfirmation($this->telegram, $chatId, $draft, $state['token'],
+            "Заблокировать {$host}?", 'Домен перестанет использоваться для поиска фотографий всех товаров.', 'Да, заблокировать этот домен');
         $update->update(['status' => 'completed', 'processed_at' => now()]);
     }
 
@@ -1022,6 +1372,7 @@ class TelegramWebhookController extends Controller
         string $callbackId,
         string $chatId,
         TelegramUpdate $update,
+        ?string $expectedHost = null,
     ): void {
         $draft = ProductDraft::query()->find($draftId);
 
@@ -1040,6 +1391,13 @@ class TelegramWebhookController extends Controller
         }
 
         $host = blank($draft->primary_source_url) ? '' : ProductSourcePriority::host($draft->primary_source_url);
+
+        if ($expectedHost === null || ! hash_equals($expectedHost, $host)) {
+            $this->telegram->answerCallbackQuery($callbackId, 'Источник изменился. Проверьте домен и подтвердите заново.');
+            $this->handleDraftSourceBlockPrompt($draftId, $callbackId, $chatId, $update);
+
+            return;
+        }
 
         if ($host === '') {
             $this->telegram->answerCallbackQuery($callbackId, 'У черновика нет ссылки на карточку товара.');
@@ -1183,7 +1541,18 @@ class TelegramWebhookController extends Controller
     ): void {
         $target = TelegramUpdate::query()->find($targetUpdateId);
 
-        if (! $target || $target->processed_at !== null) {
+        if ($target && (! hash_equals((string) $target->chat_id, $chatId)
+            || ! hash_equals((string) $target->telegram_user_id, (string) $update->telegram_user_id))) {
+            $this->telegram->answerCallbackQuery($callbackId, 'Эта операция создана в другом чате или другим пользователем.');
+            $update->update(['status' => 'rejected', 'processed_at' => now()]);
+
+            return;
+        }
+
+        $activePhotoAction = $target && AiOperation::query()->where('telegram_update_id', $target->id)
+            ->whereIn('action', ['enhance_draft_photo', 'replace_draft_photo', 'delete_draft_photo', 'process_draft_photos', 'refind_catalog_photos'])
+            ->whereIn('status', ['running', 'failed'])->exists();
+        if (! $target || ($target->processed_at !== null && ! $activePhotoAction)) {
             $this->telegram->answerCallbackQuery($callbackId, 'Поиск уже завершён — отменять нечего.');
         } else {
             $target->update(['cancel_requested_at' => now()]);
@@ -1212,100 +1581,26 @@ class TelegramWebhookController extends Controller
         mixed $messageId,
         TelegramUpdate $update,
     ): void {
-        $operation = AiOperation::query()->with('telegramUpdate')->find($operationId);
-
-        if (! $operation || $operation->action !== 'delete_product') {
-            $this->telegram->answerCallbackQuery($callbackId, 'Операция удаления не найдена.');
-            $update->update(['status' => 'not_found', 'processed_at' => now()]);
-
-            return;
-        }
-
-        $sameUser = hash_equals((string) $operation->telegram_user_id, (string) $update->telegram_user_id);
-        $sameChat = hash_equals((string) $operation->telegramUpdate?->chat_id, $chatId);
-
-        if (! $sameUser || ! $sameChat) {
-            $this->telegram->answerCallbackQuery($callbackId, 'Эта операция создана в другом чате или другим пользователем.');
-            $update->update(['status' => 'rejected', 'processed_at' => now()]);
-
-            return;
-        }
-
-        if ($operation->status !== 'awaiting_confirmation') {
-            $this->telegram->answerCallbackQuery($callbackId, "Операция уже обработана: {$operation->status}.");
-            $update->update(['status' => 'already_processed', 'processed_at' => now()]);
-
-            return;
-        }
-
-        $productTitle = (string) data_get($operation->payload, 'title', 'Товар');
-        $productId = (int) $operation->target_id;
-
-        if ($action === 'cancel') {
-            $operation->update([
-                'status' => 'cancelled',
-                'result' => ['cancelled_by_update_id' => $update->id],
-                'executed_at' => now(),
-            ]);
-            $result = "Удаление товара #{$productId} отменено.";
-        } else {
-            $product = Product::query()->find($productId);
-
-            if (! $product) {
-                $operation->update([
-                    'status' => 'failed',
-                    'error' => 'Product was not found at confirmation time.',
-                    'executed_at' => now(),
-                ]);
-                $this->telegram->answerCallbackQuery($callbackId, 'Товар уже отсутствует.');
-                $update->update(['status' => 'not_found', 'processed_at' => now()]);
-
-                return;
-            }
-
-            try {
-                $product->delete();
-                $operation->update([
-                    'status' => 'completed',
-                    'result' => [
-                        'deleted_product_id' => $productId,
-                        'title' => $productTitle,
-                        'confirmed_by_update_id' => $update->id,
-                    ],
-                    'executed_at' => now(),
-                ]);
-                $result = "🗑 Товар #{$productId} «{$productTitle}» удалён навсегда. Операция #{$operation->id}.";
-            } catch (Throwable $exception) {
-                report($exception);
-                $operation->update([
-                    'status' => 'failed',
-                    'error' => mb_substr($exception->getMessage(), 0, 5000),
-                    'executed_at' => now(),
-                ]);
-                $this->telegram->answerCallbackQuery($callbackId, 'Не удалось удалить товар. Ошибка записана в журнал.');
-                $update->update([
-                    'status' => 'failed',
-                    'error' => mb_substr($exception->getMessage(), 0, 5000),
-                    'processed_at' => now(),
-                ]);
-
-                return;
+        try {
+            $result = app(TelegramCatalogDeletion::class)->resolve($operationId, $action, $update);
+        } catch (Throwable $exception) {
+            report($exception);
+            // An after-commit delivery failure must not turn a completed deletion into a retry.
+            $operation = AiOperation::find($operationId);
+            if ($operation?->status === 'completed') {
+                $result = ['status' => 'completed', 'message' => 'Товар удалён. Операция #'.$operationId.'.', 'notify' => true];
+            } else {
+                $result = ['status' => 'failed', 'message' => 'Не удалось удалить товар. Ошибка записана в журнал.'];
             }
         }
-
-        $update->update(['status' => 'completed', 'processed_at' => now()]);
-        $this->telegram->answerCallbackQuery($callbackId, $result);
-
-        if ($chatId !== '' && is_int($messageId)) {
-            try {
-                $this->telegram->removeInlineKeyboard($chatId, $messageId);
-            } catch (Throwable $exception) {
-                report($exception);
-            }
+        $update->update(['status' => $result['status'], 'processed_at' => now()]);
+        $this->telegram->answerCallbackQuery($callbackId, mb_substr($result['message'], 0, 200));
+        if (! ($result['notify'] ?? false)) {
+            return;
         }
-
+        $this->removeCallbackKeyboard($chatId, $messageId);
         if ($chatId !== '') {
-            $this->telegram->sendMessage($chatId, $result, $this->mainKeyboard());
+            $this->telegram->sendMessage($chatId, $result['message'], $this->mainKeyboard());
         }
     }
 
@@ -1341,8 +1636,16 @@ class TelegramWebhookController extends Controller
             • «Покажи статус сервера / последние ошибки»
 
             /find запрос — поиск
+            /catalog — последние товары без обращения к AI
+            /catalog название — поиск в вашей базе без AI
+            /add — загрузить свой товар: фото и описание
+            /product номер — открыть товар
+            /edit номер — редактировать через черновик
+            /delete номер — удалить после подтверждения
+            /cancel — отменить ожидаемый ввод
+            /admin — ручное создание и редактирование без обращения к AI
             /drafts — черновики
-            /status — состояние системы
+            /status — состояние системы без обращения к AI
             /errors — ошибки
             /new — очистить контекст диалога
             /reset — отменить зависшие запросы и очистить контекст (если поиск завис, например когда воркер очереди был выключен)
@@ -1354,9 +1657,10 @@ class TelegramWebhookController extends Controller
         return [
             'keyboard' => [
                 [['text' => '🔎 Найти товар'], ['text' => '📦 Каталог']],
+                [['text' => '📥 Загрузить товар']],
                 [['text' => '📋 Черновики'], ['text' => '🖥 Статус']],
                 [['text' => '⚠️ Ошибки'], ['text' => 'ℹ️ Помощь']],
-                [['text' => '🔄 Сброс']],
+                [['text' => '🛠 Админка'], ['text' => '🔄 Сброс']],
             ],
             'resize_keyboard' => true,
             'is_persistent' => true,
@@ -1374,6 +1678,45 @@ class TelegramWebhookController extends Controller
     {
         $states = app(DraftTelegramInteractionState::class);
         $state = $states->get($chatId, (string) $update->telegram_user_id);
+        if (in_array($state['kind'] ?? '', ['confirmation', 'processing'], true)) {
+            $this->telegram->sendMessage($chatId, ($state['kind'] === 'processing'
+                ? 'Карточка сейчас обрабатывается. Дождитесь результата или /cancel.'
+                : 'Проверьте показанные изменения и подтвердите кнопкой. /cancel — отменить действие.')
+                .' Текст не отправлен в новый поиск.');
+            $this->markCommandProcessed($update);
+
+            return true;
+        }
+        if (($state['kind'] ?? '') === 'manual_photos') {
+            $this->telegram->sendMessage($chatId, 'Сейчас ожидаю фото для выбранной карточки. Отправьте фото/альбом или /cancel, затем выберите «Исправить данные».');
+            $this->markCommandProcessed($update);
+
+            return true;
+        }
+        if (($state['kind'] ?? '') === 'manual_fields') {
+            $state = $states->consume($chatId, (string) $update->telegram_user_id, $state['token']);
+            $draft = $state ? ProductDraft::find($state['draft_id']) : null;
+            if ($draft && $draft->isManualUpload() && $draft->status === 'pending_review'
+                && (int) $draft->telegram_update_id === (int) $state['generation'] && $this->draftBelongsToContext($draft, $update)) {
+                if ($this->draftHasQueuedWork($draft->id)) {
+                    $states->remember($chatId, (string) $update->telegram_user_id, $draft, 'manual_fields');
+                    $this->telegram->sendMessage($chatId, 'Карточка уже обрабатывается. Изменения пока не запущены. Дождитесь результата.');
+                    $this->markCommandProcessed($update);
+
+                    return true;
+                }
+                $processing = $states->remember($chatId, (string) $update->telegram_user_id, $draft, 'processing',
+                    ['input_update_id' => $update->id, 'operation' => 'draft-fields']);
+                Cache::put("draft-fields:{$draft->id}:queued", $update->id, 240);
+                ProposeTelegramDraftEdit::dispatch($draft->id, $update->id, $draft->telegram_update_id, $text, $processing['token'])->afterCommit();
+                $this->telegram->sendMessage($chatId, '✏️ Готовлю изменения для просмотра. Интернет-поиск не запускается.');
+            } else {
+                $this->telegram->sendMessage($chatId, 'Карточка уже недоступна. Новый поиск не запущен.');
+                $this->markCommandProcessed($update);
+            }
+
+            return true;
+        }
         if (! $state || ! in_array($state['kind'], ['source_hint', 'new_search'], true)) {
             return false;
         }
@@ -1432,7 +1775,7 @@ class TelegramWebhookController extends Controller
     {
         // Use the same markers that the existing jobs clear on completion/failure.
         // No new persistent lock or independent timeout is introduced by the UI.
-        foreach (['draft-gallery-retrain', 'draft-gallery-restage', 'draft-gallery-continue', 'draft-gallery-topup', 'draft-photo-actions'] as $operation) {
+        foreach (['draft-gallery-retrain', 'draft-gallery-restage', 'draft-gallery-continue', 'draft-gallery-topup', 'draft-photo-actions', 'draft-fields', 'draft-enrich', 'draft-upload'] as $operation) {
             if (Cache::has("{$operation}:{$draftId}:queued")) {
                 return true;
             }
@@ -1441,12 +1784,82 @@ class TelegramWebhookController extends Controller
         return false;
     }
 
+    private function clearManualCreate(string $chat, string $user): void
+    {
+        Cache::forget("telegram-manual-create:{$chat}:{$user}");
+        Cache::forget("telegram-manual-create:{$chat}:{$user}:expires_at");
+    }
+
+    private function expiredManualInput(string $chat, string $user): bool
+    {
+        $createKey = "telegram-manual-create:{$chat}:{$user}";
+        $deadline = Cache::get($createKey.':expires_at');
+
+        return app(DraftTelegramInteractionState::class)->expired($chat, $user) !== null
+            || (! Cache::has($createKey) && is_numeric($deadline) && (int) $deadline <= now()->getTimestamp());
+    }
+
     private function draftBelongsToContext(ProductDraft $draft, TelegramUpdate $update): bool
     {
-        $owner = (string) $draft->requested_by_telegram_user_id;
-        $chat = (string) ($draft->telegramUpdate?->chat_id ?: $draft->telegram_review_chat_id);
+        return app(DraftAccess::class)->belongsToContext($draft, $update);
+    }
 
-        return ($owner === '' || $owner === (string) $update->telegram_user_id)
-            && ($chat === '' || $chat === (string) $update->chat_id);
+    private function openCatalogEditor(int $productId, TelegramUpdate $update, ?int $variantId = null, int $page = 0): void
+    {
+        $product = Product::find($productId);
+        try {
+            throw_unless($product, \RuntimeException::class, 'Товар не найден.');
+            $total = $product->variants()->count();
+            if ($variantId === null && $total > 1) {
+                $pages = (int) ceil($total / 20);
+                $page = min($page, $pages - 1);
+                $buttons = $product->variants()->orderByDesc('is_default')->orderBy('id')->forPage($page + 1, 20)->get()
+                    ->map(function ($variant) use ($productId): array {
+                        $label = collect(['#'.$variant->id, $variant->name ?: $variant->sku, $variant->color,
+                            $variant->price !== null ? $variant->price.' '.$variant->currency : null])->filter()->implode(' · ');
+
+                        return [['text' => mb_substr($label, 0, 64), 'callback_data' => "product:tgedit:{$productId}:{$variant->id}"]];
+                    })->all();
+                $navigation = [];
+                if ($page > 0) {
+                    $navigation[] = ['text' => '← Назад', 'callback_data' => 'product:variants:'.$productId.':'.($page - 1)];
+                }
+                if ($page + 1 < $pages) {
+                    $navigation[] = ['text' => 'Далее →', 'callback_data' => 'product:variants:'.$productId.':'.($page + 1)];
+                }
+                if ($navigation !== []) {
+                    $buttons[] = $navigation;
+                }
+                $this->telegram->sendMessage((string) $update->chat_id,
+                    "Товар #{$productId}: {$product->title}\nВыберите комплектацию для редактирования. Общие название и описание относятся ко всему товару."
+                    .($pages > 1 ? "\nСтраница ".($page + 1).'/'.$pages : ''), ['inline_keyboard' => $buttons]);
+                $this->markCommandProcessed($update);
+
+                return;
+            }
+            $draft = app(TelegramCatalogEditor::class)->createDraft($product, $update, $variantId);
+            $this->draftPresenter->sendReview($this->telegram, (string) $update->chat_id, $draft);
+        } catch (\RuntimeException $error) {
+            $this->telegram->sendMessage((string) $update->chat_id, 'Редактор не открыт: '.$error->getMessage());
+        }
+        $this->markCommandProcessed($update);
+    }
+
+    private function prepareCatalogDeletion(int $productId, TelegramUpdate $update): void
+    {
+        $result = json_decode((string) (new PrepareProductDeletion($update))
+            ->handle(new \Laravel\Ai\Tools\Request(['product_id' => $productId])), true);
+        if (! ($result['ok'] ?? false)) {
+            $this->telegram->sendMessage((string) $update->chat_id, 'Товар не найден или операция уже обработана.');
+        } else {
+            $id = $result['operation_id'];
+            $this->telegram->sendMessage((string) $update->chat_id,
+                "Удалить товар #{$productId}: ".$result['product']['title']."?\nУдаление товара, вариантов и фото необратимо. Подтверждение действует 10 минут.",
+                ['inline_keyboard' => [[
+                    ['text' => 'Удалить навсегда', 'callback_data' => "product:delete:confirm:{$id}"],
+                    ['text' => 'Отмена', 'callback_data' => "product:delete:cancel:{$id}"],
+                ]]]);
+        }
+        $this->markCommandProcessed($update);
     }
 }

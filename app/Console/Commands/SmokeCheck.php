@@ -2,17 +2,18 @@
 
 namespace App\Console\Commands;
 
-use App\Ai\Agents\GalleryTextLanguageAgent;
 use App\Models\AppSetting;
 use App\Models\ProductGalleryRecipe;
 use App\Services\Ai\AiSettings;
 use App\Services\Products\BrowserProductGalleryExtractor;
 use App\Services\Products\ProductImageResolver;
+use App\Services\Vision\VisionCallContext;
+use App\Services\Vision\VisionImagePreparer;
+use App\Services\Vision\VisionService;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
-use Laravel\Ai\Files\Image;
 use Throwable;
 
 /**
@@ -190,28 +191,18 @@ class SmokeCheck extends Command
                     // The exact shape that answered 400 on every training round
                     // when its media type was missing. A synthetic pixel would
                     // not prove the encoding path; a real downloaded frame does.
-                    $attachments[] = Image::fromBase64(
-                        base64_encode($downloaded['bytes']),
-                        (string) ($downloaded['mime_type'] ?? 'image/jpeg'),
-                    )->as('frame-1.'.(explode('/', (string) ($downloaded['mime_type'] ?? 'image/jpeg'))[1] ?? 'jpg'));
+                    $attachments[] = app(VisionImagePreparer::class)->fromBytes($downloaded['bytes'], 'frame-1', 'auto');
                 }
 
-                $response = GalleryTextLanguageAgent::make()->prompt(
+                app(VisionService::class)->checkTextLanguage(
                     json_encode([
                         'frames' => count($attachments),
                         'question' => 'Smoke check. Answer with an empty foreign_text_frames list unless a frame '
                             .'genuinely carries prominent non-English text.',
                     ], JSON_UNESCAPED_UNICODE) ?: '{}',
-                    attachments: $attachments,
-                    provider: $provider,
-                    model: $model,
-                    timeout: 90,
+                    $attachments,
+                    new VisionCallContext(timeoutSeconds: 90, useSearchBudget: false, provider: $provider, model: $model),
                 );
-                $answer = $response->toArray();
-
-                if (! array_key_exists('foreign_text_frames', $answer)) {
-                    throw new \RuntimeException('The provider answered without the structured field the schema requires.');
-                }
 
                 return $provider.'/'.$model.', '.count($attachments).' attachment(s), structured answer received';
             });

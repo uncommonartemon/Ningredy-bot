@@ -114,7 +114,8 @@ class AdminPanelAccessTest extends TestCase
         $this->actingAs($admin)
             ->get('/admin/products')
             ->assertOk()
-            ->assertSee($imageUrl, false);
+            ->assertSee('Admin product')
+            ->assertDontSee($imageUrl, false);
         $this->actingAs($admin)
             ->get("/admin/products/{$product->id}")
             ->assertOk()

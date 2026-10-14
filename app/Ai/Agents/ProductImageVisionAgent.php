@@ -23,6 +23,13 @@ class ProductImageVisionAgent implements Agent, HasStructuredOutput
             attachment order starting at 1. Judge every image against the exact requested product
             identity supplied in the prompt.
 
+            The trusted product policy can explicitly allow component logos (COMPONENT EXCEPTION).
+            In that case, relevant brand/family logos may be publishable with kind=logo, including
+            as the cover. Judge correspondence using the requested component and source evidence;
+            do not infer an exact SKU from branding. This exception overrides the generic logo
+            prohibitions below, but never permits missing-image placeholders, conflicting brands
+            or product families. When NO LOGO EXCEPTION is specified, keep the ordinary logo rejection.
+
             An image is an exact match when it depicts the requested physical product, a useful
             close-up of it, or its retail packaging and its identity is supported by the image or the
             candidate source URL supplied in the prompt. A source URL containing the exact model or

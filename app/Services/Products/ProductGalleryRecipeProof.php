@@ -13,7 +13,7 @@ class ProductGalleryRecipeProof
         // not change any browser action. Including this annotation erased the
         // control-page proof and let repairs replace working domain recipes
         // without the canary (observed on Lenovo, Acer and Dell).
-        unset($recipe['gallery_verification_mode']);
+        unset($recipe['gallery_verification_mode'], $recipe['recipe_scope'], $recipe['scope_reason']);
 
         return $this->legacyFingerprint($recipe);
     }
@@ -61,7 +61,10 @@ class ProductGalleryRecipeProof
 
     public function provenUrl(ProductGalleryRecipe $recipe, string $exceptUrl): ?string
     {
-        return ProductSourceAttempt::query()
+        // Keep one stable control instead of replacing it with the latest
+        // successful (possibly regional) variant of the page under repair.
+        // This is a regression canary, not proof of every layout on a domain.
+        $proofs = ProductSourceAttempt::query()
             ->where('phase', 'recipe_validation')
             ->where('action', 'confirmed_recipe_execution')
             ->where('status', 'completed')
@@ -75,7 +78,31 @@ class ProductGalleryRecipeProof
             ->where('output->validation->passed', true)
             ->whereNotNull('product_url')
             ->where('product_url', '!=', $exceptUrl)
-            ->latest('id')
-            ->value('product_url');
+            ->oldest('id')
+            ->cursor(['id', 'product_url']);
+
+        foreach ($proofs as $proof) {
+            if ($this->pageKey($proof->product_url) !== $this->pageKey($exceptUrl)) {
+                return $proof->product_url;
+            }
+        }
+
+        return null;
+    }
+
+    private function pageKey(string $url): string
+    {
+        // Fragments and a trailing pathname slash do not provide an
+        // independent control page. Query parameters can identify a different
+        // product, so they must not be discarded or normalised away.
+        $parts = parse_url($url);
+        if (! is_array($parts)) {
+            return $url;
+        }
+
+        return strtolower(($parts['scheme'] ?? '').'://'.($parts['host'] ?? ''))
+            .(isset($parts['port']) ? ':'.$parts['port'] : '')
+            .rtrim($parts['path'] ?? '/', '/')
+            .(isset($parts['query']) ? '?'.$parts['query'] : '');
     }
 }

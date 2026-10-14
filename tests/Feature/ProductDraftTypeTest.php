@@ -10,11 +10,18 @@ use App\Services\Ai\AiSettings;
 use App\Services\Products\ProductDraftWorkflow;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Queue;
+use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 
 class ProductDraftTypeTest extends TestCase
 {
     use RefreshDatabase;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        Storage::fake('public');
+    }
 
     public function test_draft_product_type_wins_over_keyword_guessing(): void
     {
@@ -77,9 +84,7 @@ class ProductDraftTypeTest extends TestCase
 
     public function test_catalog_identifiers_are_saved_on_the_default_variant(): void
     {
-        $draft = $this->draft('Lenovo LOQ 15APH8', '82XT003GUS', 'laptop');
-        $draft->update(['specifications' => [
-            ...$draft->specifications,
+        $draft = $this->draft('Lenovo LOQ 15APH8', '82XT003GUS', 'laptop', overrides: ['specifications' => [
             ['key' => 'sku', 'name' => 'SKU', 'value' => '82XT003GUS'],
             ['key' => 'mpn', 'name' => 'MPN', 'value' => '82XT003GUS'],
             ['key' => 'ean', 'name' => 'EAN', 'value' => '0197529234567'],
@@ -169,8 +174,7 @@ class ProductDraftTypeTest extends TestCase
         // "16 GB" one day and "16 ГБ" the next. Hashed raw, that published one
         // product with two variants of a configuration that never differed.
         $english = $this->draft('Lenovo IdeaPad Slim 3', 'IdeaPad Slim 3', 'laptop');
-        $russian = $this->draft('Lenovo IdeaPad Slim 3', 'IdeaPad Slim 3', 'laptop');
-        $russian->update(['specifications' => [
+        $russian = $this->draft('Lenovo IdeaPad Slim 3', 'IdeaPad Slim 3', 'laptop', overrides: ['specifications' => [
             ['key' => 'cpu', 'name' => 'CPU', 'value' => 'AMD Ryzen 5'],
             ['key' => 'ram', 'name' => 'RAM', 'value' => '16 ГБ'],
             ['key' => 'storage', 'name' => 'SSD', 'value' => '512ГБ'],
@@ -188,8 +192,7 @@ class ProductDraftTypeTest extends TestCase
         // The other direction: folding how text is written must not fold the
         // machines themselves together.
         $small = $this->draft('Lenovo IdeaPad Slim 3', 'IdeaPad Slim 3', 'laptop');
-        $large = $this->draft('Lenovo IdeaPad Slim 3', 'IdeaPad Slim 3', 'laptop');
-        $large->update(['specifications' => [
+        $large = $this->draft('Lenovo IdeaPad Slim 3', 'IdeaPad Slim 3', 'laptop', overrides: ['specifications' => [
             ['key' => 'cpu', 'name' => 'CPU', 'value' => 'AMD Ryzen 5'],
             ['key' => 'ram', 'name' => 'RAM', 'value' => '32 GB'],
             ['key' => 'storage', 'name' => 'SSD', 'value' => '512 GB'],
@@ -202,7 +205,7 @@ class ProductDraftTypeTest extends TestCase
         $this->assertSame(2, $product->refresh()->variants()->count());
     }
 
-    private function draft(string $title, string $model, ?string $productType, ?string $category = null): ProductDraft
+    private function draft(string $title, string $model, ?string $productType, ?string $category = null, array $overrides = []): ProductDraft
     {
         $update = TelegramUpdate::query()->create([
             'update_id' => random_int(2000, 90000),
@@ -242,6 +245,11 @@ class ProductDraftTypeTest extends TestCase
             'sources' => [['title' => 'Store', 'url' => 'https://example.com/product']],
             'image_urls' => [],
             'confidence' => 0.9,
+            ...$overrides,
+            // These tests begin after successful card assembly, with the
+            // final fixture fields already confirmed against this source.
+            'primary_source_url' => 'https://example.com/product',
+            'specifications_reconciled_source_url' => 'https://example.com/product',
         ]);
         $this->addMedia($draft, 800, 800, 'verified');
 
@@ -254,16 +262,23 @@ class ProductDraftTypeTest extends TestCase
         int $height,
         string $verificationStatus,
     ): void {
+        $path = 'drafts/'.$draft->id.'/test-'.$width.'x'.$height.'.webp';
+        $image = imagecreatetruecolor($width, $height);
+        ob_start();
+        imagewebp($image);
+        $bytes = ob_get_clean();
+        imagedestroy($image);
+        Storage::disk('public')->put($path, $bytes);
         $draft->media()->create([
             'disk' => 'public',
-            'path' => 'drafts/'.$draft->id.'/test-'.$width.'x'.$height.'.webp',
+            'path' => $path,
             'source_url' => 'https://example.com/test-'.$width.'x'.$height.'.webp',
             'role' => 'primary',
             'mime_type' => 'image/webp',
             'width' => $width,
             'height' => $height,
-            'file_size' => 1024,
-            'checksum' => hash('sha256', $draft->id.':'.$width.':'.$height.':'.$verificationStatus),
+            'file_size' => strlen($bytes),
+            'checksum' => hash('sha256', $bytes),
             'verification_status' => $verificationStatus,
             'sort_order' => 0,
             'is_primary' => true,

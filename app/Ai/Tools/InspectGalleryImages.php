@@ -2,34 +2,21 @@
 
 namespace App\Ai\Tools;
 
-use App\Ai\Agents\ProductGalleryVisionAgent;
-use App\Models\AiRun;
-use App\Services\Ai\AiSettings;
-use App\Services\Ai\OpenAiHeavyOperationGate;
-use App\Services\Ai\ProductSearchTimeBudget;
-use App\Services\Products\ProductImageEncoder;
+use App\Exceptions\ProductSearchCancelled;
+use App\Services\Photos\ImageUrls;
 use App\Services\Products\ProductImageResolver;
-use App\Services\Products\ProductImageStorage;
 use App\Services\Products\ProductRequestContext;
+use App\Services\Vision\VisionCallContext;
+use App\Services\Vision\VisionImagePreparer;
+use App\Services\Vision\VisionService;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
 use Laravel\Ai\Contracts\Tool;
-use Laravel\Ai\Files\Image;
 use Laravel\Ai\Tools\Request;
 use Stringable;
 use Throwable;
 
 class InspectGalleryImages implements Tool
 {
-    /**
-     * What the vision provider actually accepts. A URL's own extension is
-     * never proof of what the server sent - real case: a Lenovo product
-     * page linked *.png assets that now serve AVIF, and the raw bytes went
-     * to Vision unconverted six rounds running, each one failing the exact
-     * same "not a valid image" way while the agent was only ever told
-     * "Vision inspection was unavailable".
-     */
-    private const array VISION_ACCEPTED_MIME_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
-
     /** @param array<int, string> $allowedImageUrls */
     public function __construct(
         private readonly array $allowedImageUrls,
@@ -55,10 +42,10 @@ class InspectGalleryImages implements Tool
     {
         $allowed = collect($this->allowedImageUrls)
             ->filter(fn (mixed $url): bool => is_string($url) && filter_var($url, FILTER_VALIDATE_URL) !== false)
-            ->mapWithKeys(fn (string $url): array => [ProductImageStorage::normalizeCandidateUrl($url) => $url]);
+            ->mapWithKeys(fn (string $url): array => [ImageUrls::normalizeCandidateUrl($url) => $url]);
         $requested = collect($request->array('image_urls'))
             ->filter(fn (mixed $url): bool => is_string($url) && filter_var($url, FILTER_VALIDATE_URL) !== false)
-            ->map(fn (string $url): string => ProductImageStorage::normalizeCandidateUrl($url))
+            ->map(fn (string $url): string => ImageUrls::normalizeCandidateUrl($url))
             ->unique()
             ->take(4)
             ->values();
@@ -76,6 +63,7 @@ class InspectGalleryImages implements Tool
         }
 
         $resolver = app(ProductImageResolver::class);
+        $images = app(VisionImagePreparer::class);
         $attachments = [];
         $inspectedUrls = [];
         $downloadErrors = [];
@@ -95,7 +83,7 @@ class InspectGalleryImages implements Tool
                 continue;
             }
 
-            $prepared = $this->prepareForVision($download);
+            $prepared = $images->prepare($download);
 
             if ($prepared === null) {
                 $downloadErrors[] = [
@@ -110,11 +98,11 @@ class InspectGalleryImages implements Tool
                 continue;
             }
 
-            $attachments[] = Image::fromBase64(
-                base64_encode($prepared['bytes']),
-                $prepared['mime_type'],
-            )->as('gallery-observation-'.(count($attachments) + 1))
-                ->withProviderOptions(['detail' => (string) config('product-images.gallery_agent_vision_detail', 'high')]);
+            $attachments[] = $images->attachment(
+                $prepared,
+                'gallery-observation-'.(count($attachments) + 1),
+                (string) config('product-images.gallery_agent_vision_detail', 'high'),
+            );
             $inspectedUrls[] = $url;
         }
 
@@ -127,11 +115,6 @@ class InspectGalleryImages implements Tool
             ]);
         }
 
-        $settings = app(AiSettings::class);
-        $timeBudget = app(ProductSearchTimeBudget::class);
-        $provider = $settings->providerFor('product_image_vision');
-        $model = $settings->modelFor('product_image_vision');
-        $timeout = $timeBudget->timeoutFor($this->telegramUpdateId, $settings->imageVisionTimeoutSeconds());
         $productContext = mb_substr(trim((string) $request->string('product_context')), 0, 1000);
         $prompt = json_encode([
             ...($this->productRequest ?? ProductRequestContext::unavailable())->forAgent(),
@@ -139,35 +122,12 @@ class InspectGalleryImages implements Tool
             'inspection_scope' => 'visual observations only; exact SKU must be proven from page evidence',
             'image_urls_in_attachment_order' => $inspectedUrls,
         ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?: '{}';
-        $run = AiRun::query()->create([
-            'telegram_update_id' => $this->telegramUpdateId,
-            'provider' => $provider,
-            'model' => $model,
-            'status' => 'running',
-            'prompt' => $prompt,
-            'started_at' => now(),
-        ]);
-
         try {
-            $response = app(OpenAiHeavyOperationGate::class)->run(
-                $provider,
-                $timeout,
-                fn () => ProductGalleryVisionAgent::make()->prompt(
-                    $prompt,
-                    attachments: $attachments,
-                    provider: $provider,
-                    model: $model,
-                    timeout: $timeout,
-                ),
+            $result = app(VisionService::class)->inspectGallery(
+                $prompt,
+                $attachments,
+                new VisionCallContext($this->telegramUpdateId),
             );
-            $result = $response->toArray();
-            $run->update([
-                'invocation_id' => $response->invocationId,
-                'status' => 'completed',
-                'response' => $result,
-                'usage' => $response->usage->toArray(),
-                'completed_at' => now(),
-            ]);
 
             return $this->json([
                 'ok' => true,
@@ -175,19 +135,16 @@ class InspectGalleryImages implements Tool
                 'download_errors' => $downloadErrors,
                 'observation' => $result,
             ]);
+        } catch (ProductSearchCancelled $exception) {
+            throw $exception;
         } catch (Throwable $exception) {
-            $run->update([
-                'status' => 'failed',
-                'error' => mb_substr($exception->getMessage(), 0, 5000),
-                'completed_at' => now(),
-            ]);
             report($exception);
 
             // The full exception message is deliberately not echoed back -
             // it can carry provider/request detail that does not belong in a
             // tool result. Only a known, safe classification is: whether the
             // provider still rejected a prepared image as not a valid image
-            // (residual - prepareForVision() already converts every format
+            // (residual - VisionImagePreparer already converts every format
             // it can) versus a genuine transient failure worth retrying.
             $imageRejected = str_contains(mb_strtolower($exception->getMessage()), 'valid image');
 
@@ -200,49 +157,6 @@ class InspectGalleryImages implements Tool
                 'retryable' => ! $imageRejected,
                 'inspected_urls' => $inspectedUrls,
             ]);
-        }
-    }
-
-    /**
-     * The vision provider's own accepted format list, not what a URL's
-     * extension claims. A candidate is re-encoded through GD when its actual
-     * bytes are something else (a *.png link that now serves AVIF is a real
-     * production case, not a hypothetical) rather than handed over as-is and
-     * left to fail identically every round.
-     *
-     * @param  array{bytes: string, mime_type?: string, width?: int, height?: int}  $download
-     * @return array{bytes: string, mime_type: string}|null
-     */
-    private function prepareForVision(array $download): ?array
-    {
-        $mimeType = (string) ($download['mime_type'] ?? '');
-
-        if (in_array($mimeType, self::VISION_ACCEPTED_MIME_TYPES, true)) {
-            return ['bytes' => $download['bytes'], 'mime_type' => $mimeType];
-        }
-
-        $encoder = app(ProductImageEncoder::class);
-        $width = (int) ($download['width'] ?? 0);
-        $height = (int) ($download['height'] ?? 0);
-
-        if ($width > 0 && $height > 0 && ! $encoder->isSafeToDecode($width, $height)) {
-            return null;
-        }
-
-        $decoded = @imagecreatefromstring($download['bytes']);
-
-        if ($decoded === false) {
-            return null;
-        }
-
-        try {
-            $converted = $encoder->toWebp($decoded);
-
-            return ['bytes' => $converted['bytes'], 'mime_type' => 'image/webp'];
-        } catch (Throwable) {
-            return null;
-        } finally {
-            imagedestroy($decoded);
         }
     }
 

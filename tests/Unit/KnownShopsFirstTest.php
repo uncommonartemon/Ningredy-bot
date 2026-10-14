@@ -25,6 +25,17 @@ class KnownShopsFirstTest extends TestCase
 {
     use RefreshDatabase;
 
+    public function test_an_unclassified_web_card_is_not_discarded_before_inspecting_its_page(): void
+    {
+        config(['product-images.source_preflight' => false]);
+        $url = 'https://shop.example/product/exact';
+        $draft = new ProductDraft(['sources' => [['url' => $url, 'type' => 'web']], 'title' => 'Laptop']);
+        [$queue, $cards] = (new ReflectionMethod(ProductImageStorage::class, 'buildSourceQueue'))
+            ->invoke(app(ProductImageStorage::class), $draft, [], [], false, 3, null, null);
+        $this->assertCount(1, $queue);
+        $this->assertSame($url, $cards->first()['url']);
+    }
+
     public function test_only_first_batch_is_preflighted_and_unchecked_tail_survives(): void
     {
         config(['product-images.source_preflight' => true, 'product-images.max_preflight_sources' => 4]);

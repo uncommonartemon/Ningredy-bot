@@ -1,18 +1,17 @@
-import dns from 'node:dns/promises';
-import net from 'node:net';
+import { createPublicProductUrlCheck, installProductNetworkGuard, downloadPublicProductImage, clearStoredProductServiceWorkers } from './public-product-http.mjs';
 import { captureGalleryScoutInPage } from './gallery-focus.mjs';
-import { GalleryTraversalProgress, readTraversalMediaInPage, traversalMediaState, waitForTraversalMedia, resolveGalleryDocument, embeddedProductConflicts } from './gallery-traversal.mjs';
+import { GalleryTraversalProgress, readTraversalMediaInDocument, traversalMediaState, waitForTraversalMedia, resolveGalleryDocument, embeddedProductConflicts } from './gallery-traversal.mjs';
+import { evaluateWithRecipeSelectors } from './recipe-dom-selectors.mjs';
 import { existsSync } from 'node:fs';
-import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { chromium } from 'playwright-core';
 import { closeWithin, saveGalleryCheckpoint } from './gallery-checkpoint.mjs';
-import { observedGalleryRenditions, rememberGalleryLayer, selectGalleryFrames } from './gallery-observation.mjs';
+import { observedGalleryRenditions, rememberGalleryLayer, selectGalleryFrames, unresolvedGalleryImageProbes } from './gallery-observation.mjs';
 import {
     browserServerEndpointFile,
     capturePageTextInPage,
     captureObservedControlsInPage,
-    isNavigationRequestOffConfinedHost,
     revealedCandidatesVisibilityInPage,
     revealedContainerTextInPage,
     clearBlockingOverlays,
@@ -26,6 +25,7 @@ import {
     recipeActionOpensGallery,
     recipeActionPlanStatus,
     recipeActionRequestedIndex,
+    recipeActionIteratesElements,
     readProductIdentityInPage,
     recipeActionTraversesGallery,
     resolveRecipeActionTargetIndex,
@@ -102,92 +102,7 @@ if (!sourceUrl) {
     process.exit(2);
 }
 
-const blockedIpv4 = (address) => {
-    const parts = address.split('.').map(Number);
-
-    if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part))) {
-        return true;
-    }
-
-    const [a, b] = parts;
-
-    return a === 0
-        || a === 10
-        || a === 127
-        || (a === 100 && b >= 64 && b <= 127)
-        || (a === 169 && b === 254)
-        || (a === 172 && b >= 16 && b <= 31)
-        || (a === 192 && b === 0)
-        || (a === 192 && b === 168)
-        || (a === 198 && (b === 18 || b === 19))
-        || a >= 224;
-};
-
-const blockedIp = (address) => {
-    const version = net.isIP(address);
-
-    if (version === 4) {
-        return blockedIpv4(address);
-    }
-
-    if (version !== 6) {
-        return true;
-    }
-
-    const normalized = address.toLowerCase();
-
-    if (normalized.startsWith('::ffff:')) {
-        return blockedIpv4(normalized.slice(7));
-    }
-
-    return normalized === '::'
-        || normalized === '::1'
-        || normalized.startsWith('fc')
-        || normalized.startsWith('fd')
-        || normalized.startsWith('fe8')
-        || normalized.startsWith('fe9')
-        || normalized.startsWith('fea')
-        || normalized.startsWith('feb');
-};
-
-const hostChecks = new Map();
-const publicHttpUrl = async (rawUrl) => {
-    let url;
-
-    try {
-        url = new URL(rawUrl);
-    } catch {
-        return false;
-    }
-
-    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
-        return false;
-    }
-
-    const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, '');
-
-    if (host === 'localhost' || host.endsWith('.local') || host.endsWith('.internal')) {
-        return false;
-    }
-
-    if (!hostChecks.has(host)) {
-        hostChecks.set(host, (async () => {
-            if (net.isIP(host)) {
-                return !blockedIp(host);
-            }
-
-            try {
-                const addresses = await dns.lookup(host, { all: true });
-
-                return addresses.length > 0 && addresses.every(({ address }) => !blockedIp(address));
-            } catch {
-                return false;
-            }
-        })());
-    }
-
-    return hostChecks.get(host);
-};
+const publicHttpUrl = createPublicProductUrlCheck();
 
 if (!await publicHttpUrl(sourceUrl)) {
     process.stderr.write('The product URL is not public.\n');
@@ -369,6 +284,7 @@ const sessionFile = (() => {
 })();
 const savedSession = sessionFile && existsSync(sessionFile) ? sessionFile : undefined;
 const contextOptions = {
+    serviceWorkers: 'block',
     viewport: { width: 1440, height: 1100 },
     locale: 'en-US',
     // A locale without a matching timezone is its own small inconsistency.
@@ -406,6 +322,8 @@ if (profileDirectory && !sharedBrowser && process.env.PRODUCT_IMAGE_BROWSER_PROF
     try {
         await mkdir(profileDirectory, { recursive: true });
         await pruneOldBrowserProfiles(dirname(profileDirectory), profileDirectory);
+        await clearStoredProductServiceWorkers(profileDirectory,
+            join(await realpath(process.cwd()), 'storage', 'app', 'browser-profiles'));
         context = await chromium.launchPersistentContext(profileDirectory, {
             ...contextOptions,
             headless: process.env.PRODUCT_IMAGE_BROWSER_HEADLESS === 'true',
@@ -430,6 +348,7 @@ context ??= await browser.newContext({
     ...contextOptions,
     ...(savedSession ? { storageState: savedSession } : {}),
 });
+await installProductNetworkGuard(context, publicHttpUrl, confineNavigationToHost);
 // There was an init script here that redefined navigator.webdriver to
 // undefined. It made things worse. A real Chrome reports false, and
 // --disable-blink-features=AutomationControlled above already produces exactly
@@ -438,11 +357,29 @@ context ??= await browser.newContext({
 // belongs. Both are cheaper to detect than the flag it was hiding.
 const page = await context.newPage();
 const networkImages = [];
+const imageLoadEvidence = new Map();
+const rememberImageRequest = (request, evidence) => {
+    if (request.resourceType() !== 'image') return;
+    // A CDN redirect reports its status on the final URL, while <img>.onerror
+    // still belongs to the originally requested URL. Keep that relationship.
+    for (let current = request; current; current = current.redirectedFrom()) {
+        imageLoadEvidence.set(current.url(), evidence);
+    }
+};
 const payloadImages = [];
 const pendingPayloads = new Set();
 const gathered = [];
 const excludedGalleryContexts = [];
 const collectionErrors = [];
+const recipeSelectorErrors = new Map();
+const recordRecipeSelectorErrors = (errors) => {
+    for (const error of errors) {
+        if (!recipeSelectorErrors.has(error.selector)) {
+            collectionErrors.push(error.reason + ': ' + error.selector + ': ' + error.detail);
+        }
+        recipeSelectorErrors.set(error.selector, error);
+    }
+};
 const priorityImages = [];
 let learnedRecipe = {};
 let scout = {};
@@ -527,7 +464,8 @@ const onProductPage = async () => {
         allowedByShape = false;
     }
 
-    if (allowedByShape && page.url() !== productPageUrl) {
+    const changedName = productIdentity?.name && identity?.name && productIdentity.name !== identity.name;
+    if (allowedByShape && (page.url() !== productPageUrl || changedName)) {
         identityUnconfirmed = true;
     }
 
@@ -593,23 +531,16 @@ const imageUrlsFromText = (text) => {
     return decoded.match(/https?:\/\/[^\s"'<>]+?\.(?:jpe?g|png|webp)(?:\?[^\s"'<>]*)?/gi) || [];
 };
 
-await page.route('**/*', async (route) => {
-    const request = route.request();
-
-    if (!await publicHttpUrl(request.url())) {
-        await route.abort('blockedbyclient');
-        return;
-    }
-
-    if (isNavigationRequestOffConfinedHost(request, page.mainFrame(), confineNavigationToHost)) {
-        await route.abort('blockedbyclient');
-        return;
-    }
-
-    await route.continue();
-});
-
+page.on('requestfailed', (request) => rememberImageRequest(request, {
+    ...(imageLoadEvidence.get(request.url()) || {}),
+    network_error: request.failure()?.errorText || 'request_failed',
+}));
 page.on('response', (response) => {
+    rememberImageRequest(response.request(), {
+        http_status: response.status(),
+        content_type: response.headers()['content-type'] || null,
+        response_url: response.url(),
+    });
     const pending = (async () => {
         const contentType = (await response.headerValue('content-type') || '').toLowerCase();
 
@@ -738,9 +669,10 @@ const mediaDocument = async () => {
     }
     return document;
 };
-const readGalleryStateOnce = async () => (await mediaDocument().catch(() => page)).evaluate(({
+const readGalleryStateOnce = async () => evaluateWithRecipeSelectors(await mediaDocument().catch(() => page), galleryStateSelectors, ({
     selectors,
     excludedContextPatternSource,
+    resolvedSelectors,
 }) => {
     const excludedContextPattern = new RegExp(excludedContextPatternSource.replaceAll('\\\\', '\\'), 'i');
     const semanticContext = (element) => {
@@ -767,7 +699,9 @@ const readGalleryStateOnce = async () => (await mediaDocument().catch(() => page
     const excludedContext = (element) => excludedContextPattern.test(semanticContext(element));
     const safeElements = (selector) => {
         try {
-            return [...document.querySelectorAll(selector)].filter((element) => !excludedContext(element));
+            const matches = Object.hasOwn(resolvedSelectors.elements, selector)
+                ? resolvedSelectors.elements[selector] : [...document.querySelectorAll(selector)];
+            return matches.filter((element) => !excludedContext(element));
         } catch {
             return [];
         }
@@ -790,7 +724,8 @@ const readGalleryStateOnce = async () => (await mediaDocument().catch(() => page
     ];
     const imageThumbnailCount = (selector) => {
         try {
-            return safeElements(selector).filter((node) => {
+            const frames = new Set();
+            for (const node of safeElements(selector)) {
                 const marker = [
                     node.getAttribute('class'),
                     node.getAttribute('data-type'),
@@ -803,11 +738,26 @@ const readGalleryStateOnce = async () => (await mediaDocument().catch(() => page
                     || node.querySelector?.('video,[data-type="video"],[class*="video" i],[class*="360" i]')
                     || /(?:^|\W)(?:video|360)(?:\W|$)/i.test(marker);
 
-                return !video && (
+                if (video || !(
                     node.matches?.('img,picture,[data-type=image]')
                     || node.querySelector?.('img,picture,[data-type=image]')
-                );
-            }).length;
+                )) continue;
+                // A rail can be rendered twice, and nested list items can
+                // address the same thumbnail. Count photographs, not controls.
+                const image = node.matches?.('img') ? node : node.querySelector?.('img');
+                const source = image?.currentSrc || image?.getAttribute('src');
+                let key = node;
+                if (source) {
+                    try {
+                        const asset = new URL(source, document.baseURI);
+                        for (const parameter of ['width', 'height', 'w', 'h']) asset.searchParams.delete(parameter);
+                        asset.hash = '';
+                        key = asset.href;
+                    } catch { key = source; }
+                }
+                frames.add(key);
+            }
+            return frames.size;
         } catch {
             return 0;
         }
@@ -861,9 +811,14 @@ const readGalleryStateOnce = async () => (await mediaDocument().catch(() => page
             node.textContent,
         ].filter(Boolean).join(' ').slice(0, 500);
 
-        for (const match of text.matchAll(/(\d+)\s*(?:of|\/)\s*(\d+)/gi)) {
+        // Product labels also contain slash-separated specifications, such as
+        // "2880x1620 / 16GB". Units are not counters; include digits in the
+        // boundary check so the regexp cannot backtrack from "16GB" to "1".
+        for (const match of text.matchAll(/(\d+)\s*(?:of|\/)\s*(\d+)(?![\p{L}\p{N}])/giu)) {
             const ordinal = Number.parseInt(match[1], 10);
             const count = Number.parseInt(match[2], 10);
+            if (ordinal < 1 || ordinal > count) continue;
+
             const mediaMarker = [
                 node.getAttribute('class'),
                 node.getAttribute('data-type'),
@@ -930,7 +885,7 @@ const readGalleryStateOnce = async () => (await mediaDocument().catch(() => page
 }, {
     selectors: galleryStateSelectors,
     excludedContextPatternSource: EXCLUDED_GALLERY_CONTEXT_PATTERN_SOURCE,
-});
+}, recordRecipeSelectorErrors);
 const readGalleryState = async () => {
     for (let attempt = 0; ; attempt++) {
         try {
@@ -984,28 +939,24 @@ const waitForStableGallery = async () => {
     };
 };
 
-const collectDomImages = async () => (await mediaDocument()).evaluate(({
+const collectDomImages = async () => evaluateWithRecipeSelectors(await mediaDocument(),
+    [...new Set([...gallerySelectors, ...thumbnailSelectors, ...recipeExcludeSelectors])], ({
     selectors,
     extraAttributes,
     includePageFallbacks,
     excludedContextPatternSource,
     excludeSelectors,
+    resolvedSelectors,
 }) => {
     const excludedContextPattern = new RegExp(excludedContextPatternSource.replaceAll('\\\\', '\\'), 'i');
-    // Recipe exclusions are element-exact. Using closest(selector) here lets
-    // one broad model-chosen selector erase an entire wanted subtree.
+    // Explicit exclusions apply to the selected node AND its descendants.
+    // An empty result asks the agent to repair the plan, not undo exclusions.
+    if (resolvedSelectors.errors.some((error) => excludeSelectors.includes(error.selector))) {
+        return { urls: [], excluded_contexts: [] };
+    }
+    const excludedRoots = excludeSelectors.flatMap((selector) => resolvedSelectors.elements[selector] || []);
     const matchesRecipeExclusion = (element) => {
-        for (const selector of excludeSelectors) {
-            try {
-                if (element?.matches?.(selector)) {
-                    return true;
-                }
-            } catch {
-                // Invalid exclusions fail open and remain visible in diagnostics.
-            }
-        }
-
-        return false;
+        return Boolean(element && excludedRoots.some((root) => root === element || root.contains(element)));
     };
     const semanticContext = (element) => {
         const parts = [];
@@ -1038,9 +989,7 @@ const collectDomImages = async () => (await mediaDocument()).evaluate(({
             try { urls.push(new URL(value.trim(), document.baseURI).href); } catch {}
         }
     };
-    const selectedElements = [];
     let excludedByRecipe = 0;
-    let exclusionGuardTriggered = false;
     const addSrcset = (value) => {
         if (typeof value !== 'string') {
             return;
@@ -1177,21 +1126,14 @@ const collectDomImages = async () => (await mediaDocument()).evaluate(({
 
     for (const selector of selectors) {
         try {
-            for (const element of document.querySelectorAll(selector)) {
-                selectedElements.push(element);
+            for (const element of resolvedSelectors.elements[selector] || []) {
                 addElement(element);
             }
         } catch {
-            // Ignore an invalid selector instead of aborting the entire recipe.
+            // Detached nodes can disappear between resolution and collection.
+            // Invalid syntax was already diagnosed by the shared resolver.
         }
     }
-    // If exclusions erased every candidate, retry only the already matched
-    // collect elements without recipe exclusions. Semantic/video guards stay.
-    if (urls.length === 0 && selectedElements.length > 0 && excludedByRecipe > 0) {
-        exclusionGuardTriggered = true;
-        selectedElements.forEach((element) => addElement(element, false));
-    }
-
 
     if (includePageFallbacks) {
     for (const element of document.querySelectorAll(
@@ -1222,7 +1164,6 @@ const collectDomImages = async () => (await mediaDocument()).evaluate(({
         urls,
         excluded_contexts: excludedContexts,
         excluded_by_recipe: excludedByRecipe,
-        exclusion_guard_triggered: exclusionGuardTriggered,
     };
 }, {
     selectors: [...new Set([...gallerySelectors, ...thumbnailSelectors])],
@@ -1230,7 +1171,7 @@ const collectDomImages = async () => (await mediaDocument()).evaluate(({
     includePageFallbacks: !strictRecipe,
     excludedContextPatternSource: EXCLUDED_GALLERY_CONTEXT_PATTERN_SOURCE,
     excludeSelectors: recipeExcludeSelectors,
-});
+}, recordRecipeSelectorErrors);
 
 // The only ceiling on collection is the caller's limit. It used to be the
 // smaller of that and the recipe's remembered count, which quietly stopped a
@@ -1250,8 +1191,8 @@ const collect = async () => {
     });
     gathered.push(...(collection.urls || []));
     excludedGalleryContexts.push(...(collection.excluded_contexts || []));
-    if (collection.exclusion_guard_triggered) {
-        collectionErrors.push('exclude_selectors removed every collected URL; retried exact collect matches without recipe exclusions');
+    if (!collection.urls?.length && collection.excluded_by_recipe > 0) {
+        collectionErrors.push('Recipe exclusions removed all matched photo candidates; exclusions were preserved.');
     }
     if (!strictRecipe) {
     priorityImages.push(...await page.locator('[data-old-hires]').evaluateAll(
@@ -1263,12 +1204,12 @@ const collect = async () => {
     }
     checkpoint('interaction');
 };
-const collectionSignature = async () => (await mediaDocument().catch(() => page)).evaluate(({ selectors, attributes }) => {
+const collectionSignature = async () => evaluateWithRecipeSelectors(await mediaDocument().catch(() => page), gallerySelectors, ({ selectors, attributes, resolvedSelectors }) => {
     const values = [];
 
     for (const selector of selectors) {
         try {
-            for (const element of document.querySelectorAll(selector)) {
+            for (const element of resolvedSelectors.elements[selector] || []) {
                 values.push([
                     selector,
                     element.getAttribute('class') || '',
@@ -1277,7 +1218,8 @@ const collectionSignature = async () => (await mediaDocument().catch(() => page)
                 ].join('|'));
             }
         } catch {
-            // Invalid selectors are ignored by the safe runner.
+            // Detached nodes do not prove progress. Syntax errors are recorded
+            // by the shared resolver before this DOM evaluation.
         }
     }
 
@@ -1285,11 +1227,11 @@ const collectionSignature = async () => (await mediaDocument().catch(() => page)
 }, {
     selectors: gallerySelectors,
     attributes: [...new Set([...recipeAttributes, 'src', 'href', 'srcset'])],
-}).catch(() => '');
-const readTraversalMedia = () => mediaDocument().then((document) => document.evaluate(readTraversalMediaInPage, {
+}, recordRecipeSelectorErrors).catch(() => '');
+const readTraversalMedia = () => mediaDocument().then((document) => readTraversalMediaInDocument(document, {
     selectors: recipe.active_image_selector ? [recipe.active_image_selector] : gallerySelectors,
     positionSelector: recipe.position_selector || '',
-})).catch((error) => ({ images: [], busy: false, error: String(error.message) }));
+}, recordRecipeSelectorErrors)).catch((error) => ({ images: [], busy: false, error: String(error.message) }));
 const settleTraversalMedia = () => waitForTraversalMedia(readTraversalMedia, {
     deadline: Math.min(softDeadline, Date.now() + probeTimeoutMs),
 });
@@ -1301,7 +1243,8 @@ const clickAndWaitForGalleryChange = async (locator, meta = {}) => {
     const beforeState = await readGalleryState();
     const beforeSignature = await collectionSignature();
     const beforeNetworkCount = networkImages.length;
-    const observationOnly = ['hover', 'scroll_into_view'].includes(meta.action);
+    // after_each is a click even when its parent operation only scrolls/observes.
+    const observationOnly = !meta.after_each && ['hover', 'scroll_into_view', 'scroll_each'].includes(meta.action);
     const href = observationOnly ? null : await locator.getAttribute('href').catch(() => null);
     let navigatedByHref = false;
 
@@ -1366,18 +1309,20 @@ const clickAndWaitForGalleryChange = async (locator, meta = {}) => {
 
         return navigatedByHref;
     };
+    let interactionError = null;
     const clicked = observationOnly
         ? await (meta.action === 'hover' ? locator.hover({ timeout: 2000 })
             : locator.scrollIntoViewIfNeeded({ timeout: 2000 })).then(() => true).catch(() => false)
         : await locator.click({ timeout: 2000 })
         .then(() => true)
-        .catch(() => locator.click({ force: true, timeout: 700 }).then(() => true).catch(() => false));
+        .catch(error => { interactionError = String(error.message).slice(0, 4000); return false; });
 
     if (!clicked && !await navigateAllowedHref()) {
         actionTrace.push({
             ...meta,
             clicked: false,
             changed: false,
+            interaction_error: interactionError,
             before_images: beforeState.observed_count || 0,
             after_images: beforeState.observed_count || 0,
             network_delta: 0,
@@ -1797,6 +1742,13 @@ try {
 
     checkpoint('gallery_readiness');
     galleryReadiness = await waitForStableGallery();
+    // Consent widgets often arrive after the document's load event. Recheck
+    // the settled page before taking the observation that the agent will use.
+    const lateOverlays = await clearBlockingOverlays(page);
+    dismissedOverlays = {
+        dismissed: [...(dismissedOverlays.dismissed || []), ...lateOverlays.dismissed],
+        still_blocking: lateOverlays.still_blocking,
+    };
 
     checkpoint('gallery_dom');
     scout = await captureInteractionScout();
@@ -1883,7 +1835,7 @@ try {
     if (recipeActions.length > 0) {
         for (let actionIndex = 0; actionIndex < recipeActions.length && !leftProductPage && !outOfTime(); actionIndex++) {
             const action = recipeActions[actionIndex];
-            const repeatedAction = ['click_each', 'click_until_no_change'].includes(action.kind);
+            const repeatedAction = ['click_each', 'click_until_no_change', 'scroll_each'].includes(action.kind);
             const priorViewerOpenAction = recipeActions
                 .slice(0, actionIndex)
                 .some(actionOpensExpandedGallery);
@@ -1911,7 +1863,7 @@ try {
                 // nothing to clear, which is a pass, not a broken recipe. It is
                 // still traced, so the agent and the operator see which of the
                 // two states this run met.
-                const optional = action.when === 'if_present';
+                const optional = action.kind !== 'scroll_each' && action.when === 'if_present';
 
                 actionTrace.push({
                     action: action.kind,
@@ -1928,38 +1880,34 @@ try {
                 continue;
             }
 
-            // limit is how many times the recipe asked for this control to be
-            // pressed, not how many elements the selector happens to match.
-            // Capping it at the match count silently broke every single-element
-            // traversal control: a "next" arrow is one element on virtually any
-            // site, so "advance three frames" executed exactly one click and the
-            // remaining frames were never revealed (observed live on a B&H modal
-            // recipe that declared 4 frames and returned 3). requestedIndex below
-            // only counts upward per repetition when currentCount is a genuine
-            // multi-element strip, so a multi-element selector still walks its
-            // elements while a single control keeps addressing its sole match and
-            // is simply re-pressed.
-            // How many controls this page has, asked of this page. A recipe
-            // stores how to open and walk a gallery and nothing about its size:
-            // one laptop has six photographs and the next has twelve, and a
-            // number carried over from training is wrong for every product but
-            // the one it was learned on. It failed both ways - too few and the
-            // gallery was declared broken, too many and the extra photographs
-            // were quietly never collected.
-            //
-            // A strip of thumbnails is walked in full: as many presses as there
-            // are controls. A single control - a next arrow - has no count to
-            // read, so it is re-pressed until it stops yielding anything new,
-            // bounded by the safety ceiling below. limit is that ceiling now,
-            // never a target.
+            // New recipes declare element enumeration versus repeated control
+            // presses. Neither carries the training product's photo count.
+            // Legacy recipes without a mode retain the old count-based split.
+            // The ceiling only guards resources; reaching it is not completion.
             const ceiling = Math.max(action.limit, TRAVERSAL_CEILING);
-            const traversal = new GalleryTraversalProgress(repeatedAction ? await settleTraversalMedia()
+            const traversal = new GalleryTraversalProgress(repeatedAction && action.kind !== 'scroll_each' ? await settleTraversalMedia()
                 : traversalMediaState(await readTraversalMedia()), gathered);
             let lastPrimaryTrace = null;
             const repetitions = repeatedAction ? ceiling : 1;
+            // Keep DOM references privately in this document. Appending lazy
+            // items is fine; reordering/removing previous matches invalidates
+            // nth enumeration and must not be mistaken for a shorter gallery.
+            const scrollElements = action.kind === 'scroll_each'
+                ? await actionDocument.evaluateHandle(() => []) : null;
+            const inspectScrollElements = () => locator.evaluateAll((elements, previous) => {
+                const stable = previous.every((element, index) => element === elements[index]);
+                if (stable) previous.push(...elements.slice(previous.length));
+                return { stable, count: elements.length };
+            }, scrollElements).catch(() => ({ stable: false, count: 0 }));
 
             for (let repetition = 0; repetition < repetitions && !leftProductPage && !outOfTime(); repetition++) {
                 const currentCount = await locator.count().catch(() => 0);
+
+                if (scrollElements && !(await inspectScrollElements()).stable) {
+                    actionTrace.push({ action: action.kind, action_index: actionIndex, selector: action.selector,
+                        clicked: false, traversal_complete: false, traversal_stop_reason: 'traversal_elements_changed' });
+                    break;
+                }
 
                 if (currentCount < 1) {
                     if (lastPrimaryTrace) Object.assign(lastPrimaryTrace, {
@@ -1968,14 +1916,10 @@ try {
                     break;
                 }
 
-                // A multi-element selector is walked one element per repetition,
-                // so a limit larger than the strip only re-presses its last
-                // thumbnail - and the validator, which requires min(limit,
-                // matches) clicks there, never asked for those presses either.
-                // A single control is the opposite shape (one arrow pressed
-                // limit times) and must not be capped: doing that is what lost
-                // every frame past the first.
-                if (action.kind === 'click_each' && currentCount > 1 && action.index + repetition >= currentCount) {
+                // Enumeration includes a one-element strip; repeat keeps the
+                // selected control even when its selector has several matches.
+                const iteratesElements = recipeActionIteratesElements(action, currentCount);
+                if (iteratesElements && action.index + repetition >= currentCount && lastPrimaryTrace) {
                     if (lastPrimaryTrace) Object.assign(lastPrimaryTrace, {
                         traversal_complete: true, traversal_stop_reason: 'all_current_controls_visited',
                     });
@@ -1990,10 +1934,8 @@ try {
                 // match on a page that only had, say, 12 - clamping used to
                 // click the 12th, a control the recipe never named).
                 //
-                // click_each only counts repetition into that address when
-                // currentCount is an actual strip of distinct elements
-                // (> 1) - see recipeActionRequestedIndex() for why (a lone
-                // "next" arrow regression, 2026-09-14).
+                // The declared iteration mode determines whether repetition
+                // advances this address. Only legacy auto infers it from count.
                 const requestedIndex = recipeActionRequestedIndex(action, repetition, currentCount);
                 const targetIndex = resolveRecipeActionTargetIndex(requestedIndex, currentCount);
 
@@ -2015,7 +1957,7 @@ try {
                 }
 
                 const target = locator.nth(targetIndex);
-                if (repeatedAction && await target.isDisabled().catch(() => false)) {
+                if (repeatedAction && !iteratesElements && await target.isDisabled().catch(() => false)) {
                     const endTrace = lastPrimaryTrace || { action: action.kind, action_index: actionIndex,
                         phase: 'ai_action', selector: action.selector, clicked: false, selector_match_count: currentCount };
                     const media = await settleTraversalMedia();
@@ -2024,7 +1966,19 @@ try {
                     if (!lastPrimaryTrace) actionTrace.push(endTrace);
                     break;
                 }
-                const controlSafety = await target.evaluate((element, { purpose, excludedContextPatternSource, scopeSelector }) => {
+                // The scope is a Playwright address too, including scout nth
+                // suffixes. Pass the resolved element, not syntax to querySelector.
+                let scopeHandle = null;
+                if (recipe.gallery_scope_selector) {
+                    const scopeLocator = actionDocument.locator(recipe.gallery_scope_selector);
+                    try {
+                        if (await scopeLocator.count()) scopeHandle = await scopeLocator.first().elementHandle();
+                    } catch (error) {
+                        recordRecipeSelectorErrors([{ selector: recipe.gallery_scope_selector,
+                            reason: 'invalid_recipe_selector', detail: String(error.message).slice(0, 300) }]);
+                    }
+                }
+                const controlSafety = await target.evaluate((element, { purpose, excludedContextPatternSource, declaredScope }) => {
                     const signal = [
                         element.getAttribute('id'),
                         element.getAttribute('class'),
@@ -2056,11 +2010,9 @@ try {
                         'i',
                     ).test(contextSignal);
                     const forbidden = excludedContext || /(buy|add.?to.?cart|checkout|place.?order|account|sign.?in|log.?in|wishlist|share|review|compare|subscribe|submit)/i.test(signal);
-                    let declaredScope = null;
-                    try { declaredScope = scopeSelector ? document.querySelector(scopeSelector) : null; } catch {}
                     const insideDeclaredScope = declaredScope && declaredScope !== document.body
                         && declaredScope !== document.documentElement && declaredScope.contains(element)
-                        && declaredScope.querySelector('img,picture');
+                        && declaredScope.querySelector('img,picture,canvas');
                     const mediaContainer = element.closest([
                         '[class*=gallery i]', '[class*=thumbnail i]', '[class*=slider i]',
                         '[class*=carousel i]', '[class*=swiper i]', '[class*=zoom i]',
@@ -2087,9 +2039,10 @@ try {
                     };
                 }, {
                     purpose: action.purpose,
-                    scopeSelector: recipe.gallery_scope_selector || '',
+                    declaredScope: scopeHandle,
                     excludedContextPatternSource: EXCLUDED_GALLERY_CONTEXT_PATTERN_SOURCE,
                 }).catch(() => ({ safe: false }));
+                await scopeHandle?.dispose().catch(() => {});
 
                 if (controlSafety.safe !== true) {
                     actionTrace.push({
@@ -2120,6 +2073,7 @@ try {
                     purpose: action.purpose,
                     wait_after_ms: action.wait_after_ms,
                     selector_match_count: currentCount,
+                    iteration_mode: action.iteration_mode || 'auto',
                 });
                 await collect();
                 const trace = actionTrace.at(-1) || {};
@@ -2221,15 +2175,26 @@ try {
                 }
 
                 if (repeatedAction) {
+                    const scrollSnapshot = scrollElements ? await inspectScrollElements() : null;
+                    if (scrollSnapshot && !scrollSnapshot.stable) {
+                        Object.assign(trace, { traversal_complete: false, traversal_stop_reason: 'traversal_elements_changed' });
+                        break;
+                    }
                     // Evaluate only AFTER follow-up zoom and actual media loading.
-                    const media = await settleTraversalMedia();
+                    // Native loading=lazy images elsewhere in the list have not
+                    // been visited yet. Waiting for them now deadlocks scrolling.
+                    const media = action.kind === 'scroll_each'
+                        ? await waitForTraversalMedia(() => readTraversalMediaInDocument(actionDocument, {
+                            selectors: [`${action.selector} >> nth=${targetIndex}`],
+                        }, recordRecipeSelectorErrors), { deadline: Math.min(softDeadline, Date.now() + probeTimeoutMs) })
+                        : await settleTraversalMedia();
                     await collect();
                     trace.media_status = media.status;
                     if (!clicked || leftProductPage) {
                         Object.assign(trace, { traversal_complete: false, traversal_stop_reason: 'action_failed' });
                         break;
                     }
-                    if (currentCount <= 1 || action.kind === 'click_until_no_change') {
+                    if (!iteratesElements) {
                         const outcome = traversal.advance(media, gathered, {
                             disabled: await target.isDisabled().catch(() => false),
                         });
@@ -2241,9 +2206,23 @@ try {
                     } else if (!media.ready && !media.signature) {
                         Object.assign(trace, { traversal_complete: false, traversal_stop_reason: media.status });
                         break;
-                    } else if (action.index + repetition + 1 >= await locator.count().catch(() => 0)) {
-                        Object.assign(trace, { traversal_complete: true, traversal_stop_reason: 'all_current_controls_visited' });
-                        break;
+                    } else {
+                        const afterWait = scrollElements ? await inspectScrollElements() : null;
+                        if (afterWait && !afterWait.stable) {
+                            Object.assign(trace, { traversal_complete: false, traversal_stop_reason: 'traversal_elements_changed' });
+                            break;
+                        }
+                        const remainingCount = afterWait?.count ?? await locator.count().catch(() => 0);
+                        if (remainingCount < 1) {
+                            Object.assign(trace, { traversal_complete: false, traversal_stop_reason: 'control_disappeared' });
+                            break;
+                        }
+                        if (action.index + repetition + 1 >= remainingCount) {
+                            Object.assign(trace, { traversal_complete: true,
+                                traversal_match_count: remainingCount,
+                                traversal_stop_reason: 'all_current_controls_visited' });
+                            break;
+                        }
                     }
                     if (repetition === repetitions - 1) Object.assign(trace, {
                         traversal_complete: false, traversal_stop_reason: 'safety_ceiling_reached',
@@ -2252,6 +2231,7 @@ try {
                     break;
                 }
             }
+            await scrollElements?.dispose().catch(() => {});
             if (repeatedAction && lastPrimaryTrace && typeof lastPrimaryTrace.traversal_complete !== 'boolean') {
                 Object.assign(lastPrimaryTrace, { traversal_complete: false,
                     traversal_stop_reason: outOfTime() ? 'time_budget' : 'traversal_interrupted' });
@@ -2387,7 +2367,7 @@ const probeImage = async (candidate) => {
         return { ok: false, url: candidate, reason: 'non_public_url' };
     }
 
-    return page.evaluate(({ url, timeout, minWidth, minHeight }) => new Promise((resolve) => {
+    const result = await page.evaluate(({ url, timeout, minWidth, minHeight }) => new Promise((resolve) => {
         const image = new Image();
         const timer = setTimeout(
             () => resolve({ ok: false, url, reason: 'probe_timeout' }),
@@ -2411,7 +2391,7 @@ const probeImage = async (candidate) => {
                 reason: ok ? null : 'dimensions_below_minimum',
             });
         };
-        image.onerror = () => finish({ ok: false, url, reason: 'decode_failed' });
+        image.onerror = () => finish({ ok: false, url, reason: 'image_load_failed' });
         image.src = url;
     }), {
         url: candidate,
@@ -2419,6 +2399,7 @@ const probeImage = async (candidate) => {
         minWidth: minimumWidth,
         minHeight: minimumHeight,
     }).catch(() => ({ ok: false, url: candidate, reason: 'probe_failed' }));
+    return result.ok ? result : { ...result, ...(imageLoadEvidence.get(candidate) || {}) };
 };
 const orderedCandidates = prioritizeCandidateRenditions(candidates);
 const candidatesToProbe = selectGalleryFrames(orderedCandidates, strictRecipe, Math.max(30, limit * 3));
@@ -2432,11 +2413,16 @@ if (!scoutOnly) {
 
 const bestImages = new Map();
 const validationFailures = [];
+const unresolvedImageProbes = unresolvedGalleryImageProbes(probes, domKeys);
 
 for (const probe of probes) {
     if (!probe.ok) {
         validationFailures.push({
             url: probe.url, reason: probe.reason,
+            ...(probe.http_status !== undefined ? { http_status: probe.http_status } : {}),
+            ...(probe.content_type ? { content_type: probe.content_type } : {}),
+            ...(probe.response_url ? { response_url: probe.response_url } : {}),
+            ...(probe.network_error ? { network_error: probe.network_error } : {}),
             width: probe.width ?? null, height: probe.height ?? null,
             minimum_width: minimumWidth, minimum_height: minimumHeight,
             source: domKeys.has(imageAssetKey(normalize(probe.url) || probe.url)) ? 'recipe_dom' : 'network_or_payload',
@@ -2502,6 +2488,7 @@ if (transferDirectory !== '') {
 if (!scoutOnly && transferDirectory !== '') {
     checkpoint('image_transfer');
     const selected = selectedImages;
+    const transferUserAgent = await page.evaluate(() => navigator.userAgent).catch(() => '');
 
     for (let index = 0; index < selected.length; index += 4) {
         const batch = selected.slice(index, index + 4);
@@ -2510,18 +2497,14 @@ if (!scoutOnly && transferDirectory !== '') {
 
             try {
                 if (!await publicHttpUrl(item.url)) return null;
-                const response = await context.request.get(item.url, {
-                    failOnStatusCode: false,
-                    timeout: 2500,
-                    headers: { referer: page.url() },
+                const response = await downloadPublicProductImage(item.url, {
+                    context, timeout: 5000, referer: page.url(), userAgent: transferUserAgent,
                 });
-                if (!response.ok()) throw new Error(`HTTP ${response.status()}`);
-                const body = await response.body();
-                if (body.length === 0 || body.length > 8_388_608) throw new Error('invalid_transfer_size');
+                const body = response.body;
                 const path = join(transferDirectory, `image-${ordinal}.bin`);
                 await writeFile(path, body);
 
-                return { url: item.url, final_url: response.url(), path, bytes: body.length };
+                return { url: item.url, final_url: response.url, path, bytes: body.length };
             } catch (error) {
                 transferFailures.push({ url: item.url, reason: String(error?.message || error).slice(0, 200) });
                 return null;
@@ -2579,13 +2562,19 @@ if (!crashResultEmitted) process.stdout.write(JSON.stringify({
         raw_dom_candidates: gathered.length,
         raw_dom_samples: [...new Set(gathered)].slice(0, 20),
         strict_recipe: strictRecipe,
-        partial: outOfTime() || Boolean(interruptedTraversal),
-        interruption_reason: interruptedTraversal?.media_status || interruptedTraversal?.traversal_stop_reason || null,
+        partial: outOfTime() || Boolean(interruptedTraversal) || recipeSelectorErrors.size > 0 || unresolvedImageProbes.length > 0,
+        interruption_reason: recipeSelectorErrors.size ? 'invalid_recipe_selector'
+            : interruptedTraversal?.media_status || interruptedTraversal?.traversal_stop_reason
+                || (unresolvedImageProbes.length > 0 ? 'image_load_failed' : null),
+        selector_errors: [...recipeSelectorErrors.values()],
         excluded_gallery_contexts: [...new Set(excludedGalleryContexts)].slice(0, 20),
         payload_candidates: embeddedImages.length,
         network_candidates: requestedImages.length,
         unique_candidates: allCandidates.length,
         distinct_dom_assets: new Set(domImages.map(imageAssetKey)).size,
+        collection_capability_feedback: strictRecipe && domImages.length === 0 && requestedImages.length > 0
+            ? `Strict recipe accepts DOM-bound image assets only. ${requestedImages.length} network candidates were observed, but none have DOM gallery provenance. A canvas/WebGL viewer cannot yield images through this DOM-only recipe. Inspect an alternative image-backed viewer or another exact product source; repeating canvas clicks does not remove this provenance restriction.`
+            : null,
         collection_errors: [...new Set(collectionErrors)].slice(0, 10),
         distinct_candidate_assets: new Set(candidates.map(imageAssetKey)).size,
         probed_candidates: probes.length,

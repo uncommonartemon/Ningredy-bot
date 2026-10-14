@@ -17,6 +17,7 @@ use App\Models\ProductVariant;
 use App\Models\TelegramChatState;
 use App\Models\TelegramUpdate;
 use App\Services\Ai\AiErrorPresenter;
+use App\Services\Ai\AiSettings;
 use App\Services\Ai\ProductSearchTimeBudget;
 use App\Services\Products\ProductIdentityKey;
 use App\Services\Products\ProductImageResolver;
@@ -130,16 +131,19 @@ class ProcessTelegramMessageTest extends TestCase
 
     public function test_ready_draft_is_sent_as_one_album_followed_by_compact_approval_controls(): void
     {
+        $this->freezeTime();
         Storage::fake('public');
         config(['services.telegram.bot_token' => 'test-token']);
         Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []])]);
         $update = $this->update();
+        $update->forceFill(['created_at' => now()->subSeconds(138)])->save();
         $researchRun = AiRun::query()->create([
             'telegram_update_id' => $update->id,
             'provider' => 'openai',
-            'model' => 'gpt-4.1-mini',
+            'model' => 'gpt-5.4',
             'status' => 'completed',
             'prompt' => 'find product',
+            'usage' => ['prompt_tokens' => 900, 'completion_tokens' => 300],
             'started_at' => now(),
             'completed_at' => now(),
         ]);
@@ -206,6 +210,7 @@ class ProcessTelegramMessageTest extends TestCase
             return count($media) === 3
                 && str_contains($caption, "Черновик #{$draft->id} готов к добавлению")
                 && str_contains($caption, '📷 Фото: 3')
+                && str_contains($caption, '(~$0.0068) (2 мин 18 сек)')
                 && str_contains($caption, '🔗 Источник: https://amazon.com/dp/EXACT');
         });
         Http::assertSent(fn (HttpRequest $request): bool => str_ends_with($request->url(), '/sendMessage')
@@ -869,6 +874,30 @@ class ProcessTelegramMessageTest extends TestCase
         return ['ready' => [true], 'unfinished' => [false]];
     }
 
+    public function test_disabled_card_assembly_stops_before_buying_research_or_images(): void
+    {
+        app(AiSettings::class)->saveSpecificationReconciliationEnabled(false);
+        ProductResearchAgent::fake()->preventStrayPrompts();
+        $resolver = $this->mock(ProductImageResolver::class);
+        $resolver->shouldNotReceive('resolve');
+        $storage = $this->mock(ProductImageStorage::class);
+        $storage->shouldNotReceive('stage');
+        $update = $this->update();
+
+        $result = json_decode((new ResearchProduct($update, $resolver, imageStorage: $storage))
+            ->handle(new Request(['query' => 'Any product'])), true);
+
+        $this->assertFalse($result['ok']);
+        $this->assertFalse($result['retryable']);
+        $this->assertSame('configuration_blocked', $result['status']);
+        $this->assertDatabaseCount('ai_runs', 0);
+        $this->assertDatabaseCount('product_drafts', 0);
+        ProductResearchAgent::assertNeverPrompted();
+        $this->assertDatabaseHas('product_source_attempts', [
+            'telegram_update_id' => $update->id, 'decision' => 'configuration_disabled',
+        ]);
+    }
+
     #[DataProvider('cardAssemblyStates')]
     public function test_research_tool_creates_an_audited_pending_draft(bool $ready): void
     {
@@ -1046,7 +1075,7 @@ class ProcessTelegramMessageTest extends TestCase
         $draft = ProductDraft::query()->firstOrFail();
 
         $this->assertTrue($result['ok']);
-        $this->assertSame('gallery_search_paused', $result['status']);
+        $this->assertSame('gallery_search_continuing', $result['status']);
         $this->assertSame($draft->id, $result['draft_id']);
         $this->assertSame(0, $result['image_count']);
         $this->assertSame('pending_review', $draft->status);
@@ -1211,6 +1240,48 @@ class ProcessTelegramMessageTest extends TestCase
         $this->assertSame('A2XWJG-614', $draft->model);
         $this->assertSame('A2XWJG-614', collect($draft->specifications)->firstWhere('key', 'sku')['value']);
         $this->assertSame(2, AiRun::query()->count());
+    }
+
+    public function test_research_does_not_replace_an_exact_new_mpn_with_a_catalog_sibling(): void
+    {
+        $category = Category::query()->where('slug', 'components')->firstOrFail();
+        $brand = Brand::query()->firstOrCreate(['slug' => 'samsung'], ['name' => 'Samsung', 'is_active' => true]);
+        $existing = Product::query()->create([
+            'category_id' => $category->id, 'brand_id' => $brand->id,
+            'canonical_key' => ProductIdentityKey::for('Samsung', '990 PRO', 'Samsung 990 PRO 2TB'),
+            'product_type' => 'component', 'status' => 'published',
+            'title' => 'Samsung 990 PRO 2TB', 'model' => '990 PRO', 'is_active' => true,
+        ]);
+        $existing->variants()->create(['mpn' => 'MZ-V9P2T0BW', 'condition' => 'new',
+            'fingerprint' => 'two-tb', 'is_default' => true, 'is_active' => true]);
+        ProductResearchAgent::fake([[
+            'status' => 'found', 'title' => 'Samsung 990 PRO 1TB', 'brand' => 'Samsung', 'model' => '990 PRO',
+            'category' => 'components', 'product_type' => 'component', 'condition' => 'new', 'color' => 'Black',
+            'description' => 'A 1TB M.2 SSD.',
+            'specifications' => [
+                ['key' => 'mpn', 'name' => 'MPN', 'value' => 'MZ-V9P1T0BW'],
+                ['key' => 'storage', 'name' => 'Storage', 'value' => '1 TB'],
+            ],
+            'sources' => [['title' => 'Samsung 990 PRO 1TB MZ-V9P1T0BW', 'url' => 'https://shop.example/one-tb', 'type' => 'retailer']],
+            'primary_source_url' => 'https://shop.example/one-tb', 'official_source_url' => null,
+            'research_notes' => null, 'image_urls' => [], 'confidence' => 0.95,
+        ]])->preventStrayPrompts();
+        $update = $this->update();
+        $update->update(['text' => 'Samsung 990 PRO 1TB MZ-V9P1T0BW new']);
+        $images = $this->mock(ProductImageStorage::class);
+        $images->shouldReceive('stage')->once()->andReturnUsing(function (ProductDraft $draft): int {
+            $draft->forceFill(['specifications_reconciled_source_url' => $draft->primary_source_url])->save();
+
+            return 3;
+        });
+
+        $result = json_decode((new ResearchProduct($update, app(ProductImageResolver::class), imageStorage: $images))
+            ->handle(new Request(['query' => $update->text])), true, flags: JSON_THROW_ON_ERROR);
+
+        $this->assertSame('found', $result['status']);
+        $draft = ProductDraft::query()->sole();
+        $this->assertSame('MZ-V9P1T0BW', collect($draft->specifications)->firstWhere('key', 'mpn')['value']);
+        $this->assertSame('Samsung 990 PRO 2TB', $existing->fresh()->title);
     }
 
     public function test_research_recognizes_a_product_already_in_the_catalog_instead_of_duplicating_it(): void

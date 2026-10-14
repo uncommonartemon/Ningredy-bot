@@ -7,17 +7,18 @@ use App\Ai\Tools\Concerns\RecordsOperations;
 use App\Jobs\ContinueDraftGallerySearch;
 use App\Models\AiRun;
 use App\Models\Category;
-use App\Models\Product;
 use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
 use App\Services\Ai\AiErrorPresenter;
 use App\Services\Ai\AiSettings;
 use App\Services\Ai\OpenAiHeavyOperationGate;
+use App\Services\Ai\ProductSearchCancellation;
 use App\Services\Ai\ProductSearchCostBudget;
 use App\Services\Ai\ProductSearchTimeBudget;
 use App\Services\Ai\StreamingProductResearch;
+use App\Services\Products\ProductCatalogIdentity;
 use App\Services\Products\ProductCategoryResolver;
-use App\Services\Products\ProductIdentityKey;
+use App\Services\Products\ProductCondition;
 use App\Services\Products\ProductImageCandidateDiscovery;
 use App\Services\Products\ProductImageResolver;
 use App\Services\Products\ProductImageStorage;
@@ -26,6 +27,9 @@ use App\Services\Products\ProductResearchConfigurationGuard;
 use App\Services\Products\ProductResearchResponseNormalizer;
 use App\Services\Products\ProductSourceAttemptRecorder;
 use App\Services\Products\ProductSourcePriority;
+use App\Services\Products\ProductTextEvidenceContract;
+use App\Services\ProductSearch\Research\InvalidResearchResponse;
+use App\Services\ProductSearch\Research\RecoverableProductResearch;
 use App\Services\Telegram\ProductCardPresenter;
 use App\Services\Telegram\TelegramClient;
 use App\Services\Telegram\TelegramProgressReporter;
@@ -33,6 +37,7 @@ use Illuminate\Contracts\JsonSchema\JsonSchema;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Validation\Rule;
 use Laravel\Ai\Contracts\Tool;
+use Laravel\Ai\Responses\AgentResponse;
 use Laravel\Ai\Streaming\Events\ProviderToolEvent;
 use Laravel\Ai\Streaming\Events\StreamEnd;
 use Laravel\Ai\Streaming\Events\StreamEvent;
@@ -64,6 +69,9 @@ class ResearchProduct implements Tool
 
     public function handle(Request $request): Stringable|string
     {
+        if ($this->isCancelled()) {
+            return $this->cancelledResult();
+        }
         $query = trim((string) $request->string('query'));
         $payload = is_array($this->update->payload) ? $this->update->payload : [];
         $existingProgressMessageId = (int) ($payload['_progress_message_id'] ?? 0);
@@ -86,6 +94,23 @@ class ResearchProduct implements Tool
         );
         $settings = app(AiSettings::class);
         $timeBudget = app(ProductSearchTimeBudget::class);
+
+        // Never buy web research and a gallery when the mandatory final
+        // assembly is administratively paused. Catalog reads remain available.
+        if (! $settings->specificationReconciliationEnabled()) {
+            $message = 'Поиск товара не запущен: сборка готовой карточки выключена в настройках AI. '
+                .'Включите «Сборка карточки перед подтверждением». Интернет-поиск и обучение не запускались.';
+            app(ProductSourceAttemptRecorder::class)->record([
+                'telegram_update_id' => $this->update->id,
+                'actor' => 'server', 'phase' => 'search_preflight', 'action' => 'check_card_assembly',
+                'status' => 'interrupted', 'decision' => 'configuration_disabled', 'message' => $message,
+            ]);
+
+            return $this->json([
+                'ok' => false, 'status' => 'configuration_blocked', 'retryable' => false,
+                'reason' => 'card_assembly_disabled', 'message' => $message,
+            ]);
+        }
 
         if (! $timeBudget->canStart($this->update->id, 60)) {
             $progress->warning('Общий лимит поиска исчерпан; новый долгий этап не запускаю, чтобы корректно завершить запрос.');
@@ -135,13 +160,15 @@ class ResearchProduct implements Tool
         try {
             $activity = [];
             $lastActivityWrite = 0.0;
+            $cancelled = false;
             $reportedActivity = [];
             $webSearchItems = [];
             $recordActivity = function (StreamEvent $event) use (
-                $run,
+                &$run,
                 $progress,
                 &$activity,
                 &$lastActivityWrite,
+                &$cancelled,
                 &$reportedActivity,
                 &$webSearchItems,
             ): void {
@@ -167,6 +194,14 @@ class ResearchProduct implements Tool
                         'last_activity_at' => now(),
                     ]);
                     $lastActivityWrite = $now;
+                    $cancelled = $this->isCancelled();
+                }
+
+                if ($event instanceof ProviderToolEvent && $event->type === 'web_search_call' && $event->itemId !== '') {
+                    $webSearchItems[$event->itemId] = true;
+                }
+                if ($cancelled) {
+                    return;
                 }
 
                 if ($event instanceof StreamStart && ! isset($reportedActivity['connected'])) {
@@ -200,61 +235,43 @@ class ResearchProduct implements Tool
             };
 
             try {
-                $response = ($this->streamingResearch ?? app(StreamingProductResearch::class))->prompt(
-                    ProductResearchAgent::make(),
+                $research = app(RecoverableProductResearch::class)->run(
+                    $run,
+                    $this->streamingResearch ?? app(StreamingProductResearch::class),
                     $researchPrompt,
                     $provider,
                     $model,
                     $researchTimeout,
                     $researchIdleTimeout,
+                    fn (array $data): array => $this->validateCorrectedResearchResponse($data),
                     $recordActivity,
-                    fn (int $seconds) => $progress->info(
+                    fn (int $seconds) => $this->isCancelled() ? null : $progress->info(
                         'Другой тяжёлый AI-этап ещё выполняется; этот поиск продолжится примерно через '.$seconds.' сек.',
                     ),
+                    function () use ($progress, &$webSearchItems, &$activity): void {
+                        $progress->info('Ответ поиска пришёл неполным или не прошёл проверку; агент восстанавливает его по сохранённым данным.');
+                        $webSearchItems = [];
+                        $activity = [];
+                    },
                 );
+                $response = $research['response'];
             } finally {
-                $progress->clearCancelButton();
+                // /reset already acknowledged cancellation; do not resurrect
+                // its obsolete progress message after the provider returns.
+                if ($this->update->fresh()?->status !== 'cancelled') {
+                    $progress->clearCancelButton();
+                }
             }
 
             // Cancellation is still checked after the provider returns; the
             // streamed transport now limits silent waits, but it cannot
             // interrupt local post-processing already in progress.
-            if ($this->update->fresh()?->cancel_requested_at !== null) {
-                $run->update(['status' => 'completed', 'response' => ['status' => 'cancelled'], 'completed_at' => now()]);
-                $progress->done('🚫 Поиск отменён по запросу');
-
-                return $this->json(['ok' => true, 'status' => 'cancelled']);
+            if ($this->isCancelled()) {
+                return $this->cancelledResult($run, $response, count($webSearchItems));
             }
 
             $progress->info('Результат поиска получен; проверяю совпадение и источники.');
-            $normalizedResponse = ($this->responseNormalizer ?? app(ProductResearchResponseNormalizer::class))
-                ->normalize($response->toArray());
-            $data = Validator::make($normalizedResponse, [
-                'status' => ['required', 'in:found,not_found'],
-                'title' => ['nullable', 'string', 'max:255'],
-                'brand' => ['nullable', 'string', 'max:255'],
-                'model' => ['nullable', 'string', 'max:255'],
-                'product_type' => ['nullable', 'in:laptop,desktop,component,other'],
-                'category' => ['nullable', 'string', Rule::in(Category::query()->where('is_active', true)->pluck('slug'))],
-                'color' => ['nullable', 'string', 'max:255'],
-                'description' => ['nullable', 'string', 'max:5000'],
-                'research_notes' => ['nullable', 'string', 'max:5000'],
-                'specifications' => ['present', 'array', 'max:100'],
-                'specifications.*.key' => ['required', 'string', 'max:100', 'regex:/^[a-z0-9_]+$/'],
-                'specifications.*.name' => ['required', 'string', 'max:255'],
-                'specifications.*.value' => ['required', 'string', 'max:2000'],
-                'sources' => ['present', 'array', 'max:'.ProductResearchAgent::MAX_SOURCES],
-                'sources.*.title' => ['required', 'string', 'max:500'],
-                'sources.*.url' => ['required', 'url:http,https', 'max:2048'],
-                'sources.*.type' => ['nullable', 'in:manufacturer,retailer,marketplace,review,database,web'],
-                'sources.*.image_urls' => ['present', 'array', 'max:10'],
-                'sources.*.image_urls.*' => ['url:http,https', 'max:2048'],
-                'primary_source_url' => ['nullable', 'url:http,https', 'max:2048'],
-                'official_source_url' => ['nullable', 'url:http,https', 'max:2048'],
-                'image_urls' => ['present', 'array', 'max:10'],
-                'image_urls.*' => ['url:http,https', 'max:2048'],
-                'confidence' => ['required', 'numeric', 'between:0,1'],
-            ])->validate();
+            $data = $research['data'];
 
             if ($data['status'] === 'found') {
                 $resolvedCategory = app(ProductCategoryResolver::class)->resolve(
@@ -281,6 +298,7 @@ class ResearchProduct implements Tool
             while (
                 $configurationIssues !== []
                 && $correctionAttempt < 2
+                && ! $this->isCancelled()
                 && $timeBudget->canStart($this->update->id, 30)
                 && ! app(ProductSearchCostBudget::class)->exceeded($this->update->id)
             ) {
@@ -324,6 +342,9 @@ class ResearchProduct implements Tool
                     ),
                 );
                 $webSearchItems = [];
+                if ($this->isCancelled()) {
+                    return $this->cancelledResult($run, $response);
+                }
                 $data = $this->validateCorrectedResearchResponse($response->toArray());
                 $resolvedCategory = app(ProductCategoryResolver::class)->resolve(
                     $data['product_type'] ?? null,
@@ -338,6 +359,10 @@ class ResearchProduct implements Tool
                 }
             }
 
+            if ($this->isCancelled()) {
+                return $this->cancelledResult($run, $response, count($webSearchItems));
+            }
+
             if ($configurationIssues !== []) {
                 $data['status'] = 'not_found';
                 $data['research_notes'] = 'Exact configuration validation did not pass after automatic correction: '
@@ -349,7 +374,11 @@ class ResearchProduct implements Tool
             $data['description'] = $normalizedDescription['description'];
             $data['research_notes'] = $normalizedDescription['research_notes'];
             $reportedSources = $data['sources'];
-            $data['sources'] = $sourcePriority->sortSources($reportedSources, $data['brand']);
+            $data['sources'] = $sourcePriority->sortSources($reportedSources, $data['brand'] ?? null);
+            // Text evidence has its own ledger: a PDF or a second observation
+            // of the same field must not disappear with gallery dedup/ranking.
+            $data['specification_evidence'] = array_values(array_filter($data['specification_evidence'] ?? [],
+                fn (array $fact): bool => ! $sourcePriority->isBlockedUrl($fact['source_url'])));
             $attemptRecorder = app(ProductSourceAttemptRecorder::class);
             $blockedSourceCount = 0;
             foreach ($reportedSources as $source) {
@@ -419,7 +448,7 @@ class ResearchProduct implements Tool
                 $data['image_urls'] = $sourcePriority->sortUrls([
                     ...($primarySource['image_urls'] ?? []),
                     ...($data['image_urls'] ?? []),
-                ], $data['brand'], [$primarySource]);
+                ], $data['brand'] ?? null, [$primarySource]);
             }
 
             $run->update([
@@ -449,9 +478,12 @@ class ResearchProduct implements Tool
                 return $this->json($notFound);
             }
 
-            $existingProduct = Product::query()
-                ->where('canonical_key', ProductIdentityKey::for($data['brand'], $data['model'], $data['title']))
-                ->first();
+            $catalogIdentity = app(ProductCatalogIdentity::class);
+            $existingProduct = $catalogIdentity->find($data, $data['condition'] ?? 'new', activeOnly: true);
+
+            if ($this->isCancelled()) {
+                return $this->cancelledResult($run, $response, count($webSearchItems));
+            }
 
             if ($existingProduct) {
                 // Deterministic, not left to the AI's own wording: the exact
@@ -465,6 +497,9 @@ class ResearchProduct implements Tool
                         (string) $this->update->chat_id,
                         $existingProduct,
                         '✅ Такой товар уже есть в каталоге',
+                        condition: $data['condition'] ?? 'new',
+                        variantId: $catalogIdentity->variant($existingProduct, $data['specifications'] ?? [], $data['condition'] ?? 'new', activeOnly: true)?->id,
+                        telegramUserId: $this->update->telegram_user_id,
                     );
                 } catch (Throwable $exception) {
                     report($exception);
@@ -485,6 +520,9 @@ class ResearchProduct implements Tool
                 'create_product_draft',
                 ['query' => $query],
                 function () use ($data, $run): array {
+                    if ($this->isCancelled()) {
+                        return ['ok' => true, 'status' => 'cancelled'];
+                    }
                     $draft = ProductDraft::query()->create([
                         'telegram_update_id' => $this->update->id,
                         'ai_run_id' => $run->id,
@@ -495,9 +533,11 @@ class ResearchProduct implements Tool
                         'product_type' => $data['product_type'] ?? null,
                         'category' => $data['category'] ?? null,
                         'color' => $data['color'],
+                        'condition' => $data['condition'] ?? 'new',
                         'description' => $data['description'],
                         'research_notes' => $data['research_notes'],
                         'specifications' => $data['specifications'],
+                        'specification_evidence' => $data['specification_evidence'],
                         'sources' => $data['sources'],
                         'primary_source_url' => $data['primary_source_url'],
                         'official_source_url' => $data['official_source_url'],
@@ -528,6 +568,10 @@ class ResearchProduct implements Tool
 
             $draft = ProductDraft::query()->find($result['draft_id'] ?? null);
 
+            if ($this->isCancelled()) {
+                return $this->cancelledResult($run);
+            }
+
             if ($draft && $draft->status === 'pending_review' && ! $draft->images_staged_at) {
                 $imageStageTimeout = $timeBudget->timeoutFor(
                     $this->update->id,
@@ -544,10 +588,14 @@ class ResearchProduct implements Tool
                 );
                 $imageCount = ($this->imageStorage ?? app(ProductImageStorage::class))->stage(
                     $draft,
-                    fn (string $message) => $progress->info($message),
+                    fn (string $message) => $this->isCancelled() ? null : $progress->info($message),
                 );
             } else {
                 $imageCount = $draft?->media()->count() ?? 0;
+            }
+
+            if ($this->isCancelled()) {
+                return $this->cancelledResult($run);
             }
 
             $gallerySearchStopReason = $draft?->fresh()->gallery_search_stop_reason;
@@ -563,6 +611,9 @@ class ResearchProduct implements Tool
                 && in_array($gallerySearchStopReason, ['cost_budget', 'time_budget', 'exhausted'], true);
 
             if ($galleryPaused) {
+                $automaticallyContinuing = $gallerySearchStopReason === 'exhausted'
+                    || ($gallerySearchStopReason === 'time_budget'
+                        && app(ProductSearchCostBudget::class)->hasRemaining($this->update->id));
                 // 'exhausted' means every source tried so far came up empty,
                 // but the request's own time/cost budget (tracked per
                 // telegram_update_id) is not actually used up yet - a
@@ -580,6 +631,9 @@ class ResearchProduct implements Tool
                         $this->update->id,
                         $this->update->id,
                     )->afterCommit();
+                } elseif ($gallerySearchStopReason === 'time_budget'
+                    && app(ProductSearchCostBudget::class)->hasRemaining($this->update->id)) {
+                    $progress->info('Технический запуск завершён; автоматически продолжаю поиск с оставшимся денежным бюджетом.');
                 } else {
                     $progress->warning('Лимит текущего запуска достигнут. Черновик сохранён, поиск можно продолжить отдельным бюджетным циклом.');
                 }
@@ -587,10 +641,12 @@ class ResearchProduct implements Tool
                 return $this->json([
                     ...$result,
                     'ok' => true,
-                    'status' => 'gallery_search_paused',
+                    'status' => $automaticallyContinuing ? 'gallery_search_continuing' : 'gallery_search_paused',
                     'draft_id' => $draft->id,
                     'image_count' => 0,
-                    'message' => 'Информация сохранена; поиск фотографий приостановлен и доступен для продолжения.',
+                    'message' => $automaticallyContinuing
+                        ? 'Информация сохранена; поиск фотографий продолжается автоматически с тем же денежным бюджетом.'
+                        : 'Информация сохранена; поиск фотографий приостановлен и доступен для продолжения.',
                 ]);
             }
 
@@ -638,6 +694,11 @@ class ResearchProduct implements Tool
 
             return $this->json($result);
         } catch (Throwable $exception) {
+            if ($this->isCancelled()) {
+                $run->update(['error' => mb_substr($exception->getMessage(), 0, 5000)]);
+
+                return $this->cancelledResult($run);
+            }
             $errors = app(AiErrorPresenter::class);
             app(ProductSourceAttemptRecorder::class)->record([
                 'telegram_update_id' => $this->update->id,
@@ -661,8 +722,37 @@ class ResearchProduct implements Tool
                 'completed_at' => now(),
             ]);
 
+            if ($exception instanceof InvalidResearchResponse) {
+                return $this->json(['ok' => false, 'status' => 'research_interrupted', 'retryable' => false,
+                    'reason' => $exception->reason,
+                    'message' => 'Не удалось восстановить полный ответ поиска в текущем запуске. Это не означает, что товар не найден. Полученные данные сохранены в журнале. Не запускай поиск повторно без запроса пользователя.']);
+            }
+
             throw $exception;
         }
+    }
+
+    private function isCancelled(): bool
+    {
+        return app(ProductSearchCancellation::class)->isCancelled($this->update->id);
+    }
+
+    private function cancelledResult(?AiRun $run = null, ?AgentResponse $response = null, int $webSearchCalls = 0): string
+    {
+        if ($run) {
+            $metadata = $response ? [
+                'invocation_id' => $response->invocationId,
+                'usage' => [...$response->usage->toArray(), 'web_search_calls' => $webSearchCalls],
+            ] : [];
+            $run->update([
+                ...$metadata,
+                'status' => 'completed',
+                'response' => ['status' => 'cancelled'],
+                'completed_at' => now(),
+            ]);
+        }
+
+        return $this->json(['ok' => true, 'status' => 'cancelled']);
     }
 
     /** @return array<string, mixed> */
@@ -681,12 +771,17 @@ class ResearchProduct implements Tool
                 Category::query()->where('is_active', true)->pluck('slug'),
             )],
             'color' => ['nullable', 'string', 'max:255'],
+            'condition' => ['sometimes', 'required', Rule::in(ProductCondition::VALUES)],
             'description' => ['nullable', 'string', 'max:5000'],
             'research_notes' => ['nullable', 'string', 'max:5000'],
             'specifications' => ['present', 'array', 'max:100'],
             'specifications.*.key' => ['required', 'string', 'max:100', 'regex:/^[a-z0-9_]+$/'],
             'specifications.*.name' => ['required', 'string', 'max:255'],
             'specifications.*.value' => ['required', 'string', 'max:2000'],
+            'specifications.*.group' => ['sometimes', 'nullable', 'array:id,name,name_cs'],
+            'specifications.*.source_url' => ['nullable', 'url:http,https', 'max:2048'],
+            'specifications.*.source_excerpt' => ['nullable', 'string', 'max:800'],
+            ...ProductTextEvidenceContract::rules('specification_evidence', optional: true),
             'sources' => ['present', 'array', 'max:'.ProductResearchAgent::MAX_SOURCES],
             'sources.*.title' => ['required', 'string', 'max:500'],
             'sources.*.url' => ['required', 'url:http,https', 'max:2048'],

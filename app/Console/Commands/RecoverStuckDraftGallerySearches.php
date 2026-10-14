@@ -4,6 +4,7 @@ namespace App\Console\Commands;
 
 use App\Jobs\ContinueDraftGallerySearch;
 use App\Models\ProductDraft;
+use App\Services\Ai\ProductSearchTimeBudget;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Cache;
 
@@ -32,7 +33,7 @@ class RecoverStuckDraftGallerySearches extends Command
      */
     private const ABANDON_AFTER_HOURS = 6;
 
-    public function handle(): int
+    public function handle(ProductSearchTimeBudget $timeBudget): int
     {
         ProductDraft::query()
             ->where('status', 'pending_review')
@@ -40,10 +41,17 @@ class RecoverStuckDraftGallerySearches extends Command
             ->where('created_at', '<=', now()->subMinutes(self::STUCK_AFTER_MINUTES))
             ->where('created_at', '>', now()->subHours(self::ABANDON_AFTER_HOURS))
             ->with('telegramUpdate')
-            ->each(function (ProductDraft $draft): void {
+            ->each(function (ProductDraft $draft) use ($timeBudget): void {
                 $chatId = $draft->telegramUpdate?->chat_id;
 
                 if (! $chatId || ! $draft->telegram_update_id) {
+                    return;
+                }
+
+                // Automatic recovery retains the original request's budget.
+                // After it expires, requeueing can only produce a late stop
+                // message; a new budget belongs to an operator continuation.
+                if (! $timeBudget->canStart($draft->telegram_update_id, 1)) {
                     return;
                 }
 

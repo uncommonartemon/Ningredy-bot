@@ -17,29 +17,29 @@ class AiOperationInfolist
 
         return $schema
             ->components([
-                Section::make('Операция')
+                Section::make(__('Операция'))
                     ->schema([
-                        TextEntry::make('tool')->label('Инструмент')->badge(),
-                        TextEntry::make('action')->label('Действие'),
+                        TextEntry::make('tool')->label(__('Инструмент'))->badge(),
+                        TextEntry::make('action')->label(__('Действие')),
                         TextEntry::make('target')
-                            ->label('Цель')
+                            ->label(__('Цель'))
                             ->state(fn (AiOperation $record): ?string => $record->target_type
                                 ? class_basename($record->target_type).' #'.$record->target_id
                                 : null)
                             ->placeholder('—'),
-                        TextEntry::make('status')->label('Статус')->badge(),
+                        TextEntry::make('status')->label(__('Статус'))->badge(),
                         TextEntry::make('telegramUpdate.id')->label('Telegram update')->placeholder('—'),
                         TextEntry::make('telegram_user_id')->label('Telegram user')->placeholder('—'),
                         TextEntry::make('idempotency_key')->label('Idempotency key')->placeholder('—')->copyable(),
-                        TextEntry::make('executed_at')->label('Выполнено')->dateTime('d.m.Y H:i:s')->placeholder('—'),
-                        TextEntry::make('error')->label('Ошибка')->placeholder('—')->columnSpanFull(),
+                        TextEntry::make('executed_at')->label(__('Выполнено'))->dateTime('d.m.Y H:i:s')->placeholder('—'),
+                        TextEntry::make('error')->label(__('Ошибка'))->placeholder('—')->columnSpanFull(),
                     ])
                     ->columns(4)
                     ->columnSpanFull(),
-                Section::make('Payload и результат')
+                Section::make(__('Payload и результат'))
                     ->schema([
                         TextEntry::make('payload')->label('Payload')->formatStateUsing($json)->columnSpanFull(),
-                        TextEntry::make('result')->label('Результат')->formatStateUsing($json)->columnSpanFull(),
+                        TextEntry::make('result')->label(__('Результат'))->formatStateUsing($json)->columnSpanFull(),
                     ])
                     ->collapsed()
                     ->columnSpanFull(),

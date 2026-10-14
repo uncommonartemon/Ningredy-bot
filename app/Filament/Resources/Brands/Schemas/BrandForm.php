@@ -17,13 +17,12 @@ class BrandForm
         return $schema
             ->columns(1)
             ->components([
-                Section::make('Бренд')
+                Section::make(__('Бренд'))
                     ->schema([
-                        TextInput::make('name')->label('Название')->required(),
-                        TextInput::make('slug')->label('Slug')->unique(ignoreRecord: true)->required(),
-                        TextInput::make('country')->label('Страна'),
-                        TextInput::make('website_url')->label('Сайт')->url(),
-                        Toggle::make('is_active')->label('Активен')->default(true),
+                        TextInput::make('name')->label(__('Название'))->required()->maxLength(255)->unique(ignoreRecord: true),
+                        TextInput::make('country')->label(__('Страна')),
+                        TextInput::make('website_url')->label(__('Сайт'))->url(),
+                        Toggle::make('is_active')->label(__('Активен'))->default(true),
                     ])
                     ->columns(2),
             ]);

@@ -21,27 +21,27 @@ class CatalogStats extends StatsOverviewWidget
         $blockedSources = ProductGalleryRecipe::query()->where('source_blocked', true)->count();
 
         return [
-            Stat::make('Опубликованные товары', Product::query()->visibleInCatalog()->count())
-                ->description('Активны и видны в каталоге')
+            Stat::make(__('Опубликованные товары'), Product::query()->visibleInCatalog()->count())
+                ->description(__('Активны и видны в каталоге'))
                 ->color('success')
                 ->url(ProductResource::getUrl()),
-            Stat::make('Ожидают проверки', ProductDraft::query()->where('status', 'pending_review')->count())
-                ->description('Черновики AI')
+            Stat::make(__('Ожидают проверки'), ProductDraft::query()->where('status', 'pending_review')->count())
+                ->description(__('Черновики AI'))
                 ->color('warning')
                 ->url(ProductDraftResource::getUrl()),
-            Stat::make('Активные поиски', AiRun::query()->where('status', 'running')->count())
-                ->description('Запуски со статусом running')
+            Stat::make(__('Активные поиски'), AiRun::query()->where('status', 'running')->count())
+                ->description(__('Запуски со статусом running'))
                 ->color('info')
                 ->url(AiRunResource::getUrl()),
-            Stat::make('Приостановлены', ProductDraft::query()
+            Stat::make(__('Приостановлены'), ProductDraft::query()
                 ->where('status', 'pending_review')
                 ->where(fn ($query) => $query->whereDoesntHave('media')->orWhereNotNull('gallery_search_stop_reason'))
                 ->count())
-                ->description('Поиск фото без результата или на паузе')
+                ->description(__('Поиск фото без результата или на паузе'))
                 ->color('warning')
                 ->url(ProductDraftResource::getUrl()),
-            Stat::make('Ошибки и блокировки', $failedRuns + $blockedSources)
-                ->description("AI: {$failedRuns} · заблокированных источников: {$blockedSources}")
+            Stat::make(__('Ошибки и блокировки'), $failedRuns + $blockedSources)
+                ->description(__('AI: :failed · заблокированных источников: :blocked', ['failed' => $failedRuns, 'blocked' => $blockedSources]))
                 ->color('danger')
                 ->url($failedRuns >= $blockedSources ? AiRunResource::getUrl() : ProductGalleryRecipeResource::getUrl()),
         ];

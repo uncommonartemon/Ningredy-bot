@@ -2,6 +2,7 @@
 
 namespace App\Services\Products;
 
+use App\Exceptions\ProductSearchCancelled;
 use App\Models\Category;
 use App\Models\Product;
 use App\Models\ProductDraft;
@@ -10,8 +11,15 @@ use App\Models\ProductSourceAttempt;
 use App\Models\ProductSourcePageEvidence;
 use App\Models\ProductVariant;
 use App\Services\Ai\AiSettings;
+use App\Services\Ai\ProductSearchCancellation;
 use App\Services\Ai\ProductSearchCostBudget;
 use App\Services\Ai\ProductSearchTimeBudget;
+use App\Services\Photos\CandidateUrlOrdering;
+use App\Services\Photos\GallerySourceContext;
+use App\Services\Photos\ImageGeometry;
+use App\Services\Photos\ImageRenditionDeduplicator;
+use App\Services\Photos\ImageUrls;
+use App\Services\ProductSearch\SourceQueueBuilder;
 use GdImage;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Log;
@@ -39,6 +47,11 @@ class ProductImageStorage
         private readonly ProductGalleryRecipeTrainer $recipeTrainer,
         private readonly ProductGalleryRecipeRouter $recipeRouter,
         private readonly ProductSpecificationReconciler $specificationReconciler,
+        private readonly ImageGeometry $imageGeometry,
+        private readonly SourceQueueBuilder $sourceQueue,
+        private readonly CandidateUrlOrdering $candidateUrls,
+        private readonly GallerySourceContext $gallerySourceContext,
+        private readonly ImageRenditionDeduplicator $renditions,
     ) {}
 
     /** @param array<int, int> $replaceMediaIds */
@@ -213,7 +226,65 @@ class ProductImageStorage
             'input' => ['gallery_status' => $draft->gallery_status, 'source_count' => count($draft->sources ?? [])],
         ]);
         try {
-            return $this->stageCycle($draft, $progress, $telegramUpdateId, $cycleSources, $cycleExcludedSourceUrls);
+            app(ProductSearchCancellation::class)->throwIfCancelled($updateId);
+
+            $recoveringCard = false;
+            while (true) {
+                app(ProductSearchCancellation::class)->throwIfCancelled($updateId);
+                $stored = $this->stageCycle(
+                    $draft, $progress, $telegramUpdateId, $cycleSources, $cycleExcludedSourceUrls,
+                    skipOutstandingReconciliation: $recoveringCard,
+                );
+                $draft->refresh();
+                $result = $recoveringCard ? $draft->media()->count() : $stored;
+
+                if (! $draft->reconciliationPending()
+                    || $draft->gallery_search_stop_reason !== 'specifications_unreconciled'
+                    || ! $this->settings->specificationReconciliationEnabled()
+                    || ! $this->settings->fallbackSourcesEnabled()) {
+                    return $result;
+                }
+
+                // Exhausting one source's assembly repairs is not exhausting
+                // the request. Another source gets the SAME remaining budget.
+                $stopReason = match (true) {
+                    $this->costBudget->exceeded($updateId) => 'cost_budget',
+                    ! $this->timeBudget->canStart($updateId, 20) => 'time_budget',
+                    default => null,
+                };
+                if ($stopReason !== null) {
+                    $draft->update(['gallery_search_stop_reason' => $stopReason]);
+
+                    return $result;
+                }
+                // Unpriced/budgetless runs retain bounded local recovery;
+                // they cannot authorize an open-ended paid search loop.
+                if (! $updateId || $this->settings->maxSearchCostUsd() <= 0
+                    || $this->costBudget->unmeasurable($updateId)) {
+                    return $result;
+                }
+
+                $failedSource = trim((string) $draft->primary_source_url);
+                $cycleExcludedSourceUrls = array_values(array_unique(array_filter([
+                    ...$cycleExcludedSourceUrls,
+                    ...$this->terminalSourceUrlsForContinuation($draft),
+                    $failedSource,
+                ])));
+                $this->attempts->record([
+                    'telegram_update_id' => $updateId, 'product_draft_id' => $draft->id,
+                    'product_url' => $failedSource, 'actor' => 'server',
+                    'phase' => 'card_assembly', 'action' => 'recover_with_another_source',
+                    'status' => 'interrupted', 'decision' => 'continue_search',
+                    'message' => 'Сборка карточки по этому источнику не завершена; продолжаю поиск других источников в оставшемся бюджете.',
+                    'output' => ['saved_file_count' => $draft->media()->count(),
+                        'excluded_source_urls' => $cycleExcludedSourceUrls,
+                        'failure_context' => $draft->gallery_notes,
+                        'estimated_search_cost_usd' => $this->costBudget->spent($updateId)],
+                ]);
+                $progress?->__invoke('Карточку по выбранному источнику собрать не удалось. Фото сохранены; ищу другой источник в оставшемся бюджете.');
+                $cycleSources = [];
+                $recoveringCard = true;
+            }
         } catch (Throwable $exception) {
             $failure = $exception;
             throw $exception;
@@ -221,9 +292,10 @@ class ProductImageStorage
             // Observability must never replace an original error or invalidate saved photos.
             try {
                 $state = $draft->fresh() ?? $draft;
-                $status = $failure !== null ? 'interrupted' : ($state->gallery_status ?: 'unknown');
+                $cancelled = $failure instanceof ProductSearchCancelled;
+                $status = $cancelled ? 'cancelled' : ($failure !== null ? 'interrupted' : ($state->gallery_status ?: 'unknown'));
                 $count = $state->media()->count();
-                $reason = $failure !== null ? 'exception' : ($state->gallery_search_stop_reason ?: 'none');
+                $reason = $cancelled ? 'cancelled' : ($failure !== null ? 'exception' : ($state->gallery_search_stop_reason ?: 'none'));
                 $summary = 'Запрос #'.$updateId.' · черновик #'.$state->id
                     .': цикл фото — '.$status.'; файлов сохранено: '.$count.'; остановка: '.$reason.'.';
                 $this->attempts->record([
@@ -245,7 +317,7 @@ class ProductImageStorage
                 ]);
                 // Normal completion already emits the richer final source/method line.
                 // Keep that line last; only an exception needs this extra Telegram outcome.
-                if ($failure !== null) {
+                if ($failure !== null && ! $cancelled) {
                     $progress?->__invoke('Цикл фото прерван ошибкой. Запрос #'.$updateId
                         .', черновик #'.$state->id.', сохранено файлов: '.$count.'. Причина записана в журнал.');
                 }
@@ -262,6 +334,7 @@ class ProductImageStorage
         ?int $telegramUpdateId = null,
         array $cycleSources = [],
         array $cycleExcludedSourceUrls = [],
+        bool $skipOutstandingReconciliation = false,
     ): int {
         // A restage/top-up triggered by a button press minutes or hours after
         // the draft's original search must get its own fresh time budget -
@@ -284,17 +357,25 @@ class ProductImageStorage
         // again from the top - open the page, run the recipe, download every
         // frame - to arrive back at the one step that had actually failed. The
         // frames are already on disk; what is missing is the verdict on them.
-        $resumed = $this->resumeInterruptedVerification($draft, $minimumCompleteGallerySize, $telegramUpdateId, $progress);
+        $completedSourceUrls = [];
+        $resumed = $this->resumeInterruptedVerification($draft, $minimumCompleteGallerySize, $target, $telegramUpdateId, $progress, $completedSourceUrls);
 
         if ($resumed !== null) {
             return $resumed;
         }
 
+        // A completed check may have rejected some pending files while keeping
+        // a verified partial set. Do not later resurrect the stale collection.
+        $previousMedia = $draft->media()->get();
+        $cycleExcludedSourceUrls = array_values(array_unique([...$cycleExcludedSourceUrls, ...$completedSourceUrls]));
+
         // Symmetric to the resumed-verification short-circuit just above:
         // photos are already sufficient and the sole outstanding thing is
         // reconciliation itself - "Continue" must return to exactly that,
         // never re-open the source, retrain a recipe, or re-run discovery.
-        $reconciliationResumed = $this->resumeOutstandingReconciliation($draft, $telegramUpdateId, $progress);
+        $reconciliationResumed = $skipOutstandingReconciliation
+            ? null
+            : $this->resumeOutstandingReconciliation($draft, $telegramUpdateId, $progress);
 
         if ($reconciliationResumed !== null) {
             return $reconciliationResumed;
@@ -332,8 +413,15 @@ class ProductImageStorage
         // disagree with the others.
         $reserve = null;
         $deferredVisionSets = [];
+        $reviewedSourceUrls = [];
 
         foreach ($sourceQueue as $sourceIndex => $source) {
+            app(ProductSearchCancellation::class)->throwIfCancelled($telegramUpdateId);
+            if (isset($reviewedSourceUrls[rtrim((string) $source['url'], '/')])) {
+                // A complete traversal already reached a real pixel verdict.
+                // The queue's later training pass cannot repair the shop's images.
+                continue;
+            }
             // A source is atomic: once its HTML/Playwright/recipe/Vision pass
             // starts, it is allowed to finish. The money limit is checked only
             // here, between sources, so a nearly-trained recipe is never
@@ -363,9 +451,7 @@ class ProductImageStorage
                     .($reuseOnly && ! $activeRecipeOnly ? ' (только готовый рецепт)' : '').': '.$source['url']);
             }
 
-            $source['_minimum_verified_images'] = $minimumCompleteGallerySize;
-            $source['_category_slug'] = trim((string) $draft->category) !== '' ? trim((string) $draft->category) : null;
-            $source[ProductRequestContext::SOURCE_KEY] = $draft->id;
+            $source = $this->gallerySourceContext->forDraft($draft, $source, $minimumCompleteGallerySize);
             $originalSourceUrl = (string) $source['url'];
             $productPageUrl = is_string($source['_preflight_final_url'] ?? null)
                 && filter_var($source['_preflight_final_url'], FILTER_VALIDATE_URL)
@@ -443,39 +529,11 @@ class ProductImageStorage
                     $progress?->__invoke('Источник пропущен: AI подтвердил конфликтующую модель/SKU по содержимому страницы.');
 
                     continue;
-                } elseif ($identityJudgment === 'uncertain' && $this->identityMatcher->requiresExactIdentifier($draft)) {
-                    // The operator's own request pinned an exact identifier
-                    // (or there is no request text to say otherwise), and the
-                    // AI genuinely looked and could not confirm this source
-                    // satisfies it - a real verdict, not outranked by what
-                    // was explicitly asked for. 'unavailable' (the AI was
-                    // never actually consulted - disabled, no budget, a
-                    // technical failure) never reaches this branch: a
-                    // question nobody could ask is not evidence either way.
-                    $this->attempts->record([
-                        'telegram_update_id' => $telegramUpdateId,
-                        'product_draft_id' => $draft->id,
-                        'product_url' => $source['url'],
-                        'actor' => 'identity_validator',
-                        'phase' => 'source_selection',
-                        'action' => 'validate_product_identity',
-                        'status' => 'failed',
-                        'decision' => 'reject_unconfirmed_identifier',
-                        'output' => ['title' => $source['title'] ?? null, 'method' => 'ai_judge'],
-                    ]);
-                    $progress?->__invoke('Источник пропущен: карточка не подтверждает точную модель или SKU выбранного товара.');
-
-                    continue;
                 } else {
-                    // Either the operator did not pin an exact identifier -
-                    // research chose one on its own, so an uncertain verdict
-                    // is not evidence of a mismatch, only that neither check
-                    // could confirm the specific configuration research
-                    // settled on - or the AI was never actually consulted at
-                    // all ('unavailable'), which is not evidence of anything
-                    // regardless of what the operator asked for. Either way
-                    // the source is not rejected: its frames simply earn
-                    // wholesale trust another way, one at a time under Vision.
+                    // Incomplete HTTP/search evidence can be completed by the
+                    // browser. Uncertainty must not close that route even for
+                    // an explicit identifier. This does not grant wholesale
+                    // identity trust or permission to publish the card.
                     $this->attempts->record([
                         'telegram_update_id' => $telegramUpdateId,
                         'product_draft_id' => $draft->id,
@@ -487,7 +545,7 @@ class ProductImageStorage
                         'decision' => 'proceed_without_wholesale_confirmation',
                         'output' => ['title' => $source['title'] ?? null, 'method' => 'ai_judge'],
                     ]);
-                    $progress?->__invoke('Источник не подтверждён дословно: галерея пройдёт покадровую проверку вместо доверия целиком.');
+                    $progress?->__invoke('Данных о комплектации пока недостаточно: проверяю страницу в браузере, без доверия галерее целиком.');
                 }
             }
 
@@ -524,7 +582,9 @@ class ProductImageStorage
                 $this->associateAttemptsWithDraftSince($draft, $telegramUpdateId, $attemptCheckpoint);
             }
 
-            $resolvedPageContext = collect($resolvedUrls)
+            app(ProductSearchCancellation::class)->throwIfCancelled($telegramUpdateId);
+
+            $resolvedPageContext = $this->resolver->sourceContextForPage($originalSourceUrl) ?? collect($resolvedUrls)
                 ->map(fn (string $imageUrl): ?array => $this->resolver->sourceContextForImage($imageUrl))
                 ->first(fn (mixed $context): bool => is_array($context));
             if (is_array($resolvedPageContext)) {
@@ -535,9 +595,10 @@ class ProductImageStorage
                     ...$resolvedPageContext,
                     'url' => $resolvedFinalUrl,
                 ];
-                $runtimeIdentityConfirmed = $this->identityMatcher->confirmsExactIdentifier($draft, $runtimeSourceEvidence);
+                $runtimeJudgment = app(ProductSourceIdentityGate::class)->assess($draft, $runtimeSourceEvidence, $telegramUpdateId);
+                $runtimeIdentityConfirmed = $runtimeJudgment === 'confirmed';
 
-                if ($this->identityMatcher->conflictsSource($draft, $runtimeSourceEvidence)) {
+                if ($runtimeJudgment === 'conflicting') {
                     $this->attempts->record([
                         'telegram_update_id' => $telegramUpdateId,
                         'product_draft_id' => $draft->id,
@@ -555,37 +616,14 @@ class ProductImageStorage
                 }
 
                 if (! $runtimeIdentityConfirmed) {
-                    // Same graduated rule as the pre-redirect check above: a
-                    // generic/no match after landing is asked to the judge
-                    // against what the operator actually requested, and only
-                    // a genuine conflict rejects the source here - an
-                    // 'uncertain' verdict just leaves $runtimeIdentityConfirmed
-                    // false, which demotes the source out of wholesale trust
-                    // on the line below rather than rejecting it outright.
-                    $runtimeJudgment = $this->identityConfirmation($draft, $runtimeSourceEvidence, $telegramUpdateId);
-
-                    if ($runtimeJudgment === 'conflicting') {
-                        $this->attempts->record([
-                            'telegram_update_id' => $telegramUpdateId,
-                            'product_draft_id' => $draft->id,
-                            'product_url' => $source['url'],
-                            'actor' => 'identity_validator',
-                            'phase' => 'source_selection',
-                            'action' => 'validate_runtime_product_identity',
-                            'status' => 'failed',
-                            'decision' => 'reject_runtime_identifier_mismatch',
-                            'output' => ['final_url' => $resolvedFinalUrl, 'method' => 'ai_judge'],
-                        ]);
-                        $progress?->__invoke('Источник пропущен: AI подтвердил конфликтующую модель/SKU на конечной странице после редиректа.');
-
-                        continue;
-                    }
-
+                    // Judge the rendered page against the original request.
+                    // A conflict rejects it; uncertainty cannot satisfy an
+                    // explicit code, but a broad request may continue without
+                    // trusting the gallery wholesale.
                     if ($runtimeJudgment === 'uncertain' && $this->identityMatcher->requiresExactIdentifier($draft)) {
-                        // Same rule as the pre-redirect gate: an explicit (or
-                        // text-less, equally trusted) operator identifier that
-                        // the AI genuinely could not confirm even after
-                        // redirect is rejected outright, not merely demoted.
+                        // Unlike a sparse initial HTTP snapshot, this is the
+                        // observed page after browser resolution. An explicit
+                        // operator code still needs confirmation here.
                         // 'unavailable' (the AI was never consulted) never
                         // reaches here - a question nobody could ask is not
                         // evidence either way.
@@ -597,8 +635,8 @@ class ProductImageStorage
                             'phase' => 'source_selection',
                             'action' => 'validate_runtime_product_identity',
                             'status' => 'failed',
-                            'decision' => 'reject_runtime_identifier_mismatch',
-                            'output' => ['final_url' => $resolvedFinalUrl, 'method' => 'ai_judge'],
+                            'decision' => 'reject_unconfirmed_identifier',
+                            'output' => ['final_url' => $resolvedFinalUrl, 'method' => 'ai_judge', 'identity_verdict' => 'uncertain'],
                         ]);
                         $progress?->__invoke('Источник пропущен: конечная страница после редиректа не подтверждает точную модель/SKU.');
 
@@ -609,7 +647,11 @@ class ProductImageStorage
                 }
 
                 $productPageUrl = $resolvedFinalUrl;
-                $sourceIdentityConfirmed = $sourceIdentityConfirmed && $runtimeIdentityConfirmed;
+                // Judge the actual rendered page, not the intersection with
+                // an earlier, possibly empty HTTP snapshot. Conflicts above
+                // still reject; a fresh uncertainty also removes prior trust.
+                $sourceIdentityConfirmed = $runtimeIdentityConfirmed;
+                $configurationConflict = $this->identityMatcher->conflictsMemoryConfiguration($draft, $runtimeSourceEvidence);
             }
 
             if ($sourceBlocked) {
@@ -757,6 +799,56 @@ class ProductImageStorage
                     }
                 }
 
+                // Verify an already downloaded exact-source set before spending
+                // the next time slice training another page. Canvas viewers can
+                // otherwise consume all working time while these files wait.
+                if ($galleryVerification === null && $sourceIdentityConfirmed
+                    && ! $configurationConflict && count($allCandidates) >= $minimumCompleteGallerySize) {
+                    $progress?->__invoke('Точный источник уже дал фотографии; проверяю их Vision до обучения следующей страницы.');
+                    try {
+                        $verified = $this->selectFromCandidates($draft, $allCandidates, $target, $telegramUpdateId);
+                    } catch (ProductSearchCancelled $exception) {
+                        $this->destroy($allCandidates);
+                        throw $exception;
+                    } catch (Throwable $exception) {
+                        report($exception);
+                        $this->destroy($allCandidates);
+                        $progress?->__invoke('Vision временно недоступен; продолжаю поиск другим источником.');
+
+                        continue;
+                    }
+                    $verified = $this->removeNearDuplicates($verified, $excludedHashes);
+                    $this->destroyUnselected($allCandidates, $verified);
+                    $this->attempts->record([
+                        'telegram_update_id' => $telegramUpdateId,
+                        'product_draft_id' => $draft->id,
+                        'product_url' => $source['url'],
+                        'actor' => 'vision', 'phase' => 'image_verification',
+                        'action' => 'verify_downloaded_exact_source',
+                        'status' => $verified !== [] ? 'completed' : 'failed',
+                        'input' => ['downloaded_images' => count($allCandidates)],
+                        'output' => ['accepted_images' => count($verified)],
+                    ]);
+                    $result = GallerySourceResult::fromVerifiedFrames($verified, $minimumCompleteGallerySize, $target, $source, 'static');
+                    if ($result->isComplete() && count($verified) >= $target) {
+                        $this->destroy($reserve?->candidates ?? []);
+                        foreach ($deferredVisionSets as $set) {
+                            $this->destroy($set['candidates']);
+                        }
+                        $deferredVisionSets = [];
+                        $reserve = null;
+                        $selected = $result->candidates;
+                        $outcome = $result->outcome;
+                        $chosenSource = $result->source;
+                        $chosenMethod = $result->method;
+
+                        break;
+                    }
+                    $reserve = $this->keepBestReserve($reserve, $result);
+
+                    continue;
+                }
+
                 // One source can reach this point twice - once in the pass that
                 // may only reuse an existing recipe, once when it is allowed to
                 // train - and two reserve sets of largely the same frames would
@@ -812,21 +904,29 @@ class ProductImageStorage
                     'decision' => $galleryVerification !== null
                         ? 'reject_unconfirmed_gallery_and_try_next_source'
                         : 'try_next_source_before_vision',
-                    'input' => ['downloaded_images' => count($allCandidates)],
+                    'input' => [
+                        'downloaded_images' => count($allCandidates),
+                        'confirmed_gallery_frames' => $confirmedGallery->count(),
+                        'minimum_gallery_frames' => $minimumCompleteGallerySize,
+                        'source_identity_confirmed' => $sourceIdentityConfirmed,
+                        'configuration_conflict' => $configurationConflict,
+                        'gallery_verification_attempted' => $galleryVerification !== null,
+                    ],
                 ]);
                 $progress?->__invoke($galleryVerification !== null
                     ? 'Gallery-агент не подтвердил монолитный слайдер; продолжаю поиск без тихого покадрового отбора.'
-                    : 'Подтверждённый слайдер не получен; сохраняю набор в резерв и сначала проверяю следующую страницу.');
+                    : match (true) {
+                        $configurationConflict => 'Заголовок или адрес карточки указывает другую конфигурацию памяти; фото сохраняю в резерв.',
+                        ! $sourceIdentityConfirmed => 'Идентичность источника пока не подтверждена; фото сохраняю в резерв.',
+                        default => 'Подтверждённых галерейных кадров: '.$confirmedGallery->count()
+                            .' (нужно '.$minimumCompleteGallerySize.'); сохраняю набор в резерв и проверяю следующую страницу.',
+                    });
 
                 continue;
             }
 
-            // Accepting a slider as a set is what makes it affordable, and it is
-            // also why the one rule about pixels rather than structure stopped
-            // applying here: no frame of a wholesale-accepted gallery is ever
-            // reviewed on its own, so a card could publish photographs covered
-            // in marketing copy this catalog does not publish. One question,
-            // once, about the whole set.
+            // Check current pixels as a batch: product content (with the
+            // component-logo exception) and language share one provider call.
             // Checked before the maximum is applied: taking ten first and then
             // removing two would throw away the eleventh and twelfth frames,
             // which were fine and are now gone.
@@ -838,11 +938,16 @@ class ProductImageStorage
                 $target,
                 [...$source, 'url' => $productPageUrl],
                 'playwright',
-                'Exact product source and coherent complete Playwright gallery confirmed by the gallery agent; Vision is advisory only.',
+                'Exact source and complete Playwright traversal confirmed; current frames passed Vision content and text checks.',
                 $progress,
             );
 
             if (! $result->isComplete()) {
+                if ($result->outcome !== GalleryOutcome::Interrupted
+                    && ! collect($verifiedGallery)->every(fn (array $frame): bool => (bool) ($frame['partial_gallery'] ?? false))) {
+                    $reviewedSourceUrls[rtrim($originalSourceUrl, '/')] = true;
+                    $reviewedSourceUrls[rtrim($productPageUrl, '/')] = true;
+                }
                 // Not a complete gallery any more, but the surviving frames are
                 // real photographs of this product - kept as the reserve while
                 // the search moves on, never destroyed.
@@ -883,6 +988,7 @@ class ProductImageStorage
             $progress?->__invoke('Подтверждённого слайдера нет; последовательно проверяю Vision независимые наборы лучших страниц.');
 
             foreach ($deferredVisionSets as $setIndex => $set) {
+                app(ProductSearchCancellation::class)->throwIfCancelled($telegramUpdateId);
                 $candidates = $set['candidates'];
                 $source = $set['source'];
                 $candidateCount = count($candidates);
@@ -894,6 +1000,9 @@ class ProductImageStorage
                         : $this->selectFromCandidates($draft, $candidates, $target, $telegramUpdateId);
                     $verified = $this->removeNearDuplicates($verified, $excludedHashes);
                     $this->destroyUnselected($candidates, $verified);
+                } catch (ProductSearchCancelled $exception) {
+                    $this->destroy($candidates);
+                    throw $exception;
                 } catch (Throwable $exception) {
                     report($exception);
                     $this->destroy($candidates);
@@ -978,6 +1087,7 @@ class ProductImageStorage
             $safetyRounds = max(1, (int) config('product-images.fallback_search_rounds', 3));
 
             while (true) {
+                app(ProductSearchCancellation::class)->throwIfCancelled($telegramUpdateId);
                 // Re-evaluate measurability after every discovery call. A
                 // fresh continuation has no usage before its first AI request,
                 // so spent() is temporarily null. Freezing that initial state
@@ -1082,6 +1192,7 @@ class ProductImageStorage
                     });
 
                 foreach ($candidateGroups as $groupKey => $group) {
+                    app(ProductSearchCancellation::class)->throwIfCancelled($telegramUpdateId);
                     $groupPageUrl = str_starts_with((string) $groupKey, 'page:')
                         ? substr((string) $groupKey, 5)
                         : null;
@@ -1202,6 +1313,8 @@ class ProductImageStorage
                         $verified = $groupGalleryVerification !== null
                             ? $confirmedGroup->all()
                             : $this->selectFromCandidates($draft, $groupCandidates, $target, $telegramUpdateId);
+                    } catch (ProductSearchCancelled $exception) {
+                        throw $exception;
                     } catch (Throwable $exception) {
                         report($exception);
                         $verified = [];
@@ -1362,6 +1475,8 @@ class ProductImageStorage
                         'height' => $converted['height'],
                         'file_size' => strlen($encoded),
                         'verification_status' => $candidate['verification_status'] ?? 'verified',
+                        'gallery_traversal_complete' => ($candidate['confirmed_gallery'] ?? false)
+                            && ! ($candidate['partial_gallery'] ?? false),
                         'verification_score' => isset($candidate['vision_score']) ? $candidate['vision_score'] / 100 : null,
                         'verification_model' => $candidate['vision_model'] ?? $candidate['verification_model'] ?? null,
                         'verification_notes' => $candidate['vision_reason'] ?? $candidate['verification_notes'] ?? null,
@@ -1393,6 +1508,8 @@ class ProductImageStorage
                     'file_size' => strlen($encoded),
                     'checksum' => $checksum,
                     'verification_status' => $candidate['verification_status'] ?? 'verified',
+                    'gallery_traversal_complete' => ($candidate['confirmed_gallery'] ?? false)
+                        && ! ($candidate['partial_gallery'] ?? false),
                     'verification_score' => isset($candidate['vision_score']) ? $candidate['vision_score'] / 100 : null,
                     'verification_model' => $candidate['vision_model'] ?? $candidate['verification_model'] ?? null,
                     'verification_notes' => $candidate['vision_reason'] ?? $candidate['verification_notes'] ?? null,
@@ -1445,9 +1562,11 @@ class ProductImageStorage
         $searchIncomplete = match (true) {
             $stored > 0 => $galleryIsPartial,
             $previousMedia->isEmpty(), $previousAwaitingVerification => true,
-            default => $draft->gallery_status !== 'complete' && $previousMedia->count() < $minimumCompleteGallerySize,
+            default => $draft->gallery_status !== 'complete' && ! $draft->gallery_confirmed_sufficient,
         };
-        $stopReason = $searchIncomplete
+        $retainedAssemblyPending = $skipOutstandingReconciliation
+            && $stored === 0 && $previousMedia->isNotEmpty() && $draft->reconciliationPending();
+        $stopReason = ($searchIncomplete || $retainedAssemblyPending)
             ? match (true) {
                 $this->costBudget->exceeded($telegramUpdateId) => 'cost_budget',
                 ! $this->timeBudget->canStart($telegramUpdateId, 20) => 'time_budget',
@@ -1487,15 +1606,39 @@ class ProductImageStorage
         // ProductSpecificationReconciler's own docblock for the full
         // contract and PROJECT_STRATEGY.md's "Единый источник карточки".
         $chosenSourceUrl = trim((string) ($chosenSource['url'] ?? ''));
-        $reconciliationOutcome = ($stored > 0 && is_array($chosenSource) && $chosenSourceUrl !== '')
-            ? $this->reconcileSpecifications($draft, $chosenSource, $telegramUpdateId)
+        // No photograph is not a reason to deliver nothing. With no gallery
+        // at all, the card is assembled against the page research selected
+        // and sent as a text card; approve() still refuses a draft without
+        // media, so it cannot be published until photos exist. A card
+        // already assembled against that page is not bought a second time,
+        // and a page this run saw selling a different product is not the
+        // card's source at all - the next page research found is.
+        $textOnlySourceUrl = $stored === 0 && $previousMedia->isEmpty()
+            ? $this->textCardSourceUrl($draft, $telegramUpdateId ?? $draft->telegram_update_id)
+            : '';
+        $assemblySource = match (true) {
+            $stored > 0 && is_array($chosenSource) && $chosenSourceUrl !== '' => $chosenSource,
+            $textOnlySourceUrl !== ''
+                && $draft->specifications_reconciled_source_url !== $textOnlySourceUrl => ['url' => $textOnlySourceUrl],
+            default => null,
+        };
+        $reconciliationOutcome = $assemblySource !== null
+            ? $this->reconcileSpecifications($draft, $assemblySource, $telegramUpdateId)
+            : null;
+        // A text card built from another research page makes that page the
+        // card's source; otherwise the draft would still point at the page it
+        // was not built from and read as unfinished.
+        $textCardSourceUrl = $stored === 0 && $assemblySource !== null && $reconciliationOutcome?->isReconciled()
+            ? $textOnlySourceUrl
             : null;
         $reconciliationPending = $reconciliationOutcome !== null && ! $reconciliationOutcome->isReconciled();
-        $reconciliationResult = $this->reconciliationCardFields($draft, $reconciliationOutcome, $chosenSourceUrl, $telegramUpdateId);
+        $reconciliationResult = $this->reconciliationCardFields(
+            $draft, $reconciliationOutcome, (string) ($assemblySource['url'] ?? $chosenSourceUrl), $telegramUpdateId,
+        );
 
         $identityNote = $stored > 0 && ! $identityConfirmedExactly
-            ? 'Источник фото не подтверждает дословно точный SKU/модель черновика - оператор не указывал '
-                .'точный SKU, и страница принята как подходящий вариант по смыслу запроса.'
+            ? 'Дословное совпадение полного SKU/модели с источником фото не установлено. '
+                .'Пригодность источника и готовность карточки определяются отдельными проверками.'
             : null;
         $reconciliationNote = $reconciliationPending
             ? 'Характеристики не сверены с источником фото'
@@ -1512,7 +1655,7 @@ class ProductImageStorage
         $galleryNotes = implode(' ', array_filter([$categoryHintNote, $identityNote, $reconciliationNote, $partialNote]));
 
         ProductDraft::withReconciliationWrite(fn () => $draft->update([...[
-            'primary_source_url' => $chosenSource['url'] ?? $draft->primary_source_url,
+            'primary_source_url' => $chosenSource['url'] ?? $textCardSourceUrl ?? $draft->primary_source_url,
             'image_urls' => $stored > 0 ? array_values(array_unique($storedSourceUrls)) : $draft->image_urls,
             'gallery_status' => $stored > 0
                 ? (($galleryIsPartial || $reconciliationPending) ? 'partial' : 'complete')
@@ -1526,7 +1669,7 @@ class ProductImageStorage
             'gallery_confirmed_sufficient' => $stored > 0
                 ? ! $galleryIsPartial
                 : ($previousMedia->isNotEmpty() ? $draft->gallery_confirmed_sufficient : false),
-            'gallery_notes' => $galleryNotes !== '' ? $galleryNotes : null,
+            'gallery_notes' => $galleryNotes !== '' ? $galleryNotes : ($retainedAssemblyPending ? $draft->gallery_notes : null),
             // An exhausted photo pass must not hide a stopped card assembly
             // and start another automatic queue cycle repeating its retries.
             'gallery_search_stop_reason' => $reconciliationPending
@@ -1545,8 +1688,8 @@ class ProductImageStorage
 
             if ($stored > 0) {
                 $methodLabel = match ($chosenMethod) {
-                    'playwright' => 'через AI-переобучение Playwright-рецепта',
-                    'playwright_vision' => 'через AI-переобучение Playwright-рецепта (неоднозначный слайдер, кадры проверены Vision)',
+                    'playwright' => 'через Playwright-рецепт галереи',
+                    'playwright_vision' => 'через Playwright-рецепт галереи (кадры проверены Vision)',
                     'fallback_playwright' => 'через Playwright-галерею карточки, найденной резервным поиском',
                     'fallback_playwright_vision' => 'через Playwright-галерею карточки, найденной резервным поиском (неоднозначный слайдер, кадры проверены Vision)',
                     'fallback_discovery' => 'через резервный поиск (источник не из карточек AI-исследования)',
@@ -1582,6 +1725,7 @@ class ProductImageStorage
      */
     private function reconcileSpecifications(ProductDraft $draft, array $chosenSource, ?int $telegramUpdateId): SpecificationReconciliationOutcome
     {
+        app(ProductSearchCancellation::class)->throwIfCancelled($telegramUpdateId);
         $url = trim((string) ($chosenSource['url'] ?? ''));
         $liveText = $this->resolver->specificationTextForPage($url);
         $specificationText = trim((string) ($liveText ?? ($chosenSource['_preflight_specification_text'] ?? '')));
@@ -1639,6 +1783,7 @@ class ProductImageStorage
                     'color' => $outcome->status === SpecificationReconciliationStatus::Reconciled ? $outcome->color : $draft->color,
                     'description' => $outcome->description ?? $draft->description,
                     'specifications' => $outcome->specifications ?? $draft->specifications,
+                    'translations' => $outcome->translations ?? $draft->translations,
                     'specifications_reconciled_source_url' => $outcome->reconciledSourceUrl,
                     'specifications_reconciliation_attempts' => 0,
                 ],
@@ -1646,12 +1791,12 @@ class ProductImageStorage
             ];
         }
 
+        // Spent money never stops card assembly (see ProductCardAssembly), so
+        // an exhausted assembly ran out of the job's time, whatever was spent.
         if ($outcome->isBudgetExhausted()) {
-            $updateId = $telegramUpdateId ?? $draft->telegram_update_id;
-
             return [
                 'fields' => [],
-                'stop_reason' => $this->costBudget->exceeded($updateId) ? 'cost_budget' : 'time_budget',
+                'stop_reason' => 'time_budget',
             ];
         }
 
@@ -1740,27 +1885,6 @@ class ProductImageStorage
         return $draft->media()->count();
     }
 
-    /**
-     * Which pages this search will open, and in what order.
-     *
-     * Everything from "here are the addresses research returned" to "here
-     * is the queue": ranking by past reliability, hoisting the draft's own
-     * primary source, dropping documents and pages this draft has already
-     * failed on, the two free filters (a colour the listing itself
-     * contradicts, and the shops we hold a recipe for), the per-host cap,
-     * the preflight budget, and finally the reuse-first ordering.
-     *
-     * Cut out of stage() as the first of several: at 1,273 lines that
-     * method is where a tab-name list could hide for a month, and this
-     * part of it answers one self-contained question with no state shared
-     * with the loop that follows. Behaviour is unchanged - the body is the
-     * same statements in the same order, and the suite is what says so.
-     *
-     * @param  array<int, array<string, mixed>>  $cycleSources
-     * @param  array<int, string>  $cycleExcludedSourceUrls
-     * @param  null|callable(string): void  $progress
-     * @return array{0: Collection<int, array<string, mixed>>, 1: Collection<int, array<string, mixed>>}
-     */
     private function buildSourceQueue(
         ProductDraft $draft,
         array $cycleSources,
@@ -1770,215 +1894,7 @@ class ProductImageStorage
         ?int $telegramUpdateId,
         ?callable $progress,
     ): array {
-        $rawSources = [
-            ...$cycleSources,
-            ...($draft->sources ?? []),
-        ];
-        $seenSourceUrls = [];
-        foreach ($rawSources as $source) {
-            $url = is_array($source) && is_string($source['url'] ?? null) ? $source['url'] : null;
-            $key = $url !== null ? rtrim($url, '/') : '';
-            $reason = match (true) {
-                $url === null => 'invalid_source',
-                $this->sourcePriority->isBlockedUrl($url) => 'blocked_domain',
-                isset($seenSourceUrls[$key]) => 'duplicate_url',
-                default => null,
-            };
-            if ($reason !== null) {
-                $this->attempts->record([
-                    'telegram_update_id' => $telegramUpdateId, 'product_draft_id' => $draft->id,
-                    'product_url' => $url ?? '', 'actor' => 'server', 'phase' => 'source_queue',
-                    'action' => 'filter_candidate', 'status' => 'skipped', 'decision' => $reason,
-                ]);
-            } else {
-                $seenSourceUrls[$key] = true;
-            }
-        }
-        $prioritizedSources = collect($this->sourcePriority->sortSources($rawSources, $draft->brand))
-            ->unique(fn (array $source): string => rtrim((string) ($source['url'] ?? ''), '/'))
-            ->values()
-            ->all();
-        // Historical reliability decides which source is selected before the
-        // cycle starts, but a failed HTML/Playwright probe during that same
-        // cycle must not immediately demote the chosen primary source before
-        // its already-known direct image URLs are downloaded and checked by
-        // Vision. Keep it first for this draft; only a real end-to-end gallery
-        // failure is allowed to advance to the remaining ranked sources.
-        if (is_string($draft->primary_source_url) && $draft->primary_source_url !== '') {
-            $primarySources = array_values(array_filter(
-                $prioritizedSources,
-                fn (array $source): bool => ($source['url'] ?? null) === $draft->primary_source_url,
-            ));
-            $otherSources = array_values(array_filter(
-                $prioritizedSources,
-                fn (array $source): bool => ($source['url'] ?? null) !== $draft->primary_source_url,
-            ));
-            $prioritizedSources = [...$primarySources, ...$otherSources];
-        }
-        $cardSources = collect($prioritizedSources)
-            ->filter(function (mixed $source) use ($draft, $cycleExcludedSourceUrls, $telegramUpdateId): bool {
-                $url = is_array($source) && is_string($source['url'] ?? null) ? $source['url'] : '';
-                $reason = match (true) {
-                    $url === '' => 'invalid_source',
-                    ! in_array($source['type'] ?? null, ['retailer', 'marketplace', 'manufacturer'], true) => 'not_product_card_type',
-                    // The same document test the fallback search has always applied.
-                    // Research produces this list, and nothing filtered it: a search
-                    // opened with a PDF catalogue as source #1 twice in one day
-                    // (acerid.com's brochure, gzhls.at's datasheet), each time
-                    // spending a fetch to be told it was not HTML.
-                    ! $this->candidateDiscovery->looksLikeHtmlProductPage($url) => 'non_html_document',
-                    $this->recipeRouter->domainIsBlocked($url) => 'blocked_by_recipe_router',
-                    $this->sourceExcludedForDraft($url, $draft) => 'excluded_for_draft',
-                    $this->sourceExcludedByUrls($url, $cycleExcludedSourceUrls) => 'already_finished_in_cycle',
-                    default => null,
-                };
-                if ($reason !== null) {
-                    $this->attempts->record([
-                        'telegram_update_id' => $telegramUpdateId, 'product_draft_id' => $draft->id,
-                        'product_url' => $url, 'actor' => 'server', 'phase' => 'source_queue',
-                        'action' => 'filter_candidate', 'status' => 'skipped', 'decision' => $reason,
-                        'output' => ['source_type' => $source['type'] ?? null],
-                    ]);
-                }
-
-                return $reason === null;
-            })
-            ->values();
-
-        // A colour filter stood here and it was a word list. It dropped a Grey
-        // listing for a Gray request, a "Золотой" one for a Gold request, and
-        // any card whose title said "Black Friday" - each because a vocabulary
-        // of colour words cannot survive spelling, language, or a marketing
-        // phrase. It was written the day after a list of English tab names was
-        // removed for being unfinishable, and it was the same mistake facing
-        // the other way. Colour is judged by Vision on the frames, where the
-        // evidence is, and what to do about it is the agent's call.
-        //
-        // The shops we already know how to open, moved to the front. This
-        // was decided inside preflight, which means it was decided after we had
-        // already spent a request on every candidate - while it follows from
-        // the host alone, and the recipes are per-domain now. Five recipes have
-        // been trained and not one has ever been reused; a search reaches them
-        // only by accident because nothing puts them first while it still costs
-        // nothing to do so.
-        $cardSources = $this->knownShopsFirst($cardSources);
-        $cardSources = $this->limitPerHost($cardSources, $progress);
-
-        if (config('product-images.source_preflight', true)) {
-            $progress?->__invoke('Быстро проверяю доступность карточек, CAPTCHA/WAF, статические фото и готовые рецепты до запуска Playwright.');
-            // Research may return dozens of candidates and each preflight is a
-            // real request. The ones past this budget keep their place in the
-            // queue and are opened only if the ones before them come to
-            // nothing - unchecked, not discarded.
-            $preflightBudget = max(1, (int) config('product-images.max_preflight_sources', 4));
-            $unchecked = $cardSources->slice($preflightBudget)->values();
-            $cardSources = $cardSources->take($preflightBudget)
-                ->map(function (array $source, int $index) use ($telegramUpdateId, $draft): array {
-                    $attemptCheckpoint = ProductSourceAttempt::query()->max('id') ?? 0;
-
-                    try {
-                        $preflight = $this->resolver->preflightSource($source, $telegramUpdateId);
-                    } finally {
-                        $this->associateAttemptsWithDraftSince($draft, $telegramUpdateId, $attemptCheckpoint);
-                    }
-
-                    return [
-                        ...$source,
-                        'image_urls' => array_values(array_unique([
-                            ...$this->cleanUrls($preflight['static_image_urls'] ?? []),
-                            ...$this->cleanUrls($source['image_urls'] ?? []),
-                        ])),
-                        '_preflight_blocked' => (bool) ($preflight['blocked'] ?? false),
-                        '_preflight_unavailable' => (bool) ($preflight['unavailable'] ?? false),
-                        '_preflight_active_recipe' => (bool) ($preflight['active_recipe'] ?? false),
-                        '_preflight_known_recipe_domain' => (bool) ($preflight['known_recipe_domain'] ?? false),
-                        // Set on a 401/403/429 or a detected JS/cookie gate:
-                        // the cheap HTTP fetch was refused, but a real
-                        // headless browser often gets through where it
-                        // can't - was computed and then never read by
-                        // anything downstream, so a bot-blocked official
-                        // source (e.g. a manufacturer's own store) silently
-                        // sank to the bottom on "zero evidence" exactly like
-                        // a genuinely irrelevant one, with nothing left to
-                        // tell them apart once ranked below a worse source
-                        // that merely fetched without erroring.
-                        '_preflight_browser_probe_required' => (bool) ($preflight['browser_probe_required'] ?? false),
-                        '_preflight_final_url' => (string) ($preflight['final_url'] ?? $source['url']),
-                        '_preflight_identity_evidence' => (string) ($preflight['identity_evidence'] ?? ''),
-                        '_preflight_specification_text' => (string) ($preflight['specification_text'] ?? ''),
-                        '_preflight_is_primary' => rtrim((string) ($source['url'] ?? ''), '/')
-                            === rtrim((string) ($draft->primary_source_url ?? ''), '/'),
-                        '_preflight_index' => $index,
-                    ];
-                })
-                ->filter(fn (array $source): bool => ! $source['_preflight_blocked'] && ! $source['_preflight_unavailable'])
-                ->sortByDesc(fn (array $source): array => [
-                    $this->identityMatcher->supportsSource($draft, $source) ? 1 : 0,
-                    $source['_preflight_active_recipe'] ? 1 : 0,
-                    $source['_preflight_known_recipe_domain'] ? 1 : 0,
-                    $source['_preflight_is_primary'] ? 1 : 0,
-                    $source['_preflight_browser_probe_required'] ? 1 : 0,
-                    count($source['image_urls'] ?? []) >= $minimumCompleteGallerySize ? 1 : 0,
-                    -$source['_preflight_index'],
-                ])
-                ->values();
-            // Behind the checked ones, in the order research gave them. A
-            // source nobody looked at is not a source that failed.
-            $cardSources = $cardSources->concat($unchecked)->values();
-        }
-
-        // Trying the next already-known candidate page (source #2, #3...)
-        // is not the optional "reserve" - it's core behaviour, bounded only
-        // by the per-source cost/time budget checks inside the loop below.
-        // fallbackSourcesEnabled() controls a genuinely separate, costlier
-        // mechanism further down: the broad AI web search for sources this
-        // draft's own research never found at all (discoverCandidates()).
-
-        // Sources whose domain already has a usable recipe are tried before any
-        // training happens - see ProductSourcePriority::reuseFirstQueue() for
-        // why, and for which of them are worth queueing twice.
-        $sourceQueue = collect($this->sourcePriority->reuseFirstQueue($cardSources->all(), $activeRecipeOnly));
-        $reuseFirstCount = $sourceQueue->count() - $cardSources->count();
-        $queueSummary = 'Очередь: '.$cardSources->count().' карточек; шагов обработки: '.$sourceQueue->count()
-            .' (включая отдельные пробы готовых рецептов: '.$reuseFirstCount.').';
-        $this->attempts->record([
-            'telegram_update_id' => $telegramUpdateId, 'product_draft_id' => $draft->id,
-            'product_url' => $draft->primary_source_url ?? '', 'actor' => 'server',
-            'phase' => 'source_queue', 'action' => 'queue_summary', 'status' => 'completed',
-            'message' => $queueSummary,
-            'output' => ['card_count' => $cardSources->count(), 'queue_count' => $sourceQueue->count(), 'reuse_probe_count' => $reuseFirstCount],
-        ]);
-        $progress?->__invoke($queueSummary);
-
-        if ($reuseFirstCount > 0) {
-            $progress?->__invoke(
-                'Ниже по списку есть карточки с готовыми рецептами ('.$reuseFirstCount
-                    .'): пробую их до обучения новых.',
-            );
-        }
-
-        foreach ($sourceQueue as $index => $source) {
-            $this->attempts->record([
-                'telegram_update_id' => $telegramUpdateId,
-                'product_draft_id' => $draft->id,
-                'product_url' => $source['url'],
-                'actor' => 'server',
-                'phase' => 'source_queue',
-                'action' => 'rank_candidate',
-                'status' => 'completed',
-                'decision' => 'queued',
-                'output' => [
-                    'position' => $index + 1,
-                    'recipe_priority' => $source['_queue_reason'] ?? 'unfamiliar_domain',
-                    'preflight_checked' => array_key_exists('_preflight_index', $source),
-                    'reuse_only' => (bool) ($source['_reuse_only'] ?? false),
-                ],
-            ]);
-        }
-
-        // The queue and the cards it was built from: one source below needs
-        // the addresses of every candidate, not the order they are opened in.
-        return [$sourceQueue, $cardSources];
+        return $this->sourceQueue->buildSourceQueue($draft, $cycleSources, $cycleExcludedSourceUrls, $activeRecipeOnly, $minimumCompleteGallerySize, $telegramUpdateId, $progress);
     }
 
     private function gallerySearchStrategy(ProductDraft $draft): string
@@ -2074,8 +1990,8 @@ class ProductImageStorage
         string $notes,
         ?callable $progress,
     ): GallerySourceResult {
-        return GallerySourceResult::fromVerifiedGallery(
-            $this->languageCheckedFrames($frames, $draft, $telegramUpdateId, $minimum, $progress),
+        $result = GallerySourceResult::fromVerifiedGallery(
+            $this->checkedGalleryFrames($frames, $draft, $telegramUpdateId, $minimum, $progress),
             $frames,
             $minimum,
             $target,
@@ -2083,6 +1999,20 @@ class ProductImageStorage
             $method,
             $notes,
         );
+
+        if (! $result->isComplete()) {
+            $this->attempts->record([
+                'telegram_update_id' => $telegramUpdateId, 'product_draft_id' => $draft->id,
+                'product_url' => $source['url'] ?? null, 'actor' => 'vision', 'phase' => 'image_verification',
+                'action' => 'verify_gallery',
+                'status' => $result->outcome === GalleryOutcome::Interrupted ? 'interrupted' : 'completed',
+                'decision' => $result->reason,
+                'input' => ['downloaded_images' => count($frames)],
+                'output' => ['accepted_images' => $result->outcome === GalleryOutcome::Interrupted ? null : count($result->candidates)],
+            ]);
+        }
+
+        return $result;
     }
 
     /**
@@ -2097,12 +2027,14 @@ class ProductImageStorage
     private function resumeInterruptedVerification(
         ProductDraft $draft,
         int $minimumCompleteGallerySize,
+        int $maximumImages,
         ?int $telegramUpdateId,
         ?callable $progress,
+        array &$completedSourceUrls,
     ): ?int {
         $pending = $draft->media()->where('verification_status', 'pending')->get();
 
-        if ($pending->isEmpty() || $pending->count() < $minimumCompleteGallerySize) {
+        if ($pending->isEmpty()) {
             return null;
         }
 
@@ -2129,7 +2061,7 @@ class ProductImageStorage
         }
 
         $progress?->__invoke('Возобновляю прерванную проверку уже скачанных фото: '.count($candidates).' шт.');
-        $checked = $this->languageCheckedFrames(
+        $checked = $this->checkedGalleryFrames(
             $candidates,
             $draft,
             $telegramUpdateId,
@@ -2138,22 +2070,57 @@ class ProductImageStorage
         );
         $this->destroy($candidates);
 
-        if ($checked === null || count($checked) < $minimumCompleteGallerySize) {
-            // Still no verdict, or too few frames survived one. Either way the
-            // frames stay pending and the ordinary search carries on - this was
-            // an attempt to save it a lap, not a replacement for it.
+        if ($checked === null) {
+            // No verdict yet: retain every frame for a subsequent attempt.
             return null;
         }
 
+        // Select the final album only AFTER checking the entire pending set.
+        $checked = array_slice($checked, 0, max(1, $maximumImages));
         $keptIds = collect($checked)->pluck('media_id')->filter()->all();
         $draft->media()->whereIn('id', $keptIds)->update([
             'verification_status' => 'source_verified',
             'verification_notes' => 'Проверка содержания завершена при продолжении поиска.',
         ]);
-        $draft->media()->whereNotIn('id', $keptIds)->where('verification_status', 'pending')->get()
+        $draft->media()->whereIn('id', $pending->modelKeys())->whereNotIn('id', $keptIds)->get()
             ->each(fn ($media) => $media->delete());
         $stored = $draft->media()->count();
-        $gallerySufficient = $stored >= $minimumCompleteGallerySize;
+        $traversalComplete = $pending->every(fn ($media): bool => $media->gallery_traversal_complete === true);
+        $gallerySufficient = $traversalComplete && count($keptIds) >= $minimumCompleteGallerySize;
+        // Removing the former first frame must not leave an album without a
+        // cover, or keep gaps in its ordering. Paths need not be renamed.
+        foreach ($draft->media()->get()->values() as $index => $media) {
+            $media->update(['sort_order' => $index, 'is_primary' => $index === 0,
+                'role' => ['primary', 'secondary'][$index] ?? 'detail']);
+        }
+        $draft->update([
+            'image_urls' => $draft->media()->orderBy('sort_order')->pluck('source_url')->filter()->values()->all(),
+            'gallery_status' => $stored > 0 ? 'partial' : 'missing',
+            // Persist the gallery's own verdict before card assembly: if
+            // assembly is cancelled, continuation must not reopen the browser.
+            'gallery_confirmed_sufficient' => $gallerySufficient,
+        ]);
+
+        if (! $gallerySufficient) {
+            // A real negative verdict must not remain pending. Keep the clean
+            // partial, remove rejected files, and let ordinary discovery run.
+            $sourceUrl = trim((string) $draft->primary_source_url);
+            if ($traversalComplete && $sourceUrl !== '') {
+                // We checked the whole already-finished gallery. Reopening it
+                // immediately would buy the same negative verdict again. An
+                // incomplete/unknown traversal is deliberately NOT exhausted.
+                $completedSourceUrls[] = $sourceUrl;
+                $this->attempts->record([
+                    'telegram_update_id' => $telegramUpdateId, 'product_draft_id' => $draft->id,
+                    'product_url' => $sourceUrl, 'actor' => 'vision', 'phase' => 'image_verification',
+                    'action' => 'verify_gallery', 'status' => 'completed',
+                    'decision' => 'verified_below_minimum',
+                    'output' => ['accepted_images' => count($keptIds), 'resumed' => true],
+                ]);
+            }
+
+            return null;
+        }
         // This path has no $chosenSource of its own (it finishes a verdict
         // on frames a prior cycle already downloaded, never re-deriving
         // which source produced them) - the persisted column is what it has.
@@ -2174,14 +2141,16 @@ class ProductImageStorage
         return $stored;
     }
 
-    private function languageCheckedFrames(
+    private function checkedGalleryFrames(
         array $candidates,
         ProductDraft $draft,
         ?int $telegramUpdateId,
         int $minimumImages,
         ?callable $progress,
     ): ?array {
-        $kept = $this->visionVerifier->withoutForeignTextFrames($candidates, $draft, $telegramUpdateId);
+        app(ProductSearchCancellation::class)->throwIfCancelled($telegramUpdateId);
+        $kept = $this->visionVerifier->checkedGalleryFrames($candidates, $draft, $telegramUpdateId);
+        app(ProductSearchCancellation::class)->throwIfCancelled($telegramUpdateId);
 
         if ($kept === null) {
             // Accepting the gallery anyway would turn a timeout into "Vision
@@ -2193,12 +2162,12 @@ class ProductImageStorage
                 'product_draft_id' => $draft->id,
                 'actor' => 'vision',
                 'phase' => 'image_verification',
-                'action' => 'check_frame_text_language',
+                'action' => 'check_frame_content_and_language',
                 'status' => 'interrupted',
-                'decision' => 'language_check_unavailable',
+                'decision' => 'gallery_check_unavailable',
                 'input' => ['frames' => count($candidates)],
             ]);
-            $progress?->__invoke('Языковая проверка кадров недоступна; галерею целиком не принимаю, сохраняю как частичный результат.');
+            $progress?->__invoke('Проверка содержания и текста кадров не завершена; сохраняю найденное без подтверждения.');
 
             return null;
         }
@@ -2214,12 +2183,13 @@ class ProductImageStorage
             'product_draft_id' => $draft->id,
             'actor' => 'vision',
             'phase' => 'image_verification',
-            'action' => 'check_frame_text_language',
+            'action' => 'check_frame_content_and_language',
             'status' => $enough ? 'completed' : 'failed',
             'decision' => match (true) {
                 $removed === 0 => 'accept_all_frames',
-                $enough => 'drop_frames_with_foreign_text',
-                default => 'keep_partial_after_foreign_text',
+                $enough => 'drop_non_product_or_foreign_text_frames',
+                $kept === [] => 'reject_all_frames',
+                default => 'keep_partial_after_frame_review',
             },
             'output' => ['removed' => $removed, 'kept' => count($kept)],
         ]);
@@ -2230,8 +2200,8 @@ class ProductImageStorage
             // partial result rather than discarding it with the gallery.
             $this->destroyUnselected($candidates, $kept);
             $progress?->__invoke($enough
-                ? "Vision убрал {$removed} кадр(а/ов) с текстом на неподдерживаемом языке; остаётся ".count($kept).'.'
-                : "Vision убрал {$removed} кадр(а/ов) с иностранным текстом; полной галереи не осталось, сохраняю "
+                ? "Vision убрал {$removed} кадр(а/ов) без товара или с неподдерживаемым языком; остаётся ".count($kept).'.'
+                : "Vision убрал {$removed} кадр(а/ов) без товара или с неподдерживаемым языком; пригодных кадров осталось "
                     .count($kept).' как частичный результат и проверяю следующий источник.');
         }
 
@@ -2253,6 +2223,8 @@ class ProductImageStorage
                 $minimumImages,
                 $telegramUpdateId,
             );
+        } catch (ProductSearchCancelled $exception) {
+            throw $exception;
         } catch (Throwable $exception) {
             report($exception);
 
@@ -2359,7 +2331,7 @@ class ProductImageStorage
      *
      * @param  null|callable(string): void  $progress
      */
-    public function replaceDraftMedia(ProductDraft $draft, ProductDraftMedia $media, ?callable $progress = null, ?int $telegramUpdateId = null): ProductDraftMedia
+    public function replaceDraftMedia(ProductDraft $draft, ProductDraftMedia $media, ?callable $progress = null, ?int $telegramUpdateId = null, ?callable $beforeSave = null): ProductDraftMedia
     {
         throw_unless(
             $draft->status === 'pending_review' && $media->product_draft_id === $draft->id,
@@ -2392,15 +2364,19 @@ class ProductImageStorage
             // for a single image is disproportionate, so this stays static-
             // HTML-only. A genuinely gallery-wide problem has its own,
             // heavier "Все фото" action (full restage) for that.
+            $resolvedUrls = $this->resolver->resolve(
+                [$source],
+                10,
+                $progress ? fn (string $level, string $message) => $progress($message) : null,
+                $telegramUpdateId,
+                staticOnly: true,
+            );
+            if ($this->resolvedSourceConflicts($draft, $source['url'], $telegramUpdateId, $progress)) {
+                continue;
+            }
             $urls = array_values(array_diff($this->cleanUrls([
                 ...($source['image_urls'] ?? []),
-                ...$this->resolver->resolve(
-                    [$source],
-                    10,
-                    $progress ? fn (string $level, string $message) => $progress($message) : null,
-                    $telegramUpdateId,
-                    staticOnly: true,
-                ),
+                ...$resolvedUrls,
             ]), $existingUrls));
             $candidates = $this->downloadCandidates($urls, $draft);
 
@@ -2438,6 +2414,9 @@ class ProductImageStorage
         $newPath = null;
 
         try {
+            if ($beforeSave) {
+                $beforeSave();
+            }
             $converted = $this->encoder->toWebp($candidate['image']);
             $checksum = hash('sha256', $converted['bytes']);
             $newPath = "drafts/{$draft->id}/replacement-{$media->id}-".substr($checksum, 0, 12).'.webp';
@@ -2541,6 +2520,7 @@ class ProductImageStorage
         $excludedHashes = $this->perceptualHashesForMedia($existingMedia);
         $currentSource = $this->currentDraftSource($draft);
         $sources = $currentSource ? [$currentSource] : [];
+        $activeRecipeOnly = $this->gallerySearchStrategy($draft) === Category::GALLERY_SEARCH_VISION_FIRST;
         $selected = [];
 
         foreach ($sources as $sourceIndex => $source) {
@@ -2562,14 +2542,24 @@ class ProductImageStorage
 
             $needed = $remaining - count($selected);
             $knownUrls = array_values(array_unique([...$existingUrls, ...collect($selected)->pluck('source_url')->all()]));
-            $urls = array_values(array_diff($this->cleanUrls([
-                ...($source['image_urls'] ?? []),
-                ...$this->resolver->resolve(
-                    [[...$source, ProductRequestContext::SOURCE_KEY => $draft->id]],
+            $attemptCheckpoint = ProductSourceAttempt::query()->max('id') ?? 0;
+            try {
+                $resolvedUrls = $this->resolver->resolve(
+                    [$this->gallerySourceContext->forDraft($draft, $source)],
                     max(4, $needed * 2),
                     $progress ? fn (string $level, string $message) => $progress($message) : null,
                     $telegramUpdateId,
-                ),
+                    activeRecipeOnly: $activeRecipeOnly,
+                );
+            } finally {
+                $this->attempts->associateWithDraftSince($draft, $telegramUpdateId, $attemptCheckpoint);
+            }
+            if ($this->resolvedSourceConflicts($draft, $source['url'], $telegramUpdateId, $progress)) {
+                continue;
+            }
+            $urls = array_values(array_diff($this->cleanUrls([
+                ...($source['image_urls'] ?? []),
+                ...$resolvedUrls,
             ]), $knownUrls));
             $candidates = $this->downloadCandidates($urls, $draft);
 
@@ -2586,24 +2576,9 @@ class ProductImageStorage
             $selected = [...$selected, ...$newlySelected];
         }
 
-        if (count($selected) < $remaining) {
-            if ($progress) {
-                $progress('Источники исчерпаны; выполняю дополнительный поиск.');
-            }
-
-            $knownUrls = array_values(array_unique([...$existingUrls, ...collect($selected)->pluck('source_url')->all()]));
-            $candidates = $this->downloadCandidates(
-                $this->currentDraftSourceUrls($draft, max(4, $remaining * 2), $progress, $telegramUpdateId),
-                $draft,
-            );
-            $verified = $this->selectFromCandidatesSafely($draft, $candidates, $remaining - count($selected), $telegramUpdateId, $progress);
-            $newlySelected = $this->removeNearDuplicates($verified, [
-                ...$excludedHashes,
-                ...$this->perceptualHashesForCandidates($selected),
-            ]);
-            $this->destroyUnselected($candidates, $newlySelected);
-            $selected = [...$selected, ...$newlySelected];
-        }
+        // Top-up keeps the chosen gallery. Reopening it here used to repeat the
+        // same training after a terminal result, under a misleading "new search"
+        // message. Choosing a different gallery belongs to the replacement flow.
 
         $roles = ['primary', 'secondary', 'detail'];
         $stored = 0;
@@ -2751,35 +2726,7 @@ class ProductImageStorage
 
     private function sourceExcludedForDraft(string $url, ProductDraft $draft): bool
     {
-        $host = ProductSourcePriority::host($url);
-
-        if ($host === '') {
-            return false;
-        }
-
-        return collect($draft->excluded_gallery_source_urls ?? [])
-            ->filter(fn (mixed $excluded): bool => is_string($excluded))
-            ->contains(fn (string $excluded): bool => ProductSourcePriority::hostsMatch(
-                $host,
-                ProductSourcePriority::host($excluded),
-            ));
-    }
-
-    /** @param array<int, string> $excludedUrls */
-    private function sourceExcludedByUrls(string $url, array $excludedUrls): bool
-    {
-        $host = ProductSourcePriority::host($url);
-
-        if ($host === '') {
-            return false;
-        }
-
-        return collect($excludedUrls)
-            ->filter(fn (mixed $excluded): bool => is_string($excluded))
-            ->contains(fn (string $excluded): bool => ProductSourcePriority::hostsMatch(
-                $host,
-                ProductSourcePriority::host($excluded),
-            ));
+        return $this->sourceQueue->sourceExcludedForDraft($url, $draft);
     }
 
     /** @return array<string, mixed>|null */
@@ -2808,161 +2755,68 @@ class ProductImageStorage
         ];
     }
 
-    /** @return array<int, string> */
-    private function currentDraftSourceUrls(ProductDraft $draft, int $limit, ?callable $progress = null, ?int $telegramUpdateId = null, bool $staticOnly = false): array
+    /** A zero-photo browser result must not revive seeds from a conflicting page. */
+    private function resolvedSourceConflicts(ProductDraft $draft, string $url, ?int $runId, ?callable $progress): bool
     {
-        $source = $this->currentDraftSource($draft);
-
-        if (! $source) {
-            return [];
+        $context = $this->resolver->sourceContextForPage($url);
+        if ($context === null || app(ProductSourceIdentityGate::class)->assess($draft, $context, $runId) !== 'conflicting') {
+            return false;
         }
+        $this->attempts->record([
+            'telegram_update_id' => $runId, 'product_draft_id' => $draft->id,
+            'product_url' => $context['url'] ?? $url, 'actor' => 'identity_validator',
+            'phase' => 'source_selection', 'action' => 'validate_resolved_source_before_seed_merge',
+            'status' => 'failed', 'decision' => 'reject_runtime_identifier_mismatch',
+            'input' => ['url' => $url], 'output' => $context,
+        ]);
+        $progress?->__invoke('Источник открыл другую комплектацию; старые ссылки на его фото не использую.');
 
-        return $this->cleanUrls([
-            ...($source['image_urls'] ?? []),
-            ...$this->resolver->resolve(
-                [[...$source, ProductRequestContext::SOURCE_KEY => $draft->id]],
-                $limit,
-                $progress ? fn (string $level, string $message) => $progress($message) : null,
-                $telegramUpdateId ?? $draft->telegram_update_id,
-                staticOnly: $staticOnly,
-            ),
-        ], $draft->color);
+        return true;
     }
 
-    /** @param array<int, mixed> $urls @return array<int, string> */
     /**
-     * Shops we already know how to open, moved to the front.
-     *
-     * Derived from the host and the recipe library - one query, no request to
-     * anybody. It used to be decided inside preflight, which is to say after a
-     * request had already been spent on every candidate, and by then the order
-     * could no longer save any.
-     *
-     * Nothing is dropped: a shop with a recipe is a cheaper first try, not a
-     * better product, and the identity checks downstream are unchanged.
-     *
-     * @param  Collection<int, array<string, mixed>>  $sources
-     * @return Collection<int, array<string, mixed>>
+     * The page a text card is assembled against: the one research chose, or
+     * the next page research found when this run saw the chosen one selling
+     * another product (request #94 left the operator no card at all).
      */
+    private function textCardSourceUrl(ProductDraft $draft, ?int $runId): string
+    {
+        return (string) collect([$draft->primary_source_url, ...collect($draft->sources ?? [])->pluck('url')->all()])
+            ->filter(fn (mixed $url): bool => is_string($url) && trim($url) !== '')
+            ->map(fn (string $url): string => trim($url))
+            ->unique()
+            ->first(fn (string $url): bool => ! $this->rejectedAsDifferentProduct($draft, $url, $runId), '');
+    }
+
+    /** Whether this run already saw the page (as asked for or as landed on) selling another product. */
+    private function rejectedAsDifferentProduct(ProductDraft $draft, string $url, ?int $runId): bool
+    {
+        $url = rtrim($url, '/');
+
+        return ProductSourceAttempt::query()
+            ->where('product_draft_id', $draft->id)
+            ->where('telegram_update_id', $runId)
+            ->where('decision', 'reject_runtime_identifier_mismatch')
+            ->get(['product_url', 'input'])
+            ->contains(fn (ProductSourceAttempt $attempt): bool => in_array($url, [
+                rtrim((string) $attempt->product_url, '/'),
+                rtrim((string) ($attempt->input['url'] ?? ''), '/'),
+            ], true));
+    }
+
     private function knownShopsFirst(Collection $sources): Collection
     {
-        $known = [];
-        $sources = $sources->map(function (array $source) use (&$known): array {
-            $url = (string) ($source['url'] ?? '');
-            $host = $this->recipeRouter->domainForUrl($url);
-            $active = $host !== '' && $this->recipeRouter->activeRecipeForUrl($url) !== null;
-            $domainActive = $host !== '' && ($known[$host] ??= $this->recipeRouter->domainHasActiveRecipe($url));
-
-            return [
-                ...$source,
-                '_preflight_active_recipe' => $active,
-                '_preflight_known_recipe_domain' => $domainActive,
-                '_queue_reason' => $active ? 'matching_active_recipe' : ($domainActive ? 'known_recipe_domain' : 'unfamiliar_domain'),
-            ];
-        });
-        // Stable partitions preserve reliability and discovery order on ties.
-        [$exact, $others] = $sources->partition(fn (array $source): bool => $source['_preflight_active_recipe']);
-        [$compatible, $unknown] = $others->partition(fn (array $source): bool => $source['_preflight_known_recipe_domain']);
-
-        return $exact->concat($compatible)->concat($unknown)->values();
+        return $this->sourceQueue->knownShopsFirst($sources);
     }
 
-    /**
-     * Diversify the first pass without deleting any candidate page.
-     *
-     * The fallback search has had this since the day research returned four
-     * acer.com links and the bot visited all four inside three minutes - they
-     * were never four chances, they were one shop asked four times, and they
-     * failed together while looking exactly like a scraper. The main queue,
-     * which is where researched cards actually go, never got the same rule.
-     *
-     * It matters more now that breadth is asked for: fifty candidates from a
-     * widely-sold product can easily be six pages of the same three retailers.
-     * Extra pages remain at the end: another path can have a working layout or
-     * the exact variant even when the first two pages did not.
-     *
-     * @param  Collection<int, array<string, mixed>>  $sources
-     * @return Collection<int, array<string, mixed>>
-     */
     private function limitPerHost(Collection $sources, ?callable $progress): Collection
     {
-        $cap = max(1, (int) config('product-images.max_sources_per_host', 2));
-        $seen = [];
-        $dropped = 0;
-
-        [$kept, $deferred] = $sources->partition(function (array $source) use ($cap, &$seen, &$dropped): bool {
-            $host = $this->recipeRouter->domainForUrl((string) ($source['url'] ?? ''));
-
-            if ($host === '') {
-                return true;
-            }
-
-            $seen[$host] = ($seen[$host] ?? 0) + 1;
-            $dropped += $seen[$host] > $cap ? 1 : 0;
-
-            return $seen[$host] <= $cap;
-        });
-
-        if ($dropped > 0) {
-            $progress?->__invoke(sprintf(
-                'Перенёс %d дополнительных страниц магазинов в конец очереди: сначала до %d с домена, остальные сохранены.',
-                $dropped,
-                $cap,
-            ));
-        }
-
-        return $kept->concat($deferred)->values();
+        return $this->sourceQueue->limitPerHost($sources, $progress);
     }
 
     private function cleanUrls(array $urls, ?string $variantHint = null): array
     {
-        $limit = (int) config('product-images.download_limit', 20);
-
-        $ranked = collect($urls)
-            ->filter(fn (mixed $url): bool => is_string($url))
-            ->map(fn (string $url): string => self::normalizeCandidateUrl($url))
-            ->filter(fn (string $url): bool => $url !== '' && ! $this->looksLikeJunk($url))
-            ->map(fn (string $url): array => [
-                'url' => $url,
-                'gallery_rank' => $this->resolver->isConfirmedGalleryImage($url)
-                    ? 2
-                    : ($this->resolver->isPartialGalleryImage($url) ? 1 : 0),
-                'variant_rank' => self::candidateMatchesVariant($url, $variantHint) ? 1 : 0,
-                'quality' => self::candidateUrlQualityScore($url),
-            ]);
-
-        // A family landing page carries every colourway at once, and the
-        // download limit then decides which colour the card gets by whichever
-        // renditions happened to score higher. Seen live on a Surface Laptop in
-        // Platinum: the same hero shot existed as ...-platinum-... and
-        // ...-ocean-..., and only the limit stood between the card and a blue
-        // laptop. When the product has a colour and some candidates name it,
-        // those come first - no list of colour names, just the word the draft
-        // already knows. When nothing names it the signal is absent and the
-        // order is untouched, because inventing one would be worse than none.
-        $namesTheVariant = $ranked->contains(fn (array $item): bool => $item['variant_rank'] === 1);
-        $ranked = $ranked
-            ->sort(fn (array $left, array $right): int => ($right['gallery_rank'] <=> $left['gallery_rank'])
-                ?: ($namesTheVariant ? ($right['variant_rank'] <=> $left['variant_rank']) : 0)
-                ?: ($right['quality'] <=> $left['quality'])
-            )
-            ->unique(fn (array $item): string => self::imageAssetKey($item['url']))
-            ->values();
-
-        // A trained/confirmed (or partially confirmed) gallery must never be
-        // truncated away by the generic candidate-count cap meant to bound
-        // how many *unverified* static URLs get tried - real case: a Dell
-        // page with a full 10-image confirmed gallery plus ~50 unrelated
-        // static "feature module" images lost 9 of the 10 confirmed photos
-        // here because they scored lower by size/quality alone and fell
-        // outside download_limit before gallery_rank was ever considered
-        // downstream. Only the unranked tail counts against the limit.
-        $confirmedOrPartialCount = $ranked->filter(fn (array $item): bool => $item['gallery_rank'] > 0)->count();
-
-        return $ranked
-            ->take(max($limit, $confirmedOrPartialCount))
-            ->pluck('url')
-            ->all();
+        return $this->candidateUrls->cleanUrls($urls, $variantHint);
     }
 
     /**
@@ -2978,35 +2832,9 @@ class ProductImageStorage
     /** @var array<int, string> Domains degraded this call by degradeRecipesAfterTechnicalFailure(). */
     private array $lastDegradedDomains = [];
 
-    /** @param array<int, string> $urls @return array<int, array<string, mixed>> */
-    /**
-     * Shrink a decoded frame to the size it will be published at.
-     *
-     * Everything past this is a thumbnail for Vision, a perceptual hash, or a
-     * WebP the encoder caps at the same edge - none of them need the original
-     * pixels, and holding them is what emptied the memory budget three frames
-     * into a gallery.
-     */
     private function downscaleForWork(GdImage $image): GdImage
     {
-        $edge = (int) config('product-images.working_edge', 1600);
-        $width = imagesx($image);
-        $height = imagesy($image);
-
-        if ($edge < 1 || ($width <= $edge && $height <= $edge)) {
-            return $image;
-        }
-
-        $ratio = min($edge / $width, $edge / $height);
-        $scaled = imagescale($image, max(1, (int) round($width * $ratio)), max(1, (int) round($height * $ratio)));
-
-        if (! $scaled instanceof GdImage) {
-            return $image;
-        }
-
-        imagedestroy($image);
-
-        return $scaled;
+        return $this->imageGeometry->downscaleForWork($image);
     }
 
     private function downloadCandidates(array $urls, ProductDraft $draft): array
@@ -3228,7 +3056,16 @@ class ProductImageStorage
 
         $this->degradeRecipesAfterTechnicalFailure($urls, $candidates, $sourcePagesByUrl);
 
-        return $candidates;
+        $unique = $this->renditions->unique($candidates);
+        $keptIds = array_map(fn (array $candidate): int => spl_object_id($candidate['image']), $unique);
+        foreach ($candidates as $candidate) {
+            if (! in_array(spl_object_id($candidate['image']), $keptIds, true)) {
+                $this->lastDownloadRejections[] = ['url' => $candidate['source_url'], 'reason' => 'duplicate_rendition'];
+            }
+        }
+        $this->destroyUnselected($candidates, $unique);
+
+        return $unique;
     }
 
     /** @return array<string, int> */
@@ -3366,12 +3203,15 @@ class ProductImageStorage
             $groupContext = $group['context'];
             $groupPageUrl = $group['page_url'];
 
+            $groupIdentity = is_array($groupContext) && $groupPageUrl
+                ? app(ProductSourceIdentityGate::class)->assess($draft, $groupContext, $telegramUpdateId)
+                : 'unavailable';
+
             if (
                 is_array($groupContext)
                 && $groupPageUrl
-                && ($this->identityMatcher->conflictsSource($draft, $groupContext)
-                    || ($this->identityMatcher->requiresExactIdentifier($draft)
-                        && ! $this->identityMatcher->supportsSource($draft, $groupContext)))
+                && ($groupIdentity === 'conflicting'
+                    || ($groupIdentity === 'uncertain' && $this->identityMatcher->requiresExactIdentifier($draft)))
             ) {
                 $this->attempts->record([
                     'telegram_update_id' => $telegramUpdateId,
@@ -3381,7 +3221,7 @@ class ProductImageStorage
                     'phase' => 'source_selection',
                     'action' => 'validate_discovered_product_identity',
                     'status' => 'failed',
-                    'decision' => 'reject_runtime_identifier_mismatch',
+                    'decision' => $groupIdentity === 'conflicting' ? 'reject_runtime_identifier_mismatch' : 'reject_unconfirmed_identifier',
                     'output' => ['source_context' => $groupContext],
                 ]);
                 $progress?->__invoke('Найденная страница пропущена: после открытия она не подтверждает точную модель/SKU товара · '.$groupPageUrl);
@@ -3487,28 +3327,12 @@ class ProductImageStorage
         return $safetyLimited && $completedRounds >= $safetyRounds;
     }
 
-    /**
-     * Nested resolver/trainer services only know the Telegram update that
-     * started the current search cycle. During continuation that update is
-     * the callback, while the draft still points at its original message, so
-     * recorder inference cannot bind the attempts on its own. Attach every
-     * attempt created by this exact nested call before continuation logic
-     * decides whether the source is terminal or retryable.
-     */
     private function associateAttemptsWithDraftSince(
         ProductDraft $draft,
         ?int $telegramUpdateId,
         int $afterId,
     ): void {
-        if (! $telegramUpdateId) {
-            return;
-        }
-
-        ProductSourceAttempt::query()
-            ->where('id', '>', $afterId)
-            ->where('telegram_update_id', $telegramUpdateId)
-            ->whereNull('product_draft_id')
-            ->update(['product_draft_id' => $draft->id]);
+        $this->attempts->associateWithDraftSince($draft, $telegramUpdateId, $afterId);
     }
 
     /**
@@ -3550,6 +3374,8 @@ class ProductImageStorage
     ): array {
         try {
             return $this->selectFromCandidates($draft, $candidates, $remaining, $telegramUpdateId);
+        } catch (ProductSearchCancelled $exception) {
+            throw $exception;
         } catch (Throwable $exception) {
             report($exception);
             $progress?->__invoke('Vision временно недоступен; считаю, что новых фото на этом шаге не найдено.');
@@ -3561,6 +3387,7 @@ class ProductImageStorage
     /** @param array<int, array<string, mixed>> $candidates @return array<int, array<string, mixed>> */
     private function verify(ProductDraft $draft, array $candidates, int $remaining, ?int $telegramUpdateId = null): array
     {
+        app(ProductSearchCancellation::class)->throwIfCancelled($telegramUpdateId);
         if ($candidates === []) {
             return [];
         }
@@ -3571,6 +3398,7 @@ class ProductImageStorage
             $maxBatches = max(1, (int) config('product-images.vision_max_batches', 2));
 
             foreach (array_slice(array_chunk($candidates, $batchSize), 0, $maxBatches) as $batch) {
+                app(ProductSearchCancellation::class)->throwIfCancelled($telegramUpdateId);
                 $needed = $remaining - count($selected);
 
                 if ($needed <= 0) {
@@ -3578,6 +3406,7 @@ class ProductImageStorage
                 }
 
                 $verifiedBatch = $this->visionVerifier->select($draft, $batch, $needed, $telegramUpdateId);
+                app(ProductSearchCancellation::class)->throwIfCancelled($telegramUpdateId);
                 $selected = [...$selected, ...$verifiedBatch];
             }
 
@@ -3589,13 +3418,7 @@ class ProductImageStorage
 
     private function looksLikeJunk(string $url): bool
     {
-        return ImageUrlHeuristics::containsMarker($url, [
-            ...ImageUrlHeuristics::COMMON_MARKERS,
-            ...ImageUrlHeuristics::THUMBNAIL_MARKERS,
-            ...ImageUrlHeuristics::TRACKING_MARKERS,
-            ...ImageUrlHeuristics::ASSET_MARKERS,
-            'avatar', 'icon-', '/icon/', '/flags/', 'locale-flag', '/blogs/', '/category/icons/', 'banner',
-        ]);
+        return $this->candidateUrls->looksLikeJunk($url);
     }
 
     /** @param array<int, array<string, mixed>> $candidates */
@@ -3752,169 +3575,24 @@ class ProductImageStorage
         }));
     }
 
-    /**
-     * Normalize only the syntax of an actually observed URL. Rendition
-     * canonicalization belongs in imageAssetKey(); this return value is a
-     * download target and therefore must never contain a guessed size.
-     */
     public static function normalizeCandidateUrl(string $url): string
     {
-        return trim(html_entity_decode($url, ENT_QUOTES | ENT_HTML5));
+        return ImageUrls::normalizeCandidateUrl($url);
     }
 
-    /**
-     * Identity of the physical gallery frame, independent from its CDN
-     * rendition. Unlike normalizeCandidateUrl(), this key is never fetched.
-     */
     public static function imageAssetKey(string $url): string
     {
-        $normalized = self::normalizeCandidateUrl($url);
-        $host = Str::lower((string) parse_url($normalized, PHP_URL_HOST));
-        $path = (string) parse_url($normalized, PHP_URL_PATH);
-
-        if ($host === 'static.bhphoto.com' || str_ends_with($host, '.bhphoto.com')) {
-            return 'bh:'.Str::lower((string) pathinfo($path, PATHINFO_BASENAME));
-        }
-
-        if ($host === 'm.media-amazon.com' || str_ends_with($host, '.media-amazon.com')) {
-            $normalized = preg_replace(
-                '#\._[^/]+(?=\.(?:jpe?g|png|webp)(?:$|\?))#i',
-                '',
-                $normalized,
-            ) ?: $normalized;
-        }
-
-        if ($host === 'dlcdnwebimgs.asus.com' || str_ends_with($host, '.dlcdnwebimgs.asus.com')) {
-            $normalized = preg_replace('#//w\d{2,5}(?=\?|$)#i', '', $normalized) ?: $normalized;
-        }
-
-        if (preg_match('#/is/image/#i', $path) === 1) {
-            $normalized = Str::before($normalized, '?');
-        }
-
-        if (str_ends_with($host, 'shopify.com') || preg_match('#/cdn/shop/(?:files|products)/#i', $path) === 1) {
-            $normalized = preg_replace(
-                '/_(?:\d+x\d*|pico|icon|thumb|small|compact|medium|large|grande|original|master)(?:@\dx)?(?=\.(?:jpe?g|png|webp|gif)(?:$|\?))/i',
-                '',
-                $normalized,
-            ) ?: $normalized;
-            $base = Str::before($normalized, '?');
-            parse_str((string) parse_url($normalized, PHP_URL_QUERY), $query);
-            foreach (['width', 'height', 'w', 'h'] as $key) {
-                unset($query[$key]);
-            }
-            $normalized = $base.($query === [] ? '' : '?'.http_build_query($query));
-        }
-
-        // LDLC encodes only the requested rendition in /r705/, /r1600/, ...;
-        // the remainder of the path is the physical gallery frame.
-        if ($host === 'media.ldlc.com' || str_ends_with($host, '.media.ldlc.com')) {
-            $normalized = preg_replace('#/r\d{2,5}/#i', '/__rendition__/', $normalized) ?: $normalized;
-        }
-        $normalized = preg_replace(
-            '/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:_(?:\d{2,5}|sea))?\.(?:jpe?g|png|webp|gif|avif)(?=$|\?)/i',
-            '$1.__image__',
-            $normalized,
-        ) ?: $normalized;
-
-        // A bare "WxH" or "Nw" path segment (BigCommerce Stencil:
-        // /stencil/1280x1280/products/.../file.jpg vs /stencil/640w/... same
-        // file - a real case that reached production undeduped) is a size
-        // bucket, not part of the asset identity, wherever it sits in the
-        // path - unlike the named buckets below it is rarely adjacent to the
-        // filename.
-        $normalized = preg_replace(
-            '#/(?:[a-z][a-z_-]*)?\d{2,5}(?:x\d{2,5}|w)/#i',
-            '/__rendition__/',
-            $normalized,
-        ) ?: $normalized;
-
-        return Str::lower(preg_replace(
-            '#/(?:thumb(?:nail)?s?|small|medium|large|xlarge|xxlarge|original)/(?=[^/?]+(?:\?|$))#i',
-            '/__rendition__/',
-            $normalized,
-        ) ?: $normalized);
+        return ImageUrls::imageAssetKey($url);
     }
 
-    /**
-     * Whether a candidate URL names the colour the draft asked for.
-     *
-     * Deliberately no list of colour names: the draft already holds the word,
-     * and the only question is whether the URL says it too. Matched on token
-     * boundaries so "blue" cannot match "bluetooth", and only for a word long
-     * enough to mean something on its own.
-     */
     private static function candidateMatchesVariant(string $url, ?string $variantHint): bool
     {
-        $tokens = collect(preg_split('/[^\p{L}\p{N}]+/u', mb_strtolower((string) $variantHint)) ?: [])
-            ->filter(fn (string $token): bool => mb_strlen($token) >= 4)
-            ->values();
-
-        if ($tokens->isEmpty()) {
-            return false;
-        }
-
-        $haystack = mb_strtolower((string) parse_url($url, PHP_URL_PATH));
-
-        return $tokens->contains(fn (string $token): bool => preg_match(
-            '/(?:^|[^a-z0-9])'.preg_quote($token, '/').'(?:[^a-z0-9]|$)/i',
-            $haystack,
-        ) === 1);
+        return ImageUrls::candidateMatchesVariant($url, $variantHint);
     }
 
     private static function candidateUrlQualityScore(string $url): int
     {
-        $path = (string) parse_url($url, PHP_URL_PATH);
-        $directoryScore = 0;
-
-        if (preg_match(
-            '#/(thumb(?:nail)?s?|small|medium|large|xlarge|xxlarge|original)/(?=[^/?]+(?:\?|$))#i',
-            $path,
-            $matches,
-        ) === 1) {
-            $directoryScore = match (Str::lower($matches[1])) {
-                'thumb', 'thumbnail', 'thumbnails' => 100,
-                'small' => 300,
-                'medium' => 600,
-                'large' => 1000,
-                'xlarge' => 1600,
-                'xxlarge' => 2200,
-                'original' => 3000,
-                default => 0,
-            };
-        }
-
-        $uuidRenditionScore = 0;
-
-        if (preg_match(
-            '/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}_(\d{2,5}|sea)(?=\.(?:jpe?g|png|webp|gif|avif)$)/i',
-            $path,
-            $matches,
-        ) === 1) {
-            $uuidRenditionScore = Str::lower($matches[1]) === 'sea'
-                ? 2000
-                : (int) $matches[1];
-        }
-
-        $queryScore = 0;
-        parse_str((string) parse_url($url, PHP_URL_QUERY), $query);
-        foreach (['w', 'width', 'wid', 'h', 'height', 'hei'] as $key) {
-            if (isset($query[$key]) && is_numeric($query[$key])) {
-                $queryScore = max($queryScore, min(4000, (int) $query[$key]));
-            }
-        }
-
-        $pathRenditionScore = preg_match('#/r(\d{2,5})/#i', $path, $matches) === 1
-            ? min(4000, (int) $matches[1])
-            : 0;
-
-        $sizeSegmentScore = match (true) {
-            preg_match('#/(?:[a-z][a-z_-]*)?(\d{2,5})x(\d{2,5})/#i', $path, $matches) === 1 => min(4000, max((int) $matches[1], (int) $matches[2])),
-            preg_match('#/(?:[a-z][a-z_-]*)?(\d{2,5})w/#i', $path, $matches) === 1 => min(4000, (int) $matches[1]),
-            default => 0,
-        };
-
-        return max($directoryScore, $uuidRenditionScore, $queryScore, $pathRenditionScore, $sizeSegmentScore);
+        return ImageUrls::candidateUrlQualityScore($url);
     }
 
     private function targetImageCount(Product $product): int
@@ -3939,18 +3617,9 @@ class ProductImageStorage
         int $requiredWidth,
         int $requiredHeight,
     ): bool {
-        return $this->dimensionRejectionReason($width, $height, $requiredWidth, $requiredHeight) === null;
+        return $this->imageGeometry->hasUsefulDimensions($width, $height, $requiredWidth, $requiredHeight);
     }
 
-    /**
-     * Two independent bounds share this gate - a minimum width/height and an
-     * aspect-ratio range - but they used to collapse into a single "too_small"
-     * reason string even when width/height both passed and only the ratio
-     * bound failed (e.g. a 720x64 edge/port close-up: 720 clears the width
-     * floor, but ratio 11.25 blows past the 3.5 max). Naming the ratio
-     * rejection separately keeps rejected_candidates honest about which
-     * bound actually fired.
-     */
     private function dimensionRejectionReason(
         int $width,
         int $height,
@@ -3958,45 +3627,11 @@ class ProductImageStorage
         int $requiredHeight,
         bool $allowExtremeAspectRatio = false,
     ): ?string {
-        if ($width < $requiredWidth || $height < $requiredHeight) {
-            return $requiredHeight > 0
-                ? "too_small ({$width}x{$height}; required {$requiredWidth}x{$requiredHeight})"
-                : "too_small ({$width}x{$height}; required width>={$requiredWidth}, height=any)";
-        }
-
-        if ($allowExtremeAspectRatio) {
-            return null;
-        }
-
-        $ratio = $width / max($height, 1);
-        $minRatio = (float) config('product-images.minimum_ratio', 0.28);
-        $maxRatio = (float) config('product-images.maximum_ratio', 3.5);
-
-        if ($ratio < $minRatio || $ratio > $maxRatio) {
-            return sprintf(
-                'bad_aspect_ratio (%dx%d; ratio %.2f; required %.2f-%.2f)',
-                $width,
-                $height,
-                $ratio,
-                $minRatio,
-                $maxRatio,
-            );
-        }
-
-        return null;
+        return $this->imageGeometry->dimensionRejectionReason($width, $height, $requiredWidth, $requiredHeight, $allowExtremeAspectRatio);
     }
 
-    /**
-     * Trusted-source candidates skip Vision entirely, so unlike the loose
-     * bounds in hasUsefulDimensions() (which Vision still reviews), this is
-     * the last line of defense against banner/swatch-strip images from
-     * manufacturer spec pages (e.g. a 738x270 color-swatch banner, ratio
-     * 2.73 - well inside the general 0.28-3.5 bound but not a product shot).
-     */
     private function looksLikeProductPhotoShape(int $width, int $height): bool
     {
-        $ratio = $width / max($height, 1);
-
-        return $ratio >= 0.5 && $ratio <= 2.2;
+        return $this->imageGeometry->looksLikeProductPhotoShape($width, $height);
     }
 }

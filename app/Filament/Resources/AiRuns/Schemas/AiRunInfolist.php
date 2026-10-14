@@ -19,50 +19,50 @@ class AiRunInfolist
 
         return $schema
             ->components([
-                Section::make('Запуск')
+                Section::make(__('Запуск'))
                     ->schema([
                         TextEntry::make('telegramUpdate.id')->label('Telegram update'),
                         TextEntry::make('invocation_id')->label('Invocation ID')->placeholder('—')->copyable(),
-                        TextEntry::make('provider')->label('Провайдер')->badge(),
-                        TextEntry::make('model')->label('Модель'),
+                        TextEntry::make('provider')->label(__('Провайдер'))->badge(),
+                        TextEntry::make('model')->label(__('Модель')),
                         TextEntry::make('status')
-                            ->label('Статус')
+                            ->label(__('Статус'))
                             ->badge()
                             ->formatStateUsing(fn (string $state): string => match ($state) {
-                                'completed' => 'Завершён',
-                                'running' => 'Выполняется',
-                                'failed' => 'Ошибка',
+                                'completed' => __('Завершён'),
+                                'running' => __('Выполняется'),
+                                'failed' => __('Ошибка'),
                                 default => $state,
                             }),
                         TextEntry::make('duration')
-                            ->label('Длительность')
+                            ->label(__('Длительность'))
                             ->state(fn (AiRun $record): ?string => $record->started_at
                                 ? $record->started_at->diffForHumans($record->completed_at ?: now(), syntax: CarbonInterface::DIFF_ABSOLUTE, short: true)
                                 : null)
                             ->placeholder('—'),
-                        TextEntry::make('started_at')->label('Начат')->dateTime('d.m.Y H:i:s'),
-                        TextEntry::make('completed_at')->label('Завершён')->dateTime('d.m.Y H:i:s')->placeholder('—'),
+                        TextEntry::make('started_at')->label(__('Начат'))->dateTime('d.m.Y H:i:s'),
+                        TextEntry::make('completed_at')->label(__('Завершён'))->dateTime('d.m.Y H:i:s')->placeholder('—'),
                     ])
                     ->columns(4)
                     ->columnSpanFull(),
-                Section::make('Промпт и ответ')
+                Section::make(__('Промпт и ответ'))
                     ->schema([
-                        TextEntry::make('prompt')->label('Промпт')->columnSpanFull(),
-                        TextEntry::make('response')->label('Ответ')->formatStateUsing($json)->columnSpanFull(),
-                        TextEntry::make('error')->label('Ошибка')->placeholder('—')->columnSpanFull(),
+                        TextEntry::make('prompt')->label(__('Промпт'))->columnSpanFull(),
+                        TextEntry::make('response')->label(__('Ответ'))->formatStateUsing($json)->columnSpanFull(),
+                        TextEntry::make('error')->label(__('Ошибка'))->placeholder('—')->columnSpanFull(),
                     ])
                     ->collapsed()
                     ->columnSpanFull(),
-                Section::make('Расход')
+                Section::make(__('Расход'))
                     ->schema([
                         KeyValueEntry::make('usage')
-                            ->label('Токены и стоимость')
+                            ->label(__('Токены и стоимость'))
                             ->state(fn (AiRun $record): array => is_array($record->usage) ? $record->usage : [])
                             ->columnSpanFull(),
                     ])
                     ->columnSpanFull(),
-                Section::make('Активность')
-                    ->description('Подтверждённые события провайдера (подключение, запуск/выполнение/завершение поиска).')
+                Section::make(__('Активность'))
+                    ->description(__('Подтверждённые события провайдера (подключение, запуск/выполнение/завершение поиска).'))
                     ->schema([
                         TextEntry::make('activity')->label(null)->formatStateUsing($json)->columnSpanFull(),
                     ])

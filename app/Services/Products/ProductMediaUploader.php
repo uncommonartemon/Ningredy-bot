@@ -15,7 +15,7 @@ use Throwable;
 final class ProductMediaUploader
 {
     /** @param array<array-key, UploadedFile> $photos */
-    public function upload(Product $product, array $photos): int
+    public function upload(Product $product, array $photos, ?int $variantId = null, bool $useDefaultVariant = true): int
     {
         $photos = array_values($photos);
         Validator::make(['new_photos' => $photos], [
@@ -34,11 +34,14 @@ final class ProductMediaUploader
 
         $storedPaths = [];
         try {
-            return DB::transaction(function () use ($product, $photos, $dimensions, &$storedPaths): int {
+            return DB::transaction(function () use ($product, $photos, $dimensions, $variantId, $useDefaultVariant, &$storedPaths): int {
                 $product = Product::query()->lockForUpdate()->findOrFail($product->getKey());
+                $variantId ??= $useDefaultVariant ? $product->defaultVariant()->value('id') : null;
+                if ($variantId !== null && ! $product->variants()->whereKey($variantId)->exists()) {
+                    throw ValidationException::withMessages(['product_variant_id' => __('catalog-quick-edit.missing_variant')]);
+                }
                 $order = (int) ($product->media()->max('sort_order') ?? -1) + 1;
-                $hasPrimary = $product->media()->where('is_primary', true)->exists();
-                $variantId = $product->defaultVariant()->value('id');
+                $hasPrimary = $product->media()->where('type', 'image')->where('product_variant_id', $variantId)->where('is_primary', true)->exists();
 
                 foreach ($photos as $index => $photo) {
                     $path = $photo->store("products/{$product->id}", 'public');
@@ -63,7 +66,11 @@ final class ProductMediaUploader
             });
         } catch (Throwable $exception) {
             // Only this attempt's randomly named files, never existing media.
-            Storage::disk('public')->delete($storedPaths);
+            foreach ($storedPaths as $path) {
+                if (! $product->media()->where('disk', 'public')->where('path', $path)->exists()) {
+                    Storage::disk('public')->delete($path);
+                }
+            }
             throw $exception;
         }
     }

@@ -18,17 +18,17 @@ class AiOperationsTable
             ->defaultSort('executed_at', 'desc')
             ->columns([
                 TextColumn::make('id')->label('#')->sortable(),
-                TextColumn::make('executed_at')->label('Выполнено')->dateTime('d.m.Y H:i:s')->sortable(),
-                TextColumn::make('tool')->label('Инструмент')->badge(),
-                TextColumn::make('action')->label('Действие')->searchable(),
+                TextColumn::make('executed_at')->label(__('Выполнено'))->dateTime('d.m.Y H:i:s')->sortable(),
+                TextColumn::make('tool')->label(__('Инструмент'))->badge(),
+                TextColumn::make('action')->label(__('Действие'))->searchable(),
                 TextColumn::make('target')
-                    ->label('Цель')
+                    ->label(__('Цель'))
                     ->state(fn (AiOperation $record): ?string => $record->target_type
                         ? class_basename($record->target_type).' #'.$record->target_id
                         : null)
                     ->placeholder('—'),
                 TextColumn::make('status')
-                    ->label('Статус')
+                    ->label(__('Статус'))
                     ->badge()
                     ->color(fn (string $state): string => match ($state) {
                         'completed' => 'success',
@@ -43,16 +43,16 @@ class AiOperationsTable
                     ->placeholder('—'),
                 TextColumn::make('telegram_user_id')->label('Telegram user')->placeholder('—')->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('idempotency_key')->label('Idempotency key')->toggleable(isToggledHiddenByDefault: true)->copyable(),
-                TextColumn::make('error')->label('Ошибка')->limit(50)->placeholder('—')->toggleable(isToggledHiddenByDefault: true),
-                TextColumn::make('created_at')->label('Создано')->dateTime('d.m.Y H:i:s')->sortable()->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('error')->label(__('Ошибка'))->limit(50)->placeholder('—')->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('created_at')->label(__('Создано'))->dateTime('d.m.Y H:i:s')->sortable()->toggleable(isToggledHiddenByDefault: true),
             ])
             ->filters([
-                SelectFilter::make('tool')->label('Инструмент')->options(
+                SelectFilter::make('tool')->label(__('Инструмент'))->options(
                     fn (): array => AiOperation::query()->distinct()->orderBy('tool')->pluck('tool', 'tool')->all()
                 ),
-                SelectFilter::make('status')->label('Статус')->options([
-                    'completed' => 'Завершено',
-                    'failed' => 'Ошибка',
+                SelectFilter::make('status')->label(__('Статус'))->options([
+                    'completed' => __('Завершено'),
+                    'failed' => __('Ошибка'),
                 ]),
             ])
             ->recordActions([

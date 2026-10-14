@@ -3,6 +3,8 @@
 namespace App\Providers;
 
 use App\Services\Ai\AiSettings;
+use App\Services\Playwright\BrowserRunner;
+use App\Services\Playwright\PlaywrightRunner;
 use App\Services\Products\BrowserProductImageTransferStore;
 use App\Services\Products\ProductImageResolver;
 use Illuminate\Support\Facades\Http;
@@ -18,6 +20,7 @@ class AppServiceProvider extends ServiceProvider
      */
     public function register(): void
     {
+        $this->app->bind(BrowserRunner::class, PlaywrightRunner::class);
         // Gallery confirmation is intentionally kept in the resolver's browser
         // extractor while one product-search job runs. ProductImageStorage and
         // ProductImageCandidateDiscovery are separate object graphs, so a

@@ -3,10 +3,10 @@
 namespace App\Ai\Tools;
 
 use App\Models\ProductSourcePageEvidence;
-use App\Services\Ai\ProductSearchCostBudget;
 use App\Services\Ai\ProductSearchTimeBudget;
+use App\Services\Photos\ImageUrls;
 use App\Services\Products\ProductImageResolver;
-use App\Services\Products\ProductImageStorage;
+use App\Services\Products\ProductSourcePriority;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
 use Laravel\Ai\Contracts\Tool;
 use Laravel\Ai\Tools\Request;
@@ -17,10 +17,9 @@ use Stringable;
  * of the chosen source when source_specification_text does not say enough -
  * e.g. a "characteristics"/"specifications" tab whose URL was not already
  * captured, or source_url itself when no page text was captured for it at
- * all. Scoped to one specific host at construction time (never a free-form
- * parameter the model could point anywhere) - the one thing "safe" means
- * here: this can only ever read more of the SAME site's own pages, never an
- * arbitrary URL, and a redirect or click that lands off that host is refused
+ * all. By default scoped to one host. Card text enrichment explicitly enables
+ * additional public sources. Each individual fetch still confines navigation
+ * to its requested host; private URLs are refused. A redirect or click off-host is refused
  * rather than silently trusted (see ProductImageResolver::fetchAdditionalPageText()'s
  * own host check). Its underlying fetch can fall back to a real browser
  * session for Playwright-only sources, so it is metered against the same
@@ -39,10 +38,15 @@ class FetchProductSourcePageText implements Tool
         private readonly string $allowedHost,
         private readonly ?int $telegramUpdateId = null,
         private readonly ?int $productDraftId = null,
+        private readonly bool $allowAdditionalSources = false,
     ) {}
 
     public function description(): Stringable|string
     {
+        if ($this->allowAdditionalSources) {
+            return 'Read a public product/specification page from any source to fill missing facts about the selected product. Compare its own identity before using its text. Reuse saved evidence first. force_browser reads rendered content; open_selector must be a real observed control. Each request remains confined to its requested host; redirects to another host are reported, never silently trusted.';
+        }
+
         return 'Fetch and read a specific page on the SAME site as source_url - e.g. a "характеристики" or '
             .'"specifications" tab you noticed but whose text was not already provided - only when '
             .'source_specification_text does not say enough to confirm something the operator specifically '
@@ -70,26 +74,27 @@ class FetchProductSourcePageText implements Tool
         $openSelector = trim((string) $request->string('open_selector'));
         $forceBrowser = $request->boolean('force_browser');
 
-        if ($url === '' || $host === '' || $host !== strtolower($this->allowedHost)) {
+        if ($url === '' || $host === '' || (! $this->allowAdditionalSources && $host !== strtolower($this->allowedHost))) {
             return json_encode([
                 'fetched' => false,
                 'reason' => 'url must be on the same host as source_url',
             ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         }
 
+        if ($this->allowAdditionalSources && app(ProductSourcePriority::class)->isBlockedUrl($url)) {
+            return json_encode(['fetched' => false, 'reason' => 'source is blocked']);
+        }
+
         // The underlying fetch can launch a real browser session (Playwright
-        // fallback, or opening a selector) - not free, and not something a
-        // per-call tool budget would bound on its own. Same shared search
-        // budget everything else in this pipeline already answers to,
-        // checked directly rather than via a heuristic (no separate money
-        // budget for this step).
-        if ($this->telegramUpdateId !== null && (
-            app(ProductSearchCostBudget::class)->exceeded($this->telegramUpdateId)
-            || ! app(ProductSearchTimeBudget::class)->canStart($this->telegramUpdateId, 20)
-        )) {
+        // fallback, or opening a selector). This tool belongs to card
+        // assembly, which the search's money limit does not stop (see
+        // ProductCardAssembly) - its calls are bounded by the assembly
+        // agent's step limit. The job's clock still is.
+        if ($this->telegramUpdateId !== null
+            && ! app(ProductSearchTimeBudget::class)->assemblyCanStart($this->telegramUpdateId, 20)) {
             return json_encode([
                 'fetched' => false,
-                'reason' => 'search budget exhausted',
+                'reason' => 'search time exhausted',
             ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         }
 
@@ -125,7 +130,7 @@ class FetchProductSourcePageText implements Tool
             ProductSourcePageEvidence::query()->updateOrCreate(
                 [
                     'product_draft_id' => $this->productDraftId,
-                    'url_hash' => hash('sha256', ProductImageStorage::normalizeCandidateUrl($url).$keySuffix),
+                    'url_hash' => hash('sha256', ImageUrls::normalizeCandidateUrl($url).$keySuffix),
                 ],
                 [
                     'url' => $url,
@@ -141,6 +146,8 @@ class FetchProductSourcePageText implements Tool
 
         return json_encode([
             'fetched' => $result['text'] !== '',
+            'url' => $url,
+            'final_url' => $result['final_url'],
             'specification_text' => mb_substr($result['text'], 0, 8_000),
             'identity_evidence' => mb_substr($result['identity_evidence'], 0, 2000),
             // Only present when a real browser actually ran (plain HTTP has
@@ -156,7 +163,7 @@ class FetchProductSourcePageText implements Tool
     {
         return [
             'url' => $schema->string()->max(2048)->required()->description(
-                'A specific page URL on the same site as source_url, e.g. a specifications/characteristics tab.',
+                $this->allowAdditionalSources ? 'A public source URL about the selected product.' : 'A page URL on the same host as source_url.',
             ),
             'open_selector' => $schema->string()->max(300)->nullable()->required()->description(
                 'A CSS selector for an element on THIS url (a tab/accordion/button) to click before reading, '

@@ -13,7 +13,10 @@ class DraftTelegramInteractionState
     {
         $state = [...$data, 'draft_id' => $draft->id, 'generation' => $draft->telegram_update_id,
             'kind' => $kind, 'token' => Str::random(12)];
-        Cache::put($this->key($chat, $user), $state, now()->addMinutes(10));
+        $until = now()->addMinutes($kind === 'processing' ? 20 : 10);
+        $state['expires_at'] = $until->getTimestamp();
+        Cache::put($this->key($chat, $user), $state, $until);
+        Cache::put($this->key($chat, $user).':last', $state, now()->addDay());
 
         return $state;
     }
@@ -33,6 +36,7 @@ class DraftTelegramInteractionState
                 return null;
             }
             Cache::forget($this->key($chat, $user));
+            Cache::forget($this->key($chat, $user).':last');
 
             return $state;
         }) ?: null;
@@ -41,8 +45,21 @@ class DraftTelegramInteractionState
     public function clear(string $chat, string $user): void
     {
         Cache::forget($this->key($chat, $user));
+        Cache::forget($this->key($chat, $user).':last');
         // Remove legacy chat-wide prompts on /reset or /new too.
         Cache::forget("draft-source-hint-await:{$chat}");
+    }
+
+    /** An expired manual prompt must not silently become a paid product search. */
+    public function expired(string $chat, string $user): ?array
+    {
+        if ($this->get($chat, $user) !== null) {
+            return null;
+        }
+        $state = Cache::get($this->key($chat, $user).':last');
+
+        return is_array($state) && (int) ($state['expires_at'] ?? PHP_INT_MAX) <= now()->getTimestamp()
+            ? $state : null;
     }
 
     private function key(string $chat, string $user): string

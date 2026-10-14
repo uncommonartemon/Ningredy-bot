@@ -3,6 +3,9 @@
 namespace App\Services\Ai;
 
 use App\Ai\Agents\ProductResearchAgent;
+use App\Ai\Agents\ProductImageDiscoveryAgent;
+use App\Exceptions\ProductSearchCancelled;
+use App\Services\ProductSearch\Research\InvalidResearchResponse;
 use Closure;
 use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\JsonSchema\JsonSchemaTypeFactory;
@@ -37,7 +40,7 @@ class StreamingProductResearch
      * @param  (callable(StreamEvent): void)|null  $onActivity
      */
     public function prompt(
-        ProductResearchAgent $agent,
+        ProductResearchAgent|ProductImageDiscoveryAgent $agent,
         string $prompt,
         string $providerName,
         string $model,
@@ -46,7 +49,7 @@ class StreamingProductResearch
         ?callable $onActivity = null,
         ?callable $onWait = null,
     ): AgentResponse {
-        if (ProductResearchAgent::isFaked() || $providerName !== 'openai') {
+        if ($agent::isFaked() || $providerName !== 'openai') {
             return $agent->prompt(
                 $prompt,
                 provider: $providerName,
@@ -72,7 +75,7 @@ class StreamingProductResearch
     }
 
     private function promptOpenAi(
-        ProductResearchAgent $agent,
+        ProductResearchAgent|ProductImageDiscoveryAgent $agent,
         string $prompt,
         string $providerName,
         string $model,
@@ -108,12 +111,22 @@ class StreamingProductResearch
                 $onActivity?->__invoke($event);
 
                 if ($event instanceof Error) {
-                    throw new RuntimeException($event->message);
+                    $evidence = [...$gateway->researchEvidence(), 'provider_error_message' => $event->message];
+                    throw new InvalidResearchResponse('provider_failed', $evidence,
+                        $evidence['usage'] ?? null, $invocationId, recoverable: false);
                 }
             }
 
             $step = $stream->getReturn();
         } catch (Throwable $exception) {
+            if ($exception instanceof ProductSearchCancelled || $exception instanceof InvalidResearchResponse) {
+                throw $exception;
+            }
+            $evidence = $gateway->researchEvidence();
+            if (($evidence['raw_text'] ?? '') !== '' || ($evidence['output_items'] ?? []) !== []) {
+                throw new InvalidResearchResponse('stream_interrupted', $evidence,
+                    $evidence['usage'] ?? null, $invocationId, previous: $exception);
+            }
             if ($this->isIdleTimeout($exception)) {
                 throw new ProductResearchIdleTimeoutException(
                     "Web Search не присылал данных {$idleTimeoutSeconds} сек. и был остановлен как зависший.",
@@ -124,24 +137,36 @@ class StreamingProductResearch
             throw $exception;
         }
 
-        if (! $step instanceof StepResponse || $step->finishReason === FinishReason::Error) {
-            throw new RuntimeException('OpenAI streaming response ended without a complete product research result.');
+        $evidence = $gateway->researchEvidence();
+        $usage = $evidence !== [] ? ($evidence['usage'] ?? null) : ($step instanceof StepResponse ? $step->usage->toArray() : null);
+        $text = (string) ($evidence['final_text'] ?? ($step instanceof StepResponse ? $step->text : ($evidence['raw_text'] ?? '')));
+        $evidence['raw_text'] = $text;
+        if (! empty($evidence['refusal']) || ($evidence['incomplete_reason'] ?? '') === 'content_filter') {
+            throw new InvalidResearchResponse('provider_refusal', $evidence, $usage, $invocationId, recoverable: false);
+        }
+        if (($evidence['response_status'] ?? '') === 'failed') {
+            throw new InvalidResearchResponse('provider_failed', $evidence, $usage, $invocationId, recoverable: false);
+        }
+        if (! $step instanceof StepResponse
+            || $step->finishReason !== FinishReason::Stop
+            || (array_key_exists('response_status', $evidence) && $evidence['response_status'] !== 'completed')) {
+            throw new InvalidResearchResponse('stream_incomplete', $evidence, $usage, $invocationId);
         }
 
         try {
-            $structured = json_decode($step->text, true, 512, JSON_THROW_ON_ERROR);
+            $structured = json_decode($text, true, 512, JSON_THROW_ON_ERROR);
         } catch (JsonException $exception) {
-            throw new RuntimeException('OpenAI returned invalid structured product research JSON.', previous: $exception);
+            throw new InvalidResearchResponse('invalid_json', $evidence, $usage, $invocationId, previous: $exception);
         }
 
-        if (! is_array($structured)) {
-            throw new RuntimeException('OpenAI returned an empty structured product research result.');
+        if (! is_array($structured) || array_is_list($structured)) {
+            throw new InvalidResearchResponse('invalid_object', $evidence, $usage, $invocationId);
         }
 
         return new StructuredAgentResponse(
             $invocationId,
             $structured,
-            $step->text,
+            $text,
             $step->usage,
             $step->meta,
         );

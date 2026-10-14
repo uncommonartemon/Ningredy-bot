@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright-core';
-import { GalleryTraversalProgress, readTraversalMediaInPage, traversalMediaState, waitForTraversalMedia, embeddedProductConflicts } from '../../scripts/gallery-traversal.mjs';
+import { GalleryTraversalProgress, readTraversalMediaInDocument, traversalMediaState, waitForTraversalMedia, embeddedProductConflicts } from '../../scripts/gallery-traversal.mjs';
 import { recipeActionPlanStatus } from '../../scripts/product-gallery-utils.mjs';
 
 const state = (id, ready = true) => ({ signature: id, ready, status: ready ? 'ready' : 'media_wait_timeout' });
@@ -54,7 +54,7 @@ test('real circular gallery waits for delayed originals and is reusable on 3 and
                 <button id="next">Next</button><button id="zoom">Zoom</button>
                 <script>let n=0; next.onclick=()=>{n=(n+1)%${count}; active.src='https://gallery.test/'+n+'.svg';pos.textContent=n};
                 zoom.onclick=()=>{active.src='https://gallery.test/'+n+'.svg?original=1'};</script>`);
-            const read = () => page.evaluate(readTraversalMediaInPage, { selectors: ['#active'], positionSelector: '#pos' });
+            const read = () => readTraversalMediaInDocument(page, { selectors: ['#active'], positionSelector: '#pos' });
             const settle = () => waitForTraversalMedia(read, { deadline: Date.now() + 2500, settleMs: 25 });
             await page.locator('#zoom').click();
             const first = await settle();
