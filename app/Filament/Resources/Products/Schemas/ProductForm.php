@@ -26,6 +26,7 @@ use Filament\Schemas\Components\Group;
 use Filament\Schemas\Components\Section;
 use Filament\Schemas\Components\Utilities\Get;
 use Filament\Schemas\Components\Utilities\Set;
+use Filament\Schemas\Components\View;
 use Filament\Schemas\Schema;
 
 class ProductForm
@@ -38,6 +39,8 @@ class ProductForm
                     Section::make(__('Товар'))->schema([
                         TextInput::make('title')->label(__('Название'))->required()->maxLength(255)->columnSpanFull(),
                         Select::make('category_id')->label(__('Категория'))->relationship('category', 'name')
+                            ->options(fn ($livewire): array => Category::query()->orderBy('name')->pluck('name', 'id')->all() + (method_exists($livewire, 'getProductAiOptions') ? $livewire->getProductAiOptions('category') : []))
+                            ->getOptionLabelUsing(fn ($value, $livewire): ?string => (method_exists($livewire, 'getProductAiOptions') ? ($livewire->getProductAiOptions('category')[$value] ?? null) : null) ?? Category::find($value)?->name)
                             ->searchable()->preload()->required()->live()->createOptionForm(RelatedCatalogForms::category())
                             ->createOptionUsing(fn (array $data): int => RelatedCatalogForms::createCategory($data))
                             ->afterStateUpdated(function (Get $get, Set $set, $state): void {
@@ -48,6 +51,8 @@ class ProductForm
                                 $set('variants', app(ManualProductAttributes::class)->applyCategory($get('variants') ?? [], $state));
                             }),
                         Select::make('brand_id')->label(__('Бренд'))->relationship('brand', 'name')->searchable()->preload()
+                            ->options(fn ($livewire): array => Brand::query()->orderBy('name')->pluck('name', 'id')->all() + (method_exists($livewire, 'getProductAiOptions') ? $livewire->getProductAiOptions('brand') : []))
+                            ->getOptionLabelUsing(fn ($value, $livewire): ?string => (method_exists($livewire, 'getProductAiOptions') ? ($livewire->getProductAiOptions('brand')[$value] ?? null) : null) ?? Brand::find($value)?->name)
                             ->createOptionForm([
                                 TextInput::make('name')->label(__('Название'))->required()->maxLength(255)->unique(table: Brand::class, column: 'name'),
                                 TextInput::make('country')->label(__('Страна'))->maxLength(255),
@@ -77,8 +82,10 @@ class ProductForm
                 ])->columnSpan(['default' => 1, 'lg' => 2]),
 
                 Group::make([
+                    View::make('filament.products.form-assistant')
+                        ->visible(fn ($livewire): bool => method_exists($livewire, 'sendProductAiMessage')),
                     Section::make(__('Публикация'))->schema([
-                        Select::make('status')->label(__('Статус'))->options(ProductOptions::statuses())->default('draft')->required(),
+                        Select::make('status')->label(__('Статус'))->options(ProductOptions::statuses())->default('published')->required(),
                         Toggle::make('is_active')->label(__('Показывать в каталоге'))->default(true),
                         Toggle::make('is_featured')->label(__('Рекомендуемый')),
                     ]),

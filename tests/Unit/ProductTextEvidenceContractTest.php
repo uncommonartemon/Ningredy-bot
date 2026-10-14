@@ -20,6 +20,10 @@ class ProductTextEvidenceContractTest extends TestCase
         $schema = new JsonSchemaTypeFactory;
         $research = (new ProductResearchAgent)->schema($schema)['specification_evidence']->toArray();
         $targeted = (new ProductTextEvidenceAgent)->schema($schema)['facts']->toArray();
+        $this->assertArrayNotHasKey('group', $research['items']['properties']);
+        $this->assertArrayHasKey('group', $targeted['items']['properties']);
+        unset($targeted['items']['properties']['group']);
+        $targeted['items']['required'] = array_values(array_diff($targeted['items']['required'], ['group']));
         $this->assertEquals($research['items'], $targeted['items']);
         $observation = ProductTextEvidenceContract::observationSchema($schema)->toArray();
         $this->assertArrayHasKey('scope', $observation['properties']);
@@ -44,5 +48,20 @@ class ProductTextEvidenceContractTest extends TestCase
             'source_excerpt' => 'RAM 64 GB', 'applicability' => 'Same product'];
         $data = Validator::make(['facts' => [$old]], ProductTextEvidenceContract::rules('facts'))->validate();
         $this->assertSame([$old], $data['facts']);
+    }
+
+    public function test_targeted_research_normalizes_only_group_metadata_and_keeps_citations_unchanged(): void
+    {
+        $fact = ['key' => 'gpu_memory_capacity', 'name' => 'GPU memory capacity', 'value' => '8 GB',
+            'source_url' => 'https://maker.example/specs', 'source_excerpt' => 'Graphics memory: 8 GB',
+            'scope' => 'exact_configuration', 'applicability' => 'Exact selected graphics card'];
+        $normalized = ['facts' => ProductTextEvidenceContract::normalizeGroups([
+            [...$fact, 'group' => ['id' => null, 'name' => ' Graphics ', 'name_cs' => ' Grafika ', 'extra' => true]],
+            [...$fact, 'group' => false],
+        ])];
+        $data = Validator::make($normalized, ProductTextEvidenceContract::rules('facts', includeGroup: true))->validate();
+
+        $this->assertEquals([...$fact, 'group' => ['id' => null, 'name' => 'Graphics', 'name_cs' => 'Grafika']], $data['facts'][0]);
+        $this->assertEquals([...$fact, 'group' => null], $data['facts'][1]);
     }
 }

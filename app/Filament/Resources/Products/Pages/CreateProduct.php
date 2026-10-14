@@ -3,6 +3,7 @@
 namespace App\Filament\Resources\Products\Pages;
 
 use App\Filament\Resources\Products\Pages\Concerns\HandlesProductPhotoUploads;
+use App\Filament\Resources\Products\Pages\Concerns\InteractsWithProductFormAssistant;
 use App\Filament\Resources\Products\ProductResource;
 use App\Filament\Support\ProductVariantFormState;
 use App\Models\Brand;
@@ -12,12 +13,18 @@ use Filament\Resources\Pages\CreateRecord;
 class CreateProduct extends CreateRecord
 {
     use HandlesProductPhotoUploads;
+    use InteractsWithProductFormAssistant;
 
     protected static string $resource = ProductResource::class;
 
     protected ?bool $hasDatabaseTransactions = true;
 
     public static bool $formActionsAreSticky = true;
+
+    protected function beforeValidate(): void
+    {
+        $this->materializeProductAiProposals();
+    }
 
     protected function preserveFormDataWhenCreatingAnother(array $data): array
     {

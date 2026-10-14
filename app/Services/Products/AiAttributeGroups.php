@@ -19,7 +19,7 @@ final class AiAttributeGroups
             'attributes' => AttributeDefinition::query()->orderBy('key')->get(['key', 'label', 'attribute_group_id'])->toArray(),
         ];
 
-        return <<<'PROMPT'
+        return ProductAttributeConvention::instructions()."\n\n".<<<'PROMPT'
 
             Attribute grouping is presentation metadata, not a product fact or source evidence.
             For each NEW specification key, propose an optional group: {id, name, name_cs}, or null

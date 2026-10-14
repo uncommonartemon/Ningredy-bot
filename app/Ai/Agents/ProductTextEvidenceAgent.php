@@ -2,6 +2,7 @@
 
 namespace App\Ai\Agents;
 
+use App\Services\Products\AiAttributeGroups;
 use App\Services\Products\ProductTextEvidenceContract;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
 use Laravel\Ai\Attributes\MaxTokens;
@@ -28,13 +29,13 @@ class ProductTextEvidenceAgent extends ProductResearchAgent
             Sources may have different domains. Prefer precise applicable documentation over generic authority.
             Never infer an absent material, port count, radio model or feature. Report remaining unknowns.
             Use stable snake_case keys. Search only while it can materially answer the requested gaps.
-            PROMPT;
+            PROMPT."\n\n".AiAttributeGroups::instructions();
     }
 
     public function schema(JsonSchema $schema): array
     {
         return [
-            'facts' => $schema->array()->max(100)->items(ProductTextEvidenceContract::observationSchema($schema))->required(),
+            'facts' => $schema->array()->max(100)->items(ProductTextEvidenceContract::observationSchema($schema, includeGroup: true))->required(),
             'summary' => $schema->string()->max(1500)->required(),
         ];
     }

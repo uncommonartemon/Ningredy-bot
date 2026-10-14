@@ -26,8 +26,9 @@ class ProductAttributeFields
             ->hintAction(fn (Repeater $component): Action => self::pasteAction($component))
             ->schema([
                 Hidden::make('_category_default')->dehydrated(false),
+                Hidden::make('translations'),
                 Select::make('attribute_definition_id')->label(__('Характеристика'))
-                    ->options(fn (): array => RelatedCatalogForms::attributeOptions())->searchable()->preload()->live()
+                    ->options(fn ($livewire): array => RelatedCatalogForms::attributeOptions() + (method_exists($livewire, 'getProductAiOptions') ? $livewire->getProductAiOptions('attribute') : []))->searchable()->preload()->live()
                     ->disableOptionsWhenSelectedInSiblingRepeaterItems()
                     ->required(fn (Get $get): bool => filled($get('value')))
                     ->afterStateUpdated(function (Get $get, Set $set, $state, $old): void {

@@ -5,6 +5,8 @@ namespace Tests\Feature;
 use App\Ai\Agents\ProductTextEvidenceAgent;
 use App\Ai\Tools\SearchProductTextEvidence;
 use App\Models\AiRun;
+use App\Models\AttributeDefinition;
+use App\Models\AttributeGroup;
 use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
 use App\Services\Ai\ProductSearchTimeBudget;
@@ -77,5 +79,51 @@ class ProductTextEvidenceToolTest extends TestCase
         $result = json_decode((string) $tool->handle(new Request(['question' => 'ports'])), true);
         $this->assertFalse($result['found']);
         $this->assertDatabaseCount('ai_runs', 1);
+    }
+
+    public function test_group_proposals_survive_targeted_research_without_creating_catalog_records(): void
+    {
+        $draft = $this->draft();
+        $groupsBefore = AttributeGroup::count();
+        $definitionsBefore = AttributeDefinition::count();
+        $group = ['id' => null, 'name' => 'Graphics', 'name_cs' => 'Grafika'];
+        $fact = ['key' => 'gpu_memory_capacity', 'name' => 'GPU memory capacity', 'value' => '8 GB',
+            'source_url' => 'https://maker.example/specs', 'source_excerpt' => 'Graphics memory: 8 GB',
+            'scope' => 'exact_configuration', 'source_type' => 'manufacturer', 'applicability' => 'Exact selected configuration'];
+        ProductTextEvidenceAgent::fake(fn () => ['facts' => [
+            [...$fact, 'group' => [...$group, 'name' => ' Graphics ', 'unexpected' => 'discard']],
+            [...$fact, 'key' => 'gpu_memory_bus', 'name' => 'GPU memory bus', 'value' => '128 bit',
+                'source_excerpt' => 'Memory bus: 128 bit', 'group' => ['id' => 'invalid', 'name' => 'Graphics']],
+        ], 'summary' => 'Confirmed graphics specifications'])->preventStrayPrompts();
+
+        $result = json_decode((string) (new SearchProductTextEvidence($draft->id, $draft->telegram_update_id))
+            ->handle(new Request(['question' => 'Graphics memory details?'])), true);
+
+        $this->assertTrue($result['found'], $result['reason'] ?? '');
+        $this->assertEquals([...$fact, 'group' => $group], $result['facts'][0]);
+        $this->assertNull($result['facts'][1]['group']);
+        $this->assertSame('128 bit', $result['facts'][1]['value']);
+        $this->assertSame($result['facts'], $draft->fresh()->specification_evidence);
+        $this->assertSame([], $draft->fresh()->specifications);
+        $this->assertSame($groupsBefore, AttributeGroup::count());
+        $this->assertSame($definitionsBefore, AttributeDefinition::count());
+    }
+
+    public function test_group_metadata_does_not_replace_required_source_evidence(): void
+    {
+        $draft = $this->draft();
+        ProductTextEvidenceAgent::fake(fn () => ['facts' => [[
+            'key' => 'gpu_memory_capacity', 'name' => 'GPU memory capacity', 'value' => '8 GB',
+            'group' => ['id' => null, 'name' => 'Graphics', 'name_cs' => null],
+            'source_url' => 'https://maker.example/specs', 'source_excerpt' => '',
+            'scope' => 'exact_configuration', 'applicability' => 'Exact selected configuration',
+        ]], 'summary' => 'Unsupported claim'])->preventStrayPrompts();
+
+        $result = json_decode((string) (new SearchProductTextEvidence($draft->id, $draft->telegram_update_id))
+            ->handle(new Request(['question' => 'Graphics memory?'])), true);
+
+        $this->assertFalse($result['found']);
+        $this->assertNull($draft->fresh()->specification_evidence);
+        $this->assertDatabaseHas('ai_runs', ['status' => 'failed']);
     }
 }

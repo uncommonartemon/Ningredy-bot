@@ -108,8 +108,12 @@ class SearchProductTextEvidence implements Tool
             );
             $run->update(['invocation_id' => $response->invocationId, 'response' => $response->toArray(),
                 'usage' => [...$response->usage->toArray(), 'web_search_calls' => count($searchItems)]]);
-            $data = Validator::make($response->toArray(), [
-                ...ProductTextEvidenceContract::rules('facts'),
+            $data = $response->toArray();
+            if (array_key_exists('facts', $data)) {
+                $data['facts'] = ProductTextEvidenceContract::normalizeGroups($data['facts']);
+            }
+            $data = Validator::make($data, [
+                ...ProductTextEvidenceContract::rules('facts', includeGroup: true),
                 'facts' => ['present', 'array', 'max:100'],
                 'summary' => ['required', 'string', 'max:1500'],
             ])->validate();

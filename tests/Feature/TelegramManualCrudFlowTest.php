@@ -8,8 +8,8 @@ use App\Jobs\ProcessTelegramMessage;
 use App\Jobs\ProcessTelegramProductUpload;
 use App\Jobs\ProposeTelegramDraftEdit;
 use App\Jobs\StoreProductImages;
-use App\Jobs\TranscribeTelegramVoice;
 use App\Jobs\TranscribeTelegramPhoto;
+use App\Jobs\TranscribeTelegramVoice;
 use App\Models\AiRun;
 use App\Models\AttributeDefinition;
 use App\Models\ProductDraft;
@@ -254,8 +254,10 @@ class TelegramManualCrudFlowTest extends TestCase
     public function test_enrichment_previews_cited_facts_without_publishing_or_repeating_completed_job(): void
     {
         $draft = $this->manualDraft();
+        $group = ['id' => null, 'name' => 'Connectivity', 'name_cs' => null];
         ProductTextEvidenceAgent::fake(fn () => ['facts' => [[
             'key' => 'usb_ports', 'name' => 'USB ports', 'value' => '3', 'scope' => 'exact_configuration',
+            'group' => $group,
             'source_url' => 'https://maker.example/m123', 'source_excerpt' => 'Three USB ports', 'applicability' => 'Exact M123 configuration',
         ]], 'summary' => 'Confirmed USB ports'])->preventStrayPrompts();
         $this->pressButton($draft, "draft:enrich:{$draft->id}");
@@ -265,12 +267,16 @@ class TelegramManualCrudFlowTest extends TestCase
         $job->handle(app(TelegramClient::class), app(DraftTelegramPresenter::class), app(TelegramDraftEditor::class));
         $this->assertSame([], $draft->fresh()->specifications);
         $this->assertCount(1, $draft->fresh()->specification_evidence);
+        $this->assertSame($group, $draft->fresh()->specification_evidence[0]['group']);
+        $this->assertDatabaseCount('attribute_groups', 0);
         $runs = AiRun::count();
         $job->handle(app(TelegramClient::class), app(DraftTelegramPresenter::class), app(TelegramDraftEditor::class));
         $this->assertSame($runs, AiRun::count());
         $state = app(DraftTelegramInteractionState::class)->get('12345', '12345');
         $this->pressButton($draft, "draft:confirm:{$draft->id}:{$state['token']}");
         $this->assertSame('https://maker.example/m123', $draft->fresh()->specifications[0]['source_url']);
+        $this->assertSame($group, $draft->fresh()->specifications[0]['group']);
+        $this->assertDatabaseCount('attribute_groups', 0);
         $this->assertSame(1, $draft->media()->count());
         $this->assertDatabaseCount('products', 0);
     }

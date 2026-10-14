@@ -56,6 +56,7 @@ class FilamentProductWorkflowTest extends TestCase
         $this->assertEquals($brand->id, $page->get('data.brand_id'));
         $this->assertEmpty($page->get('data.title'));
         $this->assertEmpty($page->get('data.new_photos'));
+        $this->assertSame('published', $page->get('data.status'));
         $variants = $page->get('data.variants');
         $this->assertCount(1, $variants);
         $this->assertArrayNotHasKey($key, $variants);
@@ -68,6 +69,8 @@ class FilamentProductWorkflowTest extends TestCase
         $page->fillForm(['title' => 'Second workflow product'])->call('create')->assertHasNoFormErrors();
         $this->assertSame(1, Product::where('title', 'First workflow product')->sole()->media()->count());
         $second = Product::where('title', 'Second workflow product')->sole();
+        $this->assertTrue(Product::visibleInCatalog()->whereKey($second->id)->exists());
+        $this->assertSame('draft', Product::where('title', 'First workflow product')->sole()->status);
         $this->assertSame(0, $second->media()->count());
         $this->assertNull($second->variants()->sole()->price);
     }

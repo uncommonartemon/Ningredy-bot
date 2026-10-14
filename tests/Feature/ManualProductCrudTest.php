@@ -71,10 +71,12 @@ class ManualProductCrudTest extends TestCase
             ->set('data.category_id', Category::where('slug', 'laptops')->value('id'));
         $variantKey = array_key_first($page->get('data.variants'));
         $page->set("data.variants.$variantKey.condition", 'open_box')
-            ->fillForm(['title' => 'Manual open box laptop', 'status' => 'draft'])
+            ->fillForm(['title' => 'Manual open box laptop'])
             ->call('create')->assertHasNoFormErrors();
         $product = Product::where('title', 'Manual open box laptop')->sole();
         $this->assertSame('open_box', $product->variants()->sole()->condition);
+        $this->assertTrue(Product::visibleInCatalog()->whereKey($product->id)->exists());
+        $this->assertSame(0, $product->media()->count());
 
         Livewire::test(EditProduct::class, ['record' => $product->id])
             ->call('save')->assertHasNoFormErrors();
