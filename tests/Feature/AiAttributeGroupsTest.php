@@ -50,9 +50,12 @@ class AiAttributeGroupsTest extends TestCase
         $definition = AttributeDefinition::where('key', 'gpu_bus_width')->sole();
         $this->assertSame('Graphics', $group->name);
         $this->assertSame(['cs' => 'Grafika'], $group->translations);
-        $this->assertFalse($group->highlight_in_filters);
+        $this->assertTrue($group->highlight_in_filters);
         $this->assertSame(0, $group->sort_order);
         $this->assertSame($group->id, $definition->attribute_group_id);
+        $this->assertFalse($definition->is_variant);
+        $catalog = $this->get('/catalog')->assertOk()->viewData('page')['props'];
+        $this->assertContains('gpu_bus_width', array_column($catalog['facets']['attributes'], 'key'));
         $this->assertDatabaseHas('attribute_values', ['product_id' => $product->id,
             'attribute_definition_id' => $definition->id, 'value' => '128 bit']);
         $this->assertSame('approved', $draft->fresh()->status);
@@ -62,7 +65,7 @@ class AiAttributeGroupsTest extends TestCase
     public function test_approval_reuses_existing_ids_and_normalized_names_without_editing_admin_group_settings(): void
     {
         $group = AttributeGroup::create(['name' => 'Graphics details', 'translations' => ['cs' => 'Grafické detaily'],
-            'sort_order' => 27, 'highlight_in_filters' => true]);
+            'sort_order' => 27, 'highlight_in_filters' => false]);
         $original = $group->fresh()->getAttributes();
         $draft = $this->draft([
             $this->specification('gpu_bus_width', ['id' => $group->id, 'name' => 'GPU', 'name_cs' => 'Replacement']),
@@ -103,7 +106,7 @@ class AiAttributeGroupsTest extends TestCase
         $manualGroup = AttributeGroup::create(['name' => 'Admin graphics']);
         $grouped = AttributeDefinition::create(['key' => 'gpu_bus_width', 'label' => 'GPU bus width',
             'attribute_group_id' => $manualGroup->id]);
-        $ungrouped = AttributeDefinition::create(['key' => 'gpu_memory_type', 'label' => 'GPU memory type']);
+        $ungrouped = AttributeDefinition::create(['key' => 'gpu_memory_type', 'label' => 'GPU memory type', 'is_filterable' => false]);
         $proposal = ['id' => null, 'name' => 'AI graphics', 'name_cs' => null];
         $draft = $this->draft([
             $this->specification($grouped->key, $proposal),
@@ -117,6 +120,7 @@ class AiAttributeGroupsTest extends TestCase
 
         $this->assertSame($manualGroup->id, $grouped->fresh()->attribute_group_id);
         $this->assertNull($ungrouped->fresh()->attribute_group_id);
+        $this->assertFalse($ungrouped->fresh()->is_filterable);
         $this->assertDatabaseCount('attribute_groups', 1);
         $this->assertDatabaseMissing('attribute_groups', ['name' => 'AI graphics']);
     }

@@ -9,6 +9,7 @@ use App\Services\Products\ManualProductAttributes;
 use Filament\Actions\Action;
 use Filament\Forms\Components\Hidden;
 use Filament\Forms\Components\Repeater;
+use Filament\Forms\Components\Repeater\TableColumn;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\Textarea;
 use Filament\Forms\Components\TextInput;
@@ -24,10 +25,17 @@ class ProductAttributeFields
     {
         return Repeater::make('attributes')->relationship()->label(__('Характеристики'))
             ->hintAction(fn (Repeater $component): Action => self::pasteAction($component))
+            ->table([
+                TableColumn::make(__('Характеристика'))->width('45%'),
+                TableColumn::make(__('Значение')),
+                TableColumn::make(__('Единица'))->width('6rem'),
+            ])->compact()
+            ->extraAttributes(['class' => 'product-attributes-compact'])
             ->schema([
                 Hidden::make('_category_default')->dehydrated(false),
                 Hidden::make('translations'),
                 Select::make('attribute_definition_id')->label(__('Характеристика'))
+                    ->extraInputAttributes(['aria-label' => __('Характеристика')])
                     ->options(fn ($livewire): array => RelatedCatalogForms::attributeOptions() + (method_exists($livewire, 'getProductAiOptions') ? $livewire->getProductAiOptions('attribute') : []))->searchable()->preload()->live()
                     ->disableOptionsWhenSelectedInSiblingRepeaterItems()
                     ->required(fn (Get $get): bool => filled($get('value')))
@@ -44,21 +52,19 @@ class ProductAttributeFields
                         $set('_category_default', false);
                     })
                     ->createOptionForm(RelatedCatalogForms::attribute())
-                    ->createOptionUsing(fn (array $data): int => AttributeDefinition::create($data)->id)
-                    ->columnSpan(['default' => 1, '@md' => 2]),
+                    ->createOptionUsing(fn (array $data): int => AttributeDefinition::create($data)->id),
                 TextInput::make('value')->label(__('Значение'))
+                    ->extraInputAttributes(['aria-label' => __('Значение')])
                     ->placeholder(__('Введите или выберите из подсказок'))
                     ->datalist(fn (Get $get): array => app(ManualProductAttributes::class)->suggestions($get('attribute_definition_id'), $get('value')))
                     ->live(debounce: 400)
                     ->required(fn (?AttributeValue $record): bool => $record?->exists ?? false)
-                    ->maxLength(2000)->columnSpan(['default' => 1, '@md' => 2]),
+                    ->maxLength(2000),
                 TextInput::make('unit')->label(__('Единица'))->maxLength(24)->live(onBlur: true)
+                    ->extraInputAttributes(['aria-label' => __('Единица')])
                     ->afterStateUpdated(fn (Set $set) => $set('_category_default', false))
-                    ->placeholder(__('Необязательно'))
-                    ->columnStart(['default' => 1, '@md' => 5]),
+                    ->placeholder('—'),
             ])
-            // A nested variant can be narrow even on a desktop-size viewport.
-            ->gridContainer()->columns(['default' => 1, '@md' => 5, '@2xl' => 5])
             ->default(fn (Get $get): array => app(ManualProductAttributes::class)->defaults($get('../../category_id')))
             ->mutateRelationshipDataBeforeCreateUsing(fn (array $data): ?array => app(ManualProductAttributes::class)->normalize($data))
             ->mutateRelationshipDataBeforeSaveUsing(fn (array $data): ?array => app(ManualProductAttributes::class)->normalize($data))

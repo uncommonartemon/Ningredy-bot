@@ -8,7 +8,6 @@
 <aside
     class="product-form-assistant"
     aria-label="{{ __('product-assistant.heading') }}"
-    @if ($assistantBusy) wire:poll.3s="pollProductAi" @endif
     x-data="{
         submitting: false,
         async ask(action) {
@@ -22,10 +21,6 @@
         },
     }"
 >
-    <x-filament::section icon="heroicon-o-sparkles" :compact="true">
-        <x-slot name="heading">{{ __('product-assistant.heading') }}</x-slot>
-        <x-slot name="description">{{ __('product-assistant.model', ['model' => $this->getProductAiModelLabel()]) }}</x-slot>
-
         <div class="product-form-assistant__body">
             <p class="product-form-assistant__hint">{{ __('product-assistant.form_only') }}</p>
 
@@ -253,8 +248,6 @@
                 </div>
             @endif
         </div>
-    </x-filament::section>
-
     <style>
         .product-form-assistant { min-width: 0; color: var(--gray-950); }
         .product-form-assistant__body { display: flex; flex-direction: column; gap: 1rem; }

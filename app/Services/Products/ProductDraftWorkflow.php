@@ -398,15 +398,15 @@ class ProductDraftWorkflow
                 continue;
             }
             [$dataType, $numericValue, $unit] = $this->typedValue($attributeKey, (string) $rawValue);
-            $isFilterable = in_array($attributeKey, self::FILTERABLE_ATTRIBUTE_KEYS, true);
+            $isVariantAttribute = in_array($attributeKey, self::FILTERABLE_ATTRIBUTE_KEYS, true);
             $definition = AttributeDefinition::query()->firstOrCreate(
                 ['key' => $attributeKey],
                 [
                     'label' => $this->canonicalLabel($attributeKey, (string) $label),
                     'data_type' => $dataType,
                     'default_unit' => $unit,
-                    'is_filterable' => $isFilterable,
-                    'is_variant' => $isFilterable,
+                    'is_filterable' => true,
+                    'is_variant' => $isVariantAttribute,
                 ],
             );
             if ($definition->wasRecentlyCreated && is_array($specification)) {
@@ -427,7 +427,7 @@ class ProductDraftWorkflow
                 $definition->update(['translations' => [...($definition->translations ?? []), ...$missingNames]]);
             }
             $valueTranslations = array_filter(array_map(fn (array $items): ?string => $items[$attributeKey]['value'] ?? null, $translations));
-            $belongsToVariant = $variantScoped || $isFilterable;
+            $belongsToVariant = $variantScoped || $isVariantAttribute;
             $owner = $belongsToVariant ? $variant->attributes() : $product->attributes();
             $typedFields = ['numeric_value' => $numericValue, 'unit' => $unit];
             if ($variantScoped) {

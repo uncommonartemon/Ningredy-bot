@@ -7,6 +7,8 @@ use App\Models\AttributeDefinition;
 use App\Models\Product;
 use App\Services\Ai\AiSettings;
 use App\Services\Products\ProductFormAssistant;
+use Filament\Actions\Action;
+use Filament\Support\Enums\Width;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use Livewire\Attributes\Locked;
@@ -42,6 +44,23 @@ trait InteractsWithProductFormAssistant
     public function getProductAiModelLabel(): string
     {
         return app(AiSettings::class)->modelFor('server_assistant');
+    }
+
+    public function productAiAssistantAction(): Action
+    {
+        return Action::make('productAiAssistant')
+            ->label(__('product-assistant.heading'))
+            ->icon('heroicon-o-sparkles')
+            ->color('gray')
+            ->slideOver()
+            ->modalClickThrough()
+            ->modalAutofocus(false)
+            ->modalHeading(__('product-assistant.heading'))
+            ->modalDescription(fn (): string => __('product-assistant.model', ['model' => $this->getProductAiModelLabel()]))
+            ->modalWidth(Width::Large)
+            ->modalSubmitAction(false)
+            ->modalCancelAction(false)
+            ->modalContent(fn () => view('filament.products.form-assistant'));
     }
 
     public function getProductAiVariantOptions(): array

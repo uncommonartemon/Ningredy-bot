@@ -81,7 +81,7 @@ final class AiAttributeGroups
         return AttributeGroup::query()->firstOrCreate(['name' => $proposal['name']], [
             'translations' => $proposal['name_cs'] === null ? null : ['cs' => $proposal['name_cs']],
             'sort_order' => 0,
-            'highlight_in_filters' => false,
+            'highlight_in_filters' => true,
         ]);
     }
 
@@ -103,7 +103,7 @@ final class AiAttributeGroups
             'name' => $proposal['name'],
             'translations' => $proposal['name_cs'] === null ? [] : ['cs' => $proposal['name_cs']],
             'sort_order' => 0,
-            'highlight_in_filters' => false,
+            'highlight_in_filters' => true,
         ];
     }
 

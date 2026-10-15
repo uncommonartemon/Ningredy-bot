@@ -52,7 +52,7 @@ class AttributeGroupsTest extends TestCase
         $this->assertEquals($group->id, $page->get('data.attribute_group_id'));
         $this->assertSame('Keyboard pitch', $page->get('data.label'));
         $this->assertSame('mm', $page->get('data.default_unit'));
-        $this->assertFalse($group->highlight_in_filters);
+        $this->assertTrue($group->highlight_in_filters);
         $this->assertSame(['cs' => 'Klávesnice'], $group->translations);
         $this->assertDatabaseMissing('attribute_definitions', ['label' => 'Keyboard pitch']);
         $page->call('create')->assertHasNoFormErrors();

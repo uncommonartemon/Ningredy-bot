@@ -25,7 +25,7 @@ class EditProduct extends EditRecord
 
     protected ?bool $hasDatabaseTransactions = true;
 
-    public static bool $formActionsAreSticky = true;
+    public static bool $formActionsAreSticky = false;
 
     protected function beforeValidate(): void
     {
@@ -46,6 +46,8 @@ class EditProduct extends EditRecord
                 ->url(fn (): string => route('products.show', $this->record), true)
                 ->visible(fn (): bool => $this->record->status === 'published' && $this->record->is_active),
             ViewAction::make(),
+            $this->productAiAssistantAction(),
+            $this->getSaveFormAction()->formId('form')->keyBindings([]),
             DeleteAction::make(),
         ];
     }

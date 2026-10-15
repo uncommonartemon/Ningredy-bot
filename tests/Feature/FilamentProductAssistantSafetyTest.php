@@ -42,6 +42,49 @@ class FilamentProductAssistantSafetyTest extends TestCase
         Filament::bootCurrentPanel();
     }
 
+    #[DataProvider('editorOperations')]
+    public function test_native_assistant_drawer_preserves_the_editing_session_when_closed_and_reopened(string $operation): void
+    {
+        $product = $operation === 'edit' ? $this->savedProduct()[0] : null;
+        $page = $product
+            ? Livewire::test(EditProduct::class, ['record' => $product->id])
+            : $this->createPage();
+        $page->mountAction('productAiAssistant')->assertActionMounted('productAiAssistant');
+        $action = $page->instance()->getMountedAction();
+        $this->assertTrue($action->isModalSlideOver());
+        $this->assertTrue($action->isModalClickThrough());
+        $this->assertNull($action->getModalSubmitAction());
+        $this->assertNull($action->getModalCancelAction());
+
+        $run = $this->send($page);
+        $session = $page->get('productAiSession');
+        $page->set('data.description', 'Typed while the assistant is open')
+            ->set('productAiMessage', 'Unsent follow-up')->unmountAction();
+
+        $this->assertSame('queued', $run->fresh()->status);
+        $this->complete($run, [
+            ['path' => 'title', 'value' => 'Prepared title'],
+            ['path' => 'description', 'value' => 'AI description'],
+        ]);
+        $page->call('pollProductAi');
+        $this->assertSame([], $page->get('mountedActions'));
+        $this->assertSame('Prepared title', $page->get('data.title'));
+        $this->assertSame('Typed while the assistant is open', $page->get('data.description'));
+        $page->mountAction('productAiAssistant')->assertActionMounted('productAiAssistant');
+
+        $this->assertSame($session, $page->get('productAiSession'));
+        $this->assertSame($run->id, $page->get('productAiRunId'));
+        $this->assertSame('Unsent follow-up', $page->get('productAiMessage'));
+        $this->assertSame('Prepared title', $page->get('data.title'));
+        $this->assertSame('Typed while the assistant is open', $page->get('data.description'));
+        $this->assertCount(2, $page->get('productAiMessages'));
+        $this->assertSame($product ? 1 : 0, Product::count());
+        if ($product) {
+            $this->assertSame('Lenovo Z50-70', $product->fresh()->title);
+        }
+        Queue::assertPushed(RunProductFormAssistant::class, 1);
+    }
+
     public function test_repeated_send_queues_one_request_and_uses_the_admin_selected_model(): void
     {
         app(AiSettings::class)->saveModel('gpt-6-luna');
@@ -392,6 +435,13 @@ class FilamentProductAssistantSafetyTest extends TestCase
         $this->assertSame('PCIe 4.0', $attribute->value);
         $this->assertSame('Assistant Storage', $attribute->definition->group->name);
         $this->assertSame('Assistant proposed brand', $product->brand->name);
+        $this->assertFalse($attribute->definition->is_variant);
+        $catalog = $this->get('/catalog')->assertOk()->viewData('page')['props'];
+        $this->assertContains('assistant_storage_interface', array_column($catalog['facets']['attributes'], 'key'));
+
+        $attribute->definition->update(['is_filterable' => false]);
+        $catalog = $this->get('/catalog')->assertOk()->viewData('page')['props'];
+        $this->assertNotContains('assistant_storage_interface', array_column($catalog['facets']['attributes'], 'key'));
     }
 
     public function test_repeated_attribute_proposals_reuse_the_pending_row_before_save(): void

@@ -6,7 +6,6 @@ use App\Filament\Resources\Categories\Pages\EditCategory;
 use App\Filament\Resources\Products\Pages\CreateProduct;
 use App\Filament\Resources\Products\Pages\EditProduct;
 use App\Filament\Resources\Products\Pages\ViewProduct;
-use App\Filament\Schemas\ProductAttributeFields;
 use App\Models\AttributeDefinition;
 use App\Models\AttributeValue;
 use App\Models\Brand;
@@ -48,21 +47,11 @@ class ManualProductCrudTest extends TestCase
         Filament::bootCurrentPanel();
     }
 
-    public function test_long_product_forms_use_native_sticky_actions_and_unsaved_changes_alerts(): void
+    public function test_product_forms_use_static_actions_and_unsaved_changes_alerts(): void
     {
         $this->assertTrue(Filament::getPanel('admin')->hasUnsavedChangesAlerts());
-        $this->assertTrue((new CreateProduct)->areFormActionsSticky());
-        $this->assertTrue((new EditProduct)->areFormActionsSticky());
-    }
-
-    public function test_attribute_fields_adapt_to_their_container_not_the_whole_screen(): void
-    {
-        $fields = ProductAttributeFields::make();
-        $this->assertTrue($fields->isGridContainer());
-        $this->assertSame(1, $fields->getColumns('default'));
-        $this->assertSame(5, $fields->getColumns('@md'));
-        $this->assertSame(5, $fields->getColumns('@2xl'));
-        $this->assertNull($fields->getColumns('md'));
+        $this->assertFalse((new CreateProduct)->areFormActionsSticky());
+        $this->assertFalse((new EditProduct)->areFormActionsSticky());
     }
 
     public function test_manual_open_box_product_can_be_created_and_saved_unchanged(): void

@@ -9,6 +9,8 @@ class AttributeGroup extends Model
 {
     protected $fillable = ['name', 'translations', 'sort_order', 'highlight_in_filters'];
 
+    protected $attributes = ['highlight_in_filters' => true];
+
     protected static function booted(): void
     {
         static::saving(function (AttributeGroup $group): void {

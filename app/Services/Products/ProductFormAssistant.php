@@ -452,7 +452,7 @@ class ProductFormAssistant
                     'key' => preg_match('/^[a-z][a-z0-9_-]{0,254}$/', $proposal['key']) ? $proposal['key'] : null,
                     'label' => $proposal['label'], 'data_type' => $proposal['data_type'], 'default_unit' => $proposal['unit'],
                     'attribute_group_id' => AiAttributeGroups::resolve($proposal['group'])?->id,
-                    'is_filterable' => false, 'is_variant' => false, 'sort_order' => 0,
+                    'is_filterable' => true, 'is_variant' => false, 'sort_order' => 0,
                 ])->id;
             }
             $class = $kind === 'brand' ? Brand::class : Category::class;

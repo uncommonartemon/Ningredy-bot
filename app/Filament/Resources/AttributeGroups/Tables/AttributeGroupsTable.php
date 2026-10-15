@@ -12,7 +12,7 @@ class AttributeGroupsTable
 {
     public static function configure(Table $table): Table
     {
-        return $table->defaultPaginationPageOption(50)->defaultSort('sort_order')
+        return $table->paginated(false)->defaultSort('sort_order')
             ->modifyQueryUsing(fn ($query) => $query->withCount('attributeDefinitions'))
             ->reorderable('sort_order')
             ->columns([

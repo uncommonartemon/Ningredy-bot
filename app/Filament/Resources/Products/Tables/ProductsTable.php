@@ -84,6 +84,6 @@ class ProductsTable
                 TernaryFilter::make('is_active')->label(__('product-table.show_on_site')),
                 TernaryFilter::make('is_featured')->label(__('Рекомендуемый')),
             ])->recordActions([ActionGroup::make([ProductCommercialAction::make(), ViewAction::make(), EditAction::make()])])
-            ->recordUrl(fn ($record): string => ProductResource::getUrl('view', ['record' => $record]));
+            ->recordUrl(fn ($record): string => ProductResource::getUrl('edit', ['record' => $record]));
     }
 }

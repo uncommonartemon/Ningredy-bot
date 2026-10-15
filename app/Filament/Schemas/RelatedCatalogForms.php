@@ -40,7 +40,7 @@ final class RelatedCatalogForms
                 }]),
             TextInput::make('translations.cs')->label(__('catalog-groups.czech_name'))->maxLength(255),
             TextInput::make('sort_order')->label(__('Порядок'))->integer()->minValue(0)->default(0)->required(),
-            Toggle::make('highlight_in_filters')->label(__('catalog-groups.highlight'))->default(false)
+            Toggle::make('highlight_in_filters')->label(__('catalog-groups.highlight'))->default(true)
                 ->helperText(__('catalog-groups.highlight_help')),
         ];
     }

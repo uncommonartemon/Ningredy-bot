@@ -19,7 +19,15 @@ class CreateProduct extends CreateRecord
 
     protected ?bool $hasDatabaseTransactions = true;
 
-    public static bool $formActionsAreSticky = true;
+    public static bool $formActionsAreSticky = false;
+
+    protected function getHeaderActions(): array
+    {
+        return [
+            $this->getCreateFormAction()->formId('form')->keyBindings([]),
+            $this->productAiAssistantAction(),
+        ];
+    }
 
     protected function beforeValidate(): void
     {

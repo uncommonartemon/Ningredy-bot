@@ -17,6 +17,7 @@ use Filament\Actions\Action;
 use Filament\Forms\Components\DateTimePicker;
 use Filament\Forms\Components\Hidden;
 use Filament\Forms\Components\Repeater;
+use Filament\Forms\Components\Repeater\TableColumn;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\Textarea;
 use Filament\Forms\Components\TextInput;
@@ -26,16 +27,18 @@ use Filament\Schemas\Components\Group;
 use Filament\Schemas\Components\Section;
 use Filament\Schemas\Components\Utilities\Get;
 use Filament\Schemas\Components\Utilities\Set;
-use Filament\Schemas\Components\View;
 use Filament\Schemas\Schema;
 
 class ProductForm
 {
     public static function configure(Schema $schema): Schema
     {
-        return $schema->columns(1)->components([
-            Grid::make(['default' => 1, 'lg' => 3])->schema([
-                Group::make([
+        return $schema->dense()->columns(1)->components([
+            Grid::make(['default' => 1, 'lg' => 3])
+                ->extraAttributes(fn ($livewire): array => method_exists($livewire, 'pollProductAi')
+                    && in_array($livewire->productAiStatus, ['queued', 'running'], true)
+                    ? ['wire:poll.3s' => 'pollProductAi'] : [])
+                ->schema([
                     Section::make(__('Товар'))->schema([
                         TextInput::make('title')->label(__('Название'))->required()->maxLength(255)->columnSpanFull(),
                         Select::make('category_id')->label(__('Категория'))->relationship('category', 'name')
@@ -66,63 +69,61 @@ class ProductForm
                                     ? $affinity
                                     : (array_key_exists($state ?? '', ProductOptions::types()) ? $state : 'other');
                             }),
-                    ])->columns(2),
-
-                    Section::make(__('Характеристики и конфигурации'))
-                        ->description(__('Выберите готовые значения или впишите свои. Новые значения появятся в подсказках после сохранения товара. Пустые стартовые строки можно не заполнять.'))
-                        ->schema([self::variants()]),
-
-                    Section::make(__('Фотографии'))
-                        ->description(__('Перетащите фотографии сюда. Они сохранятся вместе с товаром.'))
-                        ->schema([ProductPhotoUpload::multiple()->dehydrated(false)]),
-
-                    Section::make(__('Описание'))
-                        ->schema([Textarea::make('description')->label(__('Описание'))->hiddenLabel()->rows(5)->columnSpanFull()]),
-                    Section::make(__('Переводы'))->schema([ProductTranslations::make()])->collapsed(),
-                ])->columnSpan(['default' => 1, 'lg' => 2]),
-
-                Group::make([
-                    View::make('filament.products.form-assistant')
-                        ->visible(fn ($livewire): bool => method_exists($livewire, 'sendProductAiMessage')),
+                    ])->compact()->gridContainer()->columns(['default' => 1, '@md' => 2, '@xl' => 3])
+                        ->columnSpan(['default' => 1, 'lg' => 2]),
                     Section::make(__('Публикация'))->schema([
                         Select::make('status')->label(__('Статус'))->options(ProductOptions::statuses())->default('published')->required(),
                         Toggle::make('is_active')->label(__('Показывать в каталоге'))->default(true),
                         Toggle::make('is_featured')->label(__('Рекомендуемый')),
-                    ]),
-                    Section::make(__('Дополнительно'))->schema([
-                        DateTimePicker::make('published_at')->label(__('Дата публикации')),
-                        TextInput::make('sort_order')->label(__('Порядок'))->integer()->minValue(0)->default(0),
-                    ])->collapsed(),
-                ])->columnSpan(1),
-            ]),
+                    ])->compact(),
+                    Section::make(__('Характеристики и конфигурации'))
+                        ->contained(false)->schema([self::variants()])->columnSpanFull(),
+                    Section::make(__('Описание'))
+                        ->compact()->columnSpan(['default' => 1, 'lg' => 2])
+                        ->schema([Textarea::make('description')->label(__('Описание'))->hiddenLabel()->rows(3)->autosize()->columnSpanFull()]),
+                    Group::make([
+                        Section::make(__('Фотографии'))->compact()->collapsed()
+                            ->schema([ProductPhotoUpload::multiple()->dehydrated(false)]),
+                        Section::make(__('Переводы'))->compact()->schema([ProductTranslations::make()])->collapsed(),
+                        Section::make(__('Дополнительно'))->schema([
+                            DateTimePicker::make('published_at')->label(__('Дата публикации')),
+                            TextInput::make('sort_order')->label(__('Порядок'))->integer()->minValue(0)->default(0),
+                        ])->compact()->collapsed(),
+                    ])->columnSpan(1),
+                ]),
             Section::make(__('Источники'))->schema([
-                Repeater::make('sources')->relationship()->label(__('Источники данных'))->schema([
-                    TextInput::make('title')->label(__('Название'))->required()->maxLength(500),
-                    TextInput::make('url')->label('URL')->url()->required()->columnSpan(2),
-                    Select::make('source_type')->label(__('Тип'))->options(ProductSourceTypes::options())->default('web'),
-                ])->mutateRelationshipDataBeforeCreateUsing(fn (array $data): array => self::sourceData($data))
+                Repeater::make('sources')->relationship()->label(__('Источники данных'))->hiddenLabel()
+                    ->table([
+                        TableColumn::make(__('Название'))->width('30%'),
+                        TableColumn::make('URL'),
+                        TableColumn::make(__('Тип'))->width('8rem'),
+                    ])->compact()->schema([
+                        TextInput::make('title')->label(__('Название'))->required()->maxLength(500),
+                        TextInput::make('url')->label('URL')->url()->required(),
+                        Select::make('source_type')->label(__('Тип'))->options(ProductSourceTypes::options())->default('web'),
+                    ])->mutateRelationshipDataBeforeCreateUsing(fn (array $data): array => self::sourceData($data))
                     ->mutateRelationshipDataBeforeSaveUsing(fn (array $data): array => self::sourceData($data))
-                    ->columns(['default' => 1, 'md' => 4])->defaultItems(0)
+                    ->defaultItems(0)
                     ->addActionLabel(__('Добавить источник'))->columnSpanFull(),
-            ])->columnSpanFull()->collapsed(),
+            ])->compact()->columnSpanFull()->collapsed(),
         ]);
     }
 
     private static function variants(): Repeater
     {
-        return Repeater::make('variants')->relationship()->label(__('Конфигурации'))
+        return Repeater::make('variants')->relationship()->label(__('Конфигурации'))->hiddenLabel()
             ->schema([
                 ProductAttributeFields::make(),
-                Section::make(__('Цена и наличие'))->schema([
+                Group::make([
                     Select::make('condition')->label(__('Состояние'))->options(ProductCondition::options())
-                        ->default('new')->required()->live()->columnSpanFull(),
+                        ->default('new')->required()->live(),
                     TextInput::make('price')->label(__('Цена'))->numeric()->minValue(0),
                     TextInput::make('currency')->label(__('Валюта'))->default('CZK')->length(3),
                     Select::make('stock_status')->label(__('Наличие'))->options(ProductOptions::stockStatuses())->default('unknown')->required(),
                     TextInput::make('quantity')->label(__('Количество'))->integer()->minValue(0)->default(0)->required(),
                     Toggle::make('is_default')->label(__('Основной вариант'))->fixIndistinctState()
                         ->default(fn (Get $get): bool => count($get('../../variants') ?? []) <= 1),
-                ])->columns(['default' => 1, 'md' => 2])->columnSpanFull(),
+                ])->columns(['default' => 1, 'sm' => 2, 'xl' => 3])->columnSpanFull(),
                 Section::make(__('Дополнительные данные конфигурации'))->schema([
                     TextInput::make('name')->label(__('Название конфигурации'))->maxLength(255)
                         ->placeholder(__('Например: 16 GB / 512 GB'))->columnSpanFull(),
@@ -138,8 +139,8 @@ class ProductForm
                     TextInput::make('warranty_months')->label(__('Гарантия, месяцев'))->integer()->minValue(0),
 
                     Toggle::make('is_active')->label(__('Активен'))->default(true),
-                ])->columns(['default' => 1, 'md' => 3])->collapsed()->columnSpanFull(),
-                Section::make(__('Переводы конфигурации'))->schema([ProductTranslations::make()])->collapsed(),
+                ])->compact()->columns(['default' => 1, 'md' => 3])->collapsed()->columnSpanFull(),
+                Section::make(__('Переводы конфигурации'))->compact()->schema([ProductTranslations::make()])->collapsed(),
             ])->defaultItems(1)->columns(1)
             ->minItems(fn (string $operation): int => $operation === 'create' ? 1 : 0)
             ->deletable(fn (Repeater $component): bool => count($component->getRawState() ?? []) > 1)

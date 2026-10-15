@@ -3,6 +3,8 @@
 namespace App\Providers\Filament;
 
 use App\Filament\Pages\Auth\Login;
+use App\Filament\Resources\Products\Pages\CreateProduct;
+use App\Filament\Resources\Products\Pages\EditProduct;
 use App\Filament\Resources\Products\Pages\ListProducts;
 use App\Http\Middleware\SetAdminLocale;
 use Filament\Actions\Action;
@@ -59,6 +61,8 @@ class AdminPanelProvider extends PanelProvider
             ->maxContentWidth(Width::Full)
             ->renderHook(PanelsRenderHook::STYLES_AFTER,
                 fn () => view('filament.styles.compact-products-table'), scopes: [ListProducts::class])
+            ->renderHook(PanelsRenderHook::STYLES_AFTER,
+                fn () => view('filament.styles.compact-product-attributes'), scopes: [CreateProduct::class, EditProduct::class])
             ->discoverResources(in: app_path('Filament/Resources'), for: 'App\Filament\Resources')
             ->discoverPages(in: app_path('Filament/Pages'), for: 'App\Filament\Pages')
             ->pages([
