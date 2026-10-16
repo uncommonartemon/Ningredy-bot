@@ -1,8 +1,8 @@
-﻿param([switch]$NoPause)
+﻿param([switch]$NoPause, [switch]$ForceUpdate, [string]$ProjectRoot)
 
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-$root = Split-Path -Parent $PSScriptRoot
+$root = if ($ProjectRoot) { (Resolve-Path -LiteralPath $ProjectRoot).ProviderPath } else { Split-Path -Parent $PSScriptRoot }
 Set-Location -LiteralPath $root
 $backup = $null
 $backupComplete = $false
@@ -53,6 +53,9 @@ function Assert-BotStopped {
 
 try {
     Write-Host "`n  NINGREDY — обновление и запуск`n" -ForegroundColor Cyan
+    if ($ForceUpdate) {
+        Write-Host '  Принудительный режим: после резервного копирования локальный код будет заменён версией из GitHub.' -ForegroundColor Yellow
+    }
     if (-not (Test-Path -LiteralPath (Join-Path $root 'artisan'))) {
         throw 'Файл обновления должен находиться в установленном проекте рядом с artisan.'
     }
@@ -94,7 +97,7 @@ try {
     $branch = Invoke-Checked $git @('branch', '--show-current') 'Проверяю ветку Git' -Capture
     if ($branch -ne 'main') { throw "Открыта ветка '$branch', а обновление рассчитано на main. Автоматическое переключение отменено, чтобы сохранить вашу работу." }
     $changes = Invoke-Checked $git @('status', '--porcelain', '--untracked-files=normal') 'Проверяю локальные изменения' -Capture
-    if ($changes) {
+    if ($changes -and -not $ForceUpdate) {
         Write-Host $changes -ForegroundColor Yellow
         throw 'В папке есть локальные изменения. Они сохранены; автоматическое обновление остановлено. Пришлите список файлов выше, чтобы перенести изменения без потери работы.'
     }
@@ -102,7 +105,9 @@ try {
     Invoke-Checked $git @('fetch', 'origin', 'main') '1/6 — Получаю обновление из GitHub'
     $target = Invoke-Checked $git @('rev-parse', 'FETCH_HEAD') '' -Capture
     & $git merge-base --is-ancestor $before $target
-    if ($LASTEXITCODE -ne 0) {
+    $ancestryExit = $LASTEXITCODE
+    if ($ancestryExit -gt 1) { throw 'Не удалось проверить историю Git. Обновление остановлено.' }
+    if ($ancestryExit -ne 0 -and -not $ForceUpdate) {
         throw 'Локальная история отличается от GitHub. Автоматическое слияние отменено; ваши коммиты сохранены.'
     }
 
@@ -117,12 +122,19 @@ try {
         Copy-Item -LiteralPath (Join-Path $root 'storage\app') -Destination (Join-Path $backup 'storage-app') -Recurse
     }
     $before | Set-Content -LiteralPath (Join-Path $backup 'git-commit-before.txt') -Encoding ASCII
+    if ($ForceUpdate) {
+        Invoke-Checked $node @((Join-Path $PSScriptRoot 'backup-update-code.mjs'), $root, $backup, $git, $target) 'Сохраняю локальные коммиты и файлы, проверяю безопасность замены кода'
+    }
     'Backup completed.' | Set-Content -LiteralPath (Join-Path $backup 'COMPLETE.txt') -Encoding ASCII
     $backupComplete = $true
     Write-Host "  Резервная копия: $backup" -ForegroundColor Green
 
     Assert-BotStopped
-    Invoke-Checked $git @('-c', 'merge.autostash=false', 'merge', '--ff-only', $target) '3/6 — Обновляю код'
+    if ($ForceUpdate) {
+        Invoke-Checked $git @('reset', '--hard', '--no-recurse-submodules', $target) '3/6 — Заменяю локальный код версией из GitHub'
+    } else {
+        Invoke-Checked $git @('-c', 'merge.autostash=false', 'merge', '--ff-only', $target) '3/6 — Обновляю код'
+    }
     # Do not run Composer's Laravel hooks against the old cached configuration
     # or package manifest. Artisan is available after dependencies are installed.
     Invoke-Checked $composer @('install', '--no-interaction', '--prefer-dist', '--no-scripts') '4/6 — Устанавливаю PHP-зависимости'
@@ -151,7 +163,7 @@ try {
     $transcribing = $false
     # Reuse the standard launcher: it clears stale jobs BEFORE machine checks.
     # Calling smoke here first would prevent recovery after a previous crash.
-    Invoke-Checked 'powershell.exe' @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'start-ningredy.ps1')) ''
+    Invoke-Checked 'powershell.exe' @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $root 'scripts\start-ningredy.ps1')) ''
 } catch {
     Write-Host "`n  Обновление/запуск остановлены: $($_.Exception.Message)" -ForegroundColor Red
     if ($backupComplete) { Write-Host "  Ваша резервная копия: $backup" -ForegroundColor Yellow }
