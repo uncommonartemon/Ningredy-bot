@@ -3,6 +3,7 @@
 namespace Tests\Unit;
 
 use App\Ai\Agents\ProductSpecificationReconciliationAgent;
+use App\Ai\Agents\ProductSpecificationRepairAgent;
 use App\Models\AiRun;
 use App\Models\ProductDraft;
 use App\Models\ProductSourcePageEvidence;
@@ -211,20 +212,26 @@ class ProductSpecificationReconcilerTest extends TestCase
     {
         $draft = $this->seedDraft(['image_urls' => ['https://shop.example/photo.jpg']]);
         $calls = 0;
-        ProductSpecificationReconciliationAgent::fake(function (string $prompt) use (&$calls): array {
-            if (++$calls === 1) {
-                return [...$this->fakeReconciled(title: 'Proposed card'), 'model' => null];
-            }
-            $feedback = json_decode($prompt, true)['previous_assembly_feedback'];
+        ProductSpecificationReconciliationAgent::fake(function () use (&$calls): array {
+            $calls++;
+
+            return [...$this->fakeReconciled(title: 'Proposed card'), 'model' => null];
+        })->preventStrayPrompts();
+        ProductSpecificationRepairAgent::fake(function (string $prompt) use (&$calls): array {
+            $calls++;
+            $payload = json_decode($prompt, true);
+            $feedback = $payload['previous_assembly_feedback'];
             $this->assertSame('invalid_response', $feedback['reason']);
-            $this->assertSame('Proposed card', $feedback['repair_context']['previous_candidate']['title']);
+            $this->assertSame(['model' => null], $payload['repair']['allowed_values']);
+            $this->assertArrayNotHasKey('previous_candidate', $feedback['repair_context']);
             $this->assertArrayHasKey('model', $feedback['repair_context']['validation_errors']);
 
-            return $this->fakeReconciled(title: 'Proposed card');
+            return $this->fakeRepair($prompt, ['model' => 'Test Product']);
         })->preventStrayPrompts();
 
         $outcome = app(ProductCardAssembly::class)->complete($draft, ['url' => 'https://shop.example/product'], $draft->telegram_update_id);
         $this->assertTrue($outcome->isReconciled());
+        $this->assertSame('Proposed card', $outcome->title);
         $this->assertSame(2, $calls);
         $this->assertSame(['https://shop.example/photo.jpg'], $draft->fresh()->image_urls);
         $this->assertSame('Test Product', $draft->fresh()->title);
@@ -236,17 +243,22 @@ class ProductSpecificationReconcilerTest extends TestCase
         $url = 'https://shop.example/product';
         $this->seedEvidence($draft, $url, 'Installed memory: 16 GB');
         $calls = 0;
-        ProductSpecificationReconciliationAgent::fake(function (string $prompt) use (&$calls, $url): array {
-            if (++$calls > 1) {
-                $context = json_decode($prompt, true)['previous_assembly_feedback']['repair_context'];
-                $this->assertSame('made-up quote', $context['previous_candidate']['specifications'][0]['source_excerpt']);
-                $this->assertStringContainsString('excerpt was not observed', implode(' ', $context['validation_errors']));
-            }
+        ProductSpecificationReconciliationAgent::fake(function () use (&$calls, $url): array {
+            $calls++;
 
             return $this->fakeReconciled([[
                 'key' => 'ram', 'name' => 'RAM', 'value' => '16 GB', 'evidence' => 'confirmed',
-                'source_url' => $url, 'source_excerpt' => $calls === 1 ? 'made-up quote' : 'Installed memory: 16 GB',
+                'source_url' => $url, 'source_excerpt' => 'made-up quote',
             ]]);
+        })->preventStrayPrompts();
+        ProductSpecificationRepairAgent::fake(function (string $prompt) use (&$calls): array {
+            $calls++;
+            $payload = json_decode($prompt, true);
+            $context = $payload['previous_assembly_feedback']['repair_context'];
+            $this->assertSame('made-up quote', $payload['repair']['affected_candidate_facts']['ram']['source_excerpt']);
+            $this->assertStringContainsString('excerpt was not observed', implode(' ', $context['validation_errors']));
+
+            return $this->fakeRepair($prompt, ['specifications.ram.source_excerpt' => 'Installed memory: 16 GB']);
         })->preventStrayPrompts();
 
         $outcome = app(ProductCardAssembly::class)->complete($draft, ['url' => $url], $draft->telegram_update_id);
@@ -262,22 +274,24 @@ class ProductSpecificationReconcilerTest extends TestCase
         $url = 'https://shop.example/product';
         $this->seedEvidence($draft, $url, 'Installed memory is 16 GB. This model has two slots. One slot is free.');
         $calls = 0;
-        ProductSpecificationReconciliationAgent::fake(function (string $prompt) use (&$calls, $url): array {
-            if (++$calls > 1) {
-                $payload = json_decode($prompt, true);
-                $context = $payload['previous_assembly_feedback']['repair_context'];
-                $this->assertStringContainsString('Saved text exists for this URL', implode(' ', $context['validation_errors']));
-                $this->assertStringContainsString('separate nonadjacent passages', implode(' ', $context['validation_errors']));
-                $this->assertSame($url, $context['previous_candidate']['specifications'][0]['source_url']);
-                $this->assertStringContainsString('This model has two slots.', $payload['source_specification_text']);
-            }
+        ProductSpecificationReconciliationAgent::fake(function () use (&$calls, $url): array {
+            $calls++;
 
             return $this->fakeReconciled([[
                 'key' => 'ram', 'name' => 'RAM', 'value' => '16 GB', 'evidence' => 'confirmed',
-                'source_url' => $url, 'source_excerpt' => $calls === 1
-                    ? 'Installed memory is 16 GB. One slot is free.'
-                    : "Installed memory is 16 GB.\nOne slot is free.",
+                'source_url' => $url, 'source_excerpt' => 'Installed memory is 16 GB. One slot is free.',
             ]]);
+        })->preventStrayPrompts();
+        ProductSpecificationRepairAgent::fake(function (string $prompt) use (&$calls, $url): array {
+            $calls++;
+            $payload = json_decode($prompt, true);
+            $context = $payload['previous_assembly_feedback']['repair_context'];
+            $this->assertStringContainsString('Saved text exists for this URL', implode(' ', $context['validation_errors']));
+            $this->assertStringContainsString('separate nonadjacent passages', implode(' ', $context['validation_errors']));
+            $this->assertSame($url, $payload['repair']['affected_candidate_facts']['ram']['source_url']);
+            $this->assertStringContainsString('This model has two slots.', $payload['source_specification_text']);
+
+            return $this->fakeRepair($prompt, ['specifications.ram.source_excerpt' => "Installed memory is 16 GB.\nOne slot is free."]);
         })->preventStrayPrompts();
 
         $outcome = app(ProductCardAssembly::class)->complete($draft, ['url' => $url], $draft->telegram_update_id);
@@ -294,6 +308,11 @@ class ProductSpecificationReconcilerTest extends TestCase
             $calls++;
 
             return [...$this->fakeReconciled(), 'model' => null];
+        })->preventStrayPrompts();
+        ProductSpecificationRepairAgent::fake(function (string $prompt) use (&$calls): array {
+            $calls++;
+
+            return $this->fakeRepair($prompt, ['model' => null]);
         })->preventStrayPrompts();
         $result = app(ProductCardAssembly::class)->complete($draft, ['url' => 'https://shop.example/product'], $draft->telegram_update_id);
         $this->assertSame(2, $calls);
@@ -562,17 +581,21 @@ class ProductSpecificationReconcilerTest extends TestCase
     public function test_assembly_keeps_repairing_past_three_attempts_while_each_one_fixes_something(): void
     {
         // Requests #99/#102: every attempt cleared the last error and hit a
-        // new one; a cap of three ended cards that were one fix away.
+        // smaller unresolved set; a cap of three ended cards one fix away.
         $draft = $this->seedDraft();
         $calls = 0;
         ProductSpecificationReconciliationAgent::fake(function () use (&$calls): array {
-            return match (++$calls) {
-                1 => [...$this->fakeReconciled(), 'title' => null],
-                2 => [...$this->fakeReconciled(), 'model' => null],
-                3 => [...$this->fakeReconciled(), 'description' => null],
-                4 => [...$this->fakeReconciled(), 'summary' => null],
-                default => $this->fakeReconciled(),
-            };
+            $calls++;
+
+            return [...$this->fakeReconciled(), 'title' => null, 'model' => null, 'description' => null, 'summary' => null];
+        })->preventStrayPrompts();
+        ProductSpecificationRepairAgent::fake(function (string $prompt) use (&$calls): array {
+            $field = ['title', 'model', 'description', 'summary'][$calls - 1];
+            $calls++;
+            $payload = json_decode($prompt, true);
+            $this->assertArrayHasKey($field, $payload['repair']['allowed_values']);
+
+            return $this->fakeRepair($prompt, [$field => $this->fakeReconciled()[$field]]);
         })->preventStrayPrompts();
 
         $result = app(ProductCardAssembly::class)->complete($draft, ['url' => 'https://shop.example/product'], $draft->telegram_update_id);
@@ -593,7 +616,12 @@ class ProductSpecificationReconcilerTest extends TestCase
         ProductSpecificationReconciliationAgent::fake(function (string $prompt, $attachments, $provider, string $model) use (&$models): array {
             $models[] = $model;
 
-            return $model === 'gpt-6-luna' ? [...$this->fakeReconciled(), 'title' => null] : $this->fakeReconciled();
+            return [...$this->fakeReconciled(), 'title' => null];
+        })->preventStrayPrompts();
+        ProductSpecificationRepairAgent::fake(function (string $prompt, $attachments, $provider, string $model) use (&$models): array {
+            $models[] = $model;
+
+            return $this->fakeRepair($prompt, ['title' => $model === 'gpt-6-luna' ? null : 'Test Product']);
         })->preventStrayPrompts();
 
         $result = app(ProductCardAssembly::class)->complete($draft, ['url' => 'https://shop.example/product'], $draft->telegram_update_id);
@@ -656,6 +684,11 @@ class ProductSpecificationReconcilerTest extends TestCase
 
             return [...$this->fakeReconciled(), 'title' => null];
         })->preventStrayPrompts();
+        ProductSpecificationRepairAgent::fake(function (string $prompt) use (&$calls): array {
+            $calls++;
+
+            return $this->fakeRepair($prompt, ['title' => null]);
+        })->preventStrayPrompts();
 
         $result = app(ProductCardAssembly::class)->complete($draft, ['url' => 'https://shop.example/product'], $draft->telegram_update_id);
 
@@ -669,9 +702,16 @@ class ProductSpecificationReconcilerTest extends TestCase
         $draft = $this->seedDraft();
         $calls = 0;
         ProductSpecificationReconciliationAgent::fake(function () use (&$calls): array {
-            return ++$calls % 2 === 1
-                ? [...$this->fakeReconciled(), 'title' => null]
-                : [...$this->fakeReconciled(), 'model' => null];
+            $calls++;
+
+            return [...$this->fakeReconciled(), 'title' => null];
+        })->preventStrayPrompts();
+        ProductSpecificationRepairAgent::fake(function (string $prompt) use (&$calls): array {
+            // A and B are different validation errors of the same allowed
+            // field: a patch cannot break an unrelated, previously valid model.
+            $value = ++$calls % 2 === 0 ? ['not a string'] : null;
+
+            return $this->fakeRepair($prompt, ['title' => $value]);
         })->preventStrayPrompts();
 
         $result = app(ProductCardAssembly::class)->complete($draft, ['url' => 'https://shop.example/product'], $draft->telegram_update_id);
@@ -685,27 +725,32 @@ class ProductSpecificationReconcilerTest extends TestCase
         $draft = $this->seedDraft();
         $calls = 0;
         $summaries = [];
-        ProductSpecificationReconciliationAgent::fake(function (string $prompt) use (&$calls, &$summaries): array {
-            $feedback = json_decode($prompt, true)['previous_assembly_feedback'];
-            if ($feedback !== null) {
-                $summaries[] = $feedback['summary'];
-                $this->assertSame('invalid_response', $feedback['reason']);
-                $this->assertArrayHasKey($calls === 1 ? 'model' : 'description', $feedback['repair_context']['validation_errors']);
-            }
+        $modelErrors = [];
+        ProductSpecificationReconciliationAgent::fake(function () use (&$calls): array {
+            $calls++;
 
-            return match (++$calls) {
-                // Laravel summarizes both as the first title error plus one
-                // more error. The real second error must not be lost behind it.
-                1 => [...$this->fakeReconciled(), 'title' => null, 'model' => null],
-                2 => [...$this->fakeReconciled(), 'title' => null, 'description' => null],
-                default => $this->fakeReconciled(),
-            };
+            return [...$this->fakeReconciled(), 'title' => null, 'model' => ['not a string']];
+        })->preventStrayPrompts();
+        ProductSpecificationRepairAgent::fake(function (string $prompt) use (&$calls, &$summaries, &$modelErrors): array {
+            $feedback = json_decode($prompt, true)['previous_assembly_feedback'];
+            $summaries[] = $feedback['summary'];
+            $this->assertSame('invalid_response', $feedback['reason']);
+            $this->assertArrayHasKey('model', $feedback['repair_context']['validation_errors']);
+            $modelErrors[] = $feedback['repair_context']['validation_errors']['model'];
+
+            // Both summaries contain the unchanged title error plus one more.
+            // The second error changes from model type to model length, within
+            // the existing scope; it is not an invented new broken field.
+            return ++$calls === 2
+                ? $this->fakeRepair($prompt, ['model' => str_repeat('x', 256)])
+                : $this->fakeRepair($prompt, ['title' => 'Test Product', 'model' => 'Test Product']);
         })->preventStrayPrompts();
 
         $result = app(ProductCardAssembly::class)->complete($draft, ['url' => 'https://shop.example/product'], $draft->telegram_update_id);
 
         $this->assertSame(3, $calls);
         $this->assertSame($summaries[0], $summaries[1]);
+        $this->assertNotSame($modelErrors[0], $modelErrors[1]);
         $this->assertTrue($result->isReconciled());
         $this->assertNull($draft->fresh()->specifications_reconciled_source_url);
     }
@@ -715,7 +760,16 @@ class ProductSpecificationReconcilerTest extends TestCase
         $draft = $this->seedDraft(['image_urls' => ['https://shop.example/photo.jpg']]);
         $calls = 0;
         ProductSpecificationReconciliationAgent::fake(function () use (&$calls): array {
-            return [...$this->fakeReconciled(title: 'Proposed title '.++$calls, summary: 'Reworded explanation '.$calls), 'model' => null];
+            $calls++;
+
+            return [...$this->fakeReconciled(title: 'Proposed title', summary: 'Reworded explanation 1'),
+                'model' => ['candidate' => 'Invalid model attempt 1']];
+        })->preventStrayPrompts();
+        ProductSpecificationRepairAgent::fake(function (string $prompt) use (&$calls): array {
+            $calls++;
+
+            return $this->fakeRepair($prompt, ['model' => ['candidate' => 'Invalid model attempt '.$calls]],
+                'Reworded explanation '.$calls);
         })->preventStrayPrompts();
 
         $result = app(ProductCardAssembly::class)->complete($draft, ['url' => 'https://shop.example/product'], $draft->telegram_update_id);
@@ -892,18 +946,24 @@ class ProductSpecificationReconcilerTest extends TestCase
         ]]);
         $this->seedEvidence($draft, $new, 'Installed RAM: 48 GB');
         $calls = 0;
-        ProductSpecificationReconciliationAgent::fake(function (string $prompt) use (&$calls, $old, $new): array {
-            $payload = json_decode($prompt, true);
-            if (++$calls > 1) {
-                $this->assertStringContainsString('considered_source_urls', $payload['previous_assembly_feedback']['summary']);
-            }
+        ProductSpecificationReconciliationAgent::fake(function () use (&$calls, $new): array {
+            $calls++;
 
             return $this->fakeReconciled([
                 ['key' => 'ram', 'name' => 'RAM', 'value' => '48 GB', 'evidence' => 'corrected',
                     'reason' => 'The earlier document describes another regional revision; the selected offer explicitly installs 48 GB.',
                     'source_url' => $new, 'source_excerpt' => 'Installed RAM: 48 GB',
-                    'considered_source_urls' => $calls === 1 ? [] : [$old, $new]],
+                    'considered_source_urls' => []],
             ]);
+        })->preventStrayPrompts();
+        ProductSpecificationRepairAgent::fake(function (string $prompt) use (&$calls, $old, $new): array {
+            $calls++;
+            $payload = json_decode($prompt, true);
+            $this->assertStringContainsString('considered_source_urls', $payload['previous_assembly_feedback']['summary']);
+            $this->assertSame('64 GB', $payload['current_specifications'][0]['value']);
+            $this->assertSame('48 GB', $payload['repair']['affected_candidate_facts']['ram']['value']);
+
+            return $this->fakeRepair($prompt, ['specifications.ram.considered_source_urls' => [$old, $new]]);
         })->preventStrayPrompts();
         $result = app(ProductCardAssembly::class)->complete($draft, ['url' => $new], null);
         $this->assertSame(2, $calls);
@@ -976,6 +1036,22 @@ class ProductSpecificationReconcilerTest extends TestCase
     }
 
     /** @param array<string, mixed> $overrides */
+    private function fakeRepair(string $prompt, array $changes, string $summary = 'Исправлено.'): array
+    {
+        $payload = json_decode($prompt, true);
+
+        return [
+            'base_hash' => $payload['repair']['base_hash'],
+            'decision' => 'patch',
+            'changes' => array_map(fn (string $path): array => [
+                'path' => $path,
+                'value_json' => json_encode($changes[$path], JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE),
+            ], array_keys($changes)),
+            'unresolved_fields' => [],
+            'summary' => $summary,
+        ];
+    }
+
     private function seedDraft(array $overrides = []): ProductDraft
     {
         $updateId = $this->telegramUpdateId();

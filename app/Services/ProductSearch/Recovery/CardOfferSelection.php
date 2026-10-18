@@ -9,7 +9,6 @@ use App\Services\Products\ProductIdentityMatcher;
 use App\Services\Products\ProductPhotoApplicability;
 use App\Services\Products\ProductRequestContext;
 use App\Services\Products\ProductSourceIdentityJudge;
-use Illuminate\Validation\ValidationException;
 
 /**
  * An explicit, checked transition between research's offer and the gallery's
@@ -53,14 +52,22 @@ final class CardOfferSelection
                 $this->reject('A compatible gallery illustrates the selected product; it does not authorize adopting the gallery offer or its configuration.');
             }
             if ($this->identifier((string) ($card['model'] ?? '')) !== $this->identifier((string) $draft->model)) {
-                $this->reject('Keep the selected model when using photos of a compatible variant.');
+                $this->reject('Keep the selected model when using photos of a compatible variant.', ['paths' => ['model']]);
             }
             $proposedTarget = clone $draft;
             $proposedTarget->fill(array_intersect_key($card, array_flip(['model', 'color'])));
             $proposedTarget->specifications = array_values(array_filter($card['specifications'] ?? [],
                 fn (array $fact): bool => ($fact['evidence'] ?? null) !== 'dropped'));
             if (! ProductPhotoApplicability::matchesTarget($proposedTarget, $photoAssessment)) {
-                $this->reject('The proposed card changes the colour or known physical characteristics covered by the photo decision. Preserve them or request a new photo applicability check.');
+                $originals = collect($draft->specifications ?? [])->keyBy('key');
+                $changedKeys = collect($card['specifications'])->filter(fn (array $fact): bool => in_array($fact['key'], $photoAssessment['target_physical_keys'] ?? [], true)
+                    && (($fact['evidence'] ?? null) === 'dropped'
+                        || ($fact['value'] ?? null) !== ($originals[$fact['key']]['value'] ?? null)
+                        || ($fact['unit'] ?? null) !== ($originals[$fact['key']]['unit'] ?? null)))
+                    ->pluck('key')->values()->all();
+                $this->reject('The proposed card changes the colour or known physical characteristics covered by the photo decision. Preserve them or request a new photo applicability check.',
+                    ['specification_keys' => $changedKeys, 'paths' => $draft->color !== ($card['color'] ?? null) ? ['color'] : [],
+                        'requires_photo_reassessment' => true]);
             }
             $this->retainConfigurationFacts($draft, $source, $card['specifications'], $observedPages);
         }
@@ -157,9 +164,9 @@ final class CardOfferSelection
         return $selection;
     }
 
-    private function reject(string $message): never
+    private function reject(string $message, array $targets = []): never
     {
-        throw ValidationException::withMessages(['offer_selection' => [$message]]);
+        throw CardRepairValidationException::forTargets($message, $targets);
     }
 
     /** A gallery-only offer cannot supply a changed or newly introduced configuration value. */
@@ -189,7 +196,8 @@ final class CardOfferSelection
                 continue;
             }
             $this->reject('The compatible gallery cannot supply the new or changed configuration fact '.$fact['key']
-                .'. Keep the selected product facts; cite observed evidence for its own configuration from a separate text source or factory label. Shared unchanged facts remain allowed.');
+                .'. Keep the selected product facts; cite observed evidence for its own configuration from a separate text source or factory label. Shared unchanged facts remain allowed.',
+                ['specification_keys' => [$fact['key']]]);
         }
     }
 

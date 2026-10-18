@@ -7,6 +7,7 @@ use App\Models\TelegramUpdate;
 use App\Services\Products\ProductPhotoApplicability;
 use App\Services\Products\ProductSpecificationEvidenceGuard;
 use App\Services\ProductSearch\Recovery\CardOfferSelection;
+use App\Services\ProductSearch\Recovery\CardRepairValidationException;
 use Illuminate\Validation\ValidationException;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
@@ -47,6 +48,18 @@ class CardOfferSelectionConfigurationTest extends TestCase
 
         $this->expectException(ValidationException::class);
         app(CardOfferSelection::class)->validate($draft, $source, $card, $pages, null);
+    }
+
+    public function test_foreign_configuration_failure_returns_the_exact_known_repair_key(): void
+    {
+        [$draft, $source, $card] = $this->fixture('m2_slot_count', null, '2', self::PHOTO_PAGE);
+        try {
+            app(CardOfferSelection::class)->validate($draft, $source, $card, [], null);
+            $this->fail('A gallery-only configuration fact was accepted.');
+        } catch (CardRepairValidationException $exception) {
+            $this->assertSame(['specification_keys' => ['m2_slot_count']], $exception->repairTargets);
+            $this->assertArrayHasKey('offer_selection', $exception->errors());
+        }
     }
 
     public function test_same_numeric_value_with_a_changed_unit_is_not_an_unchanged_fact(): void

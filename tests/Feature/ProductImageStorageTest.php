@@ -14,6 +14,7 @@ use App\Models\Brand;
 use App\Models\Category;
 use App\Models\Product;
 use App\Models\ProductDraft;
+use App\Models\ProductDraftMedia;
 use App\Models\ProductGalleryRecipe;
 use App\Models\ProductSourceAttempt;
 use App\Models\ProductSourceStat;
@@ -6006,6 +6007,330 @@ class ProductImageStorageTest extends TestCase
         $this->assertSame('partial', $draft->fresh()->gallery_status);
         $this->assertSame('specifications_unreconciled', $draft->fresh()->gallery_search_stop_reason);
         $this->assertNull($draft->fresh()->specifications_reconciled_source_url);
+    }
+
+    public function test_first_reviewed_gallery_checkpoint_is_durable_before_assembly_and_finalizes_without_duplicate_media(): void
+    {
+        $draft = $this->confirmedGalleryDraft();
+        $ids = [];
+        $messages = [];
+        $this->mock(ProductSpecificationReconciler::class)->shouldReceive('reconcile')->once()
+            ->andReturnUsing(function (ProductDraft $target, array $source) use (&$ids): SpecificationReconciliationOutcome {
+                $saved = $target->fresh();
+                $ids = $saved->media()->pluck('id')->all();
+                $this->assertCount(5, $ids);
+                $this->assertCount(5, $target->media);
+                $this->assertCount(5, $saved->verifiedPhotoPaths());
+                $this->assertTrue($saved->reconciliationPending());
+                $this->assertFalse($saved->hasReadyVerifiedPartial());
+                $this->assertSame('partial', $saved->gallery_status);
+                $this->assertSame('specifications_unreconciled', $saved->gallery_search_stop_reason);
+                $this->assertNull($saved->specifications_reconciled_source_url);
+                $this->assertSame($source['url'], $saved->photo_source_context['_photo_checkpoint']['source_url']);
+                $this->assertTrue(ProductPhotoApplicability::isAccepted($saved, $saved->photo_source_context,
+                    $saved->photo_source_context['_photo_applicability']));
+                foreach ($saved->media as $media) {
+                    Storage::disk($media->disk)->assertExists($media->path);
+                    $this->assertNotEmpty($media->verification_model);
+                    $this->assertNotEmpty($media->verification_notes);
+                    $this->assertSame('current_downloaded_frames', $media->photo_source_context['_photo_visual_review']['scope']);
+                }
+
+                return SpecificationReconciliationOutcome::alreadyReconciled($source['url']);
+            });
+        $target = $draft->fresh()->load('media');
+        $this->assertCount(0, $target->media);
+
+        $this->assertSame(5, app(ProductImageStorage::class)->stage($target,
+            function (string $message) use (&$messages): void {
+                $messages[] = $message;
+            }));
+
+        $saved = $draft->fresh();
+        $this->assertSame($ids, $saved->media()->pluck('id')->all());
+        $this->assertSame('complete', $saved->gallery_status);
+        $this->assertArrayNotHasKey('_photo_checkpoint', $saved->photo_source_context);
+        $this->assertTrue(collect($messages)->contains(fn (string $message): bool => str_contains($message, '5 фото сохранены;')));
+    }
+
+    #[DataProvider('checkpointFailureStages')]
+    public function test_first_gallery_checkpoint_survives_assembly_or_final_transaction_failure(string $failureStage): void
+    {
+        $draft = $this->confirmedGalleryDraft();
+        $failure = new \RuntimeException('checkpoint test '.$failureStage);
+        $this->mock(ProductSpecificationReconciler::class)->shouldReceive('reconcile')->once()
+            ->andReturnUsing(function (ProductDraft $target, array $source) use ($failureStage, $failure): SpecificationReconciliationOutcome {
+                $this->assertSame(5, $target->fresh()->media()->count());
+                if ($failureStage === 'assembly') {
+                    throw $failure;
+                }
+
+                return SpecificationReconciliationOutcome::alreadyReconciled($source['url']);
+            });
+        $dispatcher = ProductDraft::getEventDispatcher();
+        ProductDraft::setEventDispatcher(clone $dispatcher);
+        try {
+            if ($failureStage === 'final commit') {
+                ProductDraft::saving(function (ProductDraft $target) use ($failure): void {
+                    if ($target->specifications_reconciled_source_url !== null) {
+                        throw $failure;
+                    }
+                });
+            }
+            try {
+                app(ProductImageStorage::class)->stage($draft->fresh());
+                $this->fail('The injected failure must escape.');
+            } catch (\RuntimeException $caught) {
+                $this->assertSame($failure, $caught);
+            }
+        } finally {
+            ProductDraft::setEventDispatcher($dispatcher);
+        }
+        $saved = $draft->fresh();
+        $this->assertCount(5, $saved->media);
+        $this->assertCount(5, $saved->verifiedPhotoPaths());
+        $this->assertTrue($saved->reconciliationPending());
+        $this->assertSame('partial', $saved->gallery_status);
+        $this->assertArrayHasKey('_photo_checkpoint', $saved->photo_source_context);
+    }
+
+    public static function checkpointFailureStages(): array
+    {
+        return ['assembly' => ['assembly'], 'final transaction rollback' => ['final commit']];
+    }
+
+    #[DataProvider('checkpointStaleTargets')]
+    public function test_first_gallery_checkpoint_rejects_cancelled_or_changed_target_before_assembly(string $change): void
+    {
+        $draft = $this->confirmedGalleryDraft();
+        $encoder = app(ProductImageEncoder::class);
+        $calls = 0;
+        $this->partialMock(ProductImageEncoder::class)->shouldReceive('toWebp')->times(5)
+            ->andReturnUsing(function (GdImage $image) use ($encoder, $draft, $change, &$calls): array {
+                if (++$calls === 5) {
+                    match ($change) {
+                        'cancel' => $draft->telegramUpdate()->update(['status' => 'cancelled', 'cancel_requested_at' => now()]),
+                        'generation' => $draft->fresh()->update(['telegram_update_id' => TelegramUpdate::create([
+                            'update_id' => 99002, 'telegram_user_id' => '1', 'chat_id' => '1', 'payload' => [], 'status' => 'processing',
+                        ])->id]),
+                        'status' => $draft->fresh()->update(['status' => 'rejected']),
+                        'model' => $draft->fresh()->update(['model' => 'Different physical model']),
+                        'color' => $draft->fresh()->update(['color' => 'White']),
+                    };
+                }
+
+                return $encoder->toWebp($image);
+            });
+        $this->mock(ProductSpecificationReconciler::class)->shouldNotReceive('reconcile');
+        try {
+            app(ProductImageStorage::class)->stage($draft->fresh());
+            $this->fail('A superseded search must stop before saving its photographs.');
+        } catch (ProductSearchCancelled) {
+            $this->assertSame(0, $draft->media()->count());
+            $this->assertSame([], Storage::disk('public')->allFiles('drafts/'.$draft->id));
+            $this->assertArrayNotHasKey('_photo_checkpoint', $draft->fresh()->photo_source_context ?? []);
+        }
+    }
+
+    public static function checkpointStaleTargets(): array
+    {
+        return array_combine(['cancel', 'generation', 'status', 'model', 'color'],
+            array_map(fn (string $change): array => [$change], ['cancel', 'generation', 'status', 'model', 'color']));
+    }
+
+    #[DataProvider('checkpointChangesDuringAssembly')]
+    public function test_checkpoint_files_survive_a_target_change_during_assembly_without_committing_stale_facts(string $change): void
+    {
+        $draft = $this->confirmedGalleryDraft();
+        $this->mock(ProductSpecificationReconciler::class)->shouldReceive('reconcile')->once()
+            ->andReturnUsing(function (ProductDraft $target, array $source) use ($change): SpecificationReconciliationOutcome {
+                $this->assertSame(5, $target->fresh()->media()->count());
+                match ($change) {
+                    'cancel' => $target->telegramUpdate()->update(['status' => 'cancelled', 'cancel_requested_at' => now()]),
+                    'generation' => $target->fresh()->update(['telegram_update_id' => TelegramUpdate::create([
+                        'update_id' => 99002, 'telegram_user_id' => '1', 'chat_id' => '1', 'payload' => [], 'status' => 'processing',
+                    ])->id]),
+                    'color' => $target->fresh()->update(['color' => 'White']),
+                };
+
+                return SpecificationReconciliationOutcome::alreadyReconciled($source['url']);
+            });
+        try {
+            app(ProductImageStorage::class)->stage($draft->fresh());
+            $this->fail('A changed target must not receive the old completed card.');
+        } catch (ProductSearchCancelled) {
+            $saved = $draft->fresh();
+            $this->assertCount(5, $saved->verifiedPhotoPaths());
+            $this->assertTrue($saved->reconciliationPending());
+            $this->assertNull($saved->specifications_reconciled_source_url);
+            $this->assertSame('partial', $saved->gallery_status);
+            if ($change === 'color') {
+                $this->assertSame('White', $saved->color);
+            }
+        }
+    }
+
+    public static function checkpointChangesDuringAssembly(): array
+    {
+        return ['cancel' => ['cancel'], 'new generation' => ['generation'], 'edited color' => ['color']];
+    }
+
+    #[DataProvider('checkpointGalleryEdits')]
+    public function test_checkpoint_finalization_preserves_an_operator_gallery_edit_during_assembly(bool $delete): void
+    {
+        $draft = $this->confirmedGalleryDraft();
+        $operatorPath = 'drafts/'.$draft->id.'/operator-replacement.webp';
+        $this->mock(ProductSpecificationReconciler::class)->shouldReceive('reconcile')->once()
+            ->andReturnUsing(function (ProductDraft $target, array $source) use ($delete, $operatorPath): SpecificationReconciliationOutcome {
+                $this->assertSame(5, $target->fresh()->media()->count());
+                if ($delete) {
+                    $target->media()->delete();
+                } else {
+                    Storage::disk('public')->put($operatorPath, $this->jpeg(99));
+                    // Same ID and unchanged draft: checking only generation or IDs is insufficient.
+                    $target->media()->firstOrFail()->update(['path' => $operatorPath,
+                        'checksum' => hash('sha256', 'operator replacement')]);
+                }
+
+                return SpecificationReconciliationOutcome::alreadyReconciled($source['url']);
+            });
+        try {
+            app(ProductImageStorage::class)->stage($draft->fresh());
+            $this->fail('Finalization must not overwrite the operator gallery edit.');
+        } catch (ProductSearchCancelled) {
+            $saved = $draft->fresh();
+            $this->assertSame($delete ? 0 : 5, $saved->media()->count());
+            $this->assertTrue($saved->reconciliationPending());
+            $this->assertNull($saved->specifications_reconciled_source_url);
+            if (! $delete) {
+                $this->assertSame($operatorPath, $saved->media()->firstOrFail()->path);
+                Storage::disk('public')->assertExists($operatorPath);
+            }
+        }
+    }
+
+    public static function checkpointGalleryEdits(): array
+    {
+        return ['delete gallery' => [true], 'replace file on same media row' => [false]];
+    }
+
+    public function test_first_gallery_checkpoint_rolls_back_all_rows_when_one_insert_fails(): void
+    {
+        $draft = $this->confirmedGalleryDraft();
+        $this->mock(ProductSpecificationReconciler::class)->shouldNotReceive('reconcile');
+        $dispatcher = ProductDraftMedia::getEventDispatcher();
+        ProductDraftMedia::setEventDispatcher(clone $dispatcher);
+        $inserts = 0;
+        try {
+            ProductDraftMedia::creating(function () use (&$inserts): void {
+                if (++$inserts === 2) {
+                    throw new \RuntimeException('Checkpoint insert failed.');
+                }
+            });
+            try {
+                app(ProductImageStorage::class)->stage($draft->fresh());
+                $this->fail('The failed insert must roll back the first insert too.');
+            } catch (\RuntimeException $caught) {
+                $this->assertSame('Checkpoint insert failed.', $caught->getMessage());
+            }
+        } finally {
+            ProductDraftMedia::setEventDispatcher($dispatcher);
+        }
+        $this->assertSame(0, $draft->media()->count());
+        $this->assertSame([], Storage::disk('public')->allFiles('drafts/'.$draft->id));
+        $this->assertArrayNotHasKey('_photo_checkpoint', $draft->fresh()->photo_source_context ?? []);
+    }
+
+    public function test_checkpoint_resumes_only_facts_without_promoting_partial_traversal(): void
+    {
+        $draft = $this->partialCheckpointDraft();
+        $ids = $draft->media()->pluck('id')->all();
+        Http::preventStrayRequests();
+        $this->mockResolver()->shouldNotReceive('resolve');
+        $this->mock(ProductImageCandidateDiscovery::class)->shouldNotReceive('find');
+        $this->mock(ProductSpecificationReconciler::class)->shouldReceive('reconcile')->once()
+            ->andReturn(SpecificationReconciliationOutcome::alreadyReconciled($draft->primary_source_url));
+        $continuation = TelegramUpdate::create([
+            'update_id' => 99002, 'telegram_user_id' => '1', 'chat_id' => '1', 'payload' => [], 'status' => 'processing',
+        ]);
+
+        $this->assertSame(3, app(ProductImageStorage::class)->stage($draft->fresh(), null, $continuation->id));
+
+        $saved = $draft->fresh();
+        $this->assertSame($ids, $saved->media()->pluck('id')->all());
+        $this->assertSame('partial', $saved->gallery_status);
+        $this->assertFalse($saved->gallery_confirmed_sufficient);
+        $this->assertTrue($saved->hasReadyVerifiedPartial());
+        $this->assertArrayNotHasKey('_photo_checkpoint', $saved->photo_source_context);
+        Http::assertNothingSent();
+    }
+
+    #[DataProvider('invalidCheckpoints')]
+    public function test_checkpoint_resume_requires_current_source_generation_and_readable_reviewed_files(string $change): void
+    {
+        $draft = $this->partialCheckpointDraft();
+        $source = $draft->photo_source_context;
+        switch ($change) {
+            case 'generation':
+                $source['_photo_checkpoint']['generation'] = null;
+                $draft->update(['photo_source_context' => $source]);
+                break;
+            case 'source':
+                $source['_photo_checkpoint']['source_url'] = 'https://other.example/product';
+                $draft->update(['photo_source_context' => $source]);
+                break;
+            case 'missing file':
+                $media = $draft->media()->firstOrFail();
+                Storage::disk($media->disk)->delete($media->path);
+                break;
+            case 'pending frame':
+                $draft->media()->firstOrFail()->update(['verification_status' => 'pending']);
+                break;
+            case 'changed color':
+                $draft->update(['color' => 'White']);
+                break;
+        }
+        $this->mock(ProductSpecificationReconciler::class)->shouldNotReceive('reconcile');
+        $method = new \ReflectionMethod(ProductImageStorage::class, 'resumeOutstandingReconciliation');
+        $this->assertNull($method->invoke(app(ProductImageStorage::class), $draft->fresh(), $draft->telegram_update_id, null));
+    }
+
+    public static function invalidCheckpoints(): array
+    {
+        return array_map(fn (string $change): array => [$change], ['generation', 'source', 'missing file', 'pending frame', 'changed color']);
+    }
+
+    /** A persisted three-frame checkpoint from a reviewed, interrupted gallery traversal. */
+    private function partialCheckpointDraft(): ProductDraft
+    {
+        Storage::fake('public');
+        [, , $draft] = $this->records();
+        $draft->update(['model' => 'Lenovo Test', 'color' => 'Black', 'category' => 'laptops', 'product_type' => 'laptop']);
+        Category::where('slug', 'laptops')->update(['minimum_verified_images' => 3]);
+        $draft->refresh();
+        $source = ['url' => 'https://shop.example/lenovo-test', 'title' => 'Lenovo Test Black'];
+        $source['_photo_applicability'] = ProductPhotoApplicability::bind($draft, $source,
+            ['verdict' => 'exact', 'reason' => 'The observed source and reviewed product frames match this model and black colour.']);
+        $source['_photo_visual_review'] = ['scope' => 'current_downloaded_frames', 'frames' => []];
+        $staged = [];
+        foreach (range(1, 3) as $index) {
+            $path = 'drafts/'.$draft->id.'/checkpoint-'.$index.'.webp';
+            Storage::disk('public')->put($path, $this->jpeg($index));
+            $staged[] = ['existing' => null, 'attributes' => [
+                'disk' => 'public', 'path' => $path, 'source_url' => 'https://shop.example/photo-'.$index.'.jpg',
+                'photo_source_context' => $source, 'role' => $index === 1 ? 'primary' : 'secondary',
+                'mime_type' => 'image/webp', 'checksum' => hash('sha256', 'checkpoint-'.$index),
+                'verification_status' => 'verified', 'verification_model' => 'fixture-current-vision',
+                'verification_notes' => 'This current frame is a catalog photo of the same black laptop.',
+                'gallery_traversal_complete' => false, 'sort_order' => $index - 1, 'is_primary' => $index === 1,
+            ]];
+        }
+        $method = new \ReflectionMethod(ProductImageStorage::class, 'checkpointFirstGallery');
+        $method->invoke(app(ProductImageStorage::class), $draft, $staged, $source,
+            array_column(array_column($staged, 'attributes'), 'source_url'), true,
+            $draft->telegram_update_id, $draft->status, $draft->telegram_update_id);
+
+        return $draft->fresh();
     }
 
     public function test_a_budget_exhausted_reconciliation_failure_maps_to_the_non_auto_chaining_stop_reason(): void

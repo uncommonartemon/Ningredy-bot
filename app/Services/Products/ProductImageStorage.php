@@ -3,6 +3,7 @@
 namespace App\Services\Products;
 
 use App\Exceptions\ProductSearchCancelled;
+use App\Jobs\DeleteUnreferencedMedia;
 use App\Models\Category;
 use App\Models\Product;
 use App\Models\ProductDraft;
@@ -372,6 +373,8 @@ class ProductImageStorage
         // already-finished search and report zero time left immediately.
         $telegramUpdateId ??= $draft->telegram_update_id;
         $this->lastDegradedDomains = [];
+        $draftGeneration = $draft->telegram_update_id;
+        $draftStatus = $draft->status ?? 'pending_review';
         // The previous staged gallery is replaced only after a new one was
         // stored successfully, so a failed search never leaves the draft
         // without photos (same philosophy as completeRefind).
@@ -1597,11 +1600,36 @@ class ProductImageStorage
             $draft, $previousMedia, $savedCandidates, $galleryIsPartial,
         );
         $candidateChecked = collect($savedCandidates)->every(fn (array $candidate): bool => in_array($candidate['verification_status'], ['verified', 'source_verified'], true));
+        $checkpointed = false;
+        $checkpointIdentity = null;
+        if ($previousMedia->isEmpty() && $stored > 0 && $candidateChecked && is_array($chosenSource) && $assemblySource !== null
+            && ProductPhotoApplicability::isAccepted($draft, $chosenSource, $chosenSource['_photo_applicability'] ?? [])) {
+            try {
+                $stagedMedia = $this->checkpointFirstGallery(
+                    $draft, $stagedMedia, $chosenSource, $storedSourceUrls, $galleryIsPartial,
+                    $draftGeneration, $draftStatus, $telegramUpdateId,
+                );
+                $checkpointed = true;
+                $checkpointIdentity = $draft->photo_source_context['_photo_checkpoint'];
+            } catch (Throwable $exception) {
+                foreach ($newFiles as $path) {
+                    (new DeleteUnreferencedMedia('public', $path))->handle();
+                }
+
+                throw $exception;
+            }
+            $progress?->__invoke($stored.' фото сохранены; собираю и проверяю характеристики.');
+        }
         try {
             $reconciliationOutcome = $assemblySource !== null && (! $previousGalleryIsBetter || $candidateChecked)
                 ? $this->reconcileSpecifications($draft, $assemblySource, $telegramUpdateId)
                 : null;
         } catch (Throwable $exception) {
+            if ($checkpointed) {
+                // The transaction has already made these files recoverable,
+                // even if the worker is killed instead of throwing here.
+                throw $exception;
+            }
             if ($previousMedia->isEmpty()) {
                 // The first gallery still survives a technical assembly error.
                 if ($stored > 0) {
@@ -1686,6 +1714,9 @@ class ProductImageStorage
             ? $textOnlySourceUrl
             : null;
         $reconciliationPending = $reconciliationOutcome !== null && ! $reconciliationOutcome->isReconciled();
+        if ($checkpointed && $reconciliationPending && ! is_array($photoConflict)) {
+            $chosenSource['_photo_checkpoint'] = $checkpointIdentity;
+        }
         $reconciliationResult = $this->reconciliationCardFields(
             $draft, $reconciliationOutcome, (string) ($assemblySource['url'] ?? $chosenSourceUrl), $telegramUpdateId,
         );
@@ -1733,7 +1764,10 @@ class ProductImageStorage
             'images_staged_at' => now(),
         ], ...$reconciliationResult['fields']];
         try {
-            DB::transaction(function () use ($draft, $stagedMedia, $previousMedia, $reusedMediaIds, $stored, $finalFields): void {
+            DB::transaction(function () use ($draft, $stagedMedia, $previousMedia, $reusedMediaIds, $stored, $finalFields, $checkpointed, $checkpointIdentity, $assemblySource, $draftGeneration, $draftStatus, $telegramUpdateId): void {
+                if ($checkpointed) {
+                    $this->lockCheckpointTarget($draft, $assemblySource, $draftGeneration, $draftStatus, $telegramUpdateId, $checkpointIdentity);
+                }
                 $keyboardStaging = $stored > 0 ? $stagedMedia : null;
                 $finalFields = [...$finalFields, ...$this->reconciledKeyboardFields(
                     $draft, $finalFields, $finalFields['photo_source_context'] ?? [], $keyboardStaging,
@@ -1744,10 +1778,13 @@ class ProductImageStorage
                 ProductDraft::withReconciliationWrite(fn () => $draft->update($finalFields));
             });
         } catch (Throwable $exception) {
-            Storage::disk('public')->delete($newFiles);
+            if (! $checkpointed) {
+                Storage::disk('public')->delete($newFiles);
+            }
 
             throw $exception;
         }
+        $draft->unsetRelation('media');
         if ($stored > 0 && is_array($chosenSource) && is_string($chosenSource['url'] ?? null)) {
             $this->sourceMetrics->recordAcceptedGallery($chosenSource['url'], $stored);
         }
@@ -1785,11 +1822,79 @@ class ProductImageStorage
         return $stored;
     }
 
+    /** Save the first reviewed gallery before any slow factual repair; no approval readiness. */
+    private function checkpointFirstGallery(
+        ProductDraft $draft,
+        array $stagedMedia,
+        array $source,
+        array $sourceUrls,
+        bool $partial,
+        ?int $generation,
+        ?string $status,
+        ?int $updateId,
+    ): array {
+        $stagedMedia = DB::transaction(function () use ($draft, $stagedMedia, $source, $sourceUrls, $partial, $generation, $status, $updateId): array {
+            $fresh = $this->lockCheckpointTarget($draft, $source, $generation, $status, $updateId);
+            // A concurrent run may have already saved a better gallery. Never mix it.
+            if ($fresh->media()->exists()) {
+                throw new ProductSearchCancelled;
+            }
+            foreach ($stagedMedia as &$staged) {
+                $attributes = $staged['attributes'];
+                if (! in_array($attributes['verification_status'], ['verified', 'source_verified'], true)
+                    || ! Storage::disk($attributes['disk'])->exists($attributes['path'])) {
+                    throw new \RuntimeException('Reviewed gallery file is unavailable for checkpoint.');
+                }
+                $staged['existing'] = $fresh->media()->create($attributes);
+            }
+            unset($staged);
+            $source['_photo_checkpoint'] = [
+                'version' => 1, 'source_url' => $source['url'], 'generation' => $generation,
+                'media_ids' => array_map(fn (array $staged): int => $staged['existing']->id, $stagedMedia),
+                'media_signature' => $this->checkpointMediaSignature(collect(array_column($stagedMedia, 'existing'))),
+            ];
+            ProductDraft::withReconciliationWrite(fn () => $fresh->update([
+                'primary_source_url' => $source['url'], 'photo_source_context' => $source,
+                'image_urls' => array_values(array_unique($sourceUrls)),
+                'gallery_status' => 'partial', 'gallery_confirmed_sufficient' => ! $partial,
+                'gallery_notes' => 'Фото сохранены; характеристики ещё проверяются.',
+                'gallery_search_stop_reason' => 'specifications_unreconciled',
+                'specifications_reconciled_source_url' => null,
+                'specifications_reconciliation_attempts' => 0, 'images_staged_at' => now(),
+            ]));
+
+            return $stagedMedia;
+        });
+        $draft->refresh()->unsetRelation('media');
+
+        return $stagedMedia;
+    }
+
+    /** Only a short database transaction; the existing applicability verdict is rechecked, not bought again. */
+    private function lockCheckpointTarget(ProductDraft $draft, array $source, ?int $generation, ?string $status, ?int $updateId, ?array $expectedCheckpoint = null): ProductDraft
+    {
+        $fresh = ProductDraft::query()->lockForUpdate()->find($draft->id);
+        app(ProductSearchCancellation::class)->throwIfCancelled($updateId);
+        if ($fresh === null || $fresh->telegram_update_id !== $generation || $fresh->status !== $status
+            || ! ProductPhotoApplicability::isAccepted($fresh, $source, $source['_photo_applicability'] ?? [])) {
+            throw new ProductSearchCancelled;
+        }
+        if ($expectedCheckpoint !== null
+            && (($fresh->photo_source_context['_photo_checkpoint'] ?? null) !== $expectedCheckpoint
+                || $fresh->primary_source_url !== $source['url']
+                || ! $this->checkpointMediaMatches($fresh, $expectedCheckpoint, $fresh->media()->lockForUpdate()->get()))) {
+            throw new ProductSearchCancelled;
+        }
+
+        return $fresh;
+    }
+
     /** Replace database references together, only after the gallery selection decision. */
     private function commitStagedGallery(ProductDraft $draft, array $stagedMedia, Collection $previousMedia, array $reusedMediaIds): void
     {
         DB::transaction(function () use ($draft, $stagedMedia, $previousMedia, $reusedMediaIds): void {
             foreach ($stagedMedia as $staged) {
+                unset($staged['attributes']['photo_source_context']['_photo_checkpoint']);
                 if ($staged['existing'] instanceof ProductDraftMedia) {
                     $staged['existing']->update($staged['attributes']);
                 } else {
@@ -1986,7 +2091,10 @@ class ProductImageStorage
         // The existence check on top is a sanity guard, not the criterion
         // itself: a confirmed-sufficient draft with no media left at all has
         // nothing to reconcile a card against.
-        if (! $draft->gallery_confirmed_sufficient || ! $draft->media()->exists()) {
+        $checkpoint = $draft->photo_source_context['_photo_checkpoint'] ?? null;
+        $checkpointReady = is_array($checkpoint) && $this->checkpointCanResume($draft, $checkpoint);
+        if ((is_array($checkpoint) && ! $checkpointReady)
+            || (! $checkpointReady && (! $draft->gallery_confirmed_sufficient || ! $draft->media()->exists()))) {
             // Photos themselves are still the actual outstanding problem -
             // let the ordinary search flow run instead of only retrying
             // reconciliation on what would still be an incomplete gallery.
@@ -1994,28 +2102,42 @@ class ProductImageStorage
         }
 
         $progress?->__invoke('Повторно сверяю характеристики с уже выбранным источником фото — поиск и обучение рецепта не повторяются.');
-        $outcome = $this->reconcileSpecifications($draft, [...($draft->photo_source_context ?? []), 'url' => $primarySourceUrl], $telegramUpdateId);
-        $photoConflict = $outcome->repairContext['photo_applicability_conflict'] ?? null;
-        if (is_array($photoConflict)) {
-            $context = $this->photoConflictContext($draft, [...($draft->photo_source_context ?? []), 'url' => $primarySourceUrl], $photoConflict, $telegramUpdateId);
-            DB::transaction(function () use ($draft, $context, $photoConflict): void {
-                $draft->media()->update(['verification_status' => 'rejected',
-                    'photo_source_context' => json_encode($context, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
-                    'verification_notes' => $photoConflict['reason']]);
-                $draft->update(['photo_source_context' => $context, 'gallery_confirmed_sufficient' => false]);
-            });
+        $checkpointSource = $draft->photo_source_context ?? [];
+        $checkpointStatus = $draft->status;
+        if ($checkpointReady) {
+            DB::transaction(fn () => $this->lockCheckpointTarget($draft, $checkpointSource, $checkpoint['generation'], $checkpointStatus, $telegramUpdateId, $checkpoint));
         }
+        $outcome = $this->reconcileSpecifications($draft, [...$checkpointSource, 'url' => $primarySourceUrl], $telegramUpdateId);
+        $photoConflict = $outcome->repairContext['photo_applicability_conflict'] ?? null;
+        $conflictingContext = is_array($photoConflict)
+            ? $this->photoConflictContext($draft, [...$checkpointSource, 'url' => $primarySourceUrl], $photoConflict, $telegramUpdateId)
+            : null;
         $reconciled = $outcome->isReconciled();
         $result = $this->reconciliationCardFields($draft, $outcome, $primarySourceUrl, $telegramUpdateId);
-        DB::transaction(function () use ($draft, $reconciled, $result): void {
+        DB::transaction(function () use ($draft, $reconciled, $result, $checkpointReady, $checkpoint, $checkpointSource, $checkpointStatus, $telegramUpdateId, $photoConflict, $conflictingContext): void {
+            if ($checkpointReady) {
+                $this->lockCheckpointTarget($draft, $checkpointSource, $checkpoint['generation'], $checkpointStatus, $telegramUpdateId, $checkpoint);
+            }
+            $source = $conflictingContext ?? $draft->photo_source_context ?? [];
+            if ($conflictingContext !== null) {
+                $draft->media()->update(['verification_status' => 'rejected',
+                    'photo_source_context' => json_encode($source, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+                    'verification_notes' => $photoConflict['reason']]);
+            }
+            if ($reconciled) {
+                unset($source['_photo_checkpoint']);
+            }
             $fields = [...[
-                'gallery_status' => $reconciled ? 'complete' : 'partial',
+                'gallery_status' => $reconciled && $draft->gallery_confirmed_sufficient && $conflictingContext === null ? 'complete' : 'partial',
+                'gallery_confirmed_sufficient' => $conflictingContext === null && $draft->gallery_confirmed_sufficient,
                 'gallery_search_stop_reason' => $result['stop_reason'],
                 'images_staged_at' => now(),
+                'photo_source_context' => $source,
             ], ...$result['fields']];
-            $fields = [...$fields, ...$this->reconciledKeyboardFields($draft, $fields, $draft->photo_source_context ?? [])];
+            $fields = [...$fields, ...$this->reconciledKeyboardFields($draft, $fields, $source)];
             ProductDraft::withReconciliationWrite(fn () => $draft->update($fields));
         });
+        $draft->unsetRelation('media');
         $progress?->__invoke(match (true) {
             $reconciled => 'Характеристики сверены с источником фото.',
             $outcome->isBudgetExhausted() => 'Бюджет поиска исчерпан; сверка характеристик приостановлена.',
@@ -2023,6 +2145,37 @@ class ProductImageStorage
         });
 
         return $draft->media()->count();
+    }
+
+    private function checkpointCanResume(ProductDraft $draft, array $checkpoint): bool
+    {
+        $source = $draft->photo_source_context ?? [];
+        $media = $draft->media()->get();
+
+        return ($checkpoint['version'] ?? null) === 1
+            && array_key_exists('generation', $checkpoint)
+            && $checkpoint['generation'] === $draft->telegram_update_id
+            && ($checkpoint['source_url'] ?? null) === $draft->primary_source_url
+            && ($source['url'] ?? null) === $draft->primary_source_url
+            && $media->count() >= min($this->minimumVerifiedImages($draft), $this->targetDraftImageCount($draft))
+            && ProductPhotoApplicability::isAccepted($draft, $source, $source['_photo_applicability'] ?? [])
+            && $this->checkpointMediaMatches($draft, $checkpoint, $media);
+    }
+
+    private function checkpointMediaMatches(ProductDraft $draft, array $checkpoint, Collection $media): bool
+    {
+        return ($checkpoint['media_ids'] ?? []) === $media->modelKeys()
+            && ($checkpoint['media_signature'] ?? null) === $this->checkpointMediaSignature($media)
+            && $media->every(fn (ProductDraftMedia $frame): bool => in_array($frame->verification_status, ['verified', 'source_verified'], true)
+                && ($frame->photo_source_context['url'] ?? null) === $draft->primary_source_url
+                && Storage::disk($frame->disk)->exists($frame->path));
+    }
+
+    private function checkpointMediaSignature(Collection $media): string
+    {
+        return hash('sha256', json_encode($media->sortBy('id')->map(fn (ProductDraftMedia $frame): array => $frame->only([
+            'id', 'disk', 'path', 'checksum', 'source_url', 'verification_status',
+        ]))->values()->all(), JSON_THROW_ON_ERROR));
     }
 
     private function buildSourceQueue(
@@ -3018,6 +3171,7 @@ class ProductImageStorage
      */
     private function photoConflictContext(ProductDraft $draft, array $source, array $conflict, ?int $updateId): array
     {
+        unset($source['_photo_checkpoint']);
         $source['_photo_applicability'] = ProductPhotoApplicability::bind($draft, $source, [
             ...($source['_photo_applicability'] ?? []), 'verdict' => 'conflicting',
             'may_inspect_gallery' => false, 'reason' => $conflict['reason'],

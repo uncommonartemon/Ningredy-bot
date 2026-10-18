@@ -3,14 +3,19 @@
 namespace App\Services\Products;
 
 use App\Ai\Agents\ProductSpecificationReconciliationAgent;
+use App\Ai\Agents\ProductSpecificationRepairAgent;
+use App\Exceptions\ProductSearchCancelled;
 use App\Models\AiRun;
 use App\Models\ProductDraft;
 use App\Models\ProductSourcePageEvidence;
 use App\Services\Ai\AiSettings;
 use App\Services\Ai\OpenAiHeavyOperationGate;
+use App\Services\Ai\ProductSearchCancellation;
 use App\Services\Ai\ProductSearchTimeBudget;
 use App\Services\Photos\ImageUrls;
 use App\Services\ProductSearch\Recovery\CardOfferSelection;
+use App\Services\ProductSearch\Recovery\CardRepairPatch;
+use App\Services\ProductSearch\Recovery\CardRepairValidationException;
 use App\Services\ProductSearch\Recovery\OfferSelectionUnavailable;
 use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Support\Facades\Validator;
@@ -177,6 +182,16 @@ class ProductSpecificationReconciler
             'previously_fetched_pages' => $previouslyFetchedPages,
             'previous_assembly_feedback' => $source['_previous_assembly_feedback'] ?? null,
         ];
+        $previousFeedback = $source['_previous_assembly_feedback'] ?? [];
+        $repair = app(CardRepairPatch::class)->prepare($draft, $source, $updateId, $previousFeedback);
+        if ($repair !== null) {
+            $payload['repair'] = app(CardRepairPatch::class)->forAgent($repair);
+            // Keep one scoped view, not several copies of the full rejected card.
+            $payload['previous_assembly_feedback'] = array_intersect_key($previousFeedback,
+                array_flip(['status', 'reason', 'summary']));
+            $payload['previous_assembly_feedback']['repair_context'] = array_diff_key(
+                $previousFeedback['repair_context'] ?? [], array_flip(['previous_candidate', 'patch_repair']));
+        }
         $prompt = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?: '{}';
         $provider = $this->settings->providerFor('product_specification_reconciliation');
         $model = $model ?? $this->settings->modelFor('product_specification_reconciliation');
@@ -195,25 +210,34 @@ class ProductSpecificationReconciler
             'status' => 'running',
             'prompt' => $prompt,
             'started_at' => now(),
+            ...($repair === null ? [] : ['activity' => ['card_repair' => [
+                'version' => $repair['version'], 'base_hash' => $repair['base_hash'],
+                'allowed_paths' => array_keys($repair['paths']),
+            ]]]),
         ]) : null;
 
         $sourceHost = trim((string) parse_url($url, PHP_URL_HOST));
 
-        $candidate = null;
+        $candidate = $repair['base'] ?? null;
+        $patchApplied = false;
+        $patchResponseReceived = false;
         $responseDiagnostics = null;
         $responseFormatValid = false;
         try {
             $response = $retryCandidate === null ? app(OpenAiHeavyOperationGate::class)->run(
                 $provider,
                 $timeout,
-                function () use ($sourceHost, $updateId, $draft, $prompt, $provider, $model, $timeout, $source) {
+                function () use ($sourceHost, $updateId, $draft, $prompt, $provider, $model, $timeout, $source, $repair) {
                     // Waiting for another worker consumed real shared time.
                     // Do not start with a stale timeout after acquiring the lock.
                     if (! $this->timeBudget->assemblyCanStart($updateId, 20)) {
                         throw new \RuntimeException('Card assembly shared budget exhausted while waiting.');
                     }
+                    app(ProductSearchCancellation::class)->throwIfCancelled($updateId);
 
-                    return ProductSpecificationReconciliationAgent::make($sourceHost !== '' ? $sourceHost : null, $updateId, $draft->id, $source)->prompt(
+                    $agent = $repair === null ? ProductSpecificationReconciliationAgent::class : ProductSpecificationRepairAgent::class;
+
+                    return $agent::make($sourceHost !== '' ? $sourceHost : null, $updateId, $draft->id, $source)->prompt(
                         $prompt,
                         provider: $provider,
                         model: $model,
@@ -241,6 +265,40 @@ class ProductSpecificationReconciler
             // A retry of a failed requirement check revalidates retained data,
             // never assumes it is trusted and never buys its generation again.
             $normalized = $retryCandidate ?? $response->toArray();
+            app(ProductSearchCancellation::class)->throwIfCancelled($updateId);
+            if ($repair !== null) {
+                $patchResponseReceived = true;
+                try {
+                    $freshDraft = $draft->fresh();
+                    if ($freshDraft === null) {
+                        throw ValidationException::withMessages(['repair_patch' => ['The draft was removed while repairing.']]);
+                    }
+                    app(CardRepairPatch::class)->assertCurrent($freshDraft, $source, $updateId, $repair);
+                } catch (ValidationException $stale) {
+                    $run?->update(['activity' => [...($run->activity ?? []), 'obsolete_repair' => $stale->getMessage()]]);
+                    throw new ProductSearchCancelled;
+                }
+                $normalized = app(CardRepairPatch::class)->apply($repair, $normalized);
+                $patchApplied = true;
+                $run?->update(['activity' => [...($run->activity ?? []), 'card_repair' => [
+                    'version' => $repair['version'], 'base_hash' => $repair['base_hash'],
+                    'allowed_paths' => array_keys($repair['paths']), 'merged_candidate' => $normalized,
+                ]]]);
+                // A validated closed refusal is an outcome, not a replacement card.
+                // Its retained base can still contain the exact schema error that
+                // could not be repaired; never publish or revalidate it as success.
+                if (($response->toArray()['decision'] ?? null) === 'not_ready') {
+                    $run?->update(['status' => 'completed', 'completed_at' => now()]);
+
+                    return SpecificationReconciliationOutcome::notReady($normalized['summary'], $madeProgress(), [
+                        'previous_candidate' => $repair['base'], 'patch_repair' => $repair,
+                        'validation_errors' => $previousFeedback['repair_context']['validation_errors'] ?? [],
+                        'unresolved_fields' => $normalized['unresolved_fields'],
+                        'photo_result_preserved' => in_array($photoApplicability['verdict'] ?? null, ['exact', 'compatible'], true),
+                        'recovery_action' => 'retry_current_source',
+                    ]);
+                }
+            }
             // Keep the rejected proposal as data for the next attempt. It is
             // not saved to the draft or trusted merely because the model said it.
             $candidate = $normalized;
@@ -411,13 +469,16 @@ class ProductSpecificationReconciler
             );
         } catch (Throwable $exception) {
             $run?->update([
-                'status' => 'failed',
+                'status' => $exception instanceof ProductSearchCancelled ? 'cancelled' : 'failed',
                 'error' => mb_substr($exception->getMessage(), 0, 2000),
                 'completed_at' => now(),
                 ...($responseDiagnostics === null ? [] : ['activity' => [
                     ...($run?->activity ?? []), 'response_diagnostics' => $responseDiagnostics,
                 ]]),
             ]);
+            if ($exception instanceof ProductSearchCancelled) {
+                throw $exception;
+            }
             report($exception);
 
             $invalidResponse = $exception instanceof ValidationException
@@ -438,8 +499,11 @@ class ProductSpecificationReconciler
                 mb_substr($exception->getMessage(), 0, 1500),
                 $candidate === null ? null : [
                     'previous_candidate' => $candidate,
-                    'failure_kind' => $exception instanceof ValidationException ? ($responseFormatValid ? 'offer_selection' : 'response_format')
-                        : ($exception instanceof InvalidSpecificationEvidence ? 'specification_evidence' : 'operation'),
+                    'failure_kind' => $patchResponseReceived && ! $patchApplied ? 'patch_contract'
+                        : ($exception instanceof ValidationException ? ($responseFormatValid ? 'offer_selection' : 'response_format')
+                            : ($exception instanceof InvalidSpecificationEvidence ? 'specification_evidence' : 'operation')),
+                    ...($repair !== null && ! $patchApplied ? ['patch_repair' => $repair] : []),
+                    ...($exception instanceof CardRepairValidationException ? ['repair_targets' => $exception->repairTargets] : []),
                     'validation_errors' => match (true) {
                         $exception instanceof ValidationException => $exception->errors(),
                         $exception instanceof InvalidSpecificationEvidence => $exception->violations,
