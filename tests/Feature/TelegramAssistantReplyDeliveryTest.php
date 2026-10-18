@@ -9,6 +9,7 @@ use App\Jobs\DeliverTelegramAssistantReply;
 use App\Jobs\ProcessTelegramMessage;
 use App\Models\AiOperation;
 use App\Models\AiRun;
+use App\Models\Category;
 use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
 use App\Services\Ai\AiErrorPresenter;
@@ -43,6 +44,88 @@ class TelegramAssistantReplyDeliveryTest extends TestCase
         $budget = $this->mock(ProductSearchTimeBudget::class);
         $budget->shouldNotReceive('restartSession');
         $budget->shouldReceive('canStart')->andReturn(true);
+    }
+
+    #[DataProvider('readyPartialDeliveryPaths')]
+    public function test_sufficient_verified_partial_is_delivered_without_automatic_search(string $path): void
+    {
+        [$update, $draft] = $this->readyDraft(3);
+        Category::where('slug', 'laptops')->update(['minimum_verified_images' => 3]);
+        $draft->update(['gallery_search_stop_reason' => 'exhausted', 'gallery_confirmed_sufficient' => false]);
+        $budget = $this->mock(ProductSearchCostBudget::class);
+        $budget->shouldReceive('hasRemaining')->andReturn(true);
+        $budget->shouldReceive('exceeded')->andReturn(false);
+        Http::fake(fn () => Http::response(['ok' => true, 'result' => ['message_id' => 92]]));
+        $images = $this->mock(ProductImageStorage::class);
+        $jobUpdate = $update;
+
+        if ($path === 'manual callback') {
+            $jobUpdate = TelegramUpdate::create(['update_id' => 910002, 'chat_id' => $update->chat_id,
+                'telegram_user_id' => $update->telegram_user_id, 'payload' => [], 'status' => 'completed']);
+            $images->shouldReceive('continueStage')->once()->andReturn(3);
+        } elseif ($path === 'newly ready continuation') {
+            $draft->update(['images_staged_at' => null]);
+            $images->shouldReceive('continueStage')->once()->andReturnUsing(function (ProductDraft $current): int {
+                $current->update(['images_staged_at' => now()]);
+
+                return 3;
+            });
+        } else {
+            $images->shouldNotReceive('continueStage');
+        }
+
+        if ($path === 'presenter') {
+            $delivery = app(TelegramAssistantReplyDelivery::class);
+            $delivery->deliver($delivery->prepareDraft($update, $draft), app(TelegramClient::class));
+        } else {
+            (new ContinueDraftGallerySearch($draft->id, $jobUpdate->chat_id, $jobUpdate->id, $update->id))
+                ->handle($images, app(DraftTelegramPresenter::class), app(TelegramClient::class));
+        }
+
+        Queue::assertNotPushed(ContinueDraftGallerySearch::class);
+        Http::assertSent(fn (Request $request): bool => str_ends_with($request->url(), '/sendMediaGroup'));
+        Http::assertSent(fn (Request $request): bool => str_ends_with($request->url(), '/sendMessage')
+            && str_contains(json_encode($request->data()), "draft:add:{$draft->id}"));
+        $this->assertSame('completed', $jobUpdate->fresh()->status);
+        $this->assertNotNull($jobUpdate->fresh()->processed_at);
+        $checkpoint = AiOperation::where('action', 'deliver_assistant_reply')->where('target_type', 'draft_reply')->sole();
+        $this->assertSame('completed', $checkpoint->status);
+        $this->assertSame('sent', $checkpoint->result['delivery_outcome']);
+        $this->assertSame('partial', $draft->fresh()->gallery_status);
+        $this->assertFalse($draft->fresh()->gallery_confirmed_sufficient);
+        $this->assertTrue($draft->fresh()->hasReadyVerifiedPartial());
+    }
+
+    public static function readyPartialDeliveryPaths(): array
+    {
+        return [['presenter'], ['already queued automatic'], ['newly ready continuation'], ['manual callback']];
+    }
+
+    #[DataProvider('incompletePartialStates')]
+    public function test_partial_readiness_requires_staging_reconciliation_and_readable_verified_minimum(string $state): void
+    {
+        [, $draft] = $this->readyDraft(3);
+        Category::where('slug', 'laptops')->update(['minimum_verified_images' => 3]);
+        if ($state === 'pending photo') {
+            $draft->media()->first()->update(['verification_status' => 'pending']);
+        } elseif ($state === 'missing file') {
+            Storage::disk('public')->delete($draft->media()->first()->path);
+        } elseif ($state === 'below minimum') {
+            $draft->media()->first()->delete();
+        } elseif ($state === 'unreconciled') {
+            $draft->update(['specifications_reconciled_source_url' => null]);
+        } elseif ($state === 'unstaged') {
+            $draft->update(['images_staged_at' => null]);
+        } else {
+            $draft->update(['status' => 'approved']);
+        }
+
+        $this->assertFalse($draft->fresh()->hasReadyVerifiedPartial());
+    }
+
+    public static function incompletePartialStates(): array
+    {
+        return [['pending photo'], ['missing file'], ['below minimum'], ['unreconciled'], ['unstaged'], ['processed']];
     }
 
     #[DataProvider('partialPhotoCounts')]
@@ -357,9 +440,14 @@ class TelegramAssistantReplyDeliveryTest extends TestCase
     public function test_continuation_final_result_has_independent_delivery_retry_without_repeating_search(int $photoCount): void
     {
         [$update, $draft] = $this->readyDraft($photoCount);
+        $draft->update(['images_staged_at' => null]);
         ServerAssistantAgent::fake([])->preventStrayPrompts();
         $images = $this->mock(ProductImageStorage::class);
-        $images->shouldReceive('continueStage')->once()->andReturn($photoCount);
+        $images->shouldReceive('continueStage')->once()->andReturnUsing(function (ProductDraft $current) use ($photoCount): int {
+            $current->update(['images_staged_at' => now()]);
+
+            return $photoCount;
+        });
         $available = false;
         Http::fake(function (Request $request) use (&$available) {
             $isFinal = str_ends_with($request->url(), '/sendPhoto')

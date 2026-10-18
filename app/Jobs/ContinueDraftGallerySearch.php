@@ -91,6 +91,15 @@ class ContinueDraftGallerySearch implements ShouldBeUniqueUntilProcessing, Shoul
                 return;
             }
 
+            // Automatic jobs retain the original update ID. A manual callback
+            // has its own ID and may explicitly request more photos.
+            if ($this->telegramUpdateId === $this->expectedDraftTelegramUpdateId && $draft->hasReadyVerifiedPartial()) {
+                $checkpoint = $delivery->prepareDraft(TelegramUpdate::findOrFail($this->telegramUpdateId), $draft);
+                $delivery->deliver($checkpoint, $telegram, presenter: $presenter);
+
+                return;
+            }
+
             // The webhook has already acknowledged the callback. Expose its
             // ongoing work to /reset until this whole automatic chain ends.
             TelegramUpdate::query()->findOrFail($this->telegramUpdateId);
@@ -153,6 +162,7 @@ class ContinueDraftGallerySearch implements ShouldBeUniqueUntilProcessing, Shoul
             // Card assembly already recovered in stage(), before delivery.
             // Do not multiply its bounded retries through another queue chain.
             if ($fresh->gallery_status !== 'complete'
+                && ! $fresh->hasReadyVerifiedPartial()
                 && (($fresh->gallery_search_stop_reason === 'exhausted'
                         && ! app(ProductSearchCostBudget::class)->exceeded($this->telegramUpdateId))
                     || ($fresh->gallery_search_stop_reason === 'time_budget'

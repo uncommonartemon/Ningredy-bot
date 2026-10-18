@@ -601,6 +601,7 @@ class ResearchProduct implements Tool
             // leave the user with a dead draft and no way to keep going.
             $galleryPaused = $draft
                 && $imageCount === 0
+                && ! $draft->hasReadyVerifiedPartial()
                 && in_array($gallerySearchStopReason, ['cost_budget', 'time_budget', 'exhausted'], true);
 
             if ($galleryPaused) {

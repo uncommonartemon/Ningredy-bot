@@ -31,6 +31,7 @@ class DraftTelegramPresenter
         $draft->load('media');
         if ($draft->status === 'pending_review'
             && $draft->gallery_status !== 'complete'
+            && ! $draft->hasReadyVerifiedPartial()
             && in_array($draft->gallery_search_stop_reason, ['time_budget', 'exhausted'], true)
             && ! app(ProductSearchCancellation::class)->isCancelled($draft->telegram_update_id)
             && app(ProductSearchCostBudget::class)->hasRemaining($draft->telegram_update_id)) {

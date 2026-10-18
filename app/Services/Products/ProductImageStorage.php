@@ -2556,6 +2556,10 @@ class ProductImageStorage
     /** @param null|callable(string): void $progress */
     public function continueStage(ProductDraft $draft, ?callable $progress = null, ?int $telegramUpdateId = null): int
     {
+        if ($telegramUpdateId === $draft->telegram_update_id && $draft->hasReadyVerifiedPartial()) {
+            return count($draft->verifiedPhotoPaths());
+        }
+
         // Only URLs with a terminal end-to-end outcome are excluded. A
         // successful preflight, gallery-training round, source resolution,
         // completed download without final verification, or interrupted

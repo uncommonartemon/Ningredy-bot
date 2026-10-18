@@ -95,6 +95,32 @@ class ProductDraft extends Model
             ->take(10)->values()->all();
     }
 
+    /** A deliverable partial card is sufficient without claiming full traversal. */
+    public function hasReadyVerifiedPartial(): bool
+    {
+        if ($this->status !== 'pending_review' || $this->gallery_status !== 'partial'
+            || $this->images_staged_at === null || $this->reconciliationPending()) {
+            return false;
+        }
+
+        $this->loadMissing('media');
+        if ($this->media->contains(fn ($media): bool => ! in_array($media->verification_status, ['verified', 'source_verified'], true))) {
+            return false;
+        }
+
+        $minimum = Category::query()->where('slug', trim((string) $this->category))->first()?->minimumVerifiedImages() ?? 3;
+        $readable = $this->media->filter(function ($media): bool {
+            if (blank($media->disk) || blank($media->path)) {
+                return false;
+            }
+            $path = Storage::disk($media->disk)->path($media->path);
+
+            return is_file($path) && is_readable($path);
+        })->count();
+
+        return $readable >= max(1, $minimum);
+    }
+
     public function isManualUpload(): bool
     {
         return (bool) data_get($this->telegramUpdate?->payload, '_manual_product_upload', false);
