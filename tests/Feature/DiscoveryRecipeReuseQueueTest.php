@@ -31,6 +31,7 @@ class DiscoveryRecipeReuseQueueTest extends TestCase
         $this->mock(ProductSourceIdentityJudge::class)->shouldNotReceive('judge');
         $matcher = $this->mock(ProductIdentityMatcher::class);
         $matcher->shouldReceive('conflictsSource')->andReturn(false);
+        $matcher->shouldReceive('conflictsMemoryConfiguration')->andReturn(false);
         $matcher->shouldReceive('confirmsExactIdentifier')->andReturn(true);
     }
 

@@ -19,7 +19,6 @@ class AttributeDefinitionsTable
     public static function configure(Table $table): Table
     {
         return $table
-            ->defaultPaginationPageOption(50)
             ->modifyQueryUsing(fn ($query) => $query->with('group')->withCount('values'))
             ->defaultSort('sort_order')
             ->columns([

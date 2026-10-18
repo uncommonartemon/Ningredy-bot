@@ -10,6 +10,7 @@ use App\Services\Ai\AiSettings;
 use App\Services\Ai\ProductSearchCancellation;
 use App\Services\Ai\ProductSearchCostBudget;
 use App\Services\Catalog\AttributePresentation;
+use App\Services\Products\PhotoSourceNotice;
 use App\Services\Products\ProductCondition;
 use App\Services\Products\ProductSourcePriority;
 use Illuminate\Support\Facades\Cache;
@@ -30,19 +31,20 @@ class DraftTelegramPresenter
         $draft->load('media');
         if ($draft->status === 'pending_review'
             && $draft->gallery_status !== 'complete'
-            && $draft->gallery_search_stop_reason === 'time_budget'
+            && in_array($draft->gallery_search_stop_reason, ['time_budget', 'exhausted'], true)
             && ! app(ProductSearchCancellation::class)->isCancelled($draft->telegram_update_id)
             && app(ProductSearchCostBudget::class)->hasRemaining($draft->telegram_update_id)) {
             // No paused card or approval controls while the original money remains.
+            // A delivery checkpoint may temporarily claim "delivering" even
+            // when another cycle is already queued. Keep that state honest
+            // without dispatching the same continuation a second time.
+            $claimed = TelegramUpdate::query()->whereKey($draft->telegram_update_id)
+                ->whereNull('cancel_requested_at')->where('status', '!=', 'cancelled')
+                ->update(['status' => 'processing', 'processed_at' => null]);
+            if (! $claimed) {
+                return;
+            }
             if (Cache::add("draft-gallery-continue:{$draft->id}:queued", true, 2100)) {
-                $claimed = TelegramUpdate::query()->whereKey($draft->telegram_update_id)
-                    ->whereNull('cancel_requested_at')->where('status', '!=', 'cancelled')
-                    ->update(['status' => 'processing', 'processed_at' => null]);
-                if (! $claimed) {
-                    Cache::forget("draft-gallery-continue:{$draft->id}:queued");
-
-                    return;
-                }
                 ContinueDraftGallerySearch::dispatch(
                     $draft->id, $chatId, $draft->telegram_update_id, $draft->telegram_update_id,
                 )->afterCommit();
@@ -51,9 +53,6 @@ class DraftTelegramPresenter
             return;
         }
         if ($this->reconciliationPending($draft)) {
-            // A stopped search is not an approval-ready product album.
-            // Clearing Telegram messages does not delete the saved files.
-            $this->messageLifecycle->clearForRefresh($telegram, $draft);
             $budgetStopped = in_array($draft->gallery_search_stop_reason, ['cost_budget', 'time_budget'], true);
             $reason = match ($draft->gallery_search_stop_reason) {
                 'cost_budget' => 'Денежный лимит поиска достигнут.',
@@ -63,6 +62,37 @@ class DraftTelegramPresenter
             if (! $budgetStopped && ! app(AiSettings::class)->specificationReconciliationEnabled()) {
                 $reason = 'Сборка карточки выключена в настройках AI. Проверка не запускалась; повтор поиска не поможет. Найденное сохранено.';
             }
+            // A photo preview is a separate result from a publishable card.
+            // Only reviewed files are shown; pending downloads stay internal.
+            // Do not clear a successfully sent preview here: a delivery retry
+            // replays its durable receipt when only the controls failed.
+            $paths = $draft->verifiedPhotoPaths();
+            if ($paths !== []) {
+                $sourceUrl = trim((string) ($draft->photo_source_context['url'] ?? $draft->primary_source_url));
+                $photoNotice = $this->photoNotice($draft);
+                $caption = '📷 Частичный результат: '.count($paths)." фото\n"
+                    .'Запрос: '.mb_substr((string) $draft->title, 0, 180)."\n\n"
+                    .$reason."\nФото найдены; точная комплектация и характеристики ещё не подтверждены. Публикация недоступна."
+                    .($photoNotice !== '' ? "\nℹ️ ".$photoNotice : '')
+                    .($sourceUrl !== '' && mb_strlen($sourceUrl) <= 350 ? "\n🔗 ".$sourceUrl : '')
+                    .$usageFootnote;
+                $response = $telegram->sendMediaGroupFiles($chatId, $paths, $caption);
+                $this->messageLifecycle->rememberReviewResponse($telegram, $draft, $chatId, $response, true, $caption);
+                $this->messageLifecycle->replaceControlMessage(
+                    $telegram, $draft, $chatId,
+                    "📷 Частичный результат поиска #{$draft->id}: показаны найденные фото.\n"
+                        .'Карточка не готова к публикации.'
+                        .($photoNotice !== '' ? "\nℹ️ ".$photoNotice : '')
+                        .($budgetStopped ? ' Продолжение выдаст новый бюджет поиска.' : '')
+                        .($sourceUrl !== '' ? "\nИсточник фото: ".$sourceUrl : '')
+                        ."\nВыберите действие:",
+                    $this->controlMarkup($draft),
+                );
+
+                return;
+            }
+            // No checked photo files: keep the honest stopped-search message.
+            $this->messageLifecycle->clearForRefresh($telegram, $draft);
             $text = "⏸ Поиск #{$draft->id} не завершён: {$draft->title}\n"
                 .$reason."\nНайденные фото сохранены: {$draft->media->count()}. Товар не отправлен на подтверждение."
                 .($budgetStopped ? "\nПродолжение выдаст новый бюджет поиска." : '')
@@ -73,17 +103,7 @@ class DraftTelegramPresenter
 
             return;
         }
-        $paths = $draft->media
-            ->sortBy([
-                ['is_primary', 'desc'],
-                ['sort_order', 'asc'],
-            ])
-            ->filter(fn ($media): bool => filled($media->disk) && filled($media->path))
-            ->map(fn ($media): string => Storage::disk($media->disk)->path($media->path))
-            ->filter(fn (string $path): bool => is_file($path) && is_readable($path))
-            ->take(10)
-            ->values()
-            ->all();
+        $paths = $this->localMediaPaths($draft);
 
         $caption = $this->caption($draft, $usageFootnote);
 
@@ -96,6 +116,22 @@ class DraftTelegramPresenter
         $this->messageLifecycle->rememberReviewResponse($telegram, $draft, $chatId, $response, $paths !== [], $caption);
 
         $this->sendControls($telegram, $chatId, $draft);
+    }
+
+    /** @return array<int, string> */
+    private function localMediaPaths(ProductDraft $draft): array
+    {
+        return $draft->media
+            ->sortBy([
+                ['is_primary', 'desc'],
+                ['sort_order', 'asc'],
+            ])
+            ->filter(fn ($media): bool => filled($media->disk) && filled($media->path))
+            ->map(fn ($media): string => Storage::disk($media->disk)->path($media->path))
+            ->filter(fn (string $path): bool => is_file($path) && is_readable($path))
+            ->take(10)
+            ->values()
+            ->all();
     }
 
     public function finalizeRejection(TelegramClient $telegram, ProductDraft $draft): bool
@@ -131,6 +167,8 @@ class DraftTelegramPresenter
         $description = htmlspecialchars($description, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
         $details = $description !== '' && ! $this->reconciliationPending($draft)
             ? "\n\n<blockquote expandable>".$description."</blockquote>\n" : '';
+        $photoNotice = $this->photoNotice($draft);
+        $details .= $photoNotice !== '' ? "\nℹ️ ".htmlspecialchars($photoNotice, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8')."\n" : '';
 
         return $this->messageLifecycle->replaceControlMessage(
             $telegram,
@@ -290,7 +328,7 @@ class DraftTelegramPresenter
                 ? '▶️ Продолжить поиск фото'
                 : '▶️ Продолжить поиск фото (+$'.number_format(app(AiSettings::class)->maxSearchCostUsd(), 2).')';
 
-            return ['inline_keyboard' => [
+            $rows = [
                 [[
                     'text' => $buttonLabel,
                     'callback_data' => "draft:continue-search:{$draft->id}",
@@ -299,8 +337,13 @@ class DraftTelegramPresenter
                     'text' => '🔗 Источник',
                     'callback_data' => "draft:source:{$draft->id}",
                 ]],
-                $this->editAndRejectRow($draft),
-            ]];
+            ];
+            if ($draft->images_staged_at !== null && ! $this->reconciliationPending($draft)) {
+                $rows[] = [['text' => '📋 Все характеристики', 'callback_data' => "draft:details:{$draft->id}"]];
+            }
+            $rows[] = $this->editAndRejectRow($draft);
+
+            return ['inline_keyboard' => $rows];
         }
 
         if ($this->reconciliationPending($draft)) {
@@ -327,6 +370,9 @@ class DraftTelegramPresenter
                 ['text' => '🖼 Фото', 'callback_data' => "draft:photos:{$draft->id}"],
                 ['text' => '🔗 Источник', 'callback_data' => "draft:source:{$draft->id}"],
             ];
+        if ($mediaCount === 0 && $draft->images_staged_at !== null) {
+            $rows[] = [['text' => '📋 Все характеристики', 'callback_data' => "draft:details:{$draft->id}"]];
+        }
 
         if (in_array($draft->gallery_search_stop_reason, ['cost_budget', 'time_budget', 'exhausted', 'specifications_unreconciled'], true)) {
             $label = match ($draft->gallery_search_stop_reason) {
@@ -493,6 +539,7 @@ class DraftTelegramPresenter
             .$usageFootnote;
         $footer = implode("\n", array_filter([
             "📷 Фото: {$galleryCount}",
+            ($photoNotice = $this->photoNotice($draft)) !== '' ? 'ℹ️ '.$photoNotice : null,
             $primarySourceUrl !== '' ? "🔗 Источник: {$primarySourceUrl}" : null,
         ]));
         $header = implode("\n", array_filter([
@@ -534,7 +581,16 @@ class DraftTelegramPresenter
         // the latter.
         $searchInterrupted = $draft->images_staged_at === null;
 
-        if (! $draft->isManualUpload() && ($searchPaused || $searchInterrupted) && $galleryCount === 0) {
+        if (! $draft->isManualUpload() && $galleryCount === 0 && ! $searchInterrupted && ! $reconciliationPending) {
+            $header = "📋 Черновик #{$draft->id}\nИнформация собрана; фото не найдены.\n"
+                ."🏷 {$draft->title}\n"
+                .implode(' / ', array_filter([$draft->brand, $draft->model, $draft->color]));
+            $usageFootnote = "\n".match ($draft->gallery_search_stop_reason) {
+                'cost_budget' => 'Денежный лимит поиска достигнут. Продолжить поиск фото можно новым бюджетным циклом.',
+                'time_budget' => 'Время поиска закончилось. Продолжить поиск фото можно новым бюджетным циклом.',
+                default => 'Подходящие фотографии не найдены. Поиск фото можно продолжить.',
+            }.' Без фото добавление в каталог недоступно.'.$usageFootnote;
+        } elseif (! $draft->isManualUpload() && ($searchPaused || $searchInterrupted) && $galleryCount === 0) {
             $header = "⏸ Черновик #{$draft->id}: поиск фотографий приостановлен\n"
                 ."🏷 {$draft->title}\n"
                 .implode(' / ', array_filter([$draft->brand, $draft->model, $draft->color]));
@@ -575,6 +631,9 @@ class DraftTelegramPresenter
     public function sendDetails(TelegramClient $telegram, string $chatId, ProductDraft $draft): void
     {
         $lines = ["📋 Черновик #{$draft->id}: {$draft->title}", (string) $draft->description];
+        if (($photoNotice = $this->photoNotice($draft, false)) !== '') {
+            $lines[] = 'ℹ️ '.$photoNotice;
+        }
         $lines = array_merge($lines, AttributePresentation::lines(
             AttributePresentation::specifications($draft->specifications ?? []),
             fn (array $spec): string => SpecificationEmoji::for($spec['key'] ?? $spec['name'] ?? '').' '.($spec['name'] ?? '').': '.($spec['value'] ?? '')
@@ -600,5 +659,22 @@ class DraftTelegramPresenter
             $text = mb_substr($text, 3500);
         }
         $this->sendControls($telegram, $chatId, $draft);
+    }
+
+    private function photoNotice(ProductDraft $draft, bool $compact = true): string
+    {
+        $draft->loadMissing('media');
+        if ($draft->media->isEmpty()) {
+            return '';
+        }
+        // Describe the actual retained frames when an attempted new gallery was discarded.
+        $contexts = $draft->media->pluck('photo_source_context')->filter(fn ($context): bool => is_array($context));
+        if ($contexts->isEmpty() && is_array($draft->photo_source_context)) {
+            $contexts = collect([$draft->photo_source_context]);
+        }
+        $notice = $contexts->map(fn (array $context): ?string => PhotoSourceNotice::russian($context))
+            ->filter()->unique()->implode("\n");
+
+        return $compact && mb_strlen($notice) > 420 ? mb_substr($notice, 0, 419).'…' : $notice;
     }
 }

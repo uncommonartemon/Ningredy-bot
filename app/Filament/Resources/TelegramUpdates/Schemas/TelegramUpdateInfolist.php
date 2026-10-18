@@ -2,6 +2,7 @@
 
 namespace App\Filament\Resources\TelegramUpdates\Schemas;
 
+use App\Models\TelegramUpdate;
 use Filament\Infolists\Components\TextEntry;
 use Filament\Schemas\Components\Section;
 use Filament\Schemas\Schema;
@@ -29,10 +30,12 @@ class TelegramUpdateInfolist
                             ->formatStateUsing(fn (string $state): string => match ($state) {
                                 'processed' => __('Обработано'),
                                 'received' => __('Получено'),
+                                'delivering' => __('Отправляется ответ'),
                                 'failed' => __('Ошибка'),
                                 'cancelled' => __('Отменено'),
                                 default => $state,
-                            }),
+                            })
+                            ->color(fn (?TelegramUpdate $record): ?string => $record?->status === 'delivering' ? 'gray' : null),
                         TextEntry::make('text')->label(__('Текст'))->placeholder('—')->columnSpanFull(),
                         TextEntry::make('reply_to_text')->label(__('В ответ на'))->placeholder('—')->columnSpanFull(),
                     ])

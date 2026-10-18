@@ -85,6 +85,7 @@ class ProductImageResolver
             'final_url' => $url,
             'identity_evidence' => '',
             'specification_text' => '',
+            'page_identity' => [],
         ];
 
         if ($url !== '' && ($pageRule = $this->pageRules->activeRuleFor($url))) {
@@ -140,6 +141,7 @@ class ProductImageResolver
                     $result['identity_evidence'] = $this->extractPageIdentityEvidence($html, $finalUrl);
                     $result['specification_text'] = $this->extractPageSpecificationText($html, $finalUrl);
                     $result['static_image_urls'] = $this->extractPageImages($html, $finalUrl);
+                    $result['page_identity'] = ProductSourcePageMetadata::fromHtml($html, $finalUrl);
                 }
             }
         } catch (Throwable $exception) {
@@ -471,7 +473,7 @@ class ProductImageResolver
             $failureKind = null;
             $identityEvidence = '';
             $sourceTitle = is_string($source['title'] ?? null) ? $source['title'] : null;
-            $sourceIdentityAssessment = null;
+            $sourceIdentityAssessment = is_array($source['_observed_identity'] ?? null) ? $source['_observed_identity'] : null;
             $specificationText = '';
             $reportedSourceImages = collect(is_array($source['image_urls'] ?? null) ? $source['image_urls'] : [])
                 ->filter(fn (mixed $imageUrl): bool => is_string($imageUrl) && $this->isPublicUrl($imageUrl))
@@ -548,6 +550,7 @@ class ProductImageResolver
                         : []),
                     'minimum_image_width' => $source['_minimum_image_width'] ?? null,
                     'minimum_image_height' => $source['_minimum_image_height'] ?? null,
+                    ...array_intersect_key($source, array_flip(['_photo_applicability', '_observed_identity'])),
                 ];
                 $browserResult = $activeRecipeOnly
                     ? $this->browser->extract(
@@ -590,8 +593,18 @@ class ProductImageResolver
                 $browserSpecificationText = $this->browser->lastSpecificationText();
                 $browserPageUrl = $this->browser->lastProductPageUrl();
                 $browserIdentity = $this->browser->lastProductIdentity();
+                $browserObservation = $this->browser->exportObservation();
 
-                if ((is_string($browserPageUrl) && $browserPageUrl !== '') || $browserIdentity !== null) {
+                if ($browserObservation !== []) {
+                    // The trainer and final acceptance must see the same
+                    // rendered title/H1 as well as structured identifiers.
+                    // JSON-LD/og:title alone can omit the exact model code.
+                    $renderedSource = ProductPageIdentityEvidence::fromBrowserObservation($browserUrl, $browserObservation);
+                    $browserUrl = $renderedSource['url'];
+                    $sourceTitle = $renderedSource['title'];
+                    $identityEvidence = $renderedSource['_preflight_identity_evidence'];
+                    $specificationText = is_string($browserSpecificationText) ? $browserSpecificationText : '';
+                } elseif ((is_string($browserPageUrl) && $browserPageUrl !== '') || $browserIdentity !== null) {
                     // The rendered page may disagree with HTTP/search even
                     // when training returns no images. Never let that older
                     // title/SKU identify the new page or rescue its seed URLs.
@@ -615,18 +628,18 @@ class ProductImageResolver
 
                 $assessment = $this->browser->lastSourceIdentityAssessment();
                 if (is_array($assessment)
-                    && ($assessment['verdict'] ?? null) === 'conflicting'
                     && isset($source[ProductRequestContext::SOURCE_KEY], $assessment['product_draft_id'])
                     && (int) $assessment['product_draft_id'] === (int) $source[ProductRequestContext::SOURCE_KEY]
                     && ($assessment['telegram_update_id'] ?? null) === $telegramUpdateId
                     && is_array($assessment['source'] ?? null)) {
-                    // Keep the exact rejected scout evidence and its verdict:
-                    // a second, smaller snapshot cannot undo a known conflict.
                     $sourceIdentityAssessment = $assessment;
-                    $assessedSource = $assessment['source'];
-                    $browserUrl = is_string($assessedSource['url'] ?? null) ? $assessedSource['url'] : $browserUrl;
-                    $sourceTitle = is_string($assessedSource['title'] ?? null) ? $assessedSource['title'] : null;
-                    $identityEvidence = (string) ($assessedSource['_preflight_identity_evidence'] ?? '');
+                    if (($assessment['verdict'] ?? null) === 'conflicting') {
+                        // A smaller later snapshot cannot undo an observed conflict.
+                        $assessedSource = $assessment['source'];
+                        $browserUrl = is_string($assessedSource['url'] ?? null) ? $assessedSource['url'] : $browserUrl;
+                        $sourceTitle = is_string($assessedSource['title'] ?? null) ? $assessedSource['title'] : null;
+                        $identityEvidence = (string) ($assessedSource['_preflight_identity_evidence'] ?? '');
+                    }
                 }
 
                 if ($browserImages !== []) {
@@ -662,6 +675,8 @@ class ProductImageResolver
                 '_preflight_identity_evidence' => $identityEvidence,
                 '_preflight_specification_text' => $specificationText,
                 ...($sourceIdentityAssessment !== null ? ['_observed_identity' => $sourceIdentityAssessment] : []),
+                ...(is_array($sourceIdentityAssessment['_photo_applicability'] ?? null)
+                    ? ['_photo_applicability' => $sourceIdentityAssessment['_photo_applicability']] : []),
             ];
             $this->sourceContextsByPageUrl[ImageUrls::normalizeCandidateUrl($sourceUrl)] = $pageContext;
             $this->sourceContextsByPageUrl[ImageUrls::normalizeCandidateUrl($browserUrl)] = $pageContext;
@@ -942,45 +957,13 @@ class ProductImageResolver
 
     private function extractPageIdentityEvidence(string $html, string $pageUrl): string
     {
-        if ($html === '' || strlen($html) > 5_000_000) {
-            return $pageUrl;
-        }
-
-        $previous = libxml_use_internal_errors(true);
-        $document = new DOMDocument;
-        $loaded = $document->loadHTML($html, LIBXML_NOERROR | LIBXML_NOWARNING | LIBXML_NONET);
-        libxml_clear_errors();
-        libxml_use_internal_errors($previous);
-
-        if (! $loaded) {
-            return $pageUrl;
-        }
-
-        $xpath = new DOMXPath($document);
-        $values = [$pageUrl];
-        $queries = [
-            '//title',
-            '//h1[1]',
-            '//meta[@property="og:title"]/@content',
-            '//meta[@name="twitter:title"]/@content',
-            '//*[@itemprop="sku" or @itemprop="mpn" or @itemprop="model" or @itemprop="name"]/@content',
-            '//*[@itemprop="sku" or @itemprop="mpn" or @itemprop="model" or @itemprop="name"]',
-        ];
-
-        foreach ($queries as $query) {
-            foreach ($xpath->query($query) ?: [] as $node) {
-                $value = trim(html_entity_decode(strip_tags($node->nodeValue), ENT_QUOTES | ENT_HTML5));
-
-                if ($value !== '') {
-                    $values[] = $value;
-                }
-            }
-        }
-
-        foreach ($xpath->query('//script[@type="application/ld+json"]') ?: [] as $node) {
-            if (preg_match_all('/"(?:sku|mpn|model|name)"\\s*:\\s*"((?:\\\\.|[^"\\\\])+)"/iu', $node->nodeValue, $matches)) {
-                $values = [...$values, ...($matches[1] ?? [])];
-            }
+        $metadata = ProductSourcePageMetadata::fromHtml($html, $pageUrl);
+        // A compatible-products widget can mention the requested laptop on
+        // a warranty/service page. Only the page's own product is identity
+        // evidence; the larger specification extract remains available to AI.
+        $values = [$pageUrl, ...($metadata['titles'] ?? [])];
+        foreach ($metadata['product'] ?? [] as $key => $value) {
+            $values[] = $key.': '.$value;
         }
 
         return Str::limit(Str::squish(implode(' ', array_unique($values))), 2500, '');

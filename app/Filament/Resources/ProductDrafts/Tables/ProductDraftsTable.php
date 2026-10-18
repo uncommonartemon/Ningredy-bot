@@ -2,6 +2,7 @@
 
 namespace App\Filament\Resources\ProductDrafts\Tables;
 
+use App\Filament\Support\DraftSearchResult;
 use App\Models\ProductDraft;
 use App\Services\Products\ProductDraftWorkflow;
 use Filament\Actions\Action;
@@ -23,7 +24,7 @@ class ProductDraftsTable
     public static function configure(Table $table): Table
     {
         return $table
-            ->modifyQueryUsing(fn ($query) => $query->with('media')->withCount('media'))
+            ->modifyQueryUsing(fn (Builder $query) => DraftSearchResult::withSummary($query)->with('media'))
             ->defaultSort('id', 'desc')
             ->columns([
                 ImageColumn::make('preview')
@@ -48,6 +49,7 @@ class ProductDraftsTable
                     default => 'warning',
                 }),
                 TextColumn::make('media_count')->label(__('Фото'))->badge()->sortable(),
+                DraftSearchResult::column(),
                 TextColumn::make('gallery_status')
                     ->label(__('Галерея'))
                     ->badge()

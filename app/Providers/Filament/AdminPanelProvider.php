@@ -18,6 +18,7 @@ use Filament\Panel;
 use Filament\PanelProvider;
 use Filament\Support\Colors\Color;
 use Filament\Support\Enums\Width;
+use Filament\Tables\Table;
 use Filament\View\PanelsRenderHook;
 use Filament\Widgets\AccountWidget;
 use Illuminate\Cookie\Middleware\AddQueuedCookiesToResponse;
@@ -29,6 +30,14 @@ use Illuminate\View\Middleware\ShareErrorsFromSession;
 
 class AdminPanelProvider extends PanelProvider
 {
+    public function boot(): void
+    {
+        Table::configureUsing(fn (Table $table): Table => $table
+            ->paginationPageOptions([25, 50, 100, 'all'])
+            ->defaultPaginationPageOption('all')
+            ->persistRecordsPerPageInSession(false));
+    }
+
     public function panel(Panel $panel): Panel
     {
         return $panel

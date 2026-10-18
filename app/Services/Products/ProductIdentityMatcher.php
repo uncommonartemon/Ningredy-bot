@@ -818,9 +818,7 @@ class ProductIdentityMatcher
             return null;
         }
 
-        $request = $draft->relationLoaded('telegramUpdate')
-            ? $draft->telegramUpdate?->text
-            : $draft->telegramUpdate()->value('text');
+        $request = ProductRequestContext::forDraft($draft)->originalRequest();
 
         if (! is_string($request) || trim($request) === '') {
             return null;

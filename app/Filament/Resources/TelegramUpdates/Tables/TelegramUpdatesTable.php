@@ -35,6 +35,7 @@ class TelegramUpdatesTable
                     ->formatStateUsing(fn (string $state): string => match ($state) {
                         'processed' => __('Обработано'),
                         'received' => __('Получено'),
+                        'delivering' => __('Отправляется ответ'),
                         'failed' => __('Ошибка'),
                         'cancelled' => __('Отменено'),
                         default => $state,
@@ -42,6 +43,7 @@ class TelegramUpdatesTable
                     ->color(fn (string $state): string => match ($state) {
                         'processed' => 'success',
                         'received' => 'gray',
+                        'delivering' => 'gray',
                         'failed' => 'danger',
                         'cancelled' => 'warning',
                         default => 'gray',
@@ -67,6 +69,7 @@ class TelegramUpdatesTable
                 SelectFilter::make('status')->label(__('Статус'))->options([
                     'processed' => __('Обработано'),
                     'received' => __('Получено'),
+                    'delivering' => __('Отправляется ответ'),
                     'failed' => __('Ошибка'),
                     'cancelled' => __('Отменено'),
                 ]),

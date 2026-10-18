@@ -2,6 +2,7 @@
 
 namespace App\Filament\Resources\Products\Pages;
 
+use App\Filament\Concerns\InteractsWithCatalogCleanup;
 use App\Filament\Resources\Products\ProductResource;
 use App\Filament\Support\ProductTablePreferences;
 use App\Models\User;
@@ -12,6 +13,8 @@ use Filament\Tables\Table;
 
 class ListProducts extends ListRecords
 {
+    use InteractsWithCatalogCleanup;
+
     protected static string $resource = ProductResource::class;
 
     public function table(Table $table): Table
@@ -77,6 +80,7 @@ class ListProducts extends ListRecords
     {
         return [
             CreateAction::make(),
+            $this->catalogCleanupAction('catalog'),
         ];
     }
 }

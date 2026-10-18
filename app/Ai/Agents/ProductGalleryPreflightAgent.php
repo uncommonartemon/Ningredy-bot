@@ -55,6 +55,10 @@ class ProductGalleryPreflightAgent implements Agent, HasStructuredOutput
             evidence and high confidence. Do not use it merely because a valid product card has an unusual
             gallery or because one interaction is required.
 
+            A marketplace/auction card can contain either professional catalog assets or private seller photos.
+            DOM text or the domain alone cannot settle image quality. Do not turn that uncertainty into no_gallery
+            or unsuitable_page: the trainer can inspect observed pixels before paying for extraction rounds.
+
             Ignore videos and 360-degree media completely. Count only photographs; also ignore color
             swatches, recommendations, logos, icons, and unrelated page images. Do not call a generic class name proof by itself:
             cite selectors, attributes, labels, repeated product-media nodes, image URL patterns, or counts.

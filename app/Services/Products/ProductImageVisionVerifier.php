@@ -171,10 +171,10 @@ class ProductImageVisionVerifier
         }
 
         $maxCandidates = $galleryFramePolicy
-            ? AiSettings::GALLERY_MAX_IMAGE_COUNT
+            ? 40
             : (int) config('product-images.vision_candidates', 4);
         $minimumScore = $galleryFramePolicy
-            ? min(40, (int) config('product-images.vision_min_score', 60))
+            ? 0
             : (int) config('product-images.vision_min_score', 60);
         $candidates = array_slice($candidates, 0, $maxCandidates);
         $candidates = array_map(function (array $candidate) use ($draft): array {
@@ -188,9 +188,11 @@ class ProductImageVisionVerifier
             // main per-source loop does); the || below preserves that, but
             // this local, judge-free fallback must not hand it out on a
             // weaker basis than upstream required.
-            $pageIdentityConfirmed = $pageContext !== null
-                && ! $this->identityMatcher->conflictsSource($draft, $pageContext)
-                && $this->identityMatcher->confirmsExactIdentifier($draft, $pageContext);
+            $pageIdentityConfirmed = $pageContext !== null && (
+                ProductPhotoApplicability::isAccepted($draft, $pageContext, $pageContext['_photo_applicability'] ?? [])
+                || (! $this->identityMatcher->conflictsSource($draft, $pageContext)
+                    && $this->identityMatcher->confirmsExactIdentifier($draft, $pageContext))
+            );
 
             return [
                 ...$candidate,
@@ -204,6 +206,10 @@ class ProductImageVisionVerifier
         $timeBudget = app(ProductSearchTimeBudget::class);
 
         if (! $timeBudget->canStart($telegramUpdateId ?? $draft->telegram_update_id, 15)) {
+            if ($galleryFramePolicy) {
+                throw new \RuntimeException('Current gallery verification interrupted: insufficient time budget.');
+            }
+
             return [];
         }
 
@@ -220,7 +226,8 @@ class ProductImageVisionVerifier
         $attachments = array_map(fn (array $candidate, int $index) => app(VisionImagePreparer::class)->thumbnail(
             $candidate['image'],
             'candidate-'.($index + 1).'.webp',
-            (string) config('product-images.vision_detail', 'low'),
+            $galleryFramePolicy ? 'high' : (string) config('product-images.vision_detail', 'low'),
+            $galleryFramePolicy ? 2048 : 640,
         ), $candidates, array_keys($candidates));
 
         // The mini model occasionally returns a structurally invalid batch -
@@ -307,10 +314,21 @@ class ProductImageVisionVerifier
             $allowedKinds[] = 'logo';
         }
         $forbidsPackaging = self::categoryHintForbidsPackaging($categoryHint);
+        $operatorRequiresPhotoLayout = collect(ProductInputContext::forDraft($draft)['input_evidence'])
+            ->contains(fn (array $fact): bool => ($fact['source_kind'] ?? null) === 'user_text'
+                && (in_array(strtolower((string) ($fact['key'] ?? '')), [
+                    'photo_keyboard_layout', 'image_keyboard_layout', 'required_photo_keyboard_layout',
+                ], true) || (($fact['requirement_scope'] ?? null) === 'photos'
+                    && in_array(strtolower((string) ($fact['key'] ?? '')), [
+                        'keyboard_layout', 'keyboard_language', 'keyboard_localization', 'keyboard_locale',
+                    ], true))) && filled($fact['value'] ?? null));
         $qualifies = fn (array $review): bool => $review['publishable']
+            && ($review['catalog_photo'] ?? true)
+            && ($review['physical_match'] ?? null) !== 'conflicting'
+            && $this->keyboardReviewAllows($review, $operatorRequiresPhotoLayout)
             && (! filled($draft->color) || $review['color_match'])
             && in_array($review['kind'], $allowedKinds, true)
-            && $review['score'] >= $minimumScore
+            && ($galleryFramePolicy || $review['score'] >= $minimumScore)
             && ($review['exact_match'] || $review['source_supported']);
 
         if ($forbidsPackaging) {
@@ -335,6 +353,18 @@ class ProductImageVisionVerifier
                     ? 'Exact identity is supported by the source URL. '.$review['reason']
                     : $review['reason'],
                 'vision_model' => $model,
+                'photo_visual_review' => [
+                    'color_match' => $review['color_match'],
+                    'physical_match' => $review['physical_match'] ?? 'not_observable',
+                    'color_observability' => $review['color_observability'] ?? 'uncertain',
+                    'keyboard_visibility' => $review['keyboard_visibility'] ?? 'unknown',
+                    'keyboard_layout_match' => $review['keyboard_layout_match'] ?? 'unknown',
+                    'keyboard_requirement_source' => $review['keyboard_requirement_source'] ?? 'unknown',
+                    'keyboard_requirement_scope' => $review['keyboard_requirement_scope'] ?? 'unknown',
+                    'keyboard_layout' => $review['keyboard_layout'] ?? '',
+                    'keyboard_layout_note' => $review['keyboard_layout_note'] ?? '',
+                    'source_url' => $candidates[$review['index'] - 1]['source_url'] ?? null,
+                ],
             ];
         })->all();
     }
@@ -403,6 +433,15 @@ class ProductImageVisionVerifier
                     'images.*.index' => ['required', 'integer', 'between:1,'.$candidateCount, 'distinct'],
                     'images.*.exact_match' => ['required', 'boolean'],
                     'images.*.color_match' => ['required', 'boolean'],
+                    'images.*.physical_match' => ['sometimes', 'in:match,not_observable,conflicting'],
+                    'images.*.color_observability' => ['sometimes', 'in:clear,not_visible,uncertain'],
+                    'images.*.catalog_photo' => ['sometimes', 'boolean'],
+                    'images.*.keyboard_visibility' => ['sometimes', 'in:readable,visible_unreadable,not_visible,not_applicable'],
+                    'images.*.keyboard_layout_match' => ['sometimes', 'in:match,different,unknown,not_applicable'],
+                    'images.*.keyboard_requirement_source' => ['sometimes', 'in:operator,evidence,none,unknown'],
+                    'images.*.keyboard_requirement_scope' => ['sometimes', 'in:product,photos,none,unknown'],
+                    'images.*.keyboard_layout' => ['sometimes', 'nullable', 'string', 'max:100'],
+                    'images.*.keyboard_layout_note' => ['sometimes', 'nullable', 'string', 'max:500'],
                     'images.*.publishable' => ['required', 'boolean'],
                     'images.*.kind' => ['required', 'in:product,packaging,detail,logo,banner,screenshot,unrelated,uncertain'],
                     'images.*.view' => ['required', 'in:front,angle,side,back,detail,packaging,other'],
@@ -428,6 +467,56 @@ class ProductImageVisionVerifier
                 return new VisionResponse($data, $issues === [] ? null : implode(' ', $issues));
             },
         );
+    }
+
+    private function keyboardReviewAllows(array $review, bool $operatorRequiresPhotoLayout): bool
+    {
+        $visibility = $review['keyboard_visibility'] ?? 'unknown';
+        $match = $review['keyboard_layout_match'] ?? 'unknown';
+        $origin = $review['keyboard_requirement_source'] ?? 'unknown';
+        // Legacy evidence-only reviews describe the sold product, never an explicit photo restriction.
+        $scope = $review['keyboard_requirement_scope'] ?? ($origin === 'evidence' ? 'product' : 'unknown');
+        if (($operatorRequiresPhotoLayout || $scope === 'photos')
+            && in_array($visibility, ['readable', 'visible_unreadable'], true)) {
+            return $visibility === 'readable' && $match === 'match';
+        }
+        if ($match === 'different') {
+            return $scope === 'product' && in_array($origin, ['operator', 'evidence'], true)
+                && $visibility === 'readable'
+                && filled($review['keyboard_layout'] ?? null)
+                && filled($review['keyboard_layout_note'] ?? null);
+        }
+        if ($visibility === 'visible_unreadable' && $match === 'unknown') {
+            return $scope === 'product' && in_array($origin, ['operator', 'evidence'], true)
+                && ($review['physical_match'] ?? null) === 'match' && ($review['color_match'] ?? false)
+                && blank($review['keyboard_layout'] ?? null)
+                && filled($review['keyboard_layout_note'] ?? null);
+        }
+
+        return ! (in_array($visibility, ['readable', 'visible_unreadable'], true) && $match === 'unknown');
+    }
+
+    /** Every current full-size frame receives the same catalog policy, including exact sources. */
+    public function reviewCompleteGallery(array $candidates, ProductDraft $draft, ?int $updateId = null): ?array
+    {
+        $accepted = [];
+        try {
+            foreach (array_chunk(array_values($candidates), 40) as $batch) {
+                app(ProductSearchCancellation::class)->throwIfCancelled($updateId ?? $draft->telegram_update_id);
+                if (! app(ProductSearchTimeBudget::class)->canStart($updateId ?? $draft->telegram_update_id, 15)) {
+                    return null;
+                }
+                $accepted = [...$accepted, ...$this->selectGalleryFrames($draft, $batch, count($batch), $updateId)];
+            }
+        } catch (ProductSearchCancelled $exception) {
+            throw $exception;
+        } catch (Throwable $exception) {
+            report($exception);
+
+            return null;
+        }
+
+        return $accepted;
     }
 
     private function rankReviews($reviews)
@@ -463,6 +552,7 @@ class ProductImageVisionVerifier
                 .' source: '.($candidate['source_url'] ?? 'unknown')
                 .' product_page: '.($candidate['product_page_url'] ?? 'unknown')
                 .' exact_page_identity: '.(($candidate['source_identity_confirmed'] ?? false) ? 'yes' : 'no')
+                .' photo_applicability: '.json_encode($candidate['page_source_context']['_photo_applicability'] ?? null, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
                 .' resolution: '.($candidate['width'] ?? '?').'x'.($candidate['height'] ?? '?')
                 .(($candidate['confirmed_gallery'] ?? false)
                     ? ' confirmed_playwright_gallery_frame: yes; best resolution exposed by this complete gallery'
@@ -471,12 +561,15 @@ class ProductImageVisionVerifier
 
         $qualityPolicy = $galleryFramePolicy
             ? <<<'POLICY'
-            These attachments are frames from one structurally complete but semantically ambiguous carousel on the
-            exact product page. Be deliberately permissive: publishable=true when the requested product is meaningfully
-            visible and the frame is useful or attractive, including lifestyle scenes with people or rooms, feature
+            TRUSTED COMPLETE-GALLERY POLICY: These attachments are frames from one structurally complete product
+            gallery. Use the supplied source identity/applicability evidence; do not guess an exact SKU from pixels.
+            Be deliberately permissive: publishable=true when the product is meaningfully visible and image quality
+            is usable. Preserve professional lifestyle scenes with people or rooms, feature
             text/graphics over a product photo, collages, unusual angles, a closed/folded/side/top view, ports, keyboard,
             internals, installed components, or a polished render. Promotional text alone is not a rejection reason.
             Classify a marketing composition with a prominent product as kind=product, kind=detail, or kind=banner.
+            The score orders accepted frames only; decoration, an unusual angle or a low aesthetic score is not a
+            rejection reason. Keep every usable frame without a real policy violation.
 
             Reject only when the requested product is absent or too tiny to be useful; the frame is pure text/chart/logo,
             UI screenshot, accessory-only, unrelated media, user-generated/used/damaged imagery; quality is genuinely
@@ -512,6 +605,7 @@ class ProductImageVisionVerifier
         $componentLogoPolicy = ProductPhotoPolicy::allowsComponentLogos($draft)
             ? 'COMPONENT EXCEPTION: relevant brand or product-family logos are allowed, including as the cover. Classify as kind=logo; judge correspondence using the requested product and source evidence. This overrides the generic logo rejection below, never permits missing-image placeholders or conflicting brands/families, and never proves an exact SKU from pixels alone.'
             : 'NO LOGO EXCEPTION: standalone brand/family logos are not acceptable for this product type.';
+        $requestContext = json_encode(ProductRequestContext::forDraft($draft)->forAgent(), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 
         return <<<PROMPT
             Review {$count} attached candidate images for a public product catalog.
@@ -521,14 +615,33 @@ class ProductImageVisionVerifier
             Product type: {$draft->product_type}; category: {$draft->category}
             {$componentLogoPolicy}
             Required color/version: {$draft->color}
+            Original request and evidenced configuration (including keyboard requirements): {$requestContext}
             Trusted category instruction: {$categoryHint}
 
             Judge every source type by identical rules. A manufacturer, marketplace, or retailer URL is evidence only
             and must never override a visible mismatch. A visibly different product color requires color_match=false.
             {$qualityPolicy}
             {$confirmedFramePolicy}
-            A candidate marked exact_page_identity=yes came from a page whose URL/title deterministically contains
-            the requested SKU/MPN/model. Do not require that identifier to be visibly printed on the photographed
+            A candidate marked exact_page_identity=yes has confirmed source identity or separately assessed photo
+            applicability. A compatible verdict means another SKU may illustrate this target because its physical
+            appearance matches. Invisible RAM/SSD/clock differences do not disqualify photographs. Preserve and
+            report any known keyboard-layout difference, without pretending the source is the target's exact offer.
+            Record keyboard_visibility and keyboard_layout_match explicitly. A permitted, positively observed
+            regional keyboard difference needs a factual Russian note. Not-visible keyboards never prove a layout.
+            keyboard_requirement_source must distinguish an explicit original operator requirement (operator)
+            from a label/specification fact alone (evidence). keyboard_requirement_scope is product for the sold
+            item's layout, including an explicitly requested Czech laptop. A readable US keyboard on compatible
+            same-body photos may satisfy product scope only with a factual notice that the sold item is Czech.
+            Use photos scope only for an explicit requirement about the photographs themselves; a visible different
+            layout cannot satisfy that restriction, even with a note. Unknown scope/provenance does not authorize
+            a regional substitution. Neither scope permits guessing an unreadable layout or an unseen match.
+            Under product scope, visible_unreadable legends do not prove a mismatch when the body and color match:
+            keep keyboard_layout_match=unknown, keyboard_layout empty, and provide an honest Russian notice that
+            the photo layout is unreadable while the sold item's layout is known. Never invent US/CZ or call it match.
+            Under photos or unknown scope, unresolved visible layout remains ineligible; other views are separate.
+            The source's exact model and gallery membership never override catalog_photo=false for UGC/auction
+            phone shots or poor quality. Inspect chassis shape, revision, ports, finish and current pixels.
+            Do not require that identifier to be visibly printed on the photographed
             product. Use that page evidence for identity unless the pixels visibly contradict it. It never overrides
             a visible conflict, wrong color, wrong product type, prohibited packaging, or insufficient quality.
 

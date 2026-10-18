@@ -9,6 +9,11 @@
 # have written a line of the code, and the alternative is a bot that simply
 # never answers.
 
+param(
+    [switch]$WithoutTelegram,
+    [switch]$NoPause
+)
+
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $root = Split-Path -Parent $PSScriptRoot
@@ -24,7 +29,7 @@ function Stop-WithReason {
         Write-Host "      $line" -ForegroundColor Yellow
     }
     Write-Host ''
-    Read-Host '  Нажмите Enter, чтобы закрыть'
+    if (-not $NoPause) { Read-Host '  Нажмите Enter, чтобы закрыть' }
     exit 1
 }
 
@@ -51,6 +56,78 @@ if (-not (Test-Command 'php')) {
         'Проверить можно так:  php -v'
     )
 }
+
+# Local catalog/admin mode never enters the bot lifecycle below: it must not
+# stop existing processes, purge jobs, inspect the bot or start its queues.
+if ($WithoutTelegram) {
+    if (-not (Test-Path -LiteralPath (Join-Path $root '.env') -PathType Leaf)) {
+        Stop-WithReason 'Нет файла настроек .env' @(
+            'Скопируйте .env.example в .env и настройте подключение к базе.',
+            'Для сайта Telegram-токен и ngrok не нужны.'
+        )
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $root 'vendor\autoload.php') -PathType Leaf)) {
+        Stop-WithReason 'Не установлены зависимости PHP.' @(
+            'Откройте эту папку в терминале и выполните:  composer install'
+        )
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $root 'public\build\manifest.json') -PathType Leaf)) {
+        Stop-WithReason 'Интерфейс сайта ещё не собран.' @(
+            'Откройте эту папку в терминале и выполните:',
+            '  npm ci',
+            '  npm run build'
+        )
+    }
+    if (-not (Test-Command 'node')) {
+        Stop-WithReason 'Не найден Node.js.' @(
+            'Установите Node.js 22.12 или новее для совместного запуска сайта и AI-помощника.'
+        )
+    }
+    $concurrently = Join-Path $root 'node_modules\concurrently\dist\bin\concurrently.js'
+    if (-not (Test-Path -LiteralPath $concurrently -PathType Leaf)) {
+        Stop-WithReason 'Не установлены зависимости запуска.' @(
+            'Откройте эту папку в терминале и выполните:  npm ci'
+        )
+    }
+
+    Write-Host '    Локальный сайт и панель управления' -ForegroundColor Green
+    Write-Host ''
+    Write-Host '      http://127.0.0.1:8000' -ForegroundColor Cyan
+    Write-Host '      http://127.0.0.1:8000/admin' -ForegroundColor Cyan
+    Write-Host ''
+    Write-Host '    AI-помощник работает в отдельной очереди admin-ai.' -ForegroundColor DarkGray
+    Write-Host '    Telegram, ngrok и очереди бота не запускаются.' -ForegroundColor DarkGray
+    Write-Host '    Чтобы остановить сайт — закройте это окно.' -ForegroundColor Yellow
+    Write-Host ''
+
+    try {
+        $localProcessJob = & (Join-Path $PSScriptRoot 'keep-local-processes-together.ps1')
+    } catch {
+        Stop-WithReason 'Не удалось настроить остановку локальных процессов.' @(
+            $_.Exception.Message,
+            'Сайт и AI-воркер не запущены. Другие процессы не изменены.'
+        )
+    }
+    $previousAdminOnly = [Environment]::GetEnvironmentVariable('NINGREDY_ADMIN_ONLY', 'Process')
+    try {
+        [Environment]::SetEnvironmentVariable('NINGREDY_ADMIN_ONLY', '1', 'Process')
+        # --no-reload keeps the process-only flag in Laravel's PHP server;
+        # ServeCommand otherwise filters non-standard environment variables.
+        & node $concurrently --kill-others --names 'web,admin-ai' --prefix-colors 'blue,green' 'php artisan serve --host=127.0.0.1 --port=8000 --tries=1 --no-reload' 'run-admin-ai-worker.bat'
+        $webExit = $LASTEXITCODE
+    } finally {
+        [Environment]::SetEnvironmentVariable('NINGREDY_ADMIN_ONLY', $previousAdminOnly, 'Process')
+    }
+    if ($webExit -ne 0) {
+        Stop-WithReason 'Локальный сайт не запущен или остановлен с ошибкой.' @(
+            'Смотрите сообщение PHP выше. Если порт 8000 занят, закройте использующее его окно.',
+            'Другие процессы автоматически не завершаются.'
+        )
+    }
+    if (-not $NoPause) { Read-Host '  Сайт остановлен. Нажмите Enter, чтобы закрыть' }
+    exit 0
+}
+
 if (-not (Test-Command 'npm')) {
     Stop-WithReason 'Не найден Node.js.' @(
         'Скачайте Node.js 20 или новее с nodejs.org и установите.',
@@ -141,4 +218,4 @@ Write-Host ''
 & npm run start
 
 Write-Host ''
-Read-Host '  Бот остановлен. Нажмите Enter, чтобы закрыть'
+if (-not $NoPause) { Read-Host '  Бот остановлен. Нажмите Enter, чтобы закрыть' }

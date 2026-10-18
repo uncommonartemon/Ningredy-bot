@@ -4,6 +4,7 @@ namespace Tests;
 
 use App\Ai\Agents\GalleryFrameReviewAgent;
 use App\Ai\Agents\GalleryTextLanguageAgent;
+use App\Ai\Agents\ProductPhotoApplicabilityAgent;
 use App\Ai\Agents\ProductSourceIdentityAgent;
 use Illuminate\Foundation\Testing\TestCase as BaseTestCase;
 use Illuminate\Support\Facades\Http;
@@ -51,6 +52,14 @@ abstract class TestCase extends BaseTestCase
         // never become a paid provider call; tests of the judge override this.
         ProductSourceIdentityAgent::fake(fn (): array => [
             'match' => 'uncertain', 'confidence' => 0.5, 'reason' => 'No identity verdict configured by this test.',
+        ])->preventStrayPrompts();
+
+        ProductPhotoApplicabilityAgent::fake(fn (): array => [
+            'verdict' => 'uncertain', 'reason' => 'No photo applicability verdict configured by this test.',
+            'source_model' => '', 'differences' => [], 'evidence' => [],
+            'plausible_target' => true, 'may_inspect_gallery' => true,
+            'physical_checks' => array_fill_keys(['platform', 'revision', 'construction', 'dimensions', 'ports', 'color'],
+                ['status' => 'unknown', 'evidence' => '']),
         ])->preventStrayPrompts();
 
         GalleryTextLanguageAgent::fake(fn (): array => [

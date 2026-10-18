@@ -3,6 +3,7 @@
 namespace App\Ai\Tools;
 
 use App\Exceptions\ProductSearchCancelled;
+use App\Services\GalleryRecipes\Training\GalleryVisualObservations;
 use App\Services\Photos\ImageUrls;
 use App\Services\Products\ProductImageResolver;
 use App\Services\Products\ProductRequestContext;
@@ -23,6 +24,7 @@ class InspectGalleryImages implements Tool
         // Budget and audit key of the current run only.
         private readonly ?int $telegramUpdateId = null,
         private readonly ?ProductRequestContext $productRequest = null,
+        private readonly ?GalleryVisualObservations $visualObservations = null,
     ) {}
 
     public function description(): Stringable|string
@@ -30,7 +32,10 @@ class InspectGalleryImages implements Tool
         return 'Visually inspect up to four image URLs already present in the supplied page/gallery evidence. '
             .'Use only when pixels are needed to understand whether a candidate container is one coherent product '
             .'gallery, whether the product remains visible in effects/lifestyle/unusual-angle frames, or whether '
-            .'prominent in-image text uses a language other than English/Czech. This is observational: it never '
+            .'prominent in-image text uses a language other than English/Czech. Also observe capture style and '
+            .'visible wear/damage before expensive training: a gallery of private seller snapshots differs from '
+            .'professional catalog assets. One bad frame, a marketplace domain or unclear thumbnails do not '
+            .'establish that the whole gallery is unusable. This is observational: it never '
             .'selects, rejects, ranks, or proves an exact SKU. For an explicitly requested color, inspect several '
             .'informative views from the same candidate slider together; unclear detail views are not conflicts. '
             .'Call again with another observed batch if needed. A URL reported with retryable=false could not be '
@@ -66,6 +71,7 @@ class InspectGalleryImages implements Tool
         $images = app(VisionImagePreparer::class);
         $attachments = [];
         $inspectedUrls = [];
+        $inspectedImages = [];
         $downloadErrors = [];
 
         foreach ($requested as $normalizedUrl) {
@@ -104,6 +110,11 @@ class InspectGalleryImages implements Tool
                 (string) config('product-images.gallery_agent_vision_detail', 'high'),
             );
             $inspectedUrls[] = $url;
+            $inspectedImages[] = [
+                'url' => $url,
+                'width' => (int) ($download['width'] ?? 0),
+                'height' => (int) ($download['height'] ?? 0),
+            ];
         }
 
         if ($attachments === []) {
@@ -121,6 +132,9 @@ class InspectGalleryImages implements Tool
             'requested_product_context' => $productContext,
             'inspection_scope' => 'visual observations only; exact SKU must be proven from page evidence',
             'image_urls_in_attachment_order' => $inspectedUrls,
+            'downloaded_images_in_attachment_order' => $inspectedImages,
+            'quality_scope' => 'Describe observed capture style and physical condition per frame. A small '
+                .'rendition does not prove low-quality originals; uninspected gallery frames remain unknown.',
         ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?: '{}';
         try {
             $result = app(VisionService::class)->inspectGallery(
@@ -132,6 +146,7 @@ class InspectGalleryImages implements Tool
             return $this->json([
                 'ok' => true,
                 'inspected_urls' => $inspectedUrls,
+                'inspected_images' => $inspectedImages,
                 'download_errors' => $downloadErrors,
                 'observation' => $result,
             ]);
@@ -173,6 +188,8 @@ class InspectGalleryImages implements Tool
     /** @param array<string, mixed> $value */
     private function json(array $value): string
     {
+        $this->visualObservations?->record($value);
+
         return json_encode($value, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?: '{}';
     }
 }

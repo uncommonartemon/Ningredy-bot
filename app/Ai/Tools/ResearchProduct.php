@@ -22,6 +22,7 @@ use App\Services\Products\ProductCondition;
 use App\Services\Products\ProductImageCandidateDiscovery;
 use App\Services\Products\ProductImageResolver;
 use App\Services\Products\ProductImageStorage;
+use App\Services\Products\ProductInputContext;
 use App\Services\Products\ProductPublicDescription;
 use App\Services\Products\ProductResearchConfigurationGuard;
 use App\Services\Products\ProductResearchResponseNormalizer;
@@ -141,7 +142,10 @@ class ResearchProduct implements Tool
         // the exact product still outranks a familiar address, and a search
         // that only ever revisited the same shops would never grow the list.
         $provenDomains = $sourcePriority->provenDomains();
+        $inputContext = ProductInputContext::forUpdate($this->update);
         $researchPrompt = $query
+            .PHP_EOL.'Input provenance and prioritized search alternatives (observations are not additional mandatory requirements): '
+            .json_encode($inputContext, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
             .($blockedDomains === [] ? '' : PHP_EOL.'Never search or return these blocked domains: '.implode(', ', $blockedDomains))
             .($provenDomains === [] ? '' : PHP_EOL.'This catalog already knows how to read product pages on these shops: '
                 .implode(', ', $provenDomains)
@@ -599,6 +603,9 @@ class ResearchProduct implements Tool
             }
 
             $gallerySearchStopReason = $draft?->fresh()->gallery_search_stop_reason;
+            $textOnlyResult = $draft?->status === 'pending_review'
+                && $imageCount === 0
+                && ! $draft->reconciliationPending();
             // A stop is only ever a dead end when the request itself decided
             // there is nothing left worth trying (identity conflict, no
             // candidates at all). Running out of money/time, or trying every
@@ -611,6 +618,14 @@ class ResearchProduct implements Tool
                 && in_array($gallerySearchStopReason, ['cost_budget', 'time_budget', 'exhausted'], true);
 
             if ($galleryPaused) {
+                // The photo pass chose its stop reason before final assembly.
+                // Assembly may have consumed the last money since that check.
+                // Preserve that real limit instead of queueing another cycle.
+                if ($gallerySearchStopReason === 'exhausted'
+                    && app(ProductSearchCostBudget::class)->exceeded($this->update->id)) {
+                    $gallerySearchStopReason = 'cost_budget';
+                    $draft->update(['gallery_search_stop_reason' => $gallerySearchStopReason]);
+                }
                 $automaticallyContinuing = $gallerySearchStopReason === 'exhausted'
                     || ($gallerySearchStopReason === 'time_budget'
                         && app(ProductSearchCostBudget::class)->hasRemaining($this->update->id));
@@ -638,47 +653,45 @@ class ResearchProduct implements Tool
                     $progress->warning('Лимит текущего запуска достигнут. Черновик сохранён, поиск можно продолжить отдельным бюджетным циклом.');
                 }
 
-                return $this->json([
-                    ...$result,
-                    'ok' => true,
-                    'status' => $automaticallyContinuing ? 'gallery_search_continuing' : 'gallery_search_paused',
-                    'draft_id' => $draft->id,
-                    'image_count' => 0,
-                    'message' => $automaticallyContinuing
-                        ? 'Информация сохранена; поиск фотографий продолжается автоматически с тем же денежным бюджетом.'
-                        : 'Информация сохранена; поиск фотографий приостановлен и доступен для продолжения.',
-                ]);
-            }
-
-            if ($draft && $imageCount === 0) {
-                $progress->warning('Все карточки и резервный поиск проверены: подходящая галерея не найдена.');
-                $draft->update([
-                    'status' => 'rejected',
-                    'reviewed_at' => now(),
-                    'rejection_reason' => 'Не удалось получить и проверить единую галерею из выбранной карточки товара.',
-                ]);
-
-                return $this->json([
-                    'ok' => true,
-                    'status' => 'gallery_not_found',
-                    'draft_id' => null,
-                    'title' => $draft->title,
-                    'message' => 'Точная информация найдена, но ни одна единая галерея магазина не прошла загрузку и проверку.',
-                ]);
+                // Assembly already produced a verified text card. A photo
+                // budget stop must not hide it, but a live continuation still
+                // owns delivery until the existing search policy finishes.
+                if ($automaticallyContinuing || ! $textOnlyResult) {
+                    return $this->json([
+                        ...$result,
+                        'ok' => true,
+                        'status' => $automaticallyContinuing ? 'gallery_search_continuing' : 'gallery_search_paused',
+                        'draft_id' => $draft->id,
+                        'image_count' => 0,
+                        'message' => $automaticallyContinuing
+                            ? 'Информация сохранена; поиск фотографий продолжается автоматически с тем же денежным бюджетом.'
+                            : 'Информация сохранена; поиск фотографий приостановлен и доступен для продолжения.',
+                    ]);
+                }
             }
 
             $result['image_count'] = $imageCount;
             $draft->refresh();
             $sourceUrl = trim((string) $draft->primary_source_url);
             if ($draft->reconciliationPending()) {
-                $progress->failed('Сборка карточки не завершена', 'Фото сохранены. Готовой карточки для подтверждения пока нет.');
+                $previewCount = count($draft->verifiedPhotoPaths());
+                $partialPhotos = $previewCount > 0;
+                if ($partialPhotos) {
+                    $progress->warning("Частичный результат: фото — {$previewCount}. Отправляю найденное; характеристики ещё не согласованы.");
+                } else {
+                    $progress->failed('Сборка карточки не завершена', 'Пригодных фото пока нет. Черновик сохранён для продолжения.');
+                }
 
                 return $this->json([
-                    'ok' => true, 'status' => 'card_assembly_paused',
+                    'ok' => true, 'status' => $partialPhotos ? 'partial_result' : 'card_assembly_paused',
                     'draft_id' => $draft->id, 'image_count' => $imageCount,
+                    'partial_photo_result' => $partialPhotos,
+                    'partial_photo_count' => $previewCount,
                     'ready_for_approval' => false,
                     'stop_reason' => $draft->gallery_search_stop_reason,
-                    'message' => 'Поиск не завершил сборку согласованной карточки. Не предлагать принятие или отдельную ручную сверку.',
+                    'message' => $partialPhotos
+                        ? 'Поиск сохранил фотографии. Сохрани draft_id: приложение отправит найденные фото как частичный результат. Характеристики ещё не согласованы; не объявлять готовый товар, не предлагать публикацию и не запускать поиск заново в этом запросе.'
+                        : 'Поиск не завершил сборку согласованной карточки. Не предлагать принятие или отдельную ручную сверку.',
                 ]);
             }
             // Assembly may have corrected the initial research values. Return
@@ -686,7 +699,7 @@ class ResearchProduct implements Tool
             $result = [...$result, ...$draft->only([
                 'title', 'model', 'color', 'description', 'specifications',
                 'sources', 'primary_source_url', 'image_urls',
-            ]), 'ready_for_approval' => true];
+            ]), 'ready_for_approval' => $imageCount > 0, 'text_only_result' => $textOnlyResult];
             $progress->done(
                 '3/3 · черновик #'.$draft->id.' готов, фото: '.$imageCount
                 .($sourceUrl !== '' ? "\n🔗 {$sourceUrl}" : ''),

@@ -12,6 +12,7 @@ use App\Services\Ai\ProductSearchCostBudget;
 use App\Services\Ai\ProductSearchTimeBudget;
 use App\Services\Ai\StreamingProductResearch;
 use App\Services\Photos\ImageUrls;
+use App\Services\Products\ProductRequestContext;
 use App\Services\Products\ProductSourcePriority;
 use App\Services\Products\ProductTextEvidenceContract;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
@@ -78,7 +79,7 @@ class SearchProductTextEvidence implements Tool
             ];
         }
         $prompt = json_encode([
-            'original_operator_request' => $draft->telegramUpdate?->text,
+            ...ProductRequestContext::forDraft($draft)->forAgent(),
             'selected_product' => $selectedProduct,
             'known_sources' => $draft->sources,
             'known_evidence' => $draft->specification_evidence ?? [],

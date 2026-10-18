@@ -23,6 +23,15 @@ class DraftTelegramMessageLifecycle
             return;
         }
 
+        $draft->refresh();
+        if ((string) $draft->telegram_review_chat_id === $chatId
+            && array_map('intval', $draft->telegram_review_message_ids ?? []) === $messageIds
+            && (bool) $draft->telegram_review_has_media === $hasMedia
+            && $draft->telegram_review_caption === $caption) {
+            // A durable receipt is replaying this same post, not starting a new review cycle.
+            return;
+        }
+
         // A freshly posted album (restage/replace/retrain/... all repost it)
         // makes any control message left over from the previous review cycle
         // orphaned - reusing it would edit a keyboard onto that old, no

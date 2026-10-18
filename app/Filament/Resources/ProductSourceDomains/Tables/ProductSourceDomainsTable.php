@@ -52,13 +52,14 @@ class ProductSourceDomainsTable
                     ->boolean()
                     ->state(fn (ProductSourceDomain $record): bool => (bool) self::recipeFor($record)?->source_blocked),
                 TextColumn::make('recipe_success_count')
-                    ->label(__('Успехов'))
+                    ->label(__('Срабатывания рецепта'))
+                    ->tooltip(__('Подтверждённые исполнения последнего изменённого рецепта домена. Не означает готовую карточку или её отправку в Telegram.'))
                     ->state(fn (ProductSourceDomain $record): int => self::recipeFor($record)?->success_count ?? 0),
                 TextColumn::make('recipe_failure_count')
                     ->label(__('Ошибок'))
                     ->state(fn (ProductSourceDomain $record): int => self::recipeFor($record)?->failure_count ?? 0),
                 TextColumn::make('recipe_last_success_at')
-                    ->label(__('Последний успех'))
+                    ->label(__('Последнее срабатывание'))
                     ->state(fn (ProductSourceDomain $record): ?string => self::recipeFor($record)?->last_success_at?->format('d.m.Y H:i'))
                     ->placeholder('—')
                     ->toggleable(),

@@ -53,7 +53,8 @@ class ProductGalleryRecipesTable
                     ->boolean()
                     ->sortable(),
                 TextColumn::make('success_count')
-                    ->label(__('Успехов'))
+                    ->label(__('Срабатывания рецепта'))
+                    ->tooltip(__('Подтверждённые исполнения Playwright-рецепта. Не означает готовую карточку или её отправку в Telegram.'))
                     ->numeric()
                     ->sortable(),
                 TextColumn::make('failure_count')
@@ -62,7 +63,7 @@ class ProductGalleryRecipesTable
                     ->sortable()
                     ->color(fn (int $state): string => $state > 0 ? 'danger' : 'gray'),
                 TextColumn::make('last_success_at')
-                    ->label(__('Последний успех'))
+                    ->label(__('Последнее срабатывание'))
                     ->dateTime('d.m.Y H:i:s')
                     ->placeholder('—')
                     ->sortable(),

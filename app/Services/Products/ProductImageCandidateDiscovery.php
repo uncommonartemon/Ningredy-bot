@@ -8,17 +8,21 @@ use App\Models\AiRun;
 use App\Models\Category;
 use App\Models\ProductDraft;
 use App\Models\ProductSourceAttempt;
+use App\Models\TelegramUpdate;
 use App\Services\Ai\AiErrorPresenter;
 use App\Services\Ai\AiSettings;
 use App\Services\Ai\OpenAiHeavyOperationGate;
 use App\Services\Ai\ProductSearchCancellation;
 use App\Services\Ai\ProductSearchTimeBudget;
+use App\Services\Ai\StreamingProductResearch;
 use App\Services\Photos\ImageUrls;
 use App\Services\ProductSearch\Discovery\DiscoveryRecoveryState;
 use App\Services\ProductSearch\Discovery\DiscoveryResponseParser;
 use App\Services\ProductSearch\Discovery\InvalidDiscoveryResponse;
 use App\Services\ProductSearch\Recovery\RecoveryContext;
+use App\Services\ProductSearch\Research\InvalidResearchResponse;
 use Illuminate\Support\Facades\Log;
+use Laravel\Ai\Streaming\Events\ProviderToolEvent;
 use Throwable;
 
 class ProductImageCandidateDiscovery
@@ -190,7 +194,7 @@ class ProductImageCandidateDiscovery
             $draft->id, $draft->title, $draft->brand, $draft->model, $draft->color,
             $draft->specifications, $draft->primary_source_url, $draft->gallery_search_stop_reason,
             $excludedUrls, $excludedSourceUrls, $searchAttempt, $this->recovery->promptFeedback(),
-            data_get(\App\Models\TelegramUpdate::query()->find($telegramUpdateId)?->payload, '_product_search_started_at'),
+            data_get(TelegramUpdate::query()->find($telegramUpdateId)?->payload, '_product_search_started_at'),
         ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
         $cached = AiRun::query()
             ->where('telegram_update_id', $telegramUpdateId)
@@ -226,11 +230,11 @@ class ProductImageCandidateDiscovery
                 function () use ($telegramUpdateId, $prompt, $provider, $model, $discoveryTimeout, $settings, &$webSearchItems) {
                     app(ProductSearchCancellation::class)->throwIfCancelled($telegramUpdateId);
 
-                    return app(\App\Services\Ai\StreamingProductResearch::class)->prompt(
+                    return app(StreamingProductResearch::class)->prompt(
                         ProductImageDiscoveryAgent::make(), $prompt, $provider, $model, $discoveryTimeout,
                         min($discoveryTimeout, $settings->productResearchIdleTimeoutSeconds()),
                         function ($event) use (&$webSearchItems, $telegramUpdateId): void {
-                            if ($event instanceof \Laravel\Ai\Streaming\Events\ProviderToolEvent
+                            if ($event instanceof ProviderToolEvent
                                 && $event->type === 'web_search_call' && $event->itemId !== '') {
                                 $webSearchItems[$event->itemId] = $event->data;
                             }
@@ -273,7 +277,7 @@ class ProductImageCandidateDiscovery
             $run->update(['status' => 'cancelled', 'error' => $exception->getMessage(), 'completed_at' => now()]);
             throw $exception;
         } catch (Throwable $exception) {
-            if ($exception instanceof \App\Services\ProductSearch\Research\InvalidResearchResponse
+            if ($exception instanceof InvalidResearchResponse
                 && $exception->usage !== null) {
                 $run->update(['usage' => [...$exception->usage, 'web_search_calls' => count($webSearchItems)]]);
             }
@@ -668,23 +672,13 @@ class ProductImageCandidateDiscovery
             $source['_minimum_image_width'] = $category?->minimumImageWidth();
             $source['_minimum_image_height'] = $category?->minimumImageHeight();
 
-            // Read the page's own model code before spending anything on it.
-            // resolve() below is where Playwright training happens, and the
-            // identity check used to sit after it - so a page could be trained
-            // for minutes and only then rejected for being a different machine.
-            // Live case (draft #96): a shop's listing said PHN18-73 while the
-            // request was PH18-73 - one letter, but PHN is the Helios Neo line.
-            // Only a contradiction rejects here; a page that merely fails to
-            // confirm is still opened, because opaque or numeric product URLs
-            // are common and the richer runtime evidence below decides those.
-            // The main source loop has always worked this way; this brings the
-            // fallback path in line with it.
+            // Photo eligibility is independent of exact technical configuration.
+            // A different SKU/RAM needs an applicability judgment, not a blanket
+            // rejection before the browser can inspect the observed gallery.
             $preflightEvidence = $this->preflightEvidence($source, $telegramUpdateId);
-            $conflict = $preflightEvidence === null
-                ? null
-                : $this->identityMatcher->conflictingIdentifierInSource($draft, $preflightEvidence);
-
-            if ($conflict !== null) {
+            $photoAssessment = $preflightEvidence !== null
+                ? app(ProductSourceIdentityGate::class)->assessPhotos($draft, $preflightEvidence, $telegramUpdateId) : null;
+            if ($photoAssessment !== null && ! $this->mayInspectPhotos($photoAssessment)) {
                 $this->attempts->record([
                     'telegram_update_id' => $telegramUpdateId,
                     'product_draft_id' => $draft->id,
@@ -692,43 +686,22 @@ class ProductImageCandidateDiscovery
                     'actor' => 'identity_validator',
                     'phase' => 'source_selection',
                     'action' => 'validate_discovery_page_identity',
-                    'status' => 'failed',
-                    'decision' => 'reject_conflicting_identifier_before_browser',
-                    'output' => [
-                        'requested_identifier' => $conflict['requested'],
-                        'found_identifier' => $conflict['found'],
-                        'identity_evidence' => mb_substr(
-                            (string) ($preflightEvidence['_preflight_identity_evidence'] ?? ''), 0, 400,
-                        ),
-                    ],
+                    'status' => $photoAssessment['verdict'] === 'conflicting' ? 'failed' : 'interrupted',
+                    'decision' => $photoAssessment['verdict'] === 'conflicting'
+                        ? 'reject_incompatible_photos_before_browser' : 'defer_unconfirmed_photos_before_browser',
+                    'output' => ['photo_applicability' => $photoAssessment, 'source_evidence' => $preflightEvidence],
                 ]);
-                $progress?->__invoke(sprintf(
-                    'Страница пропущена до запуска браузера: на ней %s, а запрошено %s · %s',
-                    mb_strtoupper($conflict['found']),
-                    mb_strtoupper($conflict['requested']),
-                    $pageUrl,
-                ));
+                $progress?->__invoke('Фотоисточник отложен до запуска браузера: '.$photoAssessment['reason'].' · '.$pageUrl);
 
                 continue;
             }
-
-            // A family fragment is not an exact configuration. The main
-            // source loop already asks this judge; fallback must not spend
-            // minutes training a conflicting retail variant before asking.
-            // Silence/uncertainty still allows the browser to gather evidence.
-            if ($preflightEvidence !== null
-                && ! $this->identityMatcher->confirmsExactIdentifier($draft, $preflightEvidence)
-                && $this->identityJudge->judge($draft, $preflightEvidence, $telegramUpdateId) === 'conflicting') {
-                $this->attempts->record([
-                    'telegram_update_id' => $telegramUpdateId, 'product_draft_id' => $draft->id,
-                    'product_url' => $pageUrl, 'actor' => 'identity_validator', 'phase' => 'source_selection',
-                    'action' => 'validate_discovery_page_identity', 'status' => 'failed',
-                    'decision' => 'reject_conflicting_identifier_before_browser',
-                    'output' => ['method' => 'ai_judge', 'source_evidence' => $preflightEvidence],
-                ]);
-                $progress?->__invoke('Источник пропущен до обучения: проверка страницы выявила другую комплектацию · '.$pageUrl);
-
-                continue;
+            if ($photoAssessment !== null) {
+                $source['_photo_applicability'] = $photoAssessment;
+                $source['_observed_identity'] = [
+                    'purpose' => 'photos', 'verdict' => $photoAssessment['verdict'],
+                    'product_draft_id' => $draft->id, 'telegram_update_id' => $telegramUpdateId,
+                    'source' => $preflightEvidence, '_photo_applicability' => $photoAssessment,
+                ];
             }
 
             $pageImages = $progress
@@ -761,12 +734,9 @@ class ProductImageCandidateDiscovery
                 ? $runtimeContext['url']
                 : $pageUrl;
             $runtimeContext = [...$runtimeContext, 'url' => $finalPageUrl];
-            // A shared family fragment ranks a candidate; it does not prove
-            // the requested retail variant. Missing evidence goes to the same
-            // judge as the main queue, and is not itself a contradiction.
-            $identityVerdict = app(ProductSourceIdentityGate::class)->assess($draft, $runtimeContext, $telegramUpdateId);
-            $identityRejected = $identityVerdict === 'conflicting'
-                || ($identityVerdict === 'uncertain' && $this->identityMatcher->requiresExactIdentifier($draft));
+            $photoAssessment = app(ProductSourceIdentityGate::class)->assessPhotos($draft, $runtimeContext, $telegramUpdateId);
+            $identityVerdict = $photoAssessment['verdict'];
+            $identityRejected = ! $this->mayInspectPhotos($photoAssessment);
 
             if ($identityRejected) {
                 $this->attempts->record([
@@ -777,18 +747,29 @@ class ProductImageCandidateDiscovery
                     'phase' => 'source_selection',
                     'action' => 'validate_discovery_runtime_identity',
                     'status' => 'failed',
-                    'decision' => $identityVerdict === 'conflicting' ? 'reject_runtime_identifier_mismatch' : 'reject_unconfirmed_identifier',
+                    'decision' => $identityVerdict === 'conflicting' ? 'reject_runtime_incompatible_photos' : 'defer_runtime_unconfirmed_photos',
                     'input' => ['requested_url' => $pageUrl],
-                    'output' => ['final_source_context' => $runtimeContext, 'identity_verdict' => $identityVerdict],
+                    'output' => ['final_source_context' => $runtimeContext, 'photo_applicability' => $photoAssessment],
                 ]);
-                $progress?->__invoke('Страница резервного поиска пропущена после открытия: конечная карточка не подтверждает точную модель/SKU · '.$finalPageUrl);
+                $progress?->__invoke('Фотоисточник резервного поиска отложен после открытия: '.$photoAssessment['reason'].' · '.$finalPageUrl);
 
                 continue;
             }
+            $runtimeContext['_photo_applicability'] = $photoAssessment;
+            $runtimeContext['_observed_identity'] = [
+                'purpose' => 'photos', 'verdict' => $identityVerdict,
+                'product_draft_id' => $draft->id, 'telegram_update_id' => $telegramUpdateId,
+                'source' => array_intersect_key($runtimeContext, array_flip(['url', 'title', '_preflight_identity_evidence'])),
+                '_photo_applicability' => $photoAssessment,
+            ];
 
             foreach ($pageImages as $imageUrl) {
                 $key = ImageUrls::normalizeCandidateUrl($imageUrl);
                 $context = $this->resolver->sourceContextForImage($imageUrl) ?? $runtimeContext;
+                if (($context['url'] ?? null) === $runtimeContext['url']) {
+                    $context['_photo_applicability'] = $photoAssessment;
+                    $context['_observed_identity'] = $runtimeContext['_observed_identity'];
+                }
                 $finalPageUrl = is_string($context['url'] ?? null) ? $context['url'] : $pageUrl;
                 $this->sourcePagesByImageUrl[$key] = $finalPageUrl;
                 $this->sourceContextsByImageUrl[$key] = $context;
@@ -808,6 +789,13 @@ class ProductImageCandidateDiscovery
         }
 
         return array_values(array_unique($resolved));
+    }
+
+    /** Inspection permission is not acceptance of these images for publication. */
+    private function mayInspectPhotos(array $assessment): bool
+    {
+        return in_array($assessment['verdict'] ?? null, ['exact', 'compatible'], true)
+            || (($assessment['verdict'] ?? null) === 'uncertain' && ($assessment['may_inspect_gallery'] ?? false));
     }
 
     /**
@@ -848,6 +836,7 @@ class ProductImageCandidateDiscovery
             'title' => null,
             '_preflight_identity_evidence' => $evidence,
             '_preflight_specification_text' => trim((string) ($preflight['specification_text'] ?? '')),
+            '_preflight_page_identity' => $preflight['page_identity'] ?? [],
         ];
     }
 

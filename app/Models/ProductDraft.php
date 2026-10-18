@@ -5,11 +5,12 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Support\Facades\Storage;
 
 class ProductDraft extends Model
 {
     protected $fillable = [
-        'condition', 'translations', 'specification_evidence',
+        'condition', 'translations', 'specification_evidence', 'photo_source_context', 'card_repair_state',
         'telegram_update_id', 'ai_run_id', 'status', 'reviewed_at', 'reviewed_by_user_id',
         'reviewed_by_telegram_user_id', 'rejection_reason', 'requested_by_telegram_user_id',
         'approved_product_id', 'approved_variant_id',
@@ -25,7 +26,7 @@ class ProductDraft extends Model
     protected function casts(): array
     {
         return [
-            'translations' => 'array', 'specification_evidence' => 'array',
+            'translations' => 'array', 'specification_evidence' => 'array', 'photo_source_context' => 'array', 'card_repair_state' => 'array',
             'specifications' => 'array', 'sources' => 'array', 'image_urls' => 'array',
             'excluded_gallery_source_urls' => 'array',
             'excluded_gallery_image_urls' => 'array',
@@ -78,6 +79,20 @@ class ProductDraft extends Model
         return $this->gallery_search_stop_reason === 'specifications_unreconciled'
             || trim((string) $this->primary_source_url) === ''
             || $this->specifications_reconciled_source_url !== $this->primary_source_url;
+    }
+
+    /** Verified local photos available for a Telegram preview, not proof of card readiness. */
+    public function verifiedPhotoPaths(): array
+    {
+        $this->loadMissing('media');
+
+        return $this->media
+            ->sortBy([['is_primary', 'desc'], ['sort_order', 'asc']])
+            ->filter(fn ($media): bool => in_array($media->verification_status, ['verified', 'source_verified'], true)
+                && filled($media->disk) && filled($media->path))
+            ->map(fn ($media): string => Storage::disk($media->disk)->path($media->path))
+            ->filter(fn (string $path): bool => is_file($path) && is_readable($path))
+            ->take(10)->values()->all();
     }
 
     public function isManualUpload(): bool

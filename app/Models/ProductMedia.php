@@ -16,6 +16,7 @@ class ProductMedia extends Model
         'product_id', 'product_variant_id', 'type', 'disk', 'path', 'role', 'url', 'source_url',
         'alt', 'mime_type', 'width', 'height', 'file_size', 'checksum', 'sort_order', 'is_primary',
         'verification_status', 'verification_score', 'verification_model', 'verification_notes', 'verified_at',
+        'photo_source_context',
     ];
 
     protected function casts(): array
@@ -24,6 +25,7 @@ class ProductMedia extends Model
             'is_primary' => 'boolean',
             'verification_score' => 'decimal:4',
             'verified_at' => 'datetime',
+            'photo_source_context' => 'array',
         ];
     }
 

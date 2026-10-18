@@ -39,6 +39,18 @@ class ProductGalleryVisionAgent implements Agent, HasStructuredOutput
             when an attachment is too small, obscured, ambiguous, or the set is insufficient. Be explicit about
             uncertainty instead of converting it into a rejection.
 
+            Also report the visible capture_style and visible_condition of each frame so the caller can avoid
+            spending recipe-training rounds on a gallery of clearly unsuitable seller snapshots. catalog_asset
+            includes professional renders, packaging, details and lifestyle/feature photography. personal_snapshot
+            requires concrete visual evidence of an individual seller's physical specimen: casual handling,
+            a household/workbench setup with that specimen, private sale annotations, or visible wear/damage.
+            A non-white background, a hand, unusual composition, or the source being a marketplace is not enough
+            by itself: professional lifestyle photography may contain all of these. Use uncertain when evidence
+            is insufficient. Describe the actual evidence in quality_evidence; do not infer it from URL/domain.
+            A small thumbnail cannot establish that the source originals are blurred, low-resolution or damaged.
+            Do not generalize one bad frame to its neighbors or the whole gallery. This remains observational:
+            the calling agent must establish coverage of that gallery, and the final reviewer decides publication.
+
             If the original operator request explicitly specifies a color, assess that color across the
             supplied views together. A side, bottom, port detail, reflection, or shadow may reveal no reliable
             chassis color: report uncertain for that frame, never a conflict merely because color is unclear.
@@ -71,6 +83,13 @@ class ProductGalleryVisionAgent implements Agent, HasStructuredOutput
                     'none', 'english', 'czech', 'other', 'mixed', 'uncertain',
                 ])->required(),
                 'visible_conflict' => $schema->boolean()->required(),
+                'capture_style' => $schema->string()->enum([
+                    'catalog_asset', 'personal_snapshot', 'screenshot', 'uncertain',
+                ])->required(),
+                'visible_condition' => $schema->string()->enum([
+                    'no_obvious_issue', 'used_or_damaged', 'uncertain',
+                ])->required(),
+                'quality_evidence' => $schema->string()->max(600)->required(),
                 'confidence' => $schema->number()->min(0)->max(1)->required(),
                 'observation' => $schema->string()->max(600)->required(),
             ])->withoutAdditionalProperties())->required(),

@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\Product;
 use App\Models\ProductMedia;
 use App\Services\Catalog\AttributePresentation;
+use App\Services\Products\PhotoSourceNotice;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use Inertia\Inertia;
@@ -59,6 +60,7 @@ class ProductController extends Controller
                         'alt' => $media->alt ?: $product->title,
                         'role' => $media->role,
                         'primary' => $media->is_primary,
+                        'photo_notice' => PhotoSourceNotice::fromContext($media->photo_source_context),
                     ])->values(),
                 'attributes' => $this->attributes($product->attributes),
                 'variants' => $product->variants->map(fn ($variant) => [

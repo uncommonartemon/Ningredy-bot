@@ -62,9 +62,10 @@ class ProductGalleryRecipeInfolist
                 ->columnSpanFull(),
             Section::make(__('Статистика запусков'))
                 ->schema([
-                    TextEntry::make('success_count')->label(__('Успехов')),
+                    TextEntry::make('success_count')->label(__('Срабатывания рецепта'))
+                        ->tooltip(__('Подтверждённые исполнения Playwright-рецепта. Не означает готовую карточку или её отправку в Telegram.')),
                     TextEntry::make('failure_count')->label(__('Ошибок')),
-                    TextEntry::make('last_success_at')->label(__('Последний успех'))->dateTime('d.m.Y H:i:s')->placeholder('—'),
+                    TextEntry::make('last_success_at')->label(__('Последнее срабатывание'))->dateTime('d.m.Y H:i:s')->placeholder('—'),
                     TextEntry::make('last_failure_at')->label(__('Последняя ошибка'))->dateTime('d.m.Y H:i:s')->placeholder('—'),
                     TextEntry::make('last_error')->label(__('Текст последней ошибки'))->placeholder('—')->columnSpanFull(),
                 ])

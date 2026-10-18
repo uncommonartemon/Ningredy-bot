@@ -6,8 +6,11 @@ use App\Exceptions\ProductSearchCancelled;
 use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
 use App\Services\Ai\ProductSearchCancellation;
+use App\Services\Ai\ProductSearchCostBudget;
+use App\Services\Ai\ProductSearchTimeBudget;
 use App\Services\Products\ProductImageStorage;
 use App\Services\Telegram\DraftTelegramPresenter;
+use App\Services\Telegram\TelegramAssistantReplyDelivery;
 use App\Services\Telegram\TelegramClient;
 use App\Services\Telegram\TelegramProgressReporter;
 use Illuminate\Contracts\Queue\ShouldBeUniqueUntilProcessing;
@@ -81,6 +84,13 @@ class ContinueDraftGallerySearch implements ShouldBeUniqueUntilProcessing, Shoul
             );
             throw_unless($draft->status === 'pending_review', RuntimeException::class, 'Черновик уже обработан.');
 
+            $delivery = app(TelegramAssistantReplyDelivery::class);
+            if ($checkpoint = $delivery->draftFor($this->telegramUpdateId, $draft->id, $this->expectedDraftTelegramUpdateId)) {
+                $delivery->deliver($checkpoint, $telegram, presenter: $presenter);
+
+                return;
+            }
+
             // The webhook has already acknowledged the callback. Expose its
             // ongoing work to /reset until this whole automatic chain ends.
             TelegramUpdate::query()->findOrFail($this->telegramUpdateId);
@@ -92,9 +102,9 @@ class ContinueDraftGallerySearch implements ShouldBeUniqueUntilProcessing, Shoul
             }
 
             // A queue job owns a bounded time slice, never a fresh money budget.
-            $timeBudget = app(\App\Services\Ai\ProductSearchTimeBudget::class);
+            $timeBudget = app(ProductSearchTimeBudget::class);
             if (! $timeBudget->canStart($this->telegramUpdateId, 120)
-                && app(\App\Services\Ai\ProductSearchCostBudget::class)->hasRemaining($this->telegramUpdateId)) {
+                && app(ProductSearchCostBudget::class)->hasRemaining($this->telegramUpdateId)) {
                 $timeBudget->restartSession($this->telegramUpdateId);
             }
 
@@ -128,6 +138,10 @@ class ContinueDraftGallerySearch implements ShouldBeUniqueUntilProcessing, Shoul
             );
             $cancellation->throwIfCancelled($this->telegramUpdateId);
             $fresh = $draft->fresh('media');
+            if ($fresh->gallery_search_stop_reason === 'exhausted'
+                && app(ProductSearchCostBudget::class)->exceeded($this->telegramUpdateId)) {
+                $fresh->update(['gallery_search_stop_reason' => 'cost_budget']);
+            }
 
             // 'exhausted' means this cycle's sources came up short of the
             // category's minimum but the request's own time/cost budget
@@ -139,9 +153,10 @@ class ContinueDraftGallerySearch implements ShouldBeUniqueUntilProcessing, Shoul
             // Card assembly already recovered in stage(), before delivery.
             // Do not multiply its bounded retries through another queue chain.
             if ($fresh->gallery_status !== 'complete'
-                && ($fresh->gallery_search_stop_reason === 'exhausted'
+                && (($fresh->gallery_search_stop_reason === 'exhausted'
+                        && ! app(ProductSearchCostBudget::class)->exceeded($this->telegramUpdateId))
                     || ($fresh->gallery_search_stop_reason === 'time_budget'
-                        && app(\App\Services\Ai\ProductSearchCostBudget::class)->hasRemaining($this->telegramUpdateId)))) {
+                        && app(ProductSearchCostBudget::class)->hasRemaining($this->telegramUpdateId)))) {
                 Cache::put(
                     "draft-gallery-continue:{$this->draftId}:queued",
                     true,
@@ -156,7 +171,12 @@ class ContinueDraftGallerySearch implements ShouldBeUniqueUntilProcessing, Shoul
             }
 
             if ($fresh->reconciliationPending()) {
-                $progress->failed('Сверка не завершена', 'Фото сохранены; публикация пока недоступна.');
+                $previewCount = count($fresh->verifiedPhotoPaths());
+                if ($previewCount > 0) {
+                    $progress->warning("Частичный результат: фото — {$previewCount}. Отправляю найденное; характеристики ещё не согласованы.");
+                } else {
+                    $progress->failed('Сверка не завершена', 'Пригодных фото пока нет. Черновик сохранён для продолжения.');
+                }
             } elseif ($reconciliationOnly) {
                 $progress->done("Карточка сверена с источником; сохранены фото: {$fresh->media->count()}");
             } elseif ($stored > 0) {
@@ -165,7 +185,8 @@ class ContinueDraftGallerySearch implements ShouldBeUniqueUntilProcessing, Shoul
                 $progress->done("Продолжение завершено: новых фото нет, сохранены прежние {$previousCount}");
             }
 
-            $presenter->sendReview($telegram, $this->chatId, $fresh);
+            $checkpoint = $delivery->prepareDraft(TelegramUpdate::findOrFail($this->telegramUpdateId), $fresh);
+            $delivery->deliver($checkpoint, $telegram, presenter: $presenter);
             $terminalStatus = 'completed';
         } catch (ProductSearchCancelled) {
             // Cancellation is final for this run, not a failed job to retry
@@ -176,7 +197,7 @@ class ContinueDraftGallerySearch implements ShouldBeUniqueUntilProcessing, Shoul
         } finally {
             if (! $autoChainDispatched) {
                 Cache::forget("draft-gallery-continue:{$this->draftId}:queued");
-                if ($cycleStarted) {
+                if ($cycleStarted && ! (($checkpoint ?? null) && in_array($checkpoint->fresh()->status, ['pending', 'running', 'failed'], true))) {
                     $updates = TelegramUpdate::query()->whereKey($this->telegramUpdateId);
                     if ($terminalStatus !== 'cancelled') {
                         $updates->whereNull('cancel_requested_at')->where('status', '!=', 'cancelled');
@@ -190,6 +211,14 @@ class ContinueDraftGallerySearch implements ShouldBeUniqueUntilProcessing, Shoul
     public function failed(?Throwable $exception): void
     {
         Cache::forget("draft-gallery-continue:{$this->draftId}:queued");
+
+        if ($checkpoint = app(TelegramAssistantReplyDelivery::class)->draftFor($this->telegramUpdateId, $this->draftId, $this->expectedDraftTelegramUpdateId)) {
+            if (! in_array($checkpoint->status, ['completed', 'cancelled'], true)) {
+                DeliverTelegramAssistantReply::dispatch($checkpoint->id)->delay(now()->addSeconds(30));
+            }
+
+            return;
+        }
 
         if ($exception instanceof ProductSearchCancelled
             || app(ProductSearchCancellation::class)->isCancelled($this->telegramUpdateId)) {

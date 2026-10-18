@@ -17,11 +17,13 @@ use App\Services\Ai\ProductSearchTimeBudget;
 use App\Services\Telegram\DraftAccess;
 use App\Services\Telegram\DraftTelegramPresenter;
 use App\Services\Telegram\ProductCardPresenter;
+use App\Services\Telegram\TelegramAssistantReplyDelivery;
 use App\Services\Telegram\TelegramClient;
 use App\Services\Telegram\TelegramConversationScope;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
 use Illuminate\Queue\Middleware\WithoutOverlapping;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Validator;
 use Throwable;
 
@@ -83,6 +85,13 @@ class ProcessTelegramMessage implements ShouldQueue
         $productCards ??= app(ProductCardPresenter::class);
         $update = TelegramUpdate::query()->findOrFail($this->telegramUpdateId);
 
+        $replyDelivery = app(TelegramAssistantReplyDelivery::class);
+        if ($checkpoint = $replyDelivery->assistantFor($update)) {
+            $replyDelivery->deliver($checkpoint, $telegram, $productCards);
+
+            return;
+        }
+
         if ($update->processed_at) {
             return;
         }
@@ -129,6 +138,7 @@ class ProcessTelegramMessage implements ShouldQueue
         ]);
         $update->update(['status' => 'processing', 'error' => null]);
 
+        $checkpoint = null;
         try {
             $agent = ServerAssistantAgent::make($update);
             $state = TelegramChatState::query()->firstOrCreate(
@@ -204,10 +214,8 @@ class ProcessTelegramMessage implements ShouldQueue
 
             $run->update([
                 'invocation_id' => $response->invocationId,
-                'status' => 'completed',
                 'response' => $data,
                 'usage' => $response->usage->toArray(),
-                'completed_at' => now(),
             ]);
 
             // The AI can echo a draft_id from earlier in the same live
@@ -243,54 +251,30 @@ class ProcessTelegramMessage implements ShouldQueue
                 ->latest('id')
                 ->first();
 
+            $databaseChanges = AiOperation::query()
+                ->where('telegram_update_id', $update->id)
+                ->where('telegram_user_id', $update->telegram_user_id)
+                ->where('action', 'database_changes')
+                ->where('status', 'awaiting_confirmation')
+                ->orderBy('id')->get();
+
             $usageFootnote = $this->usageFootnote($update->id, includeSearchDuration: $draft !== null);
 
-            // /reset can arrive while the provider or a nested tool is busy.
-            // Claim completion conditionally rather than overwriting its
-            // cancellation with a stale model, then delivering an old result.
-            $completed = TelegramUpdate::query()->whereKey($update->id)
-                ->whereNull('cancel_requested_at')
-                ->where('status', '!=', 'cancelled')
-                ->update(['status' => 'completed', 'processed_at' => now()]);
-            if (! $completed) {
-                $this->finishCancelledRun($update, $run);
+            $checkpoint = DB::transaction(function () use ($replyDelivery, $update, $run, $data, $draft, $failedGalleryDraft, $deletion, $databaseChanges, $usageFootnote) {
+                $run->update(['status' => 'completed', 'completed_at' => now()]);
 
-                return;
-            }
-
-            if ($draft) {
-                $this->sendDraftApproval($telegram, $update->chat_id, $draft, $usageFootnote);
-            } elseif ($deletion) {
-                $productTitle = (string) data_get($deletion->payload, 'title', 'Товар');
-                $productId = (int) $deletion->target_id;
-                $telegram->sendMessage(
-                    $update->chat_id,
-                    "Подтвердите безвозвратное удаление:\n\n#{$productId} · {$productTitle}\n\nБудут удалены товар, варианты, характеристики и локальные фотографии.".$usageFootnote,
-                    [
-                        'inline_keyboard' => [[
-                            [
-                                'text' => 'Удалить навсегда',
-                                'callback_data' => "product:delete:confirm:{$deletion->id}",
-                            ],
-                            [
-                                'text' => 'Отмена',
-                                'callback_data' => "product:delete:cancel:{$deletion->id}",
-                            ],
-                        ]],
-                    ],
-                );
-            } elseif ($failedGalleryDraft) {
-                $telegram->sendMessage(
-                    $update->chat_id,
-                    "❌ Не удалось собрать проверенную галерею для «{$failedGalleryDraft->title}». Все найденные карточки и резервный поиск уже проверены; черновик без фото не создаю.".$usageFootnote,
-                );
-            } elseif ($data['response_type'] === 'catalog_results' && ! empty($data['product_ids'])) {
-                $telegram->sendMessage($update->chat_id, $data['message'].$usageFootnote);
-                $productCards->sendMany($telegram, $update->chat_id, $data['product_ids'], telegramUserId: $update->telegram_user_id);
-            } else {
-                $telegram->sendMessage($update->chat_id, $data['message'].$usageFootnote);
-            }
+                return $replyDelivery->prepareAssistant($update, $run->id, [
+                    'response' => $data, 'draft_id' => $draft?->id, 'draft_generation' => $draft?->telegram_update_id,
+                    'failed_draft_id' => $failedGalleryDraft?->id, 'failed_draft_generation' => $failedGalleryDraft?->telegram_update_id,
+                    'deletion_id' => $deletion?->id,
+                    'database_operation_ids' => $databaseChanges->modelKeys(), 'footnote' => $usageFootnote,
+                ]);
+            });
+            $replyDelivery->deliver($checkpoint, $telegram, $productCards);
         } catch (Throwable $exception) {
+            if ($checkpoint !== null) {
+                throw $exception;
+            }
             if ($this->isCancelled($update)) {
                 $this->finishCancelledRun($update, $run, [
                     'error' => mb_substr($exception->getMessage(), 0, 5000),
@@ -362,6 +346,14 @@ class ProcessTelegramMessage implements ShouldQueue
     {
         $update = TelegramUpdate::query()->find($this->telegramUpdateId);
         if (! $update) {
+            return;
+        }
+
+        if ($checkpoint = app(TelegramAssistantReplyDelivery::class)->assistantFor($update)) {
+            if (! in_array($checkpoint->status, ['completed', 'cancelled'], true)) {
+                DeliverTelegramAssistantReply::dispatch($checkpoint->id)->delay(now()->addSeconds(30));
+            }
+
             return;
         }
 

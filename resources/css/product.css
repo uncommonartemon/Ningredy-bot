@@ -76,6 +76,9 @@
 .product-gallery__expand svg { width: 22px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; }
 .product-gallery__controls { display: flex; justify-content: space-between; align-items: center; gap: 14px; padding: 16px 0 13px; }
 .product-gallery__caption { display: flex; flex-wrap: wrap; align-items: baseline; gap: 14px; font-size: 12px; }
+.product-gallery__notice { margin-top: 14px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.product-gallery__notice p { margin: 0; }
+.product-gallery__notice p + p { margin-top: 4px; }
 .product-gallery__count { color: var(--accent); font-family: var(--display); font-variant-numeric: tabular-nums; font-size: 13px; }
 .product-gallery__count i { color: var(--muted); font-style: normal; }
 .product-gallery__hint { color: var(--muted); font-size: 11px; }

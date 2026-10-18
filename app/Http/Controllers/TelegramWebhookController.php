@@ -37,7 +37,9 @@ use App\Services\Telegram\TelegramCatalogDeletion;
 use App\Services\Telegram\TelegramCatalogEditor;
 use App\Services\Telegram\TelegramClient;
 use App\Services\Telegram\TelegramConversationScope;
+use App\Services\Telegram\TelegramDatabaseOperator;
 use App\Services\Telegram\TelegramDraftEditor;
+use App\Services\Telegram\TelegramOperatorAccess;
 use App\Services\Telegram\TelegramProductUploadIntake;
 use App\Services\Telegram\TelegramWebhookDelivery;
 use Illuminate\Http\JsonResponse;
@@ -239,12 +241,7 @@ class TelegramWebhookController extends Controller
 
     private function isAllowed(mixed $telegramUserId): bool
     {
-        $stored = AppSetting::valueFor(AppSetting::TELEGRAM_ALLOWED_USER_IDS);
-        $allowed = $stored !== null
-            ? array_values(array_filter(array_map('trim', preg_split('/[,\n]+/', $stored) ?: [])))
-            : config('services.telegram.allowed_user_ids', []);
-
-        return $allowed !== [] && in_array((string) $telegramUserId, $allowed, true);
+        return app(TelegramOperatorAccess::class)->allows($telegramUserId);
     }
 
     /**
@@ -322,6 +319,7 @@ class TelegramWebhookController extends Controller
 
         if (preg_match('/^\/new(?:@\w+)?$/iu', $text) === 1) {
             if (! data_get($update->payload, '_new_context_cleared')) {
+                app(TelegramDatabaseOperator::class)->cancelPending($update);
                 app(DraftTelegramInteractionState::class)->clear($chatId, $telegramUserId);
                 TelegramConversationScope::clear($chatId, $telegramUserId);
                 $update->update(['payload' => [...$update->payload, '_new_context_cleared' => true]]);
@@ -336,6 +334,7 @@ class TelegramWebhookController extends Controller
             $message = data_get($update->payload, '_reset_result');
             if (! is_string($message)) {
                 $message = DB::transaction(function () use ($chatId, $telegramUserId, $update): string {
+                    app(TelegramDatabaseOperator::class)->cancelPending($update);
                     app(DraftTelegramInteractionState::class)->clear($chatId, $telegramUserId);
                     // A ProcessTelegramMessage job whose update already shows processed_at
                     // returns immediately. cancel_requested_at also reaches a job or
@@ -908,6 +907,18 @@ class TelegramWebhookController extends Controller
                 chatId: $chatId,
                 update: $update,
             );
+
+            return;
+        }
+
+        if (preg_match('/^db:changes:(confirm|cancel):(\d+)$/', $data, $databaseMatches) === 1) {
+            $result = app(TelegramDatabaseOperator::class)->resolve((int) $databaseMatches[2], $databaseMatches[1], $update);
+            $update->update(['status' => $result['status'], 'processed_at' => now()]);
+            $this->telegram->answerCallbackQuery($callbackId, mb_substr($result['message'], 0, 200));
+            if ($result['notify'] ?? false) {
+                $this->removeCallbackKeyboard($chatId, $messageId);
+                $this->telegram->sendMessage($chatId, $result['message']);
+            }
 
             return;
         }

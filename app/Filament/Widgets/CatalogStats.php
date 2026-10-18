@@ -29,8 +29,8 @@ class CatalogStats extends StatsOverviewWidget
                 ->description(__('Черновики AI'))
                 ->color('warning')
                 ->url(ProductDraftResource::getUrl()),
-            Stat::make(__('Активные поиски'), AiRun::query()->where('status', 'running')->count())
-                ->description(__('Запуски со статусом running'))
+            Stat::make(__('Активные AI-вызовы'), AiRun::query()->where('status', 'running')->count())
+                ->description(__('В одном поиске может быть несколько AI-вызовов'))
                 ->color('info')
                 ->url(AiRunResource::getUrl()),
             Stat::make(__('Приостановлены'), ProductDraft::query()

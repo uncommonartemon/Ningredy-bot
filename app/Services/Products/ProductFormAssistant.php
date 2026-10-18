@@ -69,7 +69,14 @@ class ProductFormAssistant
                     'variant_key' => $variantKey && isset($base['variants'][$variantKey]) ? $variantKey : $this->selectedVariant($base),
                 ],
             ]);
-            RunProductFormAssistant::dispatch($run->id)->onQueue('assistant')->afterCommit();
+            // Process-only launcher flag stays effective with cached Laravel
+            // configuration. The local admin worker must never consume bot jobs.
+            $adminOnly = getenv('NINGREDY_ADMIN_ONLY') === '1';
+            $job = RunProductFormAssistant::dispatch($run->id)->onQueue($adminOnly ? 'admin-ai' : 'assistant');
+            if ($adminOnly) {
+                $job->onConnection('database');
+            }
+            $job->afterCommit();
 
             return $run;
         });

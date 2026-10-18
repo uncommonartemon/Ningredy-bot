@@ -15,6 +15,7 @@ use App\Models\ProductGalleryRecipeVersion;
 use App\Models\ProductSourceDomain;
 use App\Models\TelegramUpdate;
 use App\Services\Ai\AiSettings;
+use App\Services\GalleryRecipes\Training\GalleryVisualObservations;
 use App\Services\Products\GalleryTrainingAbandonSignal;
 use App\Services\Products\ProductRequestContext;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
@@ -61,6 +62,7 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
         // the run's own update: it attributes the write tools' audit rows, and
         // on a continued search its text is a button callback, not a request.
         private readonly ?ProductRequestContext $productRequest = null,
+        private readonly ?GalleryVisualObservations $visualObservations = null,
     ) {}
 
     public function tools(): iterable
@@ -92,6 +94,7 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
                 $this->visionImageUrls,
                 $this->telegramUpdateId,
                 $this->productRequest ?? ProductRequestContext::unavailable(),
+                $this->visualObservations,
             );
         }
 
@@ -118,6 +121,23 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
     {
         return <<<'PROMPT'
             You design safe, reusable Playwright gallery extraction recipes for product pages.
+            Before investing in extraction rounds, inspect the available representative gallery images with
+            InspectGalleryImages when their capture style or physical condition is not yet established. Do this
+            early, not after completing the slider: extracting eight private auction snapshots successfully
+            cannot make them professional photos of a new product. Use observed larger renditions where available.
+            Compare capture_style, visible_condition and quality_evidence across the set. Inspect further batches
+            covering every visibly different frame type before concluding that no useful catalog frames remain.
+            A marketplace or auction URL alone, one poor frame in a mixed gallery, small thumbnails, or an uncertain
+            inspection never justifies abandoning that gallery. Professional lifestyle, hands, unusual backgrounds,
+            details and packaging can be valid. If other frames may be useful, continue with those prospects;
+            extraction preserves the full observed gallery and final review handles individual unsuitable frames.
+            If clear pixel evidence and gallery coverage establish that this URL offers only unsuitable personal
+            snapshots/damaged specimens/screenshots, return training_decision=abandon_page, page_kind=product_card
+            and cite the inspected URLs and concrete visual evidence. This ends this attempt only: do not label a
+            real product card unsuitable_page, write a permanent page/domain rule, or blame its selectors. You may
+            make this evidence-based decision before executing a recipe; repeating clicks cannot change the photos.
+            A failed/uncertain inspection is not such evidence. gallery_visual_observations retains inspections
+            from earlier rounds of this URL: reuse them, do not repeat unchanged inspections every round.
             Read original_operator_request to determine what the operator actually specified. If a color is
             explicitly requested, use InspectGalleryImages on informative views from the candidate slider
             before proposing a working extraction recipe. If those views are not exposed yet, you may propose
@@ -254,6 +274,14 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
             Every candidate recipe is executed from a fresh page load at the original URL. No opened modal,
             selected tab, expanded viewer, scroll position, or DOM mutation from a previous round survives
             into the next execution, so the recipe must be complete on its own.
+
+            Global positional controls such as button[name="undefined"] with indices 19 or 29 are fragile:
+            responsive duplicates, overlays and page changes can shift them. An index is an observation, not a
+            portable identity. After a missing/wrong target or unchanged click, inspect current action candidates
+            and prefer an actually observed selector scoped to the gallery or viewer, with observed ARIA/title/data
+            attributes. ReadGalleryPageObservation can reveal omitted controls and fragments. Never fix this by
+            guessing another index, inventing a selector/ancestor, or reusing an index from another regional page.
+            Keep prerequisites that open the viewer; a scoped control observed inside it does not exist at page load.
 
             The site's own cookies are the one exception: they are kept per host between runs, exactly as an
             ordinary browser keeps them, because arriving with no history on every visit is what made shops

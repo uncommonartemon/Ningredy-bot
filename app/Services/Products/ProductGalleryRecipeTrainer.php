@@ -22,6 +22,7 @@ use App\Services\GalleryRecipes\RecipeContract;
 use App\Services\GalleryRecipes\RecipePortability;
 use App\Services\GalleryRecipes\RecipeReplayFailure;
 use App\Services\GalleryRecipes\RecipeReplayPlan;
+use App\Services\GalleryRecipes\Training\GalleryVisualObservations;
 use App\Services\GalleryRecipes\Training\ObservationPresenter;
 use App\Services\GalleryRecipes\Training\RecipeExecution;
 use App\Services\GalleryRecipes\Training\RecipeRepairFeedback;
@@ -423,12 +424,29 @@ class ProductGalleryRecipeTrainer
                 throw new RuntimeException("Playwright обнаружил защитную страницу: {$reason}.");
             }
 
+            $hasFragments = ($pageScout['fragments'] ?? []) !== [];
+            $hasInteractiveGalleryControls = ($pageScout['interactive_controls'] ?? []) !== []
+                || ($pageScout['action_candidates'] ?? []) !== [];
+
+            if (! $hasFragments && ! $hasInteractiveGalleryControls) {
+                $failureKind = (string) ($scout['failure_kind'] ?? (
+                    ($scout['error'] ?? null) ? 'browser_unavailable' : 'dom_unusable'
+                ));
+                throw new RuntimeException(
+                    'Playwright не получил полезную DOM-структуру страницы.'
+                    .(($scout['error'] ?? null) ? ' '.$scout['error'] : '')
+                );
+            }
+
             // HTTP/search evidence can describe the requested product while
             // the rendered page (or a redirect) describes another variant.
             // Ask before paying for preflight/training, without blaming the
             // reusable gallery recipe for this product-specific disagreement.
             $identity = $this->scoutedProductIdentity($url, $scout, $context, $telegramUpdateId);
             if ($identity !== null) {
+                $this->browser->rememberSourceIdentityAssessment($identity);
+                $context['_observed_identity'] = $identity;
+                $context['_photo_applicability'] = $identity['_photo_applicability'];
                 $version->update(['result' => ['source_identity' => $identity]]);
                 $this->attempts->record([
                     'telegram_update_id' => $telegramUpdateId,
@@ -442,30 +460,40 @@ class ProductGalleryRecipeTrainer
                     'output' => $identity,
                 ]);
                 if ($identity['verdict'] === 'conflicting') {
-                    $this->browser->rememberSourceIdentityAssessment([
-                        ...$identity,
-                        'product_draft_id' => (int) $context[ProductRequestContext::CONTEXT_KEY],
-                        'telegram_update_id' => $telegramUpdateId,
-                    ]);
                     $version->update(['status' => 'skipped', 'error' => 'Rendered page conflicts with the requested product.']);
-                    $debug?->__invoke('warning', 'Браузер открыл другую комплектацию: обучение на этой странице не запускаю; рецепт магазина не меняю.');
+                    $debug?->__invoke('warning', 'Фотоисточник несовместим с товаром: обучение на этой странице не запускаю; рецепт магазина не меняю.');
 
                     return [];
                 }
-            }
+                if (! in_array($identity['verdict'], ['exact', 'compatible'], true)
+                    && ! ($identity['verdict'] === 'uncertain' && $identity['_photo_applicability']['may_inspect_gallery'])) {
+                    // Inspection may supply missing visible evidence, but only
+                    // when the photo judge identified a plausible target.
+                    $unavailable = $identity['verdict'] === 'unavailable';
+                    $failure = $unavailable ? 'source_identity_unavailable' : 'source_identity_unconfirmed';
+                    $version->update([
+                        'status' => $unavailable ? 'interrupted' : 'deferred',
+                        'result' => ['source_identity' => $identity, 'failure_kind' => $failure],
+                        'error' => $unavailable
+                            ? 'Product identity check is unavailable; training was not started.'
+                            : 'Photo applicability remains unconfirmed without a useful inspection path; training was not started.',
+                    ]);
+                    $this->attempts->record([
+                        'telegram_update_id' => $telegramUpdateId,
+                        'product_draft_id' => $context[ProductRequestContext::CONTEXT_KEY],
+                        'product_gallery_recipe_version_id' => $version->id,
+                        'product_url' => $identity['source']['url'],
+                        'actor' => 'identity_validator', 'phase' => 'source_selection',
+                        'action' => 'admit_product_before_training', 'status' => 'interrupted',
+                        'decision' => $unavailable ? 'defer_unavailable_identity_before_training' : 'defer_unconfirmed_product_before_training',
+                        'output' => $identity,
+                    ]);
+                    $debug?->__invoke('warning', $unavailable
+                        ? 'Проверка применимости фото недоступна: обучение не запускаю; перехожу к другим источникам.'
+                        : 'Пригодность фото пока не подтверждена, полезная проверка галереи не определена; перехожу к другим источникам.');
 
-            $hasFragments = ($pageScout['fragments'] ?? []) !== [];
-            $hasInteractiveGalleryControls = ($pageScout['interactive_controls'] ?? []) !== []
-                || ($pageScout['action_candidates'] ?? []) !== [];
-
-            if (! $hasFragments && ! $hasInteractiveGalleryControls) {
-                $failureKind = (string) ($scout['failure_kind'] ?? (
-                    ($scout['error'] ?? null) ? 'browser_unavailable' : 'dom_unusable'
-                ));
-                throw new RuntimeException(
-                    'Playwright не получил полезную DOM-структуру страницы.'
-                    .(($scout['error'] ?? null) ? ' '.$scout['error'] : '')
-                );
+                    return [];
+                }
             }
 
             $recipe->update([
@@ -743,6 +771,7 @@ class ProductGalleryRecipeTrainer
             // mismatch, but not proven fine either" reading as false, not an
             // undefined-variable warning.
             $structuralTraversalOk = false;
+            $visualObservations = new GalleryVisualObservations;
 
             for ($attempt = 1; $safetyLimited ? $attempt <= $safetyRounds : true; $attempt++) {
                 app(ProductSearchCancellation::class)->throwIfCancelled($telegramUpdateId);
@@ -831,6 +860,7 @@ class ProductGalleryRecipeTrainer
                     // --- everything below changes every round ---
                     'attempt' => $attempt,
                     'attempt_history' => $attempts,
+                    'gallery_visual_observations' => $visualObservations->all(),
                     // The sizes attempt_history holds, gathered per photograph.
                     // Scattered over rounds they did not tell the agent that
                     // store.acer.com's own full-size URLs were 500px too: it
@@ -886,6 +916,7 @@ class ProductGalleryRecipeTrainer
                             ]),
                             initialPageObservation: $pageScout,
                             latestPageObservation: $latestPageObservation,
+                            visualObservations: $visualObservations,
                         )->prompt(
                             $prompt ?: '{}',
                             // The media type is not optional: without it the
@@ -1144,6 +1175,8 @@ class ProductGalleryRecipeTrainer
 
                     $feedback = [
                         'error' => 'The previous attempt returned an invalid recipe: '.mb_substr($aiFacingMessage, 0, 300),
+                        'rejected_recipe' => $answer,
+                        'validation_rules' => $signature,
                         ...($identicalValidationFailures >= self::MAX_IDENTICAL_VALIDATION_FAILURES - 1 ? [
                             'stuck_warning' => 'This exact validation rule ('.implode(', ', $signature).') has now failed '
                                 .$identicalValidationFailures.' rounds in a row with a different value each time. Resubmitting '
@@ -1381,6 +1414,11 @@ class ProductGalleryRecipeTrainer
                     );
                 $feedback = [
                     'consecutive_unchanged_outcomes' => $stagnantRounds + 1,
+                    'selector_repair_guidance' => 'If a positional control was missing, clicked the wrong target or '
+                        .'did not advance, inspect current action_candidates and gallery fragments. Prefer an '
+                        .'observed selector scoped to the gallery/viewer; do not guess another global index or '
+                        .'invent selectors. Indices from another page are not evidence. Replay observed prerequisites '
+                        .'before addressing a control exposed inside the viewer.',
                     'autonomy' => 'You may retry or revisit this viewer while budget remains. Explain your next hypothesis using the action errors and current page state. Repeated outcomes alone do not prove that the viewer is unavailable; decide whether to investigate, change the plan or abandon this source.',
                     'current_page_validation' => $validation,
                     'portability_validation' => $priorPortabilityFailure,
@@ -1767,21 +1805,17 @@ class ProductGalleryRecipeTrainer
         if ($draft === null) {
             return null;
         }
-        $page = is_array($scout['scout'] ?? null) ? $scout['scout'] : [];
-        $identity = is_array($scout['product_identity'] ?? null) ? $scout['product_identity'] : [];
-        $source = [
-            'url' => $scout['product_page_url'] ?? $page['final_url'] ?? $url,
-            'title' => $page['title'] ?? $identity['name'] ?? null,
-            // Put structured identifiers first so long descriptive text cannot
-            // push them beyond the judge's compact evidence window.
-            '_preflight_identity_evidence' => implode("\n", array_filter([
-                $identity === [] ? '' : json_encode($identity, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
-                implode("\n", array_filter($page['product_headings'] ?? [], 'is_string')),
-                is_string($page['specification_text'] ?? null) ? $page['specification_text'] : '',
-            ])),
-        ];
+        $source = ProductPageIdentityEvidence::fromBrowserObservation($url, $scout);
+        $assessment = app(ProductSourceIdentityGate::class)->assessPhotos($draft, $source, $runId);
 
-        return ['verdict' => app(ProductSourceIdentityGate::class)->assess($draft, $source, $runId), 'source' => $source];
+        return [
+            'purpose' => 'photos',
+            'verdict' => $assessment['verdict'],
+            '_photo_applicability' => $assessment,
+            'product_draft_id' => $draft->id,
+            'telegram_update_id' => $runId,
+            'source' => $source,
+        ];
     }
 
     /**
@@ -1821,6 +1855,9 @@ class ProductGalleryRecipeTrainer
         $version = ProductGalleryRecipeVersion::query()
             ->where('product_gallery_recipe_id', $recipe->id)
             ->whereIn('status', ['deferred', 'interrupted'])
+            // Admission can be deferred before any training round. That is
+            // not newer training progress and must not hide a paid session.
+            ->whereJsonLength('result->attempts', '>', 0)
             ->where('created_at', '>=', now()->subDays(7))
             ->latest('id')
             ->first();

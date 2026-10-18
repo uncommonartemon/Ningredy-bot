@@ -42,11 +42,14 @@ class AiRunsTable
                         default => $state,
                     })
                     ->color(fn (string $state): string => match ($state) {
-                        'completed' => 'success',
+                        'completed' => 'gray',
                         'running' => 'warning',
                         'failed' => 'danger',
                         default => 'gray',
-                    }),
+                    })
+                    ->tooltip(fn (?AiRun $record): ?string => $record?->status === 'completed'
+                        ? __('AI-вызов завершён. Это не итог поиска и не подтверждение готовности или отправки карточки.')
+                        : null),
                 TextColumn::make('duration')
                     ->label(__('Длительность'))
                     ->state(fn (AiRun $record): ?string => self::duration($record))

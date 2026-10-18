@@ -6,6 +6,7 @@ use App\Models\ProductDraft;
 use App\Services\Ai\ProductSearchCancellation;
 use App\Services\Photos\ImageUrls;
 use App\Services\Products\ProductIdentityMatcher;
+use App\Services\Products\ProductPhotoApplicability;
 use App\Services\Products\ProductRequestContext;
 use App\Services\Products\ProductSourceIdentityJudge;
 use Illuminate\Validation\ValidationException;
@@ -33,7 +34,9 @@ final class CardOfferSelection
             'research_offer' => array_intersect_key($request->selectedProduct() ?? [],
                 array_flip(['model', 'identifiers', 'color', 'condition'])),
             'gallery_source' => array_intersect_key($source, array_flip(['url', 'title'])),
-            'available_actions' => ['retain_selected_offer', 'adopt_source_offer'],
+            'photo_applicability' => $source['_photo_applicability'] ?? null,
+            'available_actions' => ($source['_photo_applicability']['verdict'] ?? null) === 'compatible'
+                ? ['retain_selected_offer'] : ['retain_selected_offer', 'adopt_source_offer'],
         ];
     }
 
@@ -41,6 +44,26 @@ final class CardOfferSelection
     {
         $selection = $card['offer_selection'] ?? null;
         $url = (string) ($source['url'] ?? '');
+        $photoAssessment = $source['_photo_applicability'] ?? [];
+        if (($photoAssessment['verdict'] ?? null) === 'compatible') {
+            if (! ProductPhotoApplicability::isAccepted($draft, $source, $photoAssessment)) {
+                $this->reject('The photo applicability decision is stale or belongs to another source/target. Reassess photos before using this variant.');
+            }
+            if (($selection['action'] ?? null) === 'adopt_source_offer') {
+                $this->reject('A compatible gallery illustrates the selected product; it does not authorize adopting the gallery offer or its configuration.');
+            }
+            if ($this->identifier((string) ($card['model'] ?? '')) !== $this->identifier((string) $draft->model)) {
+                $this->reject('Keep the selected model when using photos of a compatible variant.');
+            }
+            $proposedTarget = clone $draft;
+            $proposedTarget->fill(array_intersect_key($card, array_flip(['model', 'color'])));
+            $proposedTarget->specifications = array_values(array_filter($card['specifications'] ?? [],
+                fn (array $fact): bool => ($fact['evidence'] ?? null) !== 'dropped'));
+            if (! ProductPhotoApplicability::matchesTarget($proposedTarget, $photoAssessment)) {
+                $this->reject('The proposed card changes the colour or known physical characteristics covered by the photo decision. Preserve them or request a new photo applicability check.');
+            }
+            $this->retainConfigurationFacts($draft, $source, $card['specifications'], $observedPages);
+        }
         if ($selection !== null && ImageUrls::normalizeCandidateUrl((string) ($selection['source_url'] ?? '')) !== ImageUrls::normalizeCandidateUrl($url)) {
             $this->reject('Offer selection must keep the selected gallery source URL. Changing the gallery requires photo search, not a card-only update.');
         }
@@ -137,6 +160,37 @@ final class CardOfferSelection
     private function reject(string $message): never
     {
         throw ValidationException::withMessages(['offer_selection' => [$message]]);
+    }
+
+    /** A gallery-only offer cannot supply a changed or newly introduced configuration value. */
+    private function retainConfigurationFacts(ProductDraft $draft, array $source, array $facts, array $observedPages): void
+    {
+        $pageKey = static fn (string $url): string => rtrim(explode('#', ImageUrls::normalizeCandidateUrl($url), 2)[0], '/');
+        $galleryUrls = [$pageKey((string) $source['url'])];
+        foreach ($observedPages as $page) {
+            $urls = array_values(array_filter(array_map($pageKey, [
+                (string) ($page['url'] ?? ''), (string) ($page['final_url'] ?? ''),
+            ])));
+            if (array_intersect($galleryUrls, $urls) !== []) {
+                $galleryUrls = array_values(array_unique([...$galleryUrls, ...$urls]));
+            }
+        }
+        $originals = collect($draft->specifications ?? [])->keyBy('key');
+        $valueKey = static fn (mixed $value): string => mb_strtolower(trim(preg_replace('/\s+/u', ' ', (string) $value) ?? ''));
+        foreach ($facts as $fact) {
+            if (($fact['evidence'] ?? null) === 'dropped'
+                || ($fact['source_kind'] ?? 'web') !== 'web'
+                || ! in_array($pageKey((string) ($fact['source_url'] ?? '')), $galleryUrls, true)) {
+                continue;
+            }
+            $original = $originals->get($fact['key']);
+            if ($original !== null && $valueKey($original['value'] ?? '') === $valueKey($fact['value'])
+                && $valueKey($original['unit'] ?? '') === $valueKey($fact['unit'] ?? '')) {
+                continue;
+            }
+            $this->reject('The compatible gallery cannot supply the new or changed configuration fact '.$fact['key']
+                .'. Keep the selected product facts; cite observed evidence for its own configuration from a separate text source or factory label. Shared unchanged facts remain allowed.');
+        }
     }
 
     private function identifier(string $value): string

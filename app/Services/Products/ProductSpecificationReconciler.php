@@ -136,20 +136,25 @@ class ProductSpecificationReconciler
                 && is_string($item['key'] ?? null) && $item['key'] !== ''
                 && is_string($item['name'] ?? null) && $item['name'] !== '')
             ->values();
-        $originalOperatorRequest = $draft->relationLoaded('telegramUpdate')
-            ? $draft->telegramUpdate?->text
-            : $draft->telegramUpdate()->value('text');
+        $requestContext = ProductRequestContext::forDraft($draft)->forAgent();
+        $originalOperatorRequest = $requestContext['original_operator_request'];
+        $inputEvidence = $requestContext['input_evidence'] ?? [];
+        $photoApplicability = $source['_photo_applicability'] ?? null;
         $inputSpecifications = $specifications->map(fn (array $item): array => [
             'key' => (string) $item['key'],
             'name' => (string) $item['name'],
             'value' => (string) ($item['value'] ?? ''),
             'source_url' => $item['source_url'] ?? null,
             'source_excerpt' => $item['source_excerpt'] ?? null,
+            ...array_intersect_key($item, array_flip(['source_kind', 'source_ref'])),
             ...(array_key_exists('group', $item) ? ['group' => AiAttributeGroups::normalize($item['group'])] : []),
         ])->values()->all();
         $payload = [
             'offer_context' => app(CardOfferSelection::class)->context($draft, $source),
             'original_operator_request' => is_string($originalOperatorRequest) ? $originalOperatorRequest : null,
+            'original_operator_request_status' => $requestContext['original_operator_request_status'],
+            'input_evidence' => $inputEvidence,
+            'photo_applicability' => $photoApplicability,
             'current_title' => (string) $draft->title,
             'current_model' => (string) $draft->model,
             'current_color' => $draft->color,
@@ -195,6 +200,8 @@ class ProductSpecificationReconciler
         $sourceHost = trim((string) parse_url($url, PHP_URL_HOST));
 
         $candidate = null;
+        $responseDiagnostics = null;
+        $responseFormatValid = false;
         try {
             $response = $retryCandidate === null ? app(OpenAiHeavyOperationGate::class)->run(
                 $provider,
@@ -217,6 +224,14 @@ class ProductSpecificationReconciler
             // A schema/validation failure still consumed a real model response.
             // Preserve its usage and evidence before validating the payload.
             if ($response !== null) {
+                $lastStep = ($response->steps ?? collect())->last();
+                $responseDiagnostics = [
+                    'raw_text' => mb_substr($response->text, 0, 16_000),
+                    'raw_text_length' => mb_strlen($response->text),
+                    'finish_reason' => $lastStep?->finishReason?->value,
+                    'step_count' => ($response->steps ?? collect())->count(),
+                    'tool_names' => ($response->toolCalls ?? collect())->pluck('name')->unique()->take(10)->values()->all(),
+                ];
                 $run?->update([
                     'invocation_id' => $response->invocationId,
                     'response' => $response->toArray(),
@@ -254,6 +269,15 @@ class ProductSpecificationReconciler
             $data = Validator::make($normalized, [
                 'overall_status' => ['required', 'in:reconciled,not_ready'],
                 'recovery_action' => ['sometimes', 'in:none,retry_current_source,try_other_source'],
+                'unresolved_fields' => ['sometimes', 'array'],
+                'unresolved_fields.*.key' => ['required', 'string', 'max:100'],
+                'unresolved_fields.*.status' => ['required', 'in:unknown,conflicting'],
+                'unresolved_fields.*.reason' => ['required', 'string', 'max:300'],
+                'photo_applicability_conflict' => ['sometimes', 'nullable', 'array'],
+                'photo_applicability_conflict.physical_feature' => ['required_with:photo_applicability_conflict', 'in:chassis,platform,color,ports,dimensions,layout'],
+                'photo_applicability_conflict.reason' => ['required_with:photo_applicability_conflict', 'string', 'max:600'],
+                'photo_applicability_conflict.source_url' => ['required_with:photo_applicability_conflict', 'url:http,https', 'max:2048'],
+                'photo_applicability_conflict.source_excerpt' => ['required_with:photo_applicability_conflict', 'string', 'max:800'],
                 'summary' => ['required', 'string', 'max:500'],
                 'title' => ['required', 'string', 'max:255'],
                 'model' => ['required', 'string', 'max:255'],
@@ -273,10 +297,14 @@ class ProductSpecificationReconciler
                 'specifications.*.group' => ['sometimes', 'nullable', 'array:id,name,name_cs'],
                 'specifications.*.evidence' => ['required', 'in:confirmed,corrected,dropped'],
                 'specifications.*.source_url' => ['nullable', 'url:http,https', 'max:2048'],
+                'specifications.*.source_kind' => ['sometimes', 'in:web,photo_label'],
+                'specifications.*.source_ref' => ['sometimes', 'nullable', 'string', 'max:255'],
                 'specifications.*.source_excerpt' => ['nullable', 'string', 'max:800'],
                 'specifications.*.reason' => ['nullable', 'string', 'max:300'],
                 'specifications.*.considered_source_urls' => ['sometimes', 'array'],
                 'specifications.*.considered_source_urls.*' => ['url:http,https', 'max:2048'],
+                'specifications.*.considered_source_refs' => ['sometimes', 'array'],
+                'specifications.*.considered_source_refs.*' => ['string', 'max:255'],
                 'offer_selection' => ['sometimes', 'array'],
                 'offer_selection.action' => ['required_with:offer_selection', 'in:retain_selected_offer,adopt_source_offer'],
                 'offer_selection.source_url' => ['required_with:offer_selection', 'url:http,https', 'max:2048'],
@@ -296,17 +324,39 @@ class ProductSpecificationReconciler
                     'Missing input keys: '.implode(', ', array_diff($expectedKeys, $returnedKeys)),
                 ]]);
             }
-            if ($data['overall_status'] === 'reconciled') {
+            $responseFormatValid = true;
+            $photoConflict = $data['photo_applicability_conflict'] ?? null;
+            $observedPages = [];
+            if ($data['overall_status'] === 'reconciled' || $photoConflict !== null) {
                 // Tools may have fetched evidence during this very call.
-                // Read it again before validation; never authorize a citation
-                // using only the URL or the answer being validated itself.
+                // A conflict may revoke photos only with observed provenance.
                 $observedPages = [...ProductSourcePageEvidence::where('product_draft_id', $draft->id)->get()->toArray(), [
                     'url' => $url,
                     'identity_evidence' => $source['_preflight_identity_evidence'] ?? '',
                     'specification_text' => $source['_preflight_specification_text'] ?? '',
                 ]];
+            }
+            if ($photoConflict !== null) {
+                $this->evidenceGuard->validate([], [[
+                    'key' => 'photo_applicability_conflict', 'value' => $photoConflict['reason'],
+                    'evidence' => 'confirmed', 'source_url' => $photoConflict['source_url'],
+                    'source_excerpt' => $photoConflict['source_excerpt'],
+                ]], $draft->fresh()->specification_evidence ?? [], $observedPages);
+                if ($data['overall_status'] === 'reconciled') {
+                    throw ValidationException::withMessages(['photo_applicability_conflict' => [
+                        'A demonstrated physical gallery conflict requires not_ready and photo reassessment, not a reconciled card.',
+                    ]]);
+                }
+            }
+            if ($data['overall_status'] === 'reconciled') {
+                if (($photoApplicability['verdict'] ?? null) === 'compatible'
+                    && ($data['offer_selection']['action'] ?? null) === 'adopt_source_offer') {
+                    throw ValidationException::withMessages(['offer_selection.action' => [
+                        'A compatible gallery only illustrates the requested product; retain_selected_offer and its own facts are required.',
+                    ]]);
+                }
                 $this->evidenceGuard->validate($inputSpecifications, $data['specifications'],
-                    $draft->fresh()->specification_evidence ?? [], $observedPages);
+                    $draft->fresh()->specification_evidence ?? [], $observedPages, $inputEvidence);
                 $offerSelection = app(CardOfferSelection::class)->validate($draft, $source, $data, $observedPages, $updateId);
             }
 
@@ -321,10 +371,16 @@ class ProductSpecificationReconciler
             }
 
             if ($data['overall_status'] === 'not_ready') {
+                $preservePhotos = $photoConflict === null && in_array($photoApplicability['verdict'] ?? null, ['exact', 'compatible'], true);
+
                 return SpecificationReconciliationOutcome::notReady($data['summary'], $madeProgress(), [
                     'previous_candidate' => $candidate,
                     'validation_errors' => [],
-                    'recovery_action' => $data['recovery_action'] ?? 'retry_current_source',
+                    'unresolved_fields' => $data['unresolved_fields'] ?? [],
+                    'photo_applicability_conflict' => $photoConflict,
+                    'photo_result_preserved' => $preservePhotos,
+                    'recovery_action' => $photoConflict !== null ? 'try_other_source'
+                        : ($preservePhotos ? 'retry_current_source' : ($data['recovery_action'] ?? 'retry_current_source')),
                 ]);
             }
 
@@ -337,7 +393,7 @@ class ProductSpecificationReconciler
                     'key' => $item['key'],
                     'name' => $item['name'],
                     'value' => $item['value'],
-                    ...array_intersect_key($item, array_flip(['group', 'source_url', 'source_excerpt', 'reason', 'considered_source_urls'])),
+                    ...array_intersect_key($item, array_flip(['group', 'source_kind', 'source_ref', 'source_url', 'source_excerpt', 'reason', 'considered_source_urls', 'considered_source_refs'])),
                 ])
                 ->values()
                 ->all();
@@ -358,6 +414,9 @@ class ProductSpecificationReconciler
                 'status' => 'failed',
                 'error' => mb_substr($exception->getMessage(), 0, 2000),
                 'completed_at' => now(),
+                ...($responseDiagnostics === null ? [] : ['activity' => [
+                    ...($run?->activity ?? []), 'response_diagnostics' => $responseDiagnostics,
+                ]]),
             ]);
             report($exception);
 
@@ -379,6 +438,8 @@ class ProductSpecificationReconciler
                 mb_substr($exception->getMessage(), 0, 1500),
                 $candidate === null ? null : [
                     'previous_candidate' => $candidate,
+                    'failure_kind' => $exception instanceof ValidationException ? ($responseFormatValid ? 'offer_selection' : 'response_format')
+                        : ($exception instanceof InvalidSpecificationEvidence ? 'specification_evidence' : 'operation'),
                     'validation_errors' => match (true) {
                         $exception instanceof ValidationException => $exception->errors(),
                         $exception instanceof InvalidSpecificationEvidence => $exception->violations,

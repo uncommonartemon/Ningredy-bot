@@ -21,7 +21,11 @@ class DeleteUnreferencedMedia implements ShouldQueue
 
     public function __construct(public string $disk, public string $path, public ?int $deletedProductId = null)
     {
-        $this->onQueue('media');
+        $adminOnly = getenv('NINGREDY_ADMIN_ONLY') === '1';
+        $this->onQueue($adminOnly ? 'admin-ai' : 'media');
+        if ($adminOnly) {
+            $this->onConnection('database');
+        }
         $this->afterCommit();
     }
 

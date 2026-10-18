@@ -31,6 +31,10 @@ class ProductCardAssembly
      */
     public const int MAX_ATTEMPTS = 20;
 
+    // Bump when recovery/response contracts change so a repaired implementation
+    // can retry failures persisted by an older contract.
+    private const int REPAIR_STATE_VERSION = 1;
+
     public function __construct(
         private readonly ProductSpecificationReconciler $reconciler,
         private readonly ProductSearchTimeBudget $timeBudget,
@@ -40,8 +44,72 @@ class ProductCardAssembly
 
     public function complete(ProductDraft $draft, array $source, ?int $updateId): SpecificationReconciliationOutcome
     {
+        $seenSignatures = [];
+
+        return $this->completeWithHistory($draft, $source, $updateId, $seenSignatures);
+    }
+
+    /**
+     * Resume only facts for an already retained gallery. The caller persists
+     * state beside that gallery, including across worker jobs; this method
+     * never searches, replaces or writes photos, and never applies card facts.
+     * Reconcile's own text tools perform any targeted evidence collection.
+     */
+    public function resumeFacts(ProductDraft $draft, array $source, ?int $updateId, array &$state): SpecificationReconciliationOutcome
+    {
         $updateId ??= $draft->telegram_update_id;
-        $outcome = $this->assemble($draft, $source, $updateId, null);
+        app(ProductSearchCancellation::class)->throwIfCancelled($updateId);
+        $request = ProductRequestContext::forDraft($draft)->forAgent();
+        // A newly inserted model may not yet expose the database default.
+        // Refreshing it in another job must not look like a changed product.
+        $request['selected_product']['condition'] ??= 'new';
+        $identity = hash('sha256', json_encode([
+            self::REPAIR_STATE_VERSION, $draft->id, $request,
+            $source['url'] ?? null,
+            $source['_photo_applicability']['verdict'] ?? null,
+            $source['_photo_applicability']['source_model'] ?? null,
+            $this->settings->modelFor('product_specification_reconciliation'), $this->settings->cardAssemblyFallbackModel(),
+        ], JSON_THROW_ON_ERROR));
+        if (($state['identity'] ?? null) !== $identity) {
+            $state = ['identity' => $identity, 'seen_signatures' => []];
+        }
+        $observations = array_keys(app(ProductEvidenceProgress::class)->snapshot($draft));
+        sort($observations);
+        $evidence = hash('sha256', json_encode($observations, JSON_THROW_ON_ERROR));
+        $previous = $state['last_failure'] ?? null;
+        if (is_array($previous)
+            && (($previous['repair_context']['failure_kind'] ?? null) === 'response_format'
+                || ($state['evidence'] ?? null) === $evidence)) {
+            return ($previous['status'] ?? null) === SpecificationReconciliationStatus::NotReady->value
+                ? SpecificationReconciliationOutcome::notReady($previous['summary'] ?? 'Facts remain unresolved.', false, $previous['repair_context'] ?? null)
+                : SpecificationReconciliationOutcome::unavailable($previous['reason'], false, $previous['summary'] ?? null, $previous['repair_context'] ?? null);
+        }
+
+        if (is_array($state['previous_feedback'] ?? null)) {
+            $source['_previous_assembly_feedback'] = $state['previous_feedback'];
+        }
+        $seenSignatures = is_array($state['seen_signatures'] ?? null) ? $state['seen_signatures'] : [];
+        $outcome = $this->completeWithHistory($draft, $source, $updateId, $seenSignatures);
+        $state['seen_signatures'] = array_values(array_unique($seenSignatures));
+        $state['previous_feedback'] = $source['_previous_assembly_feedback'] ?? null;
+        $observations = array_keys(app(ProductEvidenceProgress::class)->snapshot($draft));
+        sort($observations);
+        $state['evidence'] = hash('sha256', json_encode($observations, JSON_THROW_ON_ERROR));
+        // A timeout/provider interruption can resume. Identical exhausted
+        // factual or response repairs need changed evidence/input/method first.
+        $state['last_failure'] = $outcome->status === SpecificationReconciliationStatus::NotReady
+            || $outcome->unavailableReason === 'invalid_response' ? [
+                'status' => $outcome->status->value, 'reason' => $outcome->unavailableReason,
+                'summary' => $outcome->summary, 'repair_context' => $outcome->repairContext,
+            ] : null;
+
+        return $outcome;
+    }
+
+    private function completeWithHistory(ProductDraft $draft, array &$source, ?int $updateId, array &$seenSignatures): SpecificationReconciliationOutcome
+    {
+        $updateId ??= $draft->telegram_update_id;
+        $outcome = $this->assemble($draft, $source, $updateId, null, $seenSignatures);
 
         // The assembly model could not finish the card: the fallback model
         // takes over from its last attempt instead of the operator getting
@@ -56,13 +124,12 @@ class ProductCardAssembly
             return $outcome;
         }
 
-        return $this->assemble($draft, $source, $updateId, $fallback);
+        return $this->assemble($draft, $source, $updateId, $fallback, $seenSignatures);
     }
 
     /** @param array<string, mixed> $source carries the last attempt's feedback on to the next pass */
-    private function assemble(ProductDraft $draft, array &$source, ?int $updateId, ?string $model): SpecificationReconciliationOutcome
+    private function assemble(ProductDraft $draft, array &$source, ?int $updateId, ?string $model, array &$seenSignatures): SpecificationReconciliationOutcome
     {
-        $seenSignatures = [];
         // Bound recovery by attempts, not by a fresh budget, and never expose
         // a separate reconciliation job to the operator.
         for ($attempt = 1; $attempt <= self::MAX_ATTEMPTS; $attempt++) {
@@ -110,15 +177,26 @@ class ProductCardAssembly
             // their full structured details: the display summary can truncate
             // or group different field failures into the same message. Changes
             // to the candidate's wording alone are not evidence of progress.
+            $unresolved = collect($outcome->repairContext['unresolved_fields'] ?? [])
+                ->filter(fn ($field): bool => is_array($field) && isset($field['key'], $field['status']))
+                ->map(fn (array $field): string => $field['key'].':'.$field['status'])
+                ->unique()->sort()->values()->all();
             $signature = $outcome->status->value.'|'.$outcome->unavailableReason
                 .($outcome->status === SpecificationReconciliationStatus::NotReady ? '' : '|'.json_encode(
                     $outcome->repairContext['validation_errors'] ?? $outcome->summary,
-                ));
+                )).($unresolved === [] ? '' : '|'.json_encode($unresolved));
             // Any earlier attempt, not only the last: failures that take turns
             // (A, B, A, ...) are the same loop as one failure repeated.
-            if (! $outcome->madeProgress && in_array($signature, $seenSignatures, true)) {
-                return $outcome;
-            }
+            // New website quotations cannot repair an empty/truncated JSON
+            // response. Keep the same failure history when the fallback model
+            // takes over: it gets its first attempt, not a fresh identical loop.
+            $relevantProgress = $outcome->madeProgress
+                && ($outcome->repairContext['failure_kind'] ?? null) !== 'response_format'
+                // With explicit blockers, another quote is only useful if
+                // it changes what remains unresolved. Old responses without
+                // that structure retain the evidence-based compatibility path.
+                && $unresolved === [];
+            $repeatWithoutProgress = ! $relevantProgress && in_array($signature, $seenSignatures, true);
             $seenSignatures[] = $signature;
             $source['_previous_assembly_feedback'] = [
                 'status' => $outcome->status->value,
@@ -134,6 +212,9 @@ class ProductCardAssembly
                     ['repair_context' => $outcome->repairContext, 'made_progress' => $outcome->madeProgress],
                 ))->toArray(),
             ];
+            if ($repeatWithoutProgress) {
+                return $outcome;
+            }
         }
 
         return $outcome;

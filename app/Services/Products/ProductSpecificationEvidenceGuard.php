@@ -21,10 +21,18 @@ class ProductSpecificationEvidenceGuard
             ->map(fn ($group) => $group->values()->all())->all();
     }
 
-    public function validate(array $input, array $result, array $observedFacts, array $observedPages): void
+    public function validate(array $input, array $result, array $observedFacts, array $observedPages, array $inputEvidence = []): void
     {
         $originals = collect($input)->keyBy('key');
         $facts = collect([...$input, ...$observedFacts])->filter(fn ($fact) => $this->isCitedFact($fact));
+        // This is an intake confidence policy, not an independent verification
+        // of the physical label. Never promote handwriting or legacy OCR to it.
+        $labels = collect($inputEvidence)->filter(fn ($fact) => is_array($fact)
+            && ($fact['source_kind'] ?? null) === 'photo_label'
+            && is_numeric($fact['confidence'] ?? null) && $fact['confidence'] >= 0.8
+            && empty($fact['uncertain_characters'])
+            && is_string($fact['key'] ?? null) && is_string($fact['value'] ?? null)
+            && filled($fact['source_ref'] ?? null) && filled($fact['source_excerpt'] ?? null));
         $texts = [];
         foreach ($facts as $fact) {
             $texts[$fact['source_url']][] = $this->text($fact['source_excerpt']);
@@ -55,7 +63,18 @@ class ProductSpecificationEvidenceGuard
             if (! $dropped) {
                 $url = trim((string) ($item['source_url'] ?? ''));
                 $quote = $this->text((string) ($item['source_excerpt'] ?? ''));
-                if ($url === '' || $quote === '') {
+                if (($item['source_kind'] ?? 'web') === 'photo_label') {
+                    $reference = trim((string) ($item['source_ref'] ?? ''));
+                    // Intake and catalog may name the same field ram_capacity
+                    // and ram. Provenance follows the photo and literal quote;
+                    // semantic applicability still belongs to the assembler.
+                    $labelTexts = $labels->where('source_ref', $reference)
+                        ->map(fn ($label) => $this->text($label['source_excerpt']))->all();
+                    if ($reference === '' || $quote === '' || $url !== ''
+                        || ! $this->observed($labelTexts, $quote, (string) ($item['source_excerpt'] ?? ''))) {
+                        $errors[] = $key.': photo_label excerpt was not observed in clear factory-label evidence for this source_ref; do not relabel handwriting, ambiguous OCR or a website as a verified label.';
+                    }
+                } elseif ($url === '' || $quote === '') {
                     $errors[] = $key.': missing source evidence; cite an observed source_url and source_excerpt, fetch evidence, or drop the unsupported field.';
                 } elseif (! $this->observed($texts[$url] ?? [], $quote, (string) $item['source_excerpt'])) {
                     // Distinguish an unread source from an inaccurate quotation.
@@ -71,12 +90,17 @@ class ProductSpecificationEvidenceGuard
                 }
             }
 
-            $known = $facts->where('key', $key);
+            $known = $facts->where('key', $key)->concat($labels->where('key', $key));
             $hasDifference = $dropped ? $known->isNotEmpty()
                 : $known->contains(fn ($fact) => $this->text($fact['value']) !== $this->text($item['value']));
             if ($hasDifference) {
-                $needed = $known->pluck('source_url');
+                $needed = $known->pluck('source_url')->filter();
                 $considered = $item['considered_source_urls'] ?? [];
+                $neededRefs = $known->pluck('source_ref')->filter()->unique()->all();
+                $consideredRefs = $item['considered_source_refs'] ?? [];
+                if (! $dropped && ($item['source_kind'] ?? null) === 'photo_label') {
+                    $consideredRefs[] = $item['source_ref'] ?? '';
+                }
                 if (! $dropped && filled($item['source_url'] ?? null)) {
                     // The retained value already cites this source explicitly;
                     // its quotation is checked above. Repeating the same URL in
@@ -87,10 +111,14 @@ class ProductSpecificationEvidenceGuard
                     $considered[] = $selectedUrl;
                 }
                 $missing = array_diff($needed->unique()->all(), $considered);
-                if ($missing !== [] || trim((string) ($item['reason'] ?? '')) === '') {
+                $missingRefs = array_diff($neededRefs, $consideredRefs);
+                if ($missing !== [] || $missingRefs !== [] || trim((string) ($item['reason'] ?? '')) === '') {
                     $error = $key.': differing or dropped cited observations require reason and considered_source_urls for the other sources. For retained fields, source_url is already counted and need not be repeated.';
                     if ($missing !== []) {
                         $error .= ' Missing source URLs: '.implode(', ', $missing).'.';
+                    }
+                    if ($missingRefs !== []) {
+                        $error .= ' Missing input evidence references in considered_source_refs: '.implode(', ', $missingRefs).'.';
                     }
                     if (trim((string) ($item['reason'] ?? '')) === '') {
                         $error .= ' Missing explanation in reason.';

@@ -42,13 +42,13 @@ final class ProductRequestContext
         private readonly ?string $originalRequest,
         private readonly ?array $selectedProduct,
         private readonly ?string $operatorHint = null,
+        private readonly array $inputContext = [],
     ) {}
 
     public static function forDraft(ProductDraft $draft): self
     {
-        $request = $draft->relationLoaded('telegramUpdate')
-            ? $draft->telegramUpdate?->text
-            : $draft->telegramUpdate()->value('text');
+        $input = ProductInputContext::forDraft($draft);
+        $request = $input['original_operator_request'];
         $specifications = collect($draft->specifications ?? [])
             ->filter(fn (mixed $item): bool => is_array($item) && trim((string) ($item['value'] ?? '')) !== '');
 
@@ -75,6 +75,7 @@ final class ProductRequestContext
                     ->values()
                     ->all(),
             ],
+            inputContext: $input,
         );
     }
 
@@ -104,7 +105,7 @@ final class ProductRequestContext
      */
     public function withOperatorHint(?string $hint): self
     {
-        return new self($this->originalRequest, $this->selectedProduct, self::text($hint));
+        return new self($this->originalRequest, $this->selectedProduct, self::text($hint), $this->inputContext);
     }
 
     public function originalRequest(): ?string
@@ -124,11 +125,10 @@ final class ProductRequestContext
     }
 
     /**
-     * The fields an agent prompt or tool result carries, always all four, so
-     * an absent request reads as "unavailable" rather than as a silently
-     * missing key.
+     * A human request and attachment observations travel separately. A bare
+     * photo has no human request; its evidence and search keys remain present.
      *
-     * @return array{original_operator_request: ?string, original_operator_request_status: string, selected_product: ?array<string, mixed>, operator_hint: ?string}
+     * @return array{original_operator_request: ?string, original_operator_request_status: string, selected_product: ?array<string, mixed>, operator_hint: ?string, input_evidence: array, search_keys: array, search_plan: array}
      */
     public function forAgent(): array
     {
@@ -139,6 +139,9 @@ final class ProductRequestContext
                 : self::STATUS_PROVIDED,
             'selected_product' => $this->selectedProduct,
             'operator_hint' => $this->operatorHint,
+            'input_evidence' => $this->inputContext['input_evidence'] ?? [],
+            'search_keys' => $this->inputContext['search_keys'] ?? [],
+            'search_plan' => $this->inputContext['search_plan'] ?? [],
         ];
     }
 

@@ -23,7 +23,6 @@ class ProductsTable
         return $table->modifyQueryUsing(fn ($query) => $query->with(['defaultVariant', 'category', 'brand']))
             ->extraAttributes(['class' => 'products-table-compact'])
             ->reorderableColumns()
-            ->defaultPaginationPageOption(50)
             ->defaultSort('id', 'desc')->columns([
                 TextColumn::make('id')->label('#')->sortable()->toggleable(),
                 TextColumn::make('title')->label(__('Название'))

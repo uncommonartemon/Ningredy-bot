@@ -10,6 +10,7 @@ use App\Services\Products\ProductIdentityMatcher;
 use App\Services\Products\ProductImageCandidateDiscovery;
 use App\Services\Products\ProductImageResolver;
 use App\Services\Products\ProductSourceAttemptRecorder;
+use App\Services\Products\ProductSourcePageMetadata;
 use App\Services\Products\ProductSourcePriority;
 use Illuminate\Support\Collection;
 
@@ -196,6 +197,7 @@ class SourceQueueBuilder
                         '_preflight_final_url' => (string) ($preflight['final_url'] ?? $source['url']),
                         '_preflight_identity_evidence' => (string) ($preflight['identity_evidence'] ?? ''),
                         '_preflight_specification_text' => (string) ($preflight['specification_text'] ?? ''),
+                        '_preflight_page_identity' => $preflight['page_identity'] ?? [],
                         '_preflight_is_primary' => rtrim((string) ($source['url'] ?? ''), '/')
                             === rtrim((string) ($draft->primary_source_url ?? ''), '/'),
                         '_preflight_index' => $index,
@@ -215,6 +217,7 @@ class SourceQueueBuilder
             // Behind the checked ones, in the order research gave them. A
             // source nobody looked at is not a source that failed.
             $cardSources = $cardSources->concat($unchecked)->values();
+            $cardSources = $this->independentObservedSourcesFirst($cardSources, $draft, $telegramUpdateId);
         }
 
         // Trying another already-known candidate is core search behaviour.
@@ -305,6 +308,39 @@ class SourceQueueBuilder
         [$compatible, $unknown] = $others->partition(fn (array $source): bool => $source['_preflight_known_recipe_domain']);
 
         return $exact->concat($compatible)->concat($unknown)->values();
+    }
+
+    /** Explicit locale mirrors stay available, but are not independent first attempts. */
+    public function independentObservedSourcesFirst(Collection $sources, ProductDraft $draft, ?int $telegramUpdateId): Collection
+    {
+        $independent = [];
+        $mirrors = [];
+        foreach ($sources as $source) {
+            $match = null;
+            foreach ($independent as $previous) {
+                $evidence = ProductSourcePageMetadata::mirrorEvidence($previous, $source);
+                if ($evidence !== null) {
+                    $match = ['url' => $previous['url'], 'evidence' => $evidence];
+                    break;
+                }
+            }
+            if ($match === null) {
+                $independent[] = $source;
+
+                continue;
+            }
+            $source['_mirror_of'] = $match['url'];
+            $source['_mirror_evidence'] = $match['evidence'];
+            $mirrors[] = $source;
+            $this->attempts->record([
+                'telegram_update_id' => $telegramUpdateId, 'product_draft_id' => $draft->id,
+                'product_url' => $source['url'], 'actor' => 'server', 'phase' => 'source_queue',
+                'action' => 'defer_observed_mirror', 'status' => 'completed', 'decision' => 'reserve_alternate_page',
+                'output' => ['mirror_of' => $match['url'], 'evidence' => $match['evidence']],
+            ]);
+        }
+
+        return collect([...$independent, ...$mirrors]);
     }
 
     /**

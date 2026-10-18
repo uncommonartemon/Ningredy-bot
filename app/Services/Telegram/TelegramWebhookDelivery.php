@@ -4,6 +4,7 @@ namespace App\Services\Telegram;
 
 use App\Models\AiOperation;
 use App\Models\TelegramUpdate;
+use App\Services\Ai\ProductSearchCancellation;
 use Throwable;
 
 /** Durable receipts for webhook replies, separate from the business action. */
@@ -11,18 +12,41 @@ final class TelegramWebhookDelivery
 {
     private static ?int $updateId = null;
 
+    private static bool $checkCancellation = false;
+
     public static function begin(int $updateId): void
     {
         self::$updateId = $updateId;
+        self::$checkCancellation = false;
     }
 
     public static function end(): void
     {
         self::$updateId = null;
+        self::$checkCancellation = false;
+    }
+
+    /** A queue reply can run inside a synchronous webhook without losing its outer receipt scope. */
+    public static function within(int $updateId, callable $callback, bool $checkCancellation = false): mixed
+    {
+        $previous = self::$updateId;
+        $previousCheckCancellation = self::$checkCancellation;
+        self::$updateId = $updateId;
+        self::$checkCancellation = $checkCancellation;
+
+        try {
+            return $callback();
+        } finally {
+            self::$updateId = $previous;
+            self::$checkCancellation = $previousCheckCancellation;
+        }
     }
 
     public static function send(string $method, array $payload, callable $deliver): array
     {
+        if (self::$checkCancellation && self::$updateId !== null) {
+            app(ProductSearchCancellation::class)->throwIfCancelled(self::$updateId);
+        }
         // Edits/deletes and short-lived callback toasts have their own fallback;
         // a failed optional toast must not hold up an already completed action.
         if (self::$updateId === null || ! in_array($method, ['sendMessage', 'sendPhoto', 'sendPhotoFile', 'sendMediaGroupFiles'], true)) {

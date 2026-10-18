@@ -23,6 +23,17 @@ class ProductImageVisionAgent implements Agent, HasStructuredOutput
             attachment order starting at 1. Judge every image against the exact requested product
             identity supplied in the prompt.
 
+            The trusted complete-gallery policy in the prompt overrides generic aesthetic exclusions below.
+            For that policy, professional feature compositions, lifestyle scenes, banners/collages containing
+            the actual product, unusual angles, closed lids and useful details remain publishable. Do not reject
+            them for decoration, composition or a low aesthetic score, and do not guess an exact SKU from pixels
+            when the source already establishes identity. Check current pixels for real contradictions instead.
+            When the trusted source context explicitly establishes compatible-body applicability, its known regional
+            SKU suffix or permitted keyboard difference alone is not a wrong-body verdict; keep the factual notice.
+            A shared family name or resemblance alone does not establish that compatibility.
+            This exception never permits a visibly wrong body/revision/color, UGC/auction phone photos, damaged
+            goods, genuinely unusable image quality, missing products or disallowed prominent text.
+
             The trusted product policy can explicitly allow component logos (COMPONENT EXCEPTION).
             In that case, relevant brand/family logos may be publishable with kind=logo, including
             as the cover. Judge correspondence using the requested component and source evidence;
@@ -48,6 +59,37 @@ class ProductImageVisionAgent implements Agent, HasStructuredOutput
             requested, or the color genuinely cannot be observed in a packaging/detail shot, set it to
             true unless there is visible evidence of a conflicting color. Official provenance proves
             product identity but never overrides a visible color conflict.
+            physical_match compares the visible body/platform/revision/ports with the requested product:
+            match, not_observable, or conflicting. Mark conflicting for a visible different body even if
+            its page carries the exact SKU. Invisible CPU/RAM/SSD differences are not body conflicts.
+
+            Record color_observability separately: clear only when the actual body color is visible,
+            not_visible for packaging or detail views that cannot establish it, uncertain for ambiguous pixels.
+            catalog_photo must be false for user-generated auction/used-item photos, worn or damaged units,
+            improvised phone shots and heavy watermarks, even on the exact model's product page.
+
+            Inspect the keyboard only when present. keyboard_visibility is readable, visible_unreadable,
+            not_visible, or not_applicable. Compare visible legends and key geometry with an explicitly
+            requested or evidenced keyboard layout, never with a country inferred only from a URL or SKU.
+            keyboard_layout_match is match, different, unknown, or not_applicable (no target layout).
+            Set keyboard_requirement_source to operator when original_operator_request explicitly names
+            a required keyboard layout; label/specification evidence alone is evidence, no target is none,
+            and unresolved provenance is unknown. A URL country or SKU suffix alone is not layout evidence.
+            Record keyboard_requirement_scope separately: product means the sold item's layout (including an
+            operator asking for a laptop with a Czech keyboard); photos means the operator explicitly requires
+            the photographs themselves to show that layout or forbids other layouts in the photos. Use none
+            when there is no target layout, unknown when the scope cannot be determined. A product layout
+            requirement alone is NOT a photo restriction. Same-body regional photographs with a known different
+            layout are permitted under product scope, with an accurate difference notice. Only photos scope is
+            strict: a visible different or unreadable layout is not publishable even with a warning.
+            An allowed regional keyboard difference does not change the chassis identity: report the observed
+            layout and a concise factual Russian keyboard_layout_note; do not invent either side of a difference.
+            A closed-lid/side photo does not prove a layout and must use not_visible, never match.
+            Under product scope, if the body and color match but the legends are unreadable, the frame may remain
+            publishable with keyboard_visibility=visible_unreadable, keyboard_layout_match=unknown, keyboard_layout
+            empty and a factual Russian note: the layout in the photo is unreadable; the sold item's layout is known.
+            Do not invent a regional layout or mark an unreadable layout as matching. Under photos or unknown scope,
+            unresolved visible layout is not publishable; other useful views with no visible keyboard remain eligible.
 
             Inspect text that is part of the image pixels, not the surrounding web page. Prominent or
             compositionally meaningful marketing text is allowed only when it is English or Czech.
@@ -56,9 +98,11 @@ class ProductImageVisionAgent implements Agent, HasStructuredOutput
             universal technical abbreviations, and tiny incidental background text.
 
             Reject brand marks, family logos, generic category art, banners, charts, screenshots,
-            unrelated accessories, another model, and images containing only promotional text. If a
-            visible model or suffix conflicts with the requested product, always reject it. A generic
-            brand or family image without identity evidence is not an exact match.
+            unrelated accessories, another model, and images containing only promotional text. A visibly
+            different family, body or revision is always a rejection. A known regional suffix from an explicitly
+            assessed compatible-body source follows the permitted-difference policy above; never infer that
+            compatibility from a suffix or family name alone. A generic brand or family image without identity
+            evidence is not an exact match.
 
             An image is publishable only when it is clear, relevant, reasonably clean, and useful in a
             commercial product catalog. Reject heavy watermarks, collages, tiny thumbnails, distorted
@@ -82,10 +126,19 @@ class ProductImageVisionAgent implements Agent, HasStructuredOutput
     public function schema(JsonSchema $schema): array
     {
         return [
-            'images' => $schema->array()->max(4)->items($schema->object([
-                'index' => $schema->integer()->min(1)->max(4)->required(),
+            'images' => $schema->array()->max(40)->items($schema->object([
+                'index' => $schema->integer()->min(1)->max(40)->required(),
                 'exact_match' => $schema->boolean()->required(),
                 'color_match' => $schema->boolean()->required(),
+                'physical_match' => $schema->string()->enum(['match', 'not_observable', 'conflicting'])->required(),
+                'color_observability' => $schema->string()->enum(['clear', 'not_visible', 'uncertain'])->required(),
+                'catalog_photo' => $schema->boolean()->required(),
+                'keyboard_visibility' => $schema->string()->enum(['readable', 'visible_unreadable', 'not_visible', 'not_applicable'])->required(),
+                'keyboard_layout_match' => $schema->string()->enum(['match', 'different', 'unknown', 'not_applicable'])->required(),
+                'keyboard_requirement_source' => $schema->string()->enum(['operator', 'evidence', 'none', 'unknown'])->required(),
+                'keyboard_requirement_scope' => $schema->string()->enum(['product', 'photos', 'none', 'unknown'])->required(),
+                'keyboard_layout' => $schema->string()->max(100)->required(),
+                'keyboard_layout_note' => $schema->string()->max(500)->required(),
                 'publishable' => $schema->boolean()->required(),
                 'kind' => $schema->string()->enum([
                     'product', 'packaging', 'detail', 'logo', 'banner', 'screenshot', 'unrelated', 'uncertain',
@@ -93,7 +146,7 @@ class ProductImageVisionAgent implements Agent, HasStructuredOutput
                 'view' => $schema->string()->enum([
                     'front', 'angle', 'side', 'back', 'detail', 'packaging', 'other',
                 ])->required(),
-                'gallery_rank' => $schema->integer()->min(1)->max(4)->required(),
+                'gallery_rank' => $schema->integer()->min(1)->max(40)->required(),
                 'score' => $schema->integer()->min(0)->max(100)->required(),
                 'reason' => $schema->string()->max(1000)->required(),
             ])->withoutAdditionalProperties())->required(),

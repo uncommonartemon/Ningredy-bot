@@ -101,7 +101,15 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
             matching the hard specifications can be verified, return not_found.
 
             Before opening galleries, use Web Search as broad source discovery across every domain that
-            genuinely sells this exact configuration. Search the explicit model, SKU/MPN/part number, EAN or UPC
+            genuinely sells this exact configuration. Input provenance separates human requirements from
+            label observations and handwritten notes: do not turn every observed label value into
+            a mandatory web-source filter. Legible label facts retain their origin even when a website
+            omits them. Use supplied search_plan/search_keys as prioritized alternatives: try a reliable
+            EAN/UPC or P/N and the full model separately before combining them to resolve ambiguity.
+            Do not require all identifiers on every source. Full model with consistent configuration
+            may suffice. Family-only pages require applicability checks; absence is not contradiction.
+            Reuse known pages and stop repeated discovery once suitable sources are available.
+            Search the explicit model, SKU/MPN/part number, EAN or UPC
             first; then search the exact configuration in several languages/regions. Do not confuse a serial number
             of one physical unit with a reusable catalog identifier. First choose one exact current configuration,
             then require every candidate to match that SKU or the same CPU, GPU, RAM, storage, display, condition,

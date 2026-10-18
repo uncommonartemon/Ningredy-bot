@@ -3,6 +3,7 @@
 namespace App\Filament\Widgets;
 
 use App\Filament\Resources\ProductDrafts\ProductDraftResource;
+use App\Filament\Support\DraftSearchResult;
 use App\Models\ProductDraft;
 use Filament\Actions\ViewAction;
 use Filament\Tables\Columns\TextColumn;
@@ -11,19 +12,19 @@ use Filament\Widgets\TableWidget;
 
 class RecentSearchesWidget extends TableWidget
 {
-    protected static ?string $heading = 'Последние поиски';
+    protected static ?string $heading = 'Последние карточки';
 
     protected int|string|array $columnSpan = 'full';
 
     public function table(Table $table): Table
     {
         return $table
-            ->heading(__('Последние поиски'))
-            ->query(ProductDraft::query()->with('aiRun')->withCount('media')->latest('id'))
-            ->paginated([5, 10, 25])
-            ->defaultPaginationPageOption(5)
+            ->heading(__('Последние карточки'))
+            ->description(__('Созданные черновики. Запросы, завершившиеся до создания карточки, доступны в журнале Telegram.'))
+            ->query(DraftSearchResult::withSummary(ProductDraft::query())->with('aiRun')->latest('id'))
             ->columns([
                 TextColumn::make('title')->label(__('Запрос'))->searchable()->wrap()->limit(50),
+                DraftSearchResult::column(),
                 TextColumn::make('gallery_status')
                     ->label(__('Галерея'))
                     ->badge()

@@ -73,9 +73,7 @@ class ProductSourceIdentityJudge
             return 'unavailable';
         }
 
-        $originalOperatorRequest = $draft->relationLoaded('telegramUpdate')
-            ? $draft->telegramUpdate?->text
-            : $draft->telegramUpdate()->value('text');
+        $requestContext = ProductRequestContext::forDraft($draft)->forAgent();
         $payload = [
             'verification_stage' => $assembly ? 'assembled_offer' : 'source_eligibility',
             // What the operator actually asked for, not only what research
@@ -86,7 +84,7 @@ class ProductSourceIdentityJudge
             // black" apart from "the operator only said the product line, and
             // research happened to settle on one SKU of several that would
             // equally have satisfied the request".
-            'original_operator_request' => is_string($originalOperatorRequest) ? $originalOperatorRequest : null,
+            ...$requestContext,
             'requested_model' => $draft->model,
             'requested_identifiers' => $identifiers,
             'requested_color' => $draft->color,

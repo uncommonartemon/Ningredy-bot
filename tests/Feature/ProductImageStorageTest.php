@@ -30,8 +30,8 @@ use App\Services\Products\ProductImageEncoder;
 use App\Services\Products\ProductImageResolver;
 use App\Services\Products\ProductImageStorage;
 use App\Services\Products\ProductImageVisionVerifier;
+use App\Services\Products\ProductPhotoApplicability;
 use App\Services\Products\ProductPhotoManager;
-use App\Services\Products\ProductSourceIdentityJudge;
 use App\Services\Products\ProductSpecificationReconciler;
 use App\Services\Products\SpecificationReconciliationOutcome;
 use App\Services\Products\WikimediaImageSearch;
@@ -50,6 +50,34 @@ use Tests\TestCase;
 class ProductImageStorageTest extends TestCase
 {
     use RefreshDatabase;
+
+    private ?\Closure $frameReviewFixture = null;
+
+    /** Preserve each test's explicit rejected/uncertain frame scenario under the full review contract. */
+    private function fakeFullFrameReview(?\Closure $fixture = null)
+    {
+        $this->frameReviewFixture = $fixture;
+
+        return ProductImageVisionAgent::fake(function (string $prompt, $attachments) use ($fixture): array {
+            if ($fixture === null) {
+                throw new \RuntimeException('Unexpected full gallery review in this test.');
+            }
+            $verdict = $fixture(json_encode(['frames' => $attachments->count(),
+                'allow_component_logos' => str_contains($prompt, 'COMPONENT EXCEPTION:')]), $attachments);
+            if (($verdict['uncertain_content_frames'] ?? []) !== []) {
+                throw new \RuntimeException('Frame content remains uncertain.');
+            }
+            $rejected = [...($verdict['non_product_frames'] ?? []), ...($verdict['foreign_text_frames'] ?? [])];
+
+            return ['images' => $attachments->keys()->map(fn (int $index): array => [
+                'index' => $index + 1, 'exact_match' => true, 'color_match' => true,
+                'publishable' => ! in_array($index + 1, $rejected, true), 'kind' => 'product', 'view' => 'front',
+                'gallery_rank' => $index + 1, 'score' => 95, 'reason' => $verdict['reason'] ?? 'Explicit reviewed frame fixture.',
+                'catalog_photo' => true, 'physical_match' => 'match', 'color_observability' => 'clear',
+                'keyboard_visibility' => 'not_visible', 'keyboard_layout_match' => 'unknown',
+            ])->all()];
+        });
+    }
 
     protected function setUp(): void
     {
@@ -1625,9 +1653,7 @@ class ProductImageStorageTest extends TestCase
         // this same rejection by accident. Only a real 'conflicting' or a
         // real 'uncertain' still rejects an explicit exact-sku request;
         // 'unavailable' (the judge never actually ran) must not.
-        $this->mock(ProductSourceIdentityJudge::class)
-            ->shouldReceive('judge')
-            ->andReturn('conflicting');
+        $this->photoVerdict('conflicting');
         ProductImageVisionAgent::fake(fn (string $prompt, $attachments): array => [
             'images' => $attachments->keys()->map(fn (int $index): array => [
                 'index' => $index + 1,
@@ -1721,9 +1747,7 @@ class ProductImageStorageTest extends TestCase
 
             return Http::response($this->jpeg((int) ($match[1] ?? 1)), 200, ['Content-Type' => 'image/jpeg']);
         });
-        $this->mock(ProductSourceIdentityJudge::class)
-            ->shouldReceive('judge')
-            ->andReturn('confirmed');
+        $this->photoVerdict('exact');
         [, , $draft] = $this->records();
         $draft->update([
             'product_type' => 'memory',
@@ -1786,15 +1810,9 @@ class ProductImageStorageTest extends TestCase
             return Http::response($this->jpeg((int) ($match[1] ?? 1)), 200, ['Content-Type' => 'image/jpeg']);
         });
         $judgeCalls = [];
-        $this->mock(ProductSourceIdentityJudge::class)
-            ->shouldReceive('judge')
-            ->twice()
-            ->withArgs(function ($draft, array $source) use (&$judgeCalls): bool {
-                $judgeCalls[] = $source;
-
-                return true;
-            })
-            ->andReturn('confirmed');
+        $this->photoVerdict('compatible', function (array $source) use (&$judgeCalls): void {
+            $judgeCalls[] = $source;
+        });
         [, , $draft] = $this->records();
         $draft->update([
             'product_type' => 'laptop',
@@ -1876,10 +1894,7 @@ class ProductImageStorageTest extends TestCase
 
             return Http::response($this->jpeg((int) ($match[1] ?? 1)), 200, ['Content-Type' => 'image/jpeg']);
         });
-        $this->mock(ProductSourceIdentityJudge::class)
-            ->shouldReceive('judge')
-            ->twice()
-            ->andReturn('unavailable');
+        $this->photoVerdict('unavailable');
         // downloadCandidates() attaches each downloaded image's own page
         // context (title/url of the page it came from) via
         // ProductImageResolver/ProductImageCandidateDiscovery, normally
@@ -2005,10 +2020,7 @@ class ProductImageStorageTest extends TestCase
         // grant wholesale trust either - it demotes to the ordinary
         // per-frame path instead of being rejected outright.
         Storage::fake('public');
-        $this->mock(ProductSourceIdentityJudge::class)
-            ->shouldReceive('judge')
-            ->twice()
-            ->andReturn('uncertain');
+        $this->photoVerdict('uncertain');
         [, , $draft] = $this->records();
         $draft->update([
             'product_type' => 'laptop',
@@ -2032,8 +2044,8 @@ class ProductImageStorageTest extends TestCase
 
         $this->assertDatabaseHas('product_source_attempts', [
             'product_draft_id' => $draft->id,
-            'action' => 'validate_product_identity',
-            'decision' => 'proceed_without_wholesale_confirmation',
+            'action' => 'assess_photo_applicability',
+            'decision' => 'uncertain',
         ]);
         $this->assertDatabaseMissing('product_source_attempts', [
             'product_draft_id' => $draft->id,
@@ -2046,10 +2058,7 @@ class ProductImageStorageTest extends TestCase
         $this->isolateSingleIdentitySource();
         // An explicit SKU remains mandatory for final acceptance, but sparse
         // HTTP evidence must not prevent obtaining the rendered page first.
-        $this->mock(ProductSourceIdentityJudge::class)
-            ->shouldReceive('judge')
-            ->twice()
-            ->andReturn('uncertain');
+        $this->photoVerdict('uncertain');
         [, , $draft] = $this->records();
         $draft->update([
             'product_type' => 'memory',
@@ -2070,8 +2079,8 @@ class ProductImageStorageTest extends TestCase
 
         $this->assertDatabaseHas('product_source_attempts', [
             'product_draft_id' => $draft->id,
-            'action' => 'validate_product_identity',
-            'decision' => 'proceed_without_wholesale_confirmation',
+            'action' => 'assess_photo_applicability',
+            'decision' => 'uncertain',
         ]);
     }
 
@@ -2083,10 +2092,7 @@ class ProductImageStorageTest extends TestCase
         // failure) rather than having genuinely looked and stayed uncertain.
         // "Could not check" must not be read as "checked and it does not
         // match" - the source is not rejected on this alone.
-        $this->mock(ProductSourceIdentityJudge::class)
-            ->shouldReceive('judge')
-            ->twice()
-            ->andReturn('unavailable');
+        $this->photoVerdict('unavailable');
         [, , $draft] = $this->records();
         $draft->update([
             'product_type' => 'memory',
@@ -2107,8 +2113,8 @@ class ProductImageStorageTest extends TestCase
 
         $this->assertDatabaseHas('product_source_attempts', [
             'product_draft_id' => $draft->id,
-            'action' => 'validate_product_identity',
-            'decision' => 'proceed_without_wholesale_confirmation',
+            'action' => 'assess_photo_applicability',
+            'decision' => 'unavailable',
         ]);
         $this->assertDatabaseMissing('product_source_attempts', [
             'product_draft_id' => $draft->id,
@@ -2174,12 +2180,94 @@ class ProductImageStorageTest extends TestCase
         ]);
     }
 
-    public function test_staging_accepts_ten_unique_photos_from_an_exact_playwright_slider_without_vision(): void
+    public function test_six_verified_exact_source_photos_are_staged_without_opening_a_second_source_to_reach_ten(): void
+    {
+        Storage::fake('public');
+        Http::preventStrayRequests();
+        config()->set('product-images.source_preflight', false);
+        config()->set('product-images.max_images_by_type.laptop', 10);
+        Category::where('slug', 'laptops')->update(['minimum_verified_images' => 3]);
+        ProductSourceIdentityAgent::fake()->preventStrayPrompts();
+        $this->fakeFullFrameReview()->preventStrayPrompts();
+        $firstPage = 'https://93.184.216.34/products/g533qs-ds76';
+        $secondPage = 'https://93.184.216.35/products/g533qs-ds76';
+        $source = ['title' => 'ASUS ROG Strix Scar 15 G533QS-DS76', 'url' => $firstPage, 'type' => 'retailer'];
+        $photos = collect(range(1, 6))->map(fn (int $index): string => 'https://93.184.216.34/partial-'.$index.'.jpg')->all();
+        $reviewed = 0;
+        ProductImageVisionAgent::fake(function (string $prompt, $attachments) use (&$reviewed): array {
+            $reviewed += $attachments->count();
+
+            return ['images' => $attachments->keys()->map(fn (int $index): array => [
+                'index' => $index + 1, 'exact_match' => true, 'color_match' => true,
+                'publishable' => true, 'kind' => 'product', 'view' => 'angle',
+                'gallery_rank' => $index + 1, 'score' => 98,
+                'reason' => 'Exact source and a usable product photograph.',
+            ])->all()];
+        })->preventStrayPrompts();
+        $discovery = \Mockery::mock(app(ProductImageCandidateDiscovery::class))->makePartial();
+        $discovery->shouldReceive('sourceContextForImage')->andReturn(null);
+        $discovery->shouldNotReceive('find');
+        $this->instance(ProductImageCandidateDiscovery::class, $discovery);
+        $resolver = $this->mockResolver();
+        $resolver->shouldReceive('resolve')->once()->withArgs(
+            fn (array $sources): bool => count($sources) === 1 && $sources[0]['url'] === $firstPage,
+        )->andReturn($photos);
+        $resolver->shouldReceive('sourceContextForImage')->andReturn($source);
+        $resolver->shouldReceive('isConfirmedGalleryImage')->andReturn(false);
+        $resolver->shouldReceive('isPartialGalleryImage')->andReturn(true);
+        $resolver->shouldReceive('download')->times(6)->andReturnUsing(function (string $url): array {
+            preg_match('/partial-(\d+)/', $url, $match);
+
+            return [
+                'bytes' => $this->jpeg((int) $match[1]), 'source_url' => $url,
+                'mime_type' => 'image/jpeg', 'width' => 720, 'height' => 600,
+                'confirmed_gallery' => false, 'partial_gallery' => true,
+            ];
+        });
+        $this->mock(ProductSpecificationReconciler::class)->shouldReceive('reconcile')->once()
+            ->andReturnUsing(function (ProductDraft $draft, array $chosen) use ($firstPage): SpecificationReconciliationOutcome {
+                $this->assertSame($firstPage, $chosen['url']);
+
+                return SpecificationReconciliationOutcome::alreadyReconciled($firstPage);
+            });
+        [, , $draft] = $this->records();
+        $draft->update([
+            'title' => $source['title'], 'brand' => 'ASUS', 'model' => 'G533QS-DS76',
+            'product_type' => 'laptop', 'category' => 'laptops',
+            'specifications' => [['key' => 'sku', 'value' => 'G533QS-DS76']],
+            'primary_source_url' => $firstPage, 'image_urls' => [],
+            'sources' => [$source, [...$source, 'url' => $secondPage]],
+        ]);
+        $draft->telegramUpdate()->update(['text' => 'ASUS G533QS-DS76']);
+
+        $stored = app(ProductImageStorage::class)->stage($draft->fresh());
+
+        $this->assertSame(6, $stored);
+        $this->assertSame(6, $reviewed);
+        $this->assertSame($firstPage, $draft->fresh()->primary_source_url);
+        $this->assertSame('partial', $draft->fresh()->gallery_status);
+        $this->assertFalse($draft->fresh()->gallery_confirmed_sufficient);
+        $this->assertCount(6, $draft->fresh()->media);
+        $this->assertTrue($draft->fresh()->media->every(fn ($media): bool => $media->verification_status === 'verified'));
+        $this->assertTrue($draft->fresh()->media->every(fn ($media): bool => ! $media->gallery_traversal_complete));
+        $this->assertEqualsCanonicalizing($photos, $draft->fresh()->media->pluck('source_url')->all());
+        $this->assertDatabaseMissing('product_source_attempts', [
+            'product_draft_id' => $draft->id, 'product_url' => $secondPage, 'phase' => 'source_resolution',
+        ]);
+        Http::assertNothingSent();
+        GalleryFrameReviewAgent::assertNeverPrompted();
+    }
+
+    public function test_staging_reviews_all_ten_current_photos_even_from_a_preverified_exact_slider(): void
     {
         Storage::fake('public');
         AppSetting::put('ai.fallback_sources_enabled', '0');
         config()->set('product-images.max_images_by_type.laptop', 10);
-        ProductImageVisionAgent::fake()->preventStrayPrompts();
+        $this->fakeFullFrameReview(function (string $prompt, $attachments): array {
+            $this->assertCount(10, $attachments);
+
+            return ['reason' => 'All ten current product frames pass the full catalog review.'];
+        })->preventStrayPrompts();
         $gallery = collect(range(1, 10))
             ->map(fn (int $index): string => 'https://93.184.216.34/gallery-'.$index.'.jpg')
             ->all();
@@ -2188,11 +2276,8 @@ class ProductImageStorageTest extends TestCase
         $browser->shouldReceive('isConfirmedGalleryImage')
             ->andReturnUsing(fn (string $url): bool => str_contains($url, '/gallery-'));
         $browser->shouldReceive('isPartialGalleryImage')->andReturn(false);
-        // Vision's own spot check on a never-before-seen recipe is a
-        // different mechanism (see the dedicated spot-check test below);
-        // this recipe is pre-verified so this test can keep proving the
-        // downstream promise - an already-vetted confirmed slider is
-        // accepted with no Vision call at all.
+        // A previously verified recipe proves traversal, not the quality or
+        // current physical appearance of photographs for this particular SKU.
         ProductGalleryRecipe::query()->create([
             'domain' => '93.184.216.34',
             'path_pattern' => '*',
@@ -2238,21 +2323,21 @@ class ProductImageStorageTest extends TestCase
         $this->assertSame('complete', $fresh->gallery_status);
         $this->assertSame($gallery, $fresh->image_urls);
         $this->assertCount(10, $fresh->media);
+        $this->assertSame(1, AiRun::where('activity->vision_operation', 'review_gallery')->count());
         $this->assertTrue($fresh->media->every(
             fn ($media): bool => $media->verification_status === 'source_verified'
-                && $media->verification_model === null,
+                && filled($media->verification_model),
         ));
     }
 
-    public function test_confirmed_slider_uses_the_gallery_agent_verdict_without_a_standalone_vision_gate(): void
+    public function test_confirmed_slider_receives_one_full_current_pixel_review(): void
     {
         // A fully confirmed, identity-matched slider can still show
         // something other than the product itself (e.g. a manufacturing/
         // materials-story carousel using the same slider markup), and the AI
         // trainer's own claim that the content is confirmed isn't trusted
-        // The gallery agent already confirmed coherent product content while
-        // training the recipe. Post-download Vision must not independently
-        // re-decide or filter this atomic slider.
+        // Training establishes gallery provenance. The current downloaded
+        // photographs still need one full quality and appearance review.
         Storage::fake('public');
         AppSetting::put('ai.fallback_sources_enabled', '0');
         config()->set('product-images.max_images_by_type.laptop', 10);
@@ -2335,7 +2420,7 @@ class ProductImageStorageTest extends TestCase
         $stored = app(ProductImageStorage::class)->stage($draft->fresh());
 
         $this->assertSame(5, $stored);
-        $this->assertSame(0, $visionCalls);
+        $this->assertSame(1, $visionCalls);
         $this->assertArrayNotHasKey(
             'content_verified_by_vision',
             ProductGalleryRecipe::query()->where('domain', '93.184.216.36')->firstOrFail()->recipe,
@@ -2431,10 +2516,10 @@ class ProductImageStorageTest extends TestCase
         $this->assertSame(0, $stored);
     }
 
-    public function test_confirmed_gallery_does_not_invoke_the_old_standalone_vision_retry_path(): void
+    public function test_confirmed_gallery_retries_a_malformed_full_review_without_redownloading(): void
     {
-        // A malformed response fake is deliberately installed. It must remain
-        // untouched because confirmed galleries no longer enter this path.
+        // A malformed first response is retried against the same downloaded
+        // frames; an exact source cannot bypass the final pixel review.
         Storage::fake('public');
         AppSetting::put('ai.fallback_sources_enabled', '0');
         config()->set('product-images.max_images_by_type.laptop', 10);
@@ -2534,20 +2619,13 @@ class ProductImageStorageTest extends TestCase
         $stored = app(ProductImageStorage::class)->stage($draft->fresh());
 
         $this->assertSame(5, $stored);
-        // No frame is judged on its own - that is what makes accepting a
-        // confirmed slider as a set affordable.
-        $this->assertSame(0, $visionCalls);
-        // It does owe exactly one question about its pixels, though: the
-        // language rule is the only one structure cannot answer, and skipping
-        // it here meant the galleries most likely to be published were the
-        // least checked. One call for the whole gallery, not one per frame.
-        $this->assertSame(1, AiRun::query()->where('model', 'gpt-5.4-mini')->count());
+        $this->assertSame(2, $visionCalls);
+        $this->assertSame(2, AiRun::where('activity->vision_operation', 'review_gallery')->count());
     }
 
     /**
      * The shape this gate exists for: a structurally perfect five-frame slider
-     * from the exact product page, which is accepted as a set and therefore
-     * never has a single frame judged on its own.
+     * from the exact product page, reviewed as one batch of current pixels.
      */
     private function confirmedGalleryDraft(bool $fallback = false, int $frameCount = 5): ProductDraft
     {
@@ -2568,6 +2646,9 @@ class ProductImageStorageTest extends TestCase
                 'reason' => 'Genuine product photo.',
             ])->all(),
         ]);
+        if ($this->frameReviewFixture !== null) {
+            $this->fakeFullFrameReview($this->frameReviewFixture);
+        }
         Http::fake(function (Request $request) {
             if (! str_contains($request->url(), '/gallery-')) {
                 return Http::response('<html><body><h1>ASUS ROG Strix Scar 15 G533QS-DS76</h1></body></html>', 200, [
@@ -2641,6 +2722,87 @@ class ProductImageStorageTest extends TestCase
         return ['known source' => [false], 'fallback source' => [true]];
     }
 
+    public function test_complete_model_gallery_with_unknown_text_colour_is_reviewed_before_another_source(): void
+    {
+        $draft = $this->confirmedGalleryDraft(frameCount: 8);
+        $draft->update(['color' => 'Silver']);
+        $source = [...$draft->sources[0], '_preflight_index' => 0];
+        $this->partialMock(SourceQueueBuilder::class)->shouldReceive('buildSourceQueue')->once()
+            ->andReturn([collect([$source, [...$source, 'url' => 'https://93.184.216.37/second-source']]), collect([$source])]);
+        $this->partialMock(ProductIdentityMatcher::class)->shouldReceive('confirmsExactIdentifier')->andReturn(false);
+        $this->mock(ProductPhotoApplicability::class)->shouldReceive('assess')
+            ->andReturnUsing(fn (ProductDraft $target, array $page): array => ProductPhotoApplicability::bind($target, $page, [
+                'verdict' => 'uncertain', 'source_model' => $target->model, 'reason' => 'Full model; colour missing in text.',
+                'plausible_target' => true, 'may_inspect_gallery' => true, 'evidence' => ['Full model in page title.'],
+                'physical_checks' => ['platform' => ['status' => 'match'], 'revision' => ['status' => 'match'],
+                    'color' => ['status' => 'unknown']],
+            ]));
+        $batches = [];
+        ProductImageVisionAgent::fake(function (string $prompt, $attachments) use (&$batches): array {
+            $batches[] = $attachments->count();
+
+            return ['images' => $attachments->keys()->map(fn (int $i): array => [
+                'index' => $i + 1, 'exact_match' => true, 'color_match' => true, 'color_observability' => 'clear',
+                'catalog_photo' => true, 'publishable' => true, 'kind' => 'product', 'view' => 'front',
+                'gallery_rank' => $i + 1, 'score' => 95, 'reason' => 'Current full-size catalog photo shows silver body.',
+            ])->all()];
+        })->preventStrayPrompts();
+
+        $this->assertSame(8, app(ProductImageStorage::class)->stage($draft->fresh()));
+        $this->assertSame([8], $batches);
+        $fresh = $draft->fresh();
+        $this->assertSame('complete', $fresh->gallery_status);
+        $this->assertSame('exact', $fresh->photo_source_context['_photo_applicability']['verdict']);
+        $this->assertSame('source_metadata_and_current_pixels', $fresh->photo_source_context['_photo_applicability']['assessment_scope']);
+        $this->assertCount(8, $fresh->photo_source_context['_photo_visual_review']['frames']);
+        $this->assertDatabaseMissing('product_source_attempts', ['product_draft_id' => $draft->id,
+            'action' => 'verify_gallery', 'decision' => 'try_next_source_before_vision']);
+        Http::assertNotSent(fn (Request $request): bool => str_contains($request->url(), '93.184.216.37'));
+    }
+
+    public function test_fifth_unchecked_source_is_preflighted_before_photo_identity_uses_its_search_title(): void
+    {
+        Storage::fake('public');
+        AppSetting::put('ai.fallback_sources_enabled', '0');
+        config()->set('product-images.source_preflight', true);
+        [, , $draft] = $this->records();
+        $draft->update(['model' => '17-dp0005sf', 'title' => 'HP OmniBook 3 17-dp0005sf', 'image_urls' => []]);
+        $sources = collect(range(1, 4))->map(fn (int $index): array => [
+            'url' => 'https://shop.example/other-'.$index, 'title' => null, 'type' => 'retailer',
+            '_preflight_index' => $index - 1, '_preflight_identity_evidence' => 'Other unrelated product',
+        ])->push(['url' => 'https://shop.example/carepack', 'title' => $draft->title, 'type' => 'retailer']);
+        $this->partialMock(SourceQueueBuilder::class)->shouldReceive('buildSourceQueue')->once()
+            ->andReturn([$sources, $sources]);
+        $this->partialMock(ProductIdentityMatcher::class)->shouldReceive('confirmsExactIdentifier')->andReturn(false);
+        $preflighted = false;
+        $resolver = $this->mockResolver();
+        $resolver->shouldReceive('preflightSource')->once()->andReturnUsing(function (array $source) use (&$preflighted): array {
+            $this->assertSame('https://shop.example/carepack', $source['url']);
+            $preflighted = true;
+
+            return ['final_url' => $source['url'], 'identity_evidence' => 'HP Care Pack 3-year support',
+                'specification_text' => 'Warranty service, not a laptop.',
+                'page_identity' => ['product' => ['name' => 'HP Care Pack', 'sku' => 'U22S0E']]];
+        });
+        $resolver->shouldNotReceive('resolve');
+        $assessed = 0;
+        $this->photoVerdict('conflicting', function (array $source) use (&$preflighted, &$assessed): void {
+            $assessed++;
+            if ($source['url'] !== 'https://shop.example/carepack') {
+                return;
+            }
+            $this->assertTrue($preflighted);
+            $this->assertNull($source['title']);
+            $this->assertSame('HP Care Pack 3-year support', $source['_preflight_identity_evidence']);
+            $this->assertSame('Warranty service, not a laptop.', $source['_preflight_specification_text']);
+            $this->assertSame('U22S0E', $source['_preflight_page_identity']['product']['sku']);
+        });
+
+        $this->assertSame(0, app(ProductImageStorage::class)->stage($draft->fresh()));
+        $this->assertSame(5, $assessed);
+        Http::assertNothingSent();
+    }
+
     #[DataProvider('galleryOrigins')]
     public function test_logo_cover_is_removed_before_album_limit_without_breaking_the_recipe(bool $fallback): void
     {
@@ -2648,7 +2810,7 @@ class ProductImageStorageTest extends TestCase
         config()->set('product-images.max_images_by_type.laptop', 3);
         $recipe = ProductGalleryRecipe::firstOrFail();
         $health = $recipe->only(['status', 'success_count', 'failure_count']);
-        GalleryFrameReviewAgent::fake(fn () => [
+        $this->fakeFullFrameReview(fn () => [
             'foreign_text_frames' => [], 'non_product_frames' => [1], 'uncertain_content_frames' => [],
             'reason' => 'Logo first, genuine product photos afterwards.',
         ])->preventStrayPrompts();
@@ -2667,7 +2829,7 @@ class ProductImageStorageTest extends TestCase
         $draft = $this->confirmedGalleryDraft();
         $recipe = ProductGalleryRecipe::firstOrFail();
         $health = $recipe->only(['status', 'success_count', 'failure_count']);
-        GalleryFrameReviewAgent::fake(fn () => [
+        $this->fakeFullFrameReview(fn () => [
             'foreign_text_frames' => [], 'non_product_frames' => [1, 2, 3, 4, 5], 'uncertain_content_frames' => [],
             'reason' => 'Only brand graphics, no product.',
         ])->preventStrayPrompts();
@@ -2691,7 +2853,7 @@ class ProductImageStorageTest extends TestCase
             ->shouldReceive('buildSourceQueue')->once()->andReturn([
                 collect([[...$source, '_reuse_only' => true], [...$source, '_reuse_only' => false]]), collect([$source]),
             ]);
-        GalleryFrameReviewAgent::fake(fn () => [
+        $this->fakeFullFrameReview(fn () => [
             'foreign_text_frames' => [], 'non_product_frames' => [1, 2, 3, 4, 5], 'uncertain_content_frames' => [],
             'reason' => 'Only logos.',
         ])->preventStrayPrompts();
@@ -2700,7 +2862,7 @@ class ProductImageStorageTest extends TestCase
 
         // confirmedGalleryDraft expects exactly one browser extraction.
         $this->assertSame(0, $draft->media()->count());
-        $this->assertSame(1, AiRun::where('activity->vision_operation', 'check_gallery_frames')->count());
+        $this->assertSame(1, AiRun::where('activity->vision_operation', 'review_gallery')->count());
     }
 
     public function test_single_unrelated_logo_is_rejected_even_when_the_category_accepts_one_photo(): void
@@ -2709,7 +2871,7 @@ class ProductImageStorageTest extends TestCase
         Category::where('slug', 'components')->update(['minimum_verified_images' => 1]);
         $this->assertSame(1, Category::where('slug', 'components')->firstOrFail()->minimumVerifiedImages());
         $draft->update(['category' => 'components']);
-        GalleryFrameReviewAgent::fake(fn () => [
+        $this->fakeFullFrameReview(fn () => [
             'foreign_text_frames' => [], 'non_product_frames' => [1], 'uncertain_content_frames' => [],
             'reason' => 'A contradictory brand/family logo, not the requested component.',
         ])->preventStrayPrompts();
@@ -2726,7 +2888,7 @@ class ProductImageStorageTest extends TestCase
         $draft = $this->confirmedGalleryDraft(frameCount: 1);
         Category::where('slug', 'components')->update(['minimum_verified_images' => 1]);
         $draft->update(['category' => 'components', 'product_type' => 'component']);
-        GalleryFrameReviewAgent::fake(function (string $prompt): array {
+        $this->fakeFullFrameReview(function (string $prompt): array {
             $this->assertTrue(json_decode($prompt, true)['allow_component_logos']);
 
             return ['foreign_text_frames' => [], 'non_product_frames' => [], 'uncertain_content_frames' => [],
@@ -2745,7 +2907,7 @@ class ProductImageStorageTest extends TestCase
         // A Czech-and-English catalog must not publish a card covered in
         // German marketing copy just because the slider was structurally
         // perfect and came from the exact product page.
-        GalleryFrameReviewAgent::fake(fn (): array => [
+        $this->fakeFullFrameReview(fn (): array => [
             'non_product_frames' => [], 'uncertain_content_frames' => [], 'foreign_text_frames' => [2, 4],
             'reason' => 'Немецкий маркетинговый текст на двух кадрах.',
         ]);
@@ -2769,7 +2931,7 @@ class ProductImageStorageTest extends TestCase
         // language rule as a partial result and moves to the next source. The
         // clean frame is a real photograph of this product, and destroying it
         // because its neighbours carried German copy helps nobody.
-        GalleryFrameReviewAgent::fake(fn (): array => [
+        $this->fakeFullFrameReview(fn (): array => [
             'non_product_frames' => [], 'uncertain_content_frames' => [], 'foreign_text_frames' => [1, 2, 3, 4],
             'reason' => 'Почти все кадры с иностранным текстом.',
         ]);
@@ -2793,7 +2955,7 @@ class ProductImageStorageTest extends TestCase
         // A timeout must never read as "Vision cleared it" - the strategy's
         // base rule is that a technical failure is not a semantic verdict. The
         // frames survive; the confirmation does not.
-        GalleryFrameReviewAgent::fake(function (): array {
+        $this->fakeFullFrameReview(function (): array {
             throw new RuntimeException('vision timed out');
         });
 
@@ -2818,7 +2980,7 @@ class ProductImageStorageTest extends TestCase
         // judged what was already there by counting it, so five frames kept
         // from a check that never ran cleared a minimum of three and ended the
         // search as a success - without anything having verified them.
-        GalleryFrameReviewAgent::fake(function (): array {
+        $this->fakeFullFrameReview(function (): array {
             throw new RuntimeException('vision timed out');
         });
 
@@ -2860,7 +3022,7 @@ class ProductImageStorageTest extends TestCase
         // pipeline measuring frames, conversions after it are the files being
         // written. Only the latter are made to fail, and only after the first.
         $storing = false;
-        GalleryFrameReviewAgent::fake(function () use (&$storing): array {
+        $this->fakeFullFrameReview(function () use (&$storing): array {
             $storing = true;
 
             return ['non_product_frames' => [], 'uncertain_content_frames' => [], 'foreign_text_frames' => [], 'reason' => 'Чисто.'];
@@ -2894,7 +3056,7 @@ class ProductImageStorageTest extends TestCase
         // open the page, run the recipe, download every frame - to arrive back
         // at the one step that had actually failed. The photographs are already
         // on disk; what is missing is the verdict on them.
-        GalleryFrameReviewAgent::fake(function (): array {
+        $this->fakeFullFrameReview(function (): array {
             throw new RuntimeException('vision timed out');
         });
 
@@ -2907,7 +3069,7 @@ class ProductImageStorageTest extends TestCase
 
         // The continuation: the check can run now, and nothing else may be
         // needed - no browser, no downloads, no sources.
-        GalleryFrameReviewAgent::fake(fn (): array => ['non_product_frames' => [], 'uncertain_content_frames' => [], 'foreign_text_frames' => [], 'reason' => 'Чисто.']);
+        $this->fakeFullFrameReview(fn (): array => ['non_product_frames' => [], 'uncertain_content_frames' => [], 'foreign_text_frames' => [], 'reason' => 'Чисто.']);
         $browser = $this->mockBrowser();
         $browser->shouldNotReceive('extract');
         $browser->shouldNotReceive('executeRecipe');
@@ -2927,7 +3089,7 @@ class ProductImageStorageTest extends TestCase
         // Cutting to the maximum first and removing frames afterwards threw
         // away the good frames that would have taken their place.
         config()->set('product-images.max_images_by_type.laptop', 3);
-        GalleryFrameReviewAgent::fake(fn (): array => [
+        $this->fakeFullFrameReview(fn (): array => [
             'non_product_frames' => [], 'uncertain_content_frames' => [], 'foreign_text_frames' => [1, 2],
             'reason' => 'Два кадра с иностранным текстом.',
         ]);
@@ -2946,13 +3108,13 @@ class ProductImageStorageTest extends TestCase
     {
         $draft = $this->confirmedGalleryDraft();
         config()->set('product-images.max_images_by_type.laptop', 3);
-        GalleryFrameReviewAgent::fake(function (): array {
+        $this->fakeFullFrameReview(function (): array {
             throw new \RuntimeException('vision interrupted');
         });
         app(ProductImageStorage::class)->stage($draft->fresh());
         $this->assertSame(5, $draft->media()->where('verification_status', 'pending')->count());
 
-        GalleryFrameReviewAgent::fake(fn (): array => ['non_product_frames' => [], 'uncertain_content_frames' => [], 'foreign_text_frames' => [1, 2], 'reason' => 'Foreign text']);
+        $this->fakeFullFrameReview(fn (): array => ['non_product_frames' => [], 'uncertain_content_frames' => [], 'foreign_text_frames' => [1, 2], 'reason' => 'Foreign text']);
         $browser = $this->mockBrowser();
         $browser->shouldNotReceive('extract');
         $stored = app(ProductImageStorage::class)->stage($draft->fresh());
@@ -2969,7 +3131,7 @@ class ProductImageStorageTest extends TestCase
     public function test_resumed_negative_vision_verdict_is_persisted_even_below_the_minimum(): void
     {
         $draft = $this->confirmedGalleryDraft();
-        GalleryFrameReviewAgent::fake(function (): array {
+        $this->fakeFullFrameReview(function (): array {
             throw new \RuntimeException('vision interrupted');
         });
         app(ProductImageStorage::class)->stage($draft->fresh());
@@ -2978,7 +3140,7 @@ class ProductImageStorageTest extends TestCase
         // The finished gallery must not be bought a second time after its
         // pending verification has just returned a real negative verdict.
         // Keep the source in the draft to exercise actual queue exclusion.
-        GalleryFrameReviewAgent::fake(fn (): array => ['non_product_frames' => [], 'uncertain_content_frames' => [], 'foreign_text_frames' => [1, 2, 3, 4], 'reason' => 'Foreign text']);
+        $this->fakeFullFrameReview(fn (): array => ['non_product_frames' => [], 'uncertain_content_frames' => [], 'foreign_text_frames' => [1, 2, 3, 4], 'reason' => 'Foreign text']);
         $browser = $this->mockBrowser();
         $browser->shouldNotReceive('extract');
         app(ProductImageStorage::class)->stage($draft->fresh());
@@ -3020,7 +3182,7 @@ class ProductImageStorageTest extends TestCase
 
         $this->assertSame('complete', $draft->fresh()->gallery_status);
         $this->assertSame(5, $draft->media()->count());
-        ProductImageVisionAgent::assertNeverPrompted();
+        $this->assertSame(1, AiRun::where('activity->vision_operation', 'review_gallery')->count());
     }
 
     public static function unfinishedPendingTraversals(): array
@@ -3031,11 +3193,11 @@ class ProductImageStorageTest extends TestCase
     public function test_cancellation_after_resumed_vision_keeps_the_completed_gallery_fact(): void
     {
         $draft = $this->confirmedGalleryDraft();
-        GalleryFrameReviewAgent::fake(function (): array {
+        $this->fakeFullFrameReview(function (): array {
             throw new \RuntimeException('vision interrupted');
         });
         app(ProductImageStorage::class)->stage($draft->fresh());
-        GalleryFrameReviewAgent::fake(fn (): array => ['non_product_frames' => [], 'uncertain_content_frames' => [], 'foreign_text_frames' => [], 'reason' => 'Clean']);
+        $this->fakeFullFrameReview(fn (): array => ['non_product_frames' => [], 'uncertain_content_frames' => [], 'foreign_text_frames' => [], 'reason' => 'Clean']);
         $this->mock(ProductSpecificationReconciler::class)->shouldReceive('reconcile')->once()
             ->andReturnUsing(function () use ($draft): SpecificationReconciliationOutcome {
                 $draft->telegramUpdate()->update(['status' => 'cancelled', 'cancel_requested_at' => now()]);
@@ -3056,14 +3218,14 @@ class ProductImageStorageTest extends TestCase
     public function test_resumed_vision_does_not_invent_traversal_completion(?bool $complete): void
     {
         $draft = $this->confirmedGalleryDraft();
-        GalleryFrameReviewAgent::fake(function (): array {
+        $this->fakeFullFrameReview(function (): array {
             throw new \RuntimeException('vision interrupted');
         });
         app(ProductImageStorage::class)->stage($draft->fresh());
         $draft->media()->update(['gallery_traversal_complete' => $complete]);
         $this->assertSame(5, $draft->media()->where('verification_status', 'pending')->count());
         $draft->update(['sources' => [], 'primary_source_url' => null, 'image_urls' => []]);
-        GalleryFrameReviewAgent::fake(fn (): array => ['non_product_frames' => [], 'uncertain_content_frames' => [], 'foreign_text_frames' => [], 'reason' => 'Clean']);
+        $this->fakeFullFrameReview(fn (): array => ['non_product_frames' => [], 'uncertain_content_frames' => [], 'foreign_text_frames' => [], 'reason' => 'Clean']);
         $browser = $this->mockBrowser();
         $browser->shouldNotReceive('extract');
 
@@ -3076,7 +3238,7 @@ class ProductImageStorageTest extends TestCase
         $this->assertSame('exhausted', $draft->fresh()->gallery_search_stop_reason);
     }
 
-    public function test_agent_confirmed_carousel_remains_atomic_even_when_structural_mode_is_ambiguous(): void
+    public function test_agent_confirmed_ambiguous_carousel_drops_non_product_frames_without_retraining(): void
     {
         Storage::fake('public');
         AppSetting::put('ai.fallback_sources_enabled', '0');
@@ -3171,8 +3333,8 @@ class ProductImageStorageTest extends TestCase
             },
         );
 
-        $this->assertSame(5, $stored);
-        $this->assertSame(0, $visionCalls);
+        $this->assertSame(3, $stored);
+        $this->assertSame(1, $visionCalls);
         $this->assertSame($gallery[0], $draft->fresh()->media()->orderBy('sort_order')->firstOrFail()->source_url);
         $this->assertArrayNotHasKey(
             'gallery_batch_verifications',
@@ -3184,8 +3346,8 @@ class ProductImageStorageTest extends TestCase
                 ->recipe['gallery_verification_mode'],
         );
         // Structural ambiguity is metadata only after the agent has positively
-        // confirmed one coherent product gallery; the final method remains
-        // Playwright and no per-frame filter is introduced.
+        // confirmed one coherent product gallery; unusable pixels are removed
+        // without invalidating the working traversal recipe.
         $this->assertStringContainsString('через Playwright-рецепт галереи', end($messages));
         $this->assertStringNotContainsString('переобучение', end($messages));
     }
@@ -3287,7 +3449,11 @@ class ProductImageStorageTest extends TestCase
     {
         Storage::fake('public');
         config()->set('product-images.max_images_by_type.laptop', 3);
-        ProductImageVisionAgent::fake()->preventStrayPrompts();
+        $this->fakeFullFrameReview(function (string $prompt, $attachments): array {
+            $this->assertCount(3, $attachments);
+
+            return ['reason' => 'The current full-size slider frames are valid product photographs.'];
+        })->preventStrayPrompts();
         $slider = collect(range(1, 3))
             ->map(fn (int $index): string => 'https://93.184.216.35/slider-'.$index.'.jpg')
             ->all();
@@ -3694,6 +3860,9 @@ class ProductImageStorageTest extends TestCase
     public function test_fallback_stops_on_a_confirmed_exact_gallery_even_when_loose_urls_came_first(): void
     {
         Storage::fake('public');
+        // Loose URLs belong to an incompatible product in this scenario; the
+        // exact gallery remains eligible through the independent fast path.
+        $this->photoVerdict('conflicting');
         config()->set('product-images.max_images_by_type.laptop', 10);
         config()->set('product-images.download_candidates', 8);
         $visionCalls = 0;
@@ -3701,17 +3870,17 @@ class ProductImageStorageTest extends TestCase
             $visionCalls++;
 
             return [
-                'images' => [[
-                    'index' => 1,
+                'images' => $attachments->keys()->map(fn (int $index): array => [
+                    'index' => $index + 1,
                     'exact_match' => true,
                     'color_match' => true,
                     'publishable' => true,
                     'kind' => 'product',
                     'view' => 'angle',
-                    'gallery_rank' => 1,
+                    'gallery_rank' => $index + 1,
                     'score' => 99,
-                    'reason' => 'Spot-check confirms the exact product.',
-                ]],
+                    'reason' => 'Current full-size frame confirms the exact product.',
+                ])->all(),
             ];
         })->preventStrayPrompts();
 
@@ -3795,7 +3964,7 @@ class ProductImageStorageTest extends TestCase
         );
 
         $this->assertSame(7, $stored);
-        $this->assertSame(0, $visionCalls);
+        $this->assertSame(1, $visionCalls);
         $this->assertCount(7, $downloaded);
         $this->assertTrue(collect($downloaded)->every(fn (string $url): bool => str_contains($url, 'confirmed-')));
         $this->assertSame($exactPage, $draft->fresh()->primary_source_url);
@@ -5375,9 +5544,7 @@ class ProductImageStorageTest extends TestCase
 
     public function test_fallback_rejects_a_redirected_foreign_model_before_returning_its_images(): void
     {
-        ProductSourceIdentityAgent::fake(fn (): array => [
-            'match' => 'conflicting', 'confidence' => 1, 'reason' => 'OMEN 17 is not the requested OMEN MAX 16.',
-        ])->preventStrayPrompts();
+        $this->photoVerdict('conflicting');
         $requestedPage = 'https://shop.example/products/hp-omen-max-16-ah0097nr';
         $redirectedPage = 'https://shop.example/products/hp-omen-17-db1095cl';
         $wrongImages = collect(range(1, 5))
@@ -5416,7 +5583,7 @@ class ProductImageStorageTest extends TestCase
             'product_draft_id' => $draft->id,
             'product_url' => $redirectedPage,
             'action' => 'validate_discovery_runtime_identity',
-            'decision' => 'reject_runtime_identifier_mismatch',
+            'decision' => 'reject_runtime_incompatible_photos',
         ]);
     }
 
@@ -5474,9 +5641,7 @@ class ProductImageStorageTest extends TestCase
 
     public function test_wrong_discovery_page_cannot_consume_download_slots_before_a_later_exact_gallery(): void
     {
-        ProductSourceIdentityAgent::fake(fn (): array => [
-            'match' => 'conflicting', 'confidence' => 1, 'reason' => 'Different model on the opened page.',
-        ])->preventStrayPrompts();
+        $this->photoVerdict('conflicting');
         config()->set('product-images.download_candidates', 10);
         $wrongPage = 'https://wrong.example/products/hp-omen-17-db1095cl';
         $exactPage = 'https://exact.example/products/hp-omen-max-16-ah0097nr';
@@ -5547,7 +5712,8 @@ class ProductImageStorageTest extends TestCase
         $this->assertDatabaseHas('product_source_attempts', [
             'product_draft_id' => $draft->id,
             'product_url' => $wrongPage,
-            'decision' => 'reject_runtime_identifier_mismatch',
+            'action' => 'assess_photo_applicability',
+            'decision' => 'conflicting',
         ]);
 
         foreach ($candidates as $candidate) {
@@ -6142,7 +6308,7 @@ class ProductImageStorageTest extends TestCase
                 'is_primary' => $position === 1,
             ]);
         }
-        GalleryFrameReviewAgent::fake(fn (): array => ['non_product_frames' => [], 'uncertain_content_frames' => [], 'foreign_text_frames' => [], 'reason' => null])
+        $this->fakeFullFrameReview(fn (): array => ['non_product_frames' => [], 'uncertain_content_frames' => [], 'foreign_text_frames' => [], 'reason' => null])
             ->preventStrayPrompts();
 
         $stored = app(ProductImageStorage::class)->stage($draft->fresh());
@@ -6183,6 +6349,7 @@ class ProductImageStorageTest extends TestCase
         $browser->shouldReceive('lastSourceIdentityAssessment')->andReturn(null)->byDefault();
         $browser->shouldReceive('lastProductPageUrl')->andReturn(null)->byDefault();
         $browser->shouldReceive('lastProductIdentity')->andReturn(null)->byDefault();
+        $browser->shouldReceive('exportObservation')->andReturn([])->byDefault();
 
         return $browser;
     }
@@ -6272,6 +6439,22 @@ class ProductImageStorageTest extends TestCase
         imagedestroy($image);
 
         return $jpeg;
+    }
+
+    private function photoVerdict(string $verdict, ?callable $record = null): void
+    {
+        $this->mock(ProductPhotoApplicability::class)->shouldReceive('assess')->atLeast()->once()
+            ->andReturnUsing(function (ProductDraft $draft, array $source) use ($verdict, $record): array {
+                $record?->__invoke($source);
+
+                return ProductPhotoApplicability::bind($draft, $source, [
+                    'verdict' => $verdict, 'source_model' => $draft->model,
+                    'reason' => $verdict === 'conflicting' ? 'Fixture establishes a different physical product.' : 'Fixture photo applicability.',
+                    'may_inspect_gallery' => in_array($verdict, ['exact', 'compatible', 'uncertain'], true),
+                    'differences' => $verdict === 'compatible' ? ['Regional keyboard may differ.'] : [],
+                    'evidence' => $verdict === 'compatible' ? ['Fixture confirms the same platform, chassis, dimensions, ports and colour.'] : [],
+                ]);
+            });
     }
 
     /** Clears the width>=700 floor but fails the separate 0.28-3.5 ratio bound. */

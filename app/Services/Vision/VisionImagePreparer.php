@@ -63,10 +63,11 @@ class VisionImagePreparer
             ->as($name)->withProviderOptions(['detail' => $detail]);
     }
 
-    /** Same gallery thumbnail policy as before; never resize the stored original. */
-    public function thumbnail(GdImage $image, string $name, string $detail): Image
+    /** Prepare a bounded review copy; never resize the stored original or upscale a small source. */
+    public function thumbnail(GdImage $image, string $name, string $detail, int $maxDimension = 640): Image
     {
-        $ratio = min(640 / imagesx($image), 640 / imagesy($image), 1);
+        $maxDimension = max(1, min(2048, $maxDimension));
+        $ratio = min($maxDimension / imagesx($image), $maxDimension / imagesy($image), 1);
         $thumbnail = imagescale($image, max(1, (int) round(imagesx($image) * $ratio)), max(1, (int) round(imagesy($image) * $ratio)));
         if ($thumbnail === false) {
             throw new RuntimeException('Could not prepare an image thumbnail for Vision.');

@@ -4,6 +4,7 @@ namespace App\Jobs;
 
 use App\Models\TelegramUpdate;
 use App\Services\Ai\AiErrorPresenter;
+use App\Services\Products\ProductInputContext;
 use App\Services\Telegram\TelegramClient;
 use App\Services\Telegram\TelegramProductUploadIntake;
 use App\Services\Vision\VisionCallContext;
@@ -85,9 +86,16 @@ class TranscribeTelegramPhoto implements ShouldQueue
                 $text = "{$text}\n{$caption}";
             }
 
+            $update->refresh();
+            $payload = is_array($update->payload) ? $update->payload : [];
+            $payload[ProductInputContext::PAYLOAD_KEY] = ProductInputContext::fromPhotoExtraction($update, $data, [
+                'sha256' => hash('sha256', $bytes),
+                'file_unique_id' => is_array($largest) ? ($largest['file_unique_id'] ?? null) : null,
+            ]);
             $saved = TelegramUpdate::query()->whereKey($update->id)->whereNull('processed_at')
                 ->where('status', '!=', 'cancelled')
-                ->update(['text' => $text, 'status' => 'transcribed', 'error' => null]);
+                ->update(['text' => $text, 'status' => 'transcribed', 'error' => null,
+                    'payload' => json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR)]);
             if (! $saved) {
                 return;
             }

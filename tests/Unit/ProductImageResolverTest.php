@@ -746,6 +746,7 @@ class ProductImageResolverTest extends TestCase
         $browser->shouldReceive('lastProductPageUrl')->andReturn(null)->byDefault();
         $browser->shouldReceive('lastProductIdentity')->andReturn(null)->byDefault();
         $browser->shouldReceive('lastSourceIdentityAssessment')->andReturn(null)->byDefault();
+        $browser->shouldReceive('exportObservation')->andReturn([])->byDefault();
 
         return $browser;
     }

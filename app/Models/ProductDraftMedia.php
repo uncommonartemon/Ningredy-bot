@@ -14,7 +14,7 @@ class ProductDraftMedia extends Model
         'product_draft_id', 'disk', 'path', 'source_url', 'role', 'mime_type',
         'width', 'height', 'file_size', 'checksum', 'verification_status',
         'verification_score', 'verification_model', 'verification_notes',
-        'sort_order', 'is_primary', 'gallery_traversal_complete',
+        'sort_order', 'is_primary', 'gallery_traversal_complete', 'photo_source_context',
     ];
 
     protected function casts(): array
@@ -23,6 +23,7 @@ class ProductDraftMedia extends Model
             'verification_score' => 'float',
             'is_primary' => 'boolean',
             'gallery_traversal_complete' => 'boolean',
+            'photo_source_context' => 'array',
         ];
     }
 

@@ -7,7 +7,9 @@ use App\Ai\Agents\ProductGalleryRecipeTrainerAgent;
 use App\Ai\Agents\ProductImageDiscoveryAgent;
 use App\Ai\Agents\ProductImageVisionAgent;
 use App\Ai\Agents\ProductSourceIdentityAgent;
+use App\Ai\Agents\ProductSpecificationReconciliationAgent;
 use App\Ai\Agents\ServerAssistantAgent;
+use App\Ai\Agents\TelegramPhotoTextAgent;
 use App\Models\TelegramUpdate;
 use Laravel\Ai\Enums\Lab;
 use Laravel\Ai\Gateway\TextGenerationOptions;
@@ -24,6 +26,8 @@ class AiAgentLimitsTest extends TestCase
             [new ProductGalleryPreflightAgent, ProductGalleryPreflightAgent::MAX_OUTPUT_TOKENS],
             [new ProductGalleryRecipeTrainerAgent, ProductGalleryRecipeTrainerAgent::MAX_OUTPUT_TOKENS],
             [new ProductSourceIdentityAgent, ProductSourceIdentityAgent::MAX_OUTPUT_TOKENS],
+            [new ProductSpecificationReconciliationAgent, 16_000],
+            [new TelegramPhotoTextAgent, 8_000],
         ];
 
         foreach ($agents as [$agent, $expected]) {

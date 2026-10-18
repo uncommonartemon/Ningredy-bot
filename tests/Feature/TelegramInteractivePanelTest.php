@@ -350,7 +350,7 @@ class TelegramInteractivePanelTest extends TestCase
         $this->assertStringContainsString('готов к добавлению', $caption);
     }
 
-    public function test_unfinished_card_sends_only_search_status_without_album_or_manual_reconciliation_button(): void
+    public function test_unfinished_card_sends_checked_photo_preview_without_publication_or_manual_reconciliation_button(): void
     {
         Queue::fake();
         $draft = $this->pendingDraftWithMedia();
@@ -359,13 +359,16 @@ class TelegramInteractivePanelTest extends TestCase
 
         app(DraftTelegramPresenter::class)->sendReview(app(TelegramClient::class), '98765', $draft);
 
-        Http::assertNotSent(fn (ClientRequest $request): bool => str_ends_with($request->url(), '/sendMediaGroup'));
+        Http::assertSent(fn (ClientRequest $request): bool => str_ends_with($request->url(), '/sendMediaGroup'));
         Http::assertSent(function (ClientRequest $request) use ($draft): bool {
+            if (! str_ends_with($request->url(), '/sendMessage')) {
+                return false;
+            }
             $markup = $request['reply_markup'] ?? [];
             $markup = is_string($markup) ? json_decode($markup, true) : $markup;
             $buttons = collect($markup['inline_keyboard'] ?? [])->flatten(1);
 
-            return str_contains((string) $request['text'], 'Поиск #'.$draft->id.' не завершён')
+            return str_contains((string) $request['text'], 'Частичный результат поиска #'.$draft->id)
                 && ! str_contains((string) $request['text'], 'готов к добавлению')
                 && $buttons->pluck('callback_data')->all() === ["draft:edit:{$draft->id}", "draft:reject:{$draft->id}"];
         });

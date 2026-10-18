@@ -49,6 +49,9 @@ class InspectGalleryImagesToolTest extends TestCase
         ProductGalleryVisionAgent::fake(function (string $prompt, $attachments): array {
             $this->assertCount(1, $attachments);
             $this->assertStringContainsString('exact SKU must be proven from page evidence', $prompt);
+            $context = json_decode($prompt, true, flags: JSON_THROW_ON_ERROR);
+            $this->assertSame(720, $context['downloaded_images_in_attachment_order'][0]['width']);
+            $this->assertSame(64, $context['downloaded_images_in_attachment_order'][0]['height']);
 
             return [
                 'coherent_single_product_gallery' => true,
@@ -60,6 +63,9 @@ class InspectGalleryImagesToolTest extends TestCase
                     'view' => 'side',
                     'prominent_text_language' => 'none',
                     'visible_conflict' => false,
+                    'capture_style' => 'catalog_asset',
+                    'visible_condition' => 'no_obvious_issue',
+                    'quality_evidence' => 'Clean professional port detail; its narrow height is the subject framing.',
                     'confidence' => 0.93,
                     'observation' => 'A narrow side profile with ports remains visibly product-bearing.',
                 ]],
@@ -75,6 +81,8 @@ class InspectGalleryImagesToolTest extends TestCase
         $this->assertTrue($result['ok']);
         $this->assertTrue($result['observation']['coherent_single_product_gallery']);
         $this->assertSame('side', $result['observation']['images'][0]['view']);
+        $this->assertSame('catalog_asset', $result['observation']['images'][0]['capture_style']);
+        $this->assertSame(['url' => $url, 'width' => 720, 'height' => 64], $result['inspected_images'][0]);
         $this->assertArrayNotHasKey('publishable', $result['observation']['images'][0]);
         $this->assertArrayNotHasKey('accepted_indices', $result['observation']);
         $this->assertSame('completed', AiRun::query()->latest('id')->firstOrFail()->status);
@@ -161,6 +169,43 @@ class InspectGalleryImagesToolTest extends TestCase
         $this->assertSame('unsupported_image_format', $result['downloads'][0]['reason']);
         $this->assertFalse($result['downloads'][0]['retryable']);
         $this->assertStringContainsString('do not resubmit', $result['downloads'][0]['note']);
+    }
+
+    public function test_a_mixed_gallery_and_uncertain_thumbnail_remain_per_frame_observations(): void
+    {
+        $urls = ['https://cdn.example/catalog.jpg', 'https://cdn.example/seller.jpg', 'https://cdn.example/thumb.jpg'];
+        $this->mock(ProductImageResolver::class, function (MockInterface $mock) use ($urls): void {
+            foreach ($urls as $index => $url) {
+                $mock->shouldReceive('download')->once()->withArgs(fn (string $value): bool => $value === $url)
+                    ->andReturn(['bytes' => $this->jpeg(), 'source_url' => $url, 'mime_type' => 'image/jpeg',
+                        'width' => $index === 2 ? 58 : 1200, 'height' => $index === 2 ? 58 : 800]);
+            }
+        });
+        $observations = [
+            'coherent_single_product_gallery' => true,
+            'needs_more_evidence' => true,
+            'images' => [
+                ['index' => 1, 'capture_style' => 'catalog_asset', 'visible_condition' => 'no_obvious_issue',
+                    'quality_evidence' => 'Clear catalog hero with a professional lifestyle background.'],
+                ['index' => 2, 'capture_style' => 'personal_snapshot', 'visible_condition' => 'used_or_damaged',
+                    'quality_evidence' => 'Private seller specimen with obvious wear on the keys.'],
+                ['index' => 3, 'capture_style' => 'uncertain', 'visible_condition' => 'uncertain',
+                    'quality_evidence' => 'Preview is too small to judge; original remains uninspected.'],
+            ],
+            'summary' => 'Mixed set; the observed thumbnail needs a larger rendition.',
+        ];
+        ProductGalleryVisionAgent::fake(fn (): array => $observations)->preventStrayPrompts();
+
+        $result = json_decode((string) (new InspectGalleryImages($urls))->handle(new ToolRequest([
+            'image_urls' => $urls, 'product_context' => 'Laptop gallery from an auction marketplace',
+        ])), true, flags: JSON_THROW_ON_ERROR);
+
+        $this->assertTrue($result['ok']);
+        $this->assertSame($observations, $result['observation']);
+        $this->assertSame($urls, $result['inspected_urls']);
+        $this->assertSame(58, $result['inspected_images'][2]['width']);
+        $this->assertArrayNotHasKey('rejected_indices', $result);
+        $this->assertArrayNotHasKey('unusable_gallery', $result);
     }
 
     private function jpeg(): string

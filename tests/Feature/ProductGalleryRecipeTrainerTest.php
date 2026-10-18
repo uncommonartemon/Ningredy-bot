@@ -4,10 +4,12 @@ namespace Tests\Feature;
 
 use App\Ai\Agents\ProductGalleryPreflightAgent;
 use App\Ai\Agents\ProductGalleryRecipeTrainerAgent;
+use App\Ai\Agents\ProductGalleryVisionAgent;
 use App\Ai\Tools\AbandonGalleryTrainingAttempt;
 use App\Ai\Tools\FlagDomainRecipeNote;
 use App\Exceptions\InvalidGalleryRecipeException;
 use App\Exceptions\ProductSearchCancelled;
+use App\Models\AiRun;
 use App\Models\AppSetting;
 use App\Models\ProductGalleryRecipe;
 use App\Models\ProductGalleryRecipeVersion;
@@ -3476,6 +3478,92 @@ class ProductGalleryRecipeTrainerTest extends TestCase
         $this->assertSame('agent_abandoned', $recipe->versions()->latest('id')->first()->result['failure_kind']);
     }
 
+    public function test_observed_private_gallery_can_stop_before_execution_without_damaging_a_marketplace_recipe(): void
+    {
+        $url = 'https://marketplace.example/offer/laptop';
+        $images = ['https://cdn.example/seller-front.jpg', 'https://cdn.example/seller-back.jpg'];
+        $original = $this->workingRecipe();
+        $recipe = ProductGalleryRecipe::create(['domain' => 'marketplace.example', 'path_pattern' => '*',
+            'status' => 'active', 'recipe' => $original, 'success_count' => 4, 'failure_count' => 0]);
+        ProductGalleryVisionAgent::fake(fn (): array => [
+            'coherent_single_product_gallery' => true, 'needs_more_evidence' => false,
+            'images' => array_map(fn (int $index): array => [
+                'index' => $index, 'product_visible' => true, 'capture_style' => 'personal_snapshot',
+                'visible_condition' => 'used_or_damaged',
+                'quality_evidence' => 'Visible scratches and worn keys on a seller specimen photographed on a workbench.',
+                'confidence' => 0.96,
+            ], [1, 2]),
+            'summary' => 'Both observed frames show the same worn seller specimen.',
+        ])->preventStrayPrompts();
+        ProductGalleryRecipeTrainerAgent::fake([
+            new ToolCall(id: 'inspect-before-recipe', name: 'InspectGalleryImages', arguments: [
+                'image_urls' => $images, 'product_context' => 'New laptop; gallery has exactly two distinct frames.',
+            ]),
+            ['training_decision' => 'abandon_page', 'page_kind' => 'product_card', 'confidence' => 0.96,
+                'page_assessment_evidence' => array_map(fn (string $image): string => $image.' shows a worn seller specimen.', $images),
+                'reason' => 'The complete two-frame gallery contains only private photos of a worn specimen.'],
+        ])->preventStrayPrompts();
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock) use ($images): void {
+            $mock->shouldReceive('scout')->once()->andReturn(['scout' => [
+                'title' => 'Laptop offer', 'fragments' => ['<div class=gallery>1 / 2</div>'],
+                'image_candidates' => array_map(fn (string $url): array => ['src' => $url], $images),
+                'action_candidates' => [['selector' => '.gallery button', 'selector_index' => 0]],
+                'access_gate' => false, 'rate_limited' => false,
+            ]]);
+            $mock->shouldNotReceive('executeRecipe');
+        });
+
+        $this->assertSame([], app(ProductGalleryRecipeTrainer::class)->train($url, force: true, previousRecipeImages: []));
+        $recipe->refresh();
+        $this->assertSame('active', $recipe->status);
+        $this->assertSame($original, $recipe->recipe);
+        $this->assertSame(0, $recipe->failure_count);
+        $this->assertFalse((bool) $recipe->source_blocked);
+        $this->assertNull($recipe->retry_after);
+        $this->assertDatabaseMissing('product_source_page_rules', ['domain' => 'marketplace.example']);
+        $this->assertSame('agent_abandoned', $recipe->versions()->latest('id')->firstOrFail()->result['failure_kind']);
+    }
+
+    public function test_visual_inspection_survives_into_the_next_training_round(): void
+    {
+        $image = 'https://cdn.example/original.jpg';
+        ProductGalleryVisionAgent::fake(fn (): array => [
+            'coherent_single_product_gallery' => true, 'needs_more_evidence' => false,
+            'images' => [['index' => 1, 'capture_style' => 'catalog_asset', 'visible_condition' => 'no_obvious_issue',
+                'quality_evidence' => 'Clean professional hero.']],
+            'summary' => 'A clear professional product photograph.',
+        ])->preventStrayPrompts();
+        $prompts = [];
+        ProductGalleryRecipeTrainerAgent::fake([
+            new ToolCall(id: 'inspect-once', name: 'InspectGalleryImages', arguments: [
+                'image_urls' => [$image], 'product_context' => 'Laptop gallery.',
+            ]),
+            $this->workingRecipe(),
+            function (string $prompt) use (&$prompts): array {
+                $prompts[] = json_decode($prompt, true, flags: JSON_THROW_ON_ERROR);
+
+                return $this->workingRecipe();
+            },
+        ])->preventStrayPrompts();
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock) use ($image): void {
+            $mock->shouldReceive('scout')->once()->andReturn(['scout' => [
+                'title' => 'Laptop', 'fragments' => ['<div class=gallery>Gallery</div>'],
+                'image_candidates' => [['src' => $image]], 'access_gate' => false, 'rate_limited' => false,
+            ]]);
+            $mock->shouldReceive('executeRecipe')->twice()->andReturn(
+                ['images' => [], 'error' => 'Gallery did not open; an observed overlay intercepted the click.'],
+                ['images' => [$image, 'https://cdn.example/back.jpg', 'https://cdn.example/side.jpg']],
+            );
+        });
+
+        $this->assertCount(3, app(ProductGalleryRecipeTrainer::class)->train('https://quality-memory.example/product', force: true));
+        $inspection = $prompts[0]['gallery_visual_observations'][0];
+        $this->assertSame([$image], $inspection['inspected_urls']);
+        $this->assertSame('catalog_asset', $inspection['observation']['images'][0]['capture_style']);
+        $this->assertSame(1200, $inspection['inspected_images'][0]['width']);
+        $this->assertSame(1, AiRun::where('activity->vision_operation', 'inspect_gallery')->count());
+    }
+
     public function test_repeated_unexplored_abandonment_is_interrupted_not_a_persistent_page_ban(): void
     {
         $this->assertGalleryAbandonmentReview(recovers: false);
@@ -3732,6 +3820,10 @@ class ProductGalleryRecipeTrainerTest extends TestCase
         $this->assertCount(3, app(ProductGalleryRecipeTrainer::class)->train('https://viewer.example/product', force: true));
         $this->assertCount(2, $prompts);
         $this->assertSame('#main', data_get($prompts[1], 'previous_attempt_feedback.current_page_validation.unexplored_media_control.selector'));
+        $this->assertStringContainsString('observed selector scoped to the gallery/viewer',
+            $prompts[1]['previous_attempt_feedback']['selector_repair_guidance']);
+        $this->assertStringContainsString('do not guess another global index',
+            $prompts[1]['previous_attempt_feedback']['selector_repair_guidance']);
         $version = ProductGalleryRecipe::where('domain', 'viewer.example')->firstOrFail()->versions()->latest('id')->firstOrFail();
         $this->assertSame('promoted', $version->status);
     }
@@ -3858,7 +3950,9 @@ class ProductGalleryRecipeTrainerTest extends TestCase
     {
         AppSetting::put('ai.gallery_training_max_rounds', '10');
         $callCount = 0;
-        ProductGalleryRecipeTrainerAgent::fake(function () use (&$callCount): array {
+        $prompts = [];
+        ProductGalleryRecipeTrainerAgent::fake(function (string $prompt) use (&$callCount, &$prompts): array {
+            $prompts[] = json_decode($prompt, true, flags: JSON_THROW_ON_ERROR);
             $callCount++;
 
             // A different out-of-range value every round (never literally
@@ -3901,6 +3995,8 @@ class ProductGalleryRecipeTrainerTest extends TestCase
 
         $this->assertSame([], $images);
         $this->assertSame(3, $callCount, 'Training must abandon the URL after 3 identical validation failures instead of burning all 10 allowed rounds.');
+        $this->assertSame(41, $prompts[1]['previous_attempt_feedback']['rejected_recipe']['actions'][0]['limit']);
+        $this->assertSame(['actions.*.limit'], $prompts[1]['previous_attempt_feedback']['validation_rules']);
         $recipe = ProductGalleryRecipe::query()->where('domain', 'stuck.example')->firstOrFail();
         $this->assertSame(1, $recipe->failure_count);
         $this->assertSame('recipe_mismatch', $recipe->last_failure_kind);

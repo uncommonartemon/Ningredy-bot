@@ -2,6 +2,7 @@
 
 namespace App\Filament\Resources\ProductDrafts\Pages;
 
+use App\Filament\Concerns\InteractsWithCatalogCleanup;
 use App\Filament\Resources\ProductDrafts\ProductDraftResource;
 use Filament\Resources\Pages\ListRecords;
 use Filament\Schemas\Components\Tabs\Tab;
@@ -9,11 +10,13 @@ use Illuminate\Database\Eloquent\Builder;
 
 class ListProductDrafts extends ListRecords
 {
+    use InteractsWithCatalogCleanup;
+
     protected static string $resource = ProductDraftResource::class;
 
     protected function getHeaderActions(): array
     {
-        return [];
+        return [$this->catalogCleanupAction('drafts')];
     }
 
     public function getTabs(): array

@@ -9,6 +9,7 @@ use App\Models\TelegramUpdate;
 use App\Services\Products\ProductIdentityMatcher;
 use App\Services\Products\ProductImageCandidateDiscovery;
 use App\Services\Products\ProductImageResolver;
+use App\Services\Products\ProductPhotoApplicability;
 use App\Services\Products\ProductSourceIdentityJudge;
 use App\Services\Products\WikimediaImageSearch;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -40,7 +41,7 @@ class IncrementalGalleryDiscoveryTest extends TestCase
         $this->assertStringContainsString('"saved_photo_count":3', $prompt);
     }
 
-    public function test_a_conflicting_regional_variant_is_rejected_before_recipe_execution_or_training(): void
+    public function test_an_incompatible_photo_source_is_rejected_before_recipe_execution_or_training(): void
     {
         $url = 'https://shop.example/product/123';
         $draft = new ProductDraft(['model' => 'Stealth 16 AI A2HWGG-009IT', 'specifications' => [
@@ -51,16 +52,16 @@ class IncrementalGalleryDiscoveryTest extends TestCase
             'final_url' => $url, 'identity_evidence' => 'Stealth 16 AI A2HWGG-008US',
         ]);
         $resolver->shouldNotReceive('resolve');
-        $this->mock(ProductSourceIdentityJudge::class)->shouldReceive('judge')->once()
+        $this->mock(ProductPhotoApplicability::class)->shouldReceive('assess')->once()
             ->withArgs(fn ($actualDraft, $source) => $actualDraft === $draft
                 && $source['_preflight_identity_evidence'] === 'Stealth 16 AI A2HWGG-008US')
-            ->andReturn('conflicting');
+            ->andReturn(['verdict' => 'conflicting', 'may_inspect_gallery' => false, 'reason' => 'Different chassis.']);
 
         $discovery = app(ProductImageCandidateDiscovery::class);
         $method = new \ReflectionMethod($discovery, 'resolveSourcesIndividually');
         $this->assertSame([], $method->invoke($discovery, [['url' => $url]], $draft));
         $this->assertDatabaseHas('product_source_attempts', [
-            'decision' => 'reject_conflicting_identifier_before_browser',
+            'decision' => 'reject_incompatible_photos_before_browser',
         ]);
     }
 
@@ -72,7 +73,8 @@ class IncrementalGalleryDiscoveryTest extends TestCase
         $resolver = $this->mock(ProductImageResolver::class);
         $resolver->shouldReceive('preflightSource')->once()->andReturn(['identity_evidence' => 'Laptop A9']);
         $resolver->shouldReceive('resolve')->once()->andReturn([]);
-        $this->mock(ProductSourceIdentityJudge::class)->shouldReceive('judge')->once()->andReturn('uncertain');
+        $this->mock(ProductPhotoApplicability::class)->shouldReceive('assess')->once()
+            ->andReturn(['verdict' => 'uncertain', 'may_inspect_gallery' => true, 'reason' => 'Inspect visible chassis.']);
         $discovery = app(ProductImageCandidateDiscovery::class);
         $this->assertSame([], (new \ReflectionMethod($discovery, 'resolveSourcesIndividually'))
             ->invoke($discovery, [['url' => $url, 'title' => 'Laptop A9']], $draft));
@@ -96,8 +98,12 @@ class IncrementalGalleryDiscoveryTest extends TestCase
         $matcher = $this->mock(ProductIdentityMatcher::class);
         $resolver->shouldReceive('sourceContextForPage')->andReturn(null)->byDefault();
         $matcher->shouldReceive('conflictsSource')->andReturn(false);
+        $matcher->shouldReceive('conflictsMemoryConfiguration')->andReturn(false);
         $matcher->shouldReceive('confirmsExactIdentifier')->andReturn(false);
         $matcher->shouldReceive('requiresExactIdentifier')->andReturn(false);
+        $this->mock(ProductPhotoApplicability::class)->shouldReceive('assess')->andReturn([
+            'verdict' => 'exact', 'may_inspect_gallery' => true, 'reason' => 'Fixture confirmed product.',
+        ]);
         $draft = new ProductDraft(['brand' => 'Example', 'model' => 'Laptop',
             'sources' => [['url' => $first], ['url' => $second]]]);
         $discovery = app(ProductImageCandidateDiscovery::class);
@@ -124,5 +130,33 @@ class IncrementalGalleryDiscoveryTest extends TestCase
         $property->setValue($discovery, array_fill_keys($urls, 'https://shop.example/product/laptop'));
         $method = new \ReflectionMethod($discovery, 'limitCandidateUrlsBySource');
         $this->assertSame($urls, $method->invoke($discovery, $urls));
+    }
+
+    public function test_compatible_regional_gallery_survives_both_discovery_checks_with_its_differences(): void
+    {
+        $url = 'https://shop.example/product/other-region';
+        $image = 'https://shop.example/gallery.jpg';
+        $draft = new ProductDraft(['model' => 'Laptop A9-IT', 'specifications' => []]);
+        $draft->setRelation('telegramUpdate', new TelegramUpdate(['text' => 'Laptop A9-IT']));
+        $resolver = $this->mock(ProductImageResolver::class);
+        $resolver->shouldReceive('preflightSource')->once()->andReturn(['identity_evidence' => 'Laptop A9-US']);
+        $resolver->shouldReceive('resolve')->once()->withArgs(fn ($sources) => $sources[0]['_observed_identity']['purpose'] === 'photos'
+            && $sources[0]['_photo_applicability']['verdict'] === 'compatible')->andReturn([$image]);
+        $resolver->shouldReceive('sourceContextForPage')->andReturn(['url' => $url, 'title' => 'Laptop A9-US']);
+        $resolver->shouldReceive('sourceContextForImage')->andReturnNull();
+        $resolver->shouldReceive('isConfirmedGalleryImage')->andReturn(true);
+        $this->mock(ProductSourceIdentityJudge::class)->shouldNotReceive('judge');
+        $this->mock(ProductPhotoApplicability::class)->shouldReceive('assess')->twice()->andReturn([
+            'verdict' => 'compatible', 'may_inspect_gallery' => true, 'reason' => 'Same documented chassis.',
+            'differences' => ['US keyboard on photos, IT target'], 'evidence' => ['Same chassis and ports'],
+        ]);
+        $discovery = app(ProductImageCandidateDiscovery::class);
+        $images = (new \ReflectionMethod($discovery, 'resolveSourcesIndividually'))->invoke($discovery, [['url' => $url]], $draft);
+
+        $this->assertSame([$image], $images);
+        $context = $discovery->sourceContextForImage($image);
+        $this->assertSame('photos', $context['_observed_identity']['purpose']);
+        $this->assertSame('compatible', $context['_photo_applicability']['verdict']);
+        $this->assertSame(['US keyboard on photos, IT target'], $context['_photo_applicability']['differences']);
     }
 }

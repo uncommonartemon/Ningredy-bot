@@ -13,6 +13,7 @@ use App\Services\Ai\ProductSearchCostBudget;
 use App\Services\Ai\ProductSearchTimeBudget;
 use App\Services\Products\ProductCardAssembly;
 use App\Services\Products\ProductImageStorage;
+use App\Services\Products\ProductInputContext;
 use App\Services\Products\ProductSpecificationReconciler;
 use App\Services\Products\SpecificationReconciliationOutcome;
 use App\Services\Products\SpecificationReconciliationStatus;
@@ -194,6 +195,7 @@ class ProductSpecificationReconcilerTest extends TestCase
         $calls = 0;
         ProductSpecificationReconciliationAgent::fake(function () use (&$calls): array {
             $calls++;
+
             return [...$this->fakeReconciled(), 'overall_status' => 'not_ready',
                 'recovery_action' => 'try_other_source', 'summary' => 'Состояние этого предложения не подтверждено.'];
         })->preventStrayPrompts();
@@ -297,6 +299,246 @@ class ProductSpecificationReconcilerTest extends TestCase
         $this->assertSame(2, $calls);
         $this->assertFalse($result->isReconciled());
         $this->assertNull($draft->fresh()->specifications_reconciled_source_url);
+    }
+
+    public function test_new_web_quotes_do_not_extend_the_same_empty_response_repair_across_models(): void
+    {
+        app(AiSettings::class)->saveModel('gpt-6-luna');
+        app(AiSettings::class)->saveCardAssemblyFallbackModel('gpt-6-sol');
+        $draft = $this->seedDraft();
+        $models = [];
+        ProductSpecificationReconciliationAgent::fake(function (string $prompt, $attachments, $provider, string $model) use ($draft, &$models): array {
+            $models[] = $model;
+            $draft->update(['specification_evidence' => [...($draft->fresh()->specification_evidence ?? []), [
+                'key' => 'weight', 'value' => '1 kg', 'source_url' => 'https://shop.example/specs',
+                'source_excerpt' => 'New but irrelevant observation '.count($models),
+            ]]]);
+
+            return [];
+        })->preventStrayPrompts();
+
+        $result = app(ProductCardAssembly::class)->complete($draft, ['url' => 'https://shop.example/product'], $draft->telegram_update_id);
+
+        $this->assertSame(['gpt-6-luna', 'gpt-6-luna', 'gpt-6-sol'], $models);
+        $this->assertSame('response_format', $result->repairContext['failure_kind']);
+        $this->assertTrue($result->madeProgress, 'New observations remain stored, but they did not fix JSON');
+        $this->assertCount(3, $draft->fresh()->specification_evidence);
+        $run = AiRun::query()->latest('id')->first();
+        $this->assertSame('[]', $run->activity['response_diagnostics']['raw_text']);
+        $this->assertArrayHasKey('finish_reason', $run->activity['response_diagnostics']);
+        $this->assertNull($draft->fresh()->specifications_reconciled_source_url);
+    }
+
+    public function test_a_compatible_photo_source_cannot_be_adopted_as_the_product(): void
+    {
+        $draft = $this->seedDraft();
+        ProductSpecificationReconciliationAgent::fake(fn () => [
+            ...$this->fakeReconciled(), 'offer_selection' => [
+                'action' => 'adopt_source_offer', 'source_url' => 'https://shop.example/photos',
+                'reason' => 'Replace the requested configuration with the photo source.',
+            ],
+        ])->preventStrayPrompts();
+
+        $result = app(ProductSpecificationReconciler::class)->reconcile($draft, [
+            'url' => 'https://shop.example/photos', '_photo_applicability' => ['verdict' => 'compatible'],
+        ], $draft->telegram_update_id);
+
+        $this->assertSame('invalid_response', $result->unavailableReason);
+        $this->assertStringContainsString('only illustrates the requested product', $result->summary);
+        $this->assertSame('Test Product', $draft->fresh()->title);
+    }
+
+    public function test_structured_label_evidence_reaches_assembly_and_retains_its_own_provenance(): void
+    {
+        $draft = $this->seedDraft(['specifications' => [['key' => 'ram', 'name' => 'Memory', 'value' => '16 GB']]]);
+        $update = $draft->telegramUpdate;
+        $input = ProductInputContext::fromPhotoExtraction($update, [
+            'has_text' => true, 'text' => 'Test Product, 16 GB DDR4', 'identifiers' => [],
+            'observations' => [[
+                'key' => 'ram_capacity', 'name' => 'Memory capacity', 'value' => '16 GB',
+                'source_kind' => 'photo_label', 'source_excerpt' => 'Memory: 16 GB DDR4',
+                'confidence' => 0.99, 'uncertain_characters' => null,
+            ]],
+        ]);
+        $update->update(['text' => 'Test Product, 16 GB DDR4', 'payload' => [ProductInputContext::PAYLOAD_KEY => $input]]);
+        ProductSpecificationReconciliationAgent::fake(function (string $prompt) use ($update): array {
+            $payload = json_decode($prompt, true);
+            $this->assertNull($payload['original_operator_request'], 'OCR is evidence, not a human requirement');
+            $this->assertSame('Memory: 16 GB DDR4', $payload['input_evidence'][0]['source_excerpt']);
+
+            return $this->fakeReconciled(specifications: [[
+                'key' => 'ram', 'name' => 'Memory', 'value' => '16 GB', 'evidence' => 'confirmed',
+                'source_kind' => 'photo_label', 'source_ref' => 'telegram-photo:'.$update->id.':1',
+                'source_url' => null, 'source_excerpt' => 'Memory: 16 GB DDR4',
+            ]]);
+        })->preventStrayPrompts();
+
+        $result = app(ProductSpecificationReconciler::class)->reconcile($draft, ['url' => 'https://shop.example/photos'], $draft->telegram_update_id);
+
+        $this->assertTrue($result->isReconciled(), $result->summary ?? '');
+        $this->assertSame('photo_label', $result->specifications[0]['source_kind']);
+        $this->assertSame('telegram-photo:'.$update->id.':1', $result->specifications[0]['source_ref']);
+        $this->assertNull($result->specifications[0]['source_url']);
+        $this->assertSame(0, ProductSourcePageEvidence::query()->count());
+    }
+
+    public function test_an_unresolved_text_fact_does_not_reject_an_accepted_gallery(): void
+    {
+        $draft = $this->seedDraft();
+        ProductSpecificationReconciliationAgent::fake(fn () => [
+            ...$this->fakeReconciled(), 'overall_status' => 'not_ready', 'recovery_action' => 'try_other_source',
+            'unresolved_fields' => [['key' => 'keyboard_layout', 'status' => 'unknown', 'reason' => 'Requested layout not documented yet.']],
+        ])->preventStrayPrompts();
+
+        $result = app(ProductSpecificationReconciler::class)->reconcile($draft, [
+            'url' => 'https://shop.example/photos', '_photo_applicability' => ['verdict' => 'exact'],
+        ], $draft->telegram_update_id);
+
+        $this->assertFalse($result->isReconciled());
+        $this->assertTrue($result->repairContext['photo_result_preserved']);
+        $this->assertSame('retry_current_source', $result->repairContext['recovery_action']);
+        $this->assertSame('keyboard_layout', $result->repairContext['unresolved_fields'][0]['key']);
+    }
+
+    public function test_fact_recovery_state_survives_jobs_without_buying_the_same_format_failure(): void
+    {
+        app(AiSettings::class)->saveModel('gpt-6-luna');
+        app(AiSettings::class)->saveCardAssemblyFallbackModel('gpt-6-sol');
+        $draft = $this->seedDraft(['image_urls' => ['https://shop.example/retained.jpg']]);
+        $calls = 0;
+        ProductSpecificationReconciliationAgent::fake(function () use (&$calls): array {
+            $calls++;
+
+            return [];
+        })->preventStrayPrompts();
+        $source = ['url' => 'https://shop.example/photos', '_photo_applicability' => ['verdict' => 'exact']];
+        $state = [];
+        $first = app(ProductCardAssembly::class)->resumeFacts($draft, $source, $draft->telegram_update_id, $state);
+        $this->assertSame(3, $calls);
+        $this->assertSame('invalid_response', $first->unavailableReason);
+
+        // Simulate a different worker reading persisted JSON, with another
+        // quote arriving meanwhile. New facts cannot fix malformed JSON.
+        $state = json_decode(json_encode($state), true);
+        $this->seedEvidence($draft, 'https://shop.example/specs', 'RAM: 16 GB');
+        $second = app(ProductCardAssembly::class)->resumeFacts($draft->fresh(), $source, $draft->telegram_update_id, $state);
+
+        $this->assertSame(3, $calls);
+        $this->assertSame('invalid_response', $second->unavailableReason);
+        $this->assertSame(['https://shop.example/retained.jpg'], $draft->fresh()->image_urls);
+        $this->assertNull($draft->fresh()->specifications_reconciled_source_url);
+    }
+
+    public function test_observed_physical_conflict_reopens_photo_selection_instead_of_freezing_a_wrong_gallery(): void
+    {
+        $draft = $this->seedDraft(['color' => 'Black']);
+        $this->seedEvidence($draft, 'https://shop.example/photos', 'This variant has a white chassis.');
+        ProductSpecificationReconciliationAgent::fake(fn () => [
+            ...$this->fakeReconciled(), 'overall_status' => 'not_ready', 'recovery_action' => 'try_other_source',
+            'photo_applicability_conflict' => [
+                'physical_feature' => 'color', 'reason' => 'The white gallery cannot illustrate the requested black chassis.',
+                'source_url' => 'https://shop.example/photos', 'source_excerpt' => 'This variant has a white chassis.',
+            ],
+        ])->preventStrayPrompts();
+
+        $outcome = app(ProductSpecificationReconciler::class)->reconcile($draft, [
+            'url' => 'https://shop.example/photos', '_photo_applicability' => ['verdict' => 'compatible'],
+        ], $draft->telegram_update_id);
+
+        $this->assertSame(SpecificationReconciliationStatus::NotReady, $outcome->status);
+        $this->assertSame('try_other_source', $outcome->repairContext['recovery_action']);
+        $this->assertFalse($outcome->repairContext['photo_result_preserved']);
+        $this->assertSame('color', $outcome->repairContext['photo_applicability_conflict']['physical_feature']);
+    }
+
+    public function test_an_invented_physical_conflict_cannot_revoke_a_gallery(): void
+    {
+        $draft = $this->seedDraft();
+        ProductSpecificationReconciliationAgent::fake(fn () => [
+            ...$this->fakeReconciled(), 'overall_status' => 'not_ready', 'recovery_action' => 'try_other_source',
+            'photo_applicability_conflict' => [
+                'physical_feature' => 'color', 'reason' => 'The gallery is white.',
+                'source_url' => 'https://shop.example/unread', 'source_excerpt' => 'White chassis.',
+            ],
+        ])->preventStrayPrompts();
+
+        $outcome = app(ProductSpecificationReconciler::class)->reconcile($draft, [
+            'url' => 'https://shop.example/photos', '_photo_applicability' => ['verdict' => 'exact'],
+        ], $draft->telegram_update_id);
+
+        $this->assertSame('invalid_response', $outcome->unavailableReason);
+        $this->assertSame('specification_evidence', $outcome->repairContext['failure_kind']);
+        $this->assertStringContainsString('source excerpt was not observed', $outcome->summary);
+        $this->assertArrayNotHasKey('recovery_action', $outcome->repairContext);
+    }
+
+    public function test_fact_recovery_requires_new_observations_after_a_repeated_factual_blocker(): void
+    {
+        $draft = $this->seedDraft();
+        $calls = 0;
+        ProductSpecificationReconciliationAgent::fake(function () use (&$calls): array {
+            $calls++;
+
+            return [...$this->fakeReconciled(), 'overall_status' => 'not_ready',
+                'unresolved_fields' => [['key' => 'keyboard_layout', 'status' => 'unknown', 'reason' => 'Not found.']]];
+        })->preventStrayPrompts();
+        $state = [];
+        $source = ['url' => 'https://shop.example/photos', '_photo_applicability' => ['verdict' => 'exact']];
+        app(ProductCardAssembly::class)->resumeFacts($draft, $source, $draft->telegram_update_id, $state);
+        app(ProductCardAssembly::class)->resumeFacts($draft->fresh(), $source, $draft->telegram_update_id, $state);
+        $this->assertSame(2, $calls);
+
+        $this->seedEvidence($draft, 'https://shop.example/specs', 'Keyboard: Czech');
+        ProductSpecificationReconciliationAgent::fake(function () use (&$calls): array {
+            $calls++;
+
+            return $this->fakeReconciled();
+        })->preventStrayPrompts();
+        $result = app(ProductCardAssembly::class)->resumeFacts($draft->fresh(), $source, $draft->telegram_update_id, $state);
+
+        $this->assertTrue($result->isReconciled());
+        $this->assertSame(3, $calls);
+        $this->assertNull($state['last_failure']);
+    }
+
+    public function test_unrelated_new_quotes_do_not_extend_an_unchanged_explicit_blocker(): void
+    {
+        $draft = $this->seedDraft();
+        $calls = 0;
+        ProductSpecificationReconciliationAgent::fake(function () use ($draft, &$calls): array {
+            $calls++;
+            $this->seedEvidence($draft, 'https://shop.example/specs-'.$calls, 'Unrelated marketing detail '.$calls);
+
+            return [...$this->fakeReconciled(), 'overall_status' => 'not_ready',
+                'unresolved_fields' => [['key' => 'keyboard_layout', 'status' => 'unknown', 'reason' => 'Still missing '.$calls]]];
+        })->preventStrayPrompts();
+
+        $outcome = app(ProductCardAssembly::class)->complete($draft, ['url' => 'https://shop.example/product'], $draft->telegram_update_id);
+
+        $this->assertSame(2, $calls);
+        $this->assertFalse($outcome->isReconciled());
+        $this->assertSame('keyboard_layout', $outcome->repairContext['unresolved_fields'][0]['key']);
+    }
+
+    public function test_resolving_explicit_blockers_allows_further_repair_without_another_web_call(): void
+    {
+        $draft = $this->seedDraft();
+        $calls = 0;
+        ProductSpecificationReconciliationAgent::fake(function () use (&$calls): array {
+            $calls++;
+            if ($calls === 4) {
+                return $this->fakeReconciled();
+            }
+
+            return [...$this->fakeReconciled(), 'overall_status' => 'not_ready',
+                'unresolved_fields' => array_map(fn (string $key): array => ['key' => $key, 'status' => 'unknown', 'reason' => 'Missing.'],
+                    array_slice(['ram', 'keyboard_layout', 'weight'], $calls - 1))];
+        })->preventStrayPrompts();
+
+        $outcome = app(ProductCardAssembly::class)->complete($draft, ['url' => 'https://shop.example/product'], $draft->telegram_update_id);
+
+        $this->assertTrue($outcome->isReconciled());
+        $this->assertSame(4, $calls);
     }
 
     public function test_a_long_explanation_of_one_value_does_not_throw_away_the_card(): void
