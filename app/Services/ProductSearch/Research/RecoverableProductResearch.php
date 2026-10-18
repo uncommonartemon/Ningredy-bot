@@ -46,19 +46,22 @@ class RecoverableProductResearch
         for ($attempt = 0; ; $attempt++) {
             $this->cancellation->throwIfCancelled($updateId);
             $searchItems = [];
+            $searchTrace = [];
             try {
                 $response = $transport->prompt(ProductResearchAgent::make(),
                     $feedback === null ? $prompt : $prompt."\n".$feedback,
                     $provider, $model, $this->time->timeoutFor($updateId, $timeout), $idleTimeout,
-                    function ($event) use (&$searchItems, $onActivity): void {
+                    function ($event) use (&$searchItems, &$searchTrace, $onActivity): void {
                         if ($event instanceof ProviderToolEvent && $event->type === 'web_search_call' && $event->itemId !== '') {
                             $searchItems[$event->itemId] = true;
+                            $searchTrace = ResearchWebSearchTrace::record($searchTrace, $event);
                         }
                         $onActivity($event);
                     }, $onWait);
                 // Persist paid output BEFORE cancellation/normalization/validation.
                 $usage = [...$response->usage->toArray(), 'web_search_calls' => count($searchItems)];
-                $run->update(['invocation_id' => $response->invocationId, 'response' => $response->toArray(), 'usage' => $usage]);
+                $run->update(['invocation_id' => $response->invocationId, 'response' => $response->toArray(), 'usage' => $usage,
+                    'activity' => [...($run->activity ?? []), 'provider_web_search_items' => $searchTrace]]);
                 $this->cancellation->throwIfCancelled($updateId);
                 try {
                     $data = $validate($response->toArray());
@@ -71,6 +74,7 @@ class RecoverableProductResearch
                 return ['response' => $response, 'data' => $data];
             } catch (InvalidResearchResponse $error) {
                 $run->update(['invocation_id' => $error->invocationId, 'status' => 'failed',
+                    'activity' => [...($run->activity ?? []), 'provider_web_search_items' => $searchTrace],
                     'response' => ['recovery_snapshot' => $error->evidence, 'failure_kind' => $error->reason],
                     'usage' => $error->usage === null ? null : [...$error->usage, 'web_search_calls' => count($searchItems)],
                     'error' => $error->getMessage(), 'completed_at' => now()]);

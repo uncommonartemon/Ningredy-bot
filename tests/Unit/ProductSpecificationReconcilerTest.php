@@ -845,6 +845,31 @@ class ProductSpecificationReconcilerTest extends TestCase
         $this->assertStringContainsString('corrected but unchanged', $result->summary);
     }
 
+    public function test_cited_unchanged_capacity_with_reviewed_conflicts_does_not_buy_an_assembly_retry(): void
+    {
+        $fact = ['key' => 'maximum_supported_memory', 'name' => 'Maximum supported memory', 'value' => '256 GB',
+            'source_url' => 'https://maker.example/specs', 'source_excerpt' => 'Max. Memory: 256 GB'];
+        $other = [...$fact, 'value' => '192 GB', 'source_url' => 'https://shop.example/product', 'source_excerpt' => 'Max. Memory: 192 GB'];
+        $draft = $this->seedDraft(['specifications' => [$fact], 'specification_evidence' => [$other]]);
+        $reason = 'The manufacturer identifies this model; the retailer memory ceiling is outdated.';
+        $calls = 0;
+        ProductSpecificationReconciliationAgent::fake(function () use (&$calls, $fact, $other, $reason): array {
+            $calls++;
+
+            return $this->fakeReconciled([[...$fact, 'evidence' => 'corrected', 'reason' => $reason,
+                'considered_source_urls' => [$other['source_url']]]]);
+        })->preventStrayPrompts();
+
+        $result = app(ProductCardAssembly::class)->complete($draft, ['url' => 'https://shop.example/product'], $draft->telegram_update_id);
+
+        $this->assertTrue($result->isReconciled(), $result->summary ?? '');
+        $this->assertSame(1, $calls);
+        $this->assertSame($fact['value'], $result->specifications[0]['value']);
+        $this->assertSame($fact['source_excerpt'], $result->specifications[0]['source_excerpt']);
+        $this->assertSame($reason, $result->specifications[0]['reason']);
+        $this->assertSame([$other['source_url']], $result->specifications[0]['considered_source_urls']);
+    }
+
     public function test_a_known_source_url_does_not_authorize_a_fabricated_excerpt(): void
     {
         $draft = $this->seedDraft(['sources' => [['url' => 'https://maker.example/specs']]]);

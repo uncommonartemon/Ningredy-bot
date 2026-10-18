@@ -31,6 +31,7 @@ use App\Services\Products\ProductSourcePriority;
 use App\Services\Products\ProductTextEvidenceContract;
 use App\Services\ProductSearch\Research\InvalidResearchResponse;
 use App\Services\ProductSearch\Research\RecoverableProductResearch;
+use App\Services\ProductSearch\Research\ResearchWebSearchTrace;
 use App\Services\Telegram\ProductCardPresenter;
 use App\Services\Telegram\TelegramClient;
 use App\Services\Telegram\TelegramProgressReporter;
@@ -185,7 +186,13 @@ class ResearchProduct implements Tool
                     || $event instanceof TextStart
                     || $event instanceof StreamEnd;
 
-                if ($traceable && count($activity) < 50) {
+                if ($event instanceof ProviderToolEvent && $event->type === 'web_search_call') {
+                    $activity['provider_web_search_items'] = ResearchWebSearchTrace::record(
+                        $activity['provider_web_search_items'] ?? [], $event,
+                    );
+                }
+
+                if ($traceable && count(array_filter(array_keys($activity), 'is_int')) < 50) {
                     $activity[] = [
                         'at' => now()->toIso8601String(),
                         'stage' => $stage,

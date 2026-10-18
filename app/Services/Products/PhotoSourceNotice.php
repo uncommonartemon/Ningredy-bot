@@ -10,6 +10,10 @@ final class PhotoSourceNotice
         $assessment = $context['_photo_applicability'] ?? null;
         $visualDifferences = ($context['_photo_visual_review']['scope'] ?? null) === 'current_downloaded_frames'
             ? ($context['_photo_visual_review']['differences'] ?? []) : [];
+        $keyboardNotice = self::text($context['_photo_keyboard_reconciliation']['notice'] ?? null, 600);
+        if ($keyboardNotice !== '') {
+            $visualDifferences = [...(is_array($visualDifferences) ? $visualDifferences : []), $keyboardNotice];
+        }
         $compatible = is_array($assessment) && ($assessment['verdict'] ?? null) === 'compatible';
         if (! $compatible && (! is_array($visualDifferences) || $visualDifferences === [])) {
             return null;

@@ -201,6 +201,12 @@ class BrowserProductGalleryExtractor
             }
 
             if ($validation['passed'] && ! $selectorsMismatched && ! $failure->qualityUnconfirmed) {
+                if (($validation['traversal_confirmed'] ?? true) === false) {
+                    $this->rememberPartialGalleryImages($images);
+                    $debug?->__invoke('step', 'Рецепт собрал '.count($images).' фото; полный обход текущей галереи не доказан. Сохраняю частичный набор для проверки.');
+
+                    return $images;
+                }
                 app(ProductGalleryRecipeProof::class)->remember($recipe, $url, $validation, $telegramUpdateId);
                 $this->rememberConfirmedGalleryImages($images);
                 $recipe->increment('success_count', 1, [
@@ -576,6 +582,13 @@ class BrowserProductGalleryExtractor
                 continue;
             }
 
+            if (($validation['traversal_confirmed'] ?? true) === false) {
+                $this->rememberPartialGalleryImages($images);
+                $debug?->__invoke('step', 'Совместимый рецепт собрал фото без доказанного полного обхода; сохраняю частичный набор для проверки.');
+
+                return ['passed' => true, 'images' => $images];
+            }
+
             $observedLayoutFingerprint = app(ProductPageLayoutFingerprint::class)->make(
                 is_array($result['scout'] ?? null) ? $result['scout'] : [],
             );
@@ -636,6 +649,7 @@ class BrowserProductGalleryExtractor
             'fits' => ($validation['passed'] ?? false) && ! $selectorsMismatched && ! $executionInterrupted
                 && ! ($validation['needs_source_quality_diagnosis'] ?? false),
             'validation_reason' => $validation['reason'] ?? null,
+            'traversal_confirmed' => ($validation['traversal_confirmed'] ?? true) && ($validation['passed'] ?? false),
             'selectors_mismatched' => $selectorsMismatched,
             'execution_interrupted' => $executionInterrupted,
             'failure_attribution' => $executionInterrupted ? 'execution'

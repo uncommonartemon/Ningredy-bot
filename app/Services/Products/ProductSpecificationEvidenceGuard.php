@@ -21,6 +21,62 @@ class ProductSpecificationEvidenceGuard
             ->map(fn ($group) => $group->values()->all())->all();
     }
 
+    /** Repair only a status label, then run every provenance/conflict check. */
+    public function normalizeAndValidate(array $input, array $result, array $observedFacts, array $observedPages, array $inputEvidence = []): array
+    {
+        $originals = collect($input)->keyBy('key');
+        foreach ($result as $index => $item) {
+            $old = $originals->get($item['key']);
+            if (($item['evidence'] ?? null) !== 'corrected' || $old === null
+                || ! $this->sameActualValue($old, $item)
+                || trim((string) ($item['reason'] ?? '')) === '') {
+                continue;
+            }
+
+            // Do not reinterpret a claimed correction as confirmation merely
+            // because the old value survived. A cited observation must retain
+            // this very value, and the chosen quote must literally contain it.
+            // This is lexical metadata repair, not semantic fact verification.
+            $label = ($item['source_kind'] ?? 'web') === 'photo_label';
+            $support = collect($label ? $inputEvidence : [...$input, ...$observedFacts])->contains(
+                fn ($fact) => is_array($fact) && ($fact['key'] ?? null) === $item['key']
+                    && $this->sameActualValue($fact, $item)
+                    && ($label
+                        ? ($fact['source_kind'] ?? null) === 'photo_label'
+                            && filled($item['source_ref'] ?? null) && ($fact['source_ref'] ?? null) === $item['source_ref']
+                        : $this->isCitedFact($fact) && ($fact['source_kind'] ?? 'web') === 'web'
+                            && $fact['source_url'] === ($item['source_url'] ?? null)),
+            );
+            $literal = $this->literalText((string) $item['value']);
+            $unit = $this->literalText((string) ($item['unit'] ?? ''));
+            if ($unit !== '' && ! str_ends_with($literal, ' '.$unit)) {
+                $literal .= ' '.$unit;
+            }
+            $quote = $this->literalText((string) ($item['source_excerpt'] ?? ''));
+            if ($support && $literal !== '' && $this->containsWholeNumbers($quote, $literal)
+                && preg_match('/(?<![\p{L}\p{N}])'.preg_quote($literal, '/').'(?![\p{L}\p{N}])/u', $quote) === 1) {
+                $result[$index]['evidence'] = 'confirmed';
+            }
+        }
+
+        $this->validate($input, $result, $observedFacts, $observedPages, $inputEvidence);
+
+        return $result;
+    }
+
+    private function sameActualValue(array $left, array $right): bool
+    {
+        return is_string($left['value'] ?? null) && is_string($right['value'] ?? null)
+            && $this->literalText($left['value']) === $this->literalText($right['value'])
+            && $this->literalText((string) ($left['unit'] ?? '')) === $this->literalText((string) ($right['unit'] ?? ''));
+    }
+
+    /** Preserve case (GB and Gb), numbers, punctuation and unit spelling. */
+    private function literalText(string $text): string
+    {
+        return trim(preg_replace('/[\s\p{Z}]+/u', ' ', html_entity_decode($text, ENT_QUOTES | ENT_HTML5, 'UTF-8')) ?? $text);
+    }
+
     public function validate(array $input, array $result, array $observedFacts, array $observedPages, array $inputEvidence = []): void
     {
         $originals = collect($input)->keyBy('key');

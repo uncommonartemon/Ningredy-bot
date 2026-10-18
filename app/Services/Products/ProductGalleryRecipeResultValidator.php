@@ -238,14 +238,23 @@ class ProductGalleryRecipeResultValidator
             );
         }
 
+        $traversalConfirmed = $countedOnThisPage
+            || ($recipe['gallery_verification_mode'] ?? null) !== ConfirmedProductGalleryVerifier::MODE_AMBIGUOUS
+            || $observedGalleryCount > 0
+            || collect($result['action_trace'] ?? [])->contains(fn (mixed $step): bool => is_array($step)
+                && ($step['traversal_complete'] ?? false) === true);
+
         return [
             'passed' => true,
+            'traversal_confirmed' => $traversalConfirmed,
             'expected' => $targetCount,
             'extracted' => $extracted,
             'collected' => $collected,
             'rejected_frames' => $collected - $extracted,
             'quality_observation' => $this->unresolvedEnlargementControl($recipe, $result),
-            'reason' => 'Gallery traversal complete: collected '.$collected.' of '.$targetCount.' required frames; '.$extracted.' technically usable.',
+            'reason' => $traversalConfirmed
+                ? 'Gallery traversal complete: collected '.$collected.' of '.$targetCount.' required frames; '.$extracted.' technically usable.'
+                : 'Recipe extracted '.$extracted.' usable frames, but the ambiguous reused recipe has no current gallery count or measured traversal end.',
         ];
     }
 

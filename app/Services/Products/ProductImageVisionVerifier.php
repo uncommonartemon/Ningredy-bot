@@ -314,14 +314,7 @@ class ProductImageVisionVerifier
             $allowedKinds[] = 'logo';
         }
         $forbidsPackaging = self::categoryHintForbidsPackaging($categoryHint);
-        $operatorRequiresPhotoLayout = collect(ProductInputContext::forDraft($draft)['input_evidence'])
-            ->contains(fn (array $fact): bool => ($fact['source_kind'] ?? null) === 'user_text'
-                && (in_array(strtolower((string) ($fact['key'] ?? '')), [
-                    'photo_keyboard_layout', 'image_keyboard_layout', 'required_photo_keyboard_layout',
-                ], true) || (($fact['requirement_scope'] ?? null) === 'photos'
-                    && in_array(strtolower((string) ($fact['key'] ?? '')), [
-                        'keyboard_layout', 'keyboard_language', 'keyboard_localization', 'keyboard_locale',
-                    ], true))) && filled($fact['value'] ?? null));
+        $operatorRequiresPhotoLayout = ProductPhotoKeyboardContext::explicitlyRequiresPhotos(ProductInputContext::forDraft($draft));
         $qualifies = fn (array $review): bool => $review['publishable']
             && ($review['catalog_photo'] ?? true)
             && ($review['physical_match'] ?? null) !== 'conflicting'

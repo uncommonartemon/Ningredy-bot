@@ -355,7 +355,7 @@ class ProductSpecificationReconciler
                         'A compatible gallery only illustrates the requested product; retain_selected_offer and its own facts are required.',
                     ]]);
                 }
-                $this->evidenceGuard->validate($inputSpecifications, $data['specifications'],
+                $data['specifications'] = $this->evidenceGuard->normalizeAndValidate($inputSpecifications, $data['specifications'],
                     $draft->fresh()->specification_evidence ?? [], $observedPages, $inputEvidence);
                 $offerSelection = app(CardOfferSelection::class)->validate($draft, $source, $data, $observedPages, $updateId);
             }

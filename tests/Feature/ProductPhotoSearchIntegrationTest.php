@@ -13,6 +13,7 @@ use App\Services\Products\ProductImageStorage;
 use App\Services\Products\ProductImageVisionVerifier;
 use App\Services\Products\ProductInputContext;
 use App\Services\Products\ProductPhotoApplicability;
+use App\Services\Products\ProductPhotoKeyboardContext;
 use App\Services\Products\ProductSourceIdentityGate;
 use App\Services\Products\ProductSpecificationReconciler;
 use App\Services\Products\SpecificationReconciliationOutcome;
@@ -465,6 +466,174 @@ class ProductPhotoSearchIntegrationTest extends TestCase
             'source_model' => 'OTHER-16', 'differences' => ['Source has 16 GB RAM; target has 32 GB.'],
             'evidence' => ['Matching platform, shell, ports and black finish.'], 'may_inspect_gallery' => true,
         ]);
+    }
+
+    public function test_initial_stage_attaches_a_late_product_keyboard_notice_without_an_extra_vision_call(): void
+    {
+        config()->set('product-images.max_images_by_type.laptop', 1);
+        $draft = $this->draft();
+        $calls = 0;
+        $this->keyboardVision($calls);
+        $this->mock(ProductPhotoApplicability::class)->shouldReceive('assess')->andReturnUsing(
+            fn (ProductDraft $target, array $source): array => $this->compatible($target, $source),
+        );
+        $this->mock(ProductSpecificationReconciler::class)->shouldReceive('reconcile')->once()
+            ->andReturnUsing(fn (ProductDraft $target) => $this->italianOutcome($target));
+
+        $this->assertSame(1, app(ProductImageStorage::class)->stage($draft));
+        $fresh = $draft->fresh();
+        $this->assertSame(1, $calls);
+        $this->assertStringContainsString('не сверена', PhotoSourceNotice::russian($fresh->photo_source_context));
+        $this->assertStringContainsString('Italian', PhotoSourceNotice::russian($fresh->photo_source_context));
+        $this->assertSame($fresh->photo_source_context, $fresh->media()->first()->photo_source_context);
+        $this->assertSame('not_applicable', $fresh->photo_source_context['_photo_visual_review']['frames'][0]['keyboard_layout_match']);
+    }
+
+    public static function savedKeyboardPaths(): array
+    {
+        return ['resume facts' => [false], 'resume pending pixels' => [true]];
+    }
+
+    #[DataProvider('savedKeyboardPaths')]
+    public function test_late_keyboard_notice_is_saved_when_resuming_facts_or_pixels(bool $pending): void
+    {
+        config()->set('product-images.max_images_by_type.laptop', 1);
+        $draft = $this->savedKeyboardDraft($pending);
+        $calls = 0;
+        $this->keyboardVision($calls);
+        $this->mock(ProductImageCandidateDiscovery::class)->shouldNotReceive('find');
+        $this->mock(ProductSpecificationReconciler::class)->shouldReceive('reconcile')->once()
+            ->andReturnUsing(fn (ProductDraft $target) => $this->italianOutcome($target));
+        $before = Storage::disk('public')->get('drafts/keyboard-front.webp');
+
+        $this->assertSame(1, app(ProductImageStorage::class)->stage($draft));
+        $fresh = $draft->fresh();
+        $this->assertSame($pending ? 1 : 0, $calls);
+        $this->assertStringContainsString('Italian', PhotoSourceNotice::russian($fresh->photo_source_context));
+        $this->assertSame($fresh->photo_source_context, $fresh->media()->first()->photo_source_context);
+        $this->assertSame($before, Storage::disk('public')->get('drafts/keyboard-front.webp'));
+        Http::assertNothingSent();
+    }
+
+    public function test_strict_late_keyboard_requirement_preserves_side_views_and_resumes_only_local_pixels(): void
+    {
+        config()->set('product-images.max_images_by_type.laptop', 2);
+        $draft = $this->savedKeyboardDraft(false, true);
+        $this->mock(ProductImageCandidateDiscovery::class)->shouldNotReceive('find');
+        $this->mock(ProductSpecificationReconciler::class)->shouldReceive('reconcile')->twice()
+            ->andReturnUsing(fn (ProductDraft $target) => $this->italianOutcome($target));
+        $this->assertSame(2, app(ProductImageStorage::class)->stage($draft));
+        $fresh = $draft->fresh();
+        $this->assertSame('pending', $fresh->media()->where('source_url', self::PAGE.'/front.jpg')->first()->verification_status);
+        $this->assertSame('verified', $fresh->media()->where('source_url', self::PAGE.'/closed.jpg')->first()->verification_status);
+        $this->assertSame('partial', $fresh->gallery_status);
+        $calls = 0;
+        $this->keyboardVision($calls, true);
+        // The confirmed gallery already has a closed frame; only one frame needs a new pixel verdict.
+        config()->set('product-images.max_images_by_type.laptop', 1);
+        $this->assertSame(2, app(ProductImageStorage::class)->stage($fresh));
+        $fresh = $fresh->fresh();
+        $this->assertSame(1, $calls);
+        $this->assertFalse($fresh->media()->where('verification_status', 'pending')->exists());
+        $this->assertCount(2, $fresh->photo_source_context['_photo_visual_review']['frames']);
+        foreach ($fresh->media as $media) {
+            $this->assertSame($fresh->photo_source_context, $media->photo_source_context);
+            Storage::disk('public')->assertExists($media->path);
+        }
+        Http::assertNothingSent();
+    }
+
+    public function test_interrupted_late_keyboard_review_does_not_reopen_the_source(): void
+    {
+        config()->set('product-images.max_images_by_type.laptop', 1);
+        $draft = $this->savedKeyboardDraft(false, true);
+        $this->mock(ProductSpecificationReconciler::class)->shouldReceive('reconcile')->once()
+            ->andReturnUsing(fn (ProductDraft $target) => $this->italianOutcome($target));
+        app(ProductImageStorage::class)->stage($draft);
+        $this->mock(ProductImageCandidateDiscovery::class)->shouldNotReceive('find');
+        $this->mock(ProductImageVisionVerifier::class)->shouldReceive('reviewCompleteGallery')->once()->andReturn(null);
+
+        $this->assertSame(2, app(ProductImageStorage::class)->stage($draft->fresh()));
+        $this->assertTrue($draft->media()->where('verification_status', 'pending')->exists());
+        Http::assertNothingSent();
+    }
+
+    public function test_strict_review_of_a_frame_outside_the_retained_album_does_not_block_closed_photos(): void
+    {
+        $draft = $this->savedKeyboardDraft(false, true);
+        $source = $draft->photo_source_context;
+        $source['_photo_visual_review']['frames'][0]['keyboard_visibility'] = 'not_visible';
+        $source['_photo_visual_review']['frames'][] = ['source_url' => self::PAGE.'/not-retained.jpg',
+            'keyboard_visibility' => 'readable', 'keyboard_requirement_scope' => 'none'];
+        $draft->update(['photo_source_context' => $source]);
+        $this->mock(ProductSpecificationReconciler::class)->shouldReceive('reconcile')->once()
+            ->andReturnUsing(fn (ProductDraft $target) => $this->italianOutcome($target));
+
+        $this->assertSame(2, app(ProductImageStorage::class)->stage($draft));
+        $fresh = $draft->fresh();
+        $this->assertSame('complete', $fresh->gallery_status);
+        $this->assertFalse($fresh->media()->where('verification_status', 'pending')->exists());
+        $this->assertSame([], ProductPhotoKeyboardContext::pendingSources($fresh->photo_source_context));
+        Http::assertNothingSent();
+    }
+
+    private function keyboardVision(int &$calls, bool $strict = false): void
+    {
+        ProductImageVisionAgent::fake(function (string $prompt, $attachments) use (&$calls, $strict): array {
+            $calls++;
+
+            return ['images' => $attachments->keys()->map(fn (int $i): array => [
+                'index' => $i + 1, 'gallery_rank' => $i + 1, 'exact_match' => true, 'color_match' => true,
+                'physical_match' => 'match', 'color_observability' => 'clear', 'catalog_photo' => true,
+                'publishable' => true, 'kind' => 'product', 'view' => 'front', 'score' => 95,
+                'keyboard_visibility' => 'readable', 'keyboard_layout_match' => $strict ? 'match' : 'not_applicable',
+                'keyboard_requirement_source' => $strict ? 'operator' : 'none',
+                'keyboard_requirement_scope' => $strict ? 'photos' : 'none',
+                'keyboard_layout' => $strict ? 'Italian' : '', 'keyboard_layout_note' => '',
+                'reason' => 'Current body and colour match; keyboard result follows the request available at review time.',
+            ])->all()];
+        })->preventStrayPrompts();
+    }
+
+    private function italianOutcome(ProductDraft $draft): SpecificationReconciliationOutcome
+    {
+        $specs = array_values(array_filter($draft->specifications, fn (array $fact): bool => $fact['key'] !== 'keyboard_layout'));
+
+        return SpecificationReconciliationOutcome::reconciled(self::PAGE, $draft->title, $draft->model, $draft->color,
+            $draft->description ?? 'Laptop.', [...$specs, ['key' => 'keyboard_layout', 'name' => 'Keyboard layout', 'value' => 'Italian']], 'Verified final layout.');
+    }
+
+    private function savedKeyboardDraft(bool $pending, bool $strict = false): ProductDraft
+    {
+        $draft = $this->draft();
+        if ($strict) {
+            $draft->telegramUpdate->update(['payload' => [ProductInputContext::PAYLOAD_KEY => [
+                'version' => 1, 'original_operator_request' => 'Photos must show the Italian keyboard.',
+                'input_evidence' => [['key' => 'photo_keyboard_layout', 'value' => 'Italian', 'source_kind' => 'user_text']],
+            ]]]);
+        }
+        $source = $draft->sources[0];
+        $source['_photo_applicability'] = $this->compatible($draft, $source);
+        $source['_photo_visual_review'] = ['scope' => 'current_downloaded_frames', 'keyboard_target' => [], 'differences' => [],
+            'photo_requirement' => ProductPhotoKeyboardContext::photoRequirement(ProductInputContext::forDraft($draft)),
+            'frames' => [['source_url' => self::PAGE.'/front.jpg', 'physical_match' => 'match', 'color_match' => true,
+                'keyboard_visibility' => 'readable', 'keyboard_layout_match' => 'not_applicable', 'keyboard_requirement_scope' => 'none']]];
+        if ($strict) {
+            $source['_photo_visual_review']['frames'][] = ['source_url' => self::PAGE.'/closed.jpg',
+                'keyboard_visibility' => 'not_visible', 'keyboard_requirement_scope' => 'none'];
+        }
+        $draft->update(['primary_source_url' => self::PAGE, 'photo_source_context' => $source,
+            'gallery_confirmed_sufficient' => true, 'gallery_status' => 'partial']);
+        foreach ($strict ? ['front', 'closed'] : ['front'] as $view) {
+            $path = 'drafts/keyboard-'.$view.'.webp';
+            Storage::disk('public')->put($path, $this->jpeg());
+            $draft->media()->create(['disk' => 'public', 'path' => $path, 'source_url' => self::PAGE.'/'.$view.'.jpg',
+                'checksum' => hash('sha256', $view), 'width' => 720, 'height' => 600,
+                'verification_status' => $pending ? 'pending' : 'verified', 'gallery_traversal_complete' => true,
+                'photo_source_context' => $source]);
+        }
+
+        return $draft;
     }
 
     private function draft(): ProductDraft

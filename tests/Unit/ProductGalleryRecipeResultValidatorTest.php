@@ -10,6 +10,30 @@ class ProductGalleryRecipeResultValidatorTest extends TestCase
 {
     use RefreshDatabase;
 
+    public function test_reused_ambiguous_recipe_needs_current_structure_to_claim_full_traversal(): void
+    {
+        $recipe = ['gallery_present' => true, 'content_confirmed_product' => true,
+            'gallery_verification_mode' => 'ambiguous', 'actions' => []];
+        $result = ['images' => $this->images(3), 'diagnostics' => ['observed_gallery_count' => 0]];
+        $validator = app(ProductGalleryRecipeResultValidator::class);
+        $partial = $validator->validate($recipe, $result, minimumSuccessCount: 1, countedOnThisPage: false);
+        $this->assertTrue($partial['passed']);
+        $this->assertFalse($partial['traversal_confirmed']);
+        $this->assertSame(3, $partial['extracted']);
+        $this->assertStringNotContainsString('traversal complete', $partial['reason']);
+
+        $this->assertTrue($validator->validate([...$recipe, 'gallery_verification_mode' => 'dedicated'],
+            $result, minimumSuccessCount: 1, countedOnThisPage: false)['traversal_confirmed']);
+        $this->assertTrue($validator->validate($recipe,
+            [...$result, 'diagnostics' => ['observed_gallery_count' => 3]],
+            minimumSuccessCount: 1, countedOnThisPage: false)['traversal_confirmed']);
+        $recipe['actions'] = [['kind' => 'click_each', 'selector' => '.next', 'iteration_mode' => 'repeat']];
+        $result['action_trace'] = [['action_index' => 0, 'action' => 'click_each', 'clicked' => true,
+            'traversal_complete' => true, 'traversal_stop_reason' => 'returned_to_first_frame']];
+        $this->assertTrue($validator->validate($recipe, $result,
+            minimumSuccessCount: 1, countedOnThisPage: false)['traversal_confirmed']);
+    }
+
     public function test_explicit_iteration_mode_requires_a_measured_traversal_end_but_legacy_remains_compatible(): void
     {
         $recipe = ['gallery_present' => true, 'content_confirmed_product' => true,

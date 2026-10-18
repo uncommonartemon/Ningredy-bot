@@ -136,6 +136,51 @@ class ResearchResponseRecoveryTest extends TestCase
         $this->assertDatabaseCount('product_drafts', 0);
     }
 
+    public function test_real_research_records_executed_queries_once_per_call_and_preserves_usage(): void
+    {
+        $valid = json_encode(['status' => 'not_found', 'title' => null, 'specifications' => [], 'sources' => [],
+            'image_urls' => [], 'confidence' => 0, 'research_notes' => 'No matching product.']);
+        $search = ['id' => 'ws_exact', 'type' => 'web_search_call', 'status' => 'completed',
+            'action' => ['type' => 'search', 'queries' => ['"ThinkPad E14" black', '"EAN123"'], 'query' => '"ThinkPad E14" black',
+                'headers' => ['Authorization' => 'never-save']], 'secret' => 'never-save'];
+        Http::fake(['api.openai.com/*' => Http::response($this->sse($valid, [$search, $search]), 200, ['Content-Type' => 'text/event-stream']),
+            'api.telegram.org/*' => Http::response(['ok' => true, 'result' => ['message_id' => 987]])]);
+        $update = $this->update();
+
+        $result = json_decode((string) (new ResearchProduct($update, app(ProductImageResolver::class)))
+            ->handle(new Request(['query' => $update->text])), true);
+
+        $run = AiRun::sole();
+        $this->assertSame('not_found', $result['status']);
+        $this->assertSame(1, $run->usage['web_search_calls']);
+        $this->assertSame(120, $run->usage['prompt_tokens']);
+        $this->assertCount(1, $run->activity['provider_web_search_items']);
+        $this->assertSame($search['action']['queries'], $run->activity['provider_web_search_items']['ws_exact']['action']['queries']);
+        $this->assertStringNotContainsString('never-save', json_encode($run->activity));
+        $this->assertSame('stream_start', $run->activity[0]['stage']);
+    }
+
+    public function test_recovery_keeps_each_attempts_executed_searches_without_carrying_old_calls_into_new_usage(): void
+    {
+        $first = ['id' => 'ws_first', 'type' => 'web_search_call', 'status' => 'completed',
+            'action' => ['type' => 'search', 'queries' => ['ThinkPad E14 exact SKU']]];
+        $second = ['id' => 'ws_second', 'type' => 'web_search_call', 'status' => 'completed',
+            'action' => ['type' => 'open_page', 'url' => 'https://shop.example/e14']];
+        Http::fake(['api.openai.com/*' => Http::sequence()
+            ->push($this->sse('broken', [$first, $first]), 200, ['Content-Type' => 'text/event-stream'])
+            ->push($this->sse('{"status":"not_found"}', [$second]), 200, ['Content-Type' => 'text/event-stream'])]);
+        $run = $this->runRecord();
+
+        $this->execute($run);
+
+        $runs = AiRun::orderBy('id')->get();
+        $this->assertSame(['failed', 'running'], $runs->pluck('status')->all());
+        $this->assertSame([1, 1], $runs->map(fn ($item) => $item->usage['web_search_calls'])->all());
+        $this->assertSame(['ws_first'], array_keys($runs[0]->activity['provider_web_search_items']));
+        $this->assertSame(['ws_second'], array_keys($runs[1]->activity['provider_web_search_items']));
+        $this->assertSame($second['action'], $runs[1]->activity['provider_web_search_items']['ws_second']['action']);
+    }
+
     #[DataProvider('unusableFoundResponses')]
     public function test_found_requirements_are_repaired_inside_recovery_with_the_original_sources_retained(array $found, string $errorKey): void
     {
@@ -203,9 +248,10 @@ class ResearchResponseRecoveryTest extends TestCase
         Http::fake(['api.openai.com/*' => $sequence, ...($telegram ? ['api.telegram.org/*' => Http::response(['ok' => true, 'result' => ['message_id' => 987]])] : [])]);
     }
 
-    private function sse(string $text): string
+    private function sse(string $text, array $searchItems = []): string
     {
         $events = [['type' => 'response.created', 'response' => ['id' => 'resp_test', 'model' => 'gpt-5-mini']],
+            ...array_map(fn (array $item): array => ['type' => 'response.output_item.done', 'item' => $item], $searchItems),
             ['type' => 'response.output_text.delta', 'delta' => $text],
             ['type' => 'response.completed', 'response' => ['id' => 'resp_test', 'model' => 'gpt-5-mini', 'status' => 'completed',
                 'output' => [['type' => 'message', 'status' => 'completed', 'content' => [['type' => 'output_text', 'text' => $text]]]],

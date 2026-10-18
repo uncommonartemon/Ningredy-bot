@@ -224,6 +224,88 @@ class ProductSpecificationEvidenceGuardTest extends TestCase
         (new ProductSpecificationEvidenceGuard)->validate([$fact], [[...$fact, 'value' => '48 GB', 'evidence' => 'confirmed']], [], []);
     }
 
+    public function test_unchanged_cited_value_only_repairs_the_status_after_all_conflicts_are_accounted_for(): void
+    {
+        $fact = $this->fact(['value' => '256 GB', 'source_excerpt' => 'Max. Memory: 256 GB']);
+        $other = $this->fact(['value' => '192 GB', 'source_url' => 'https://shop.example/product', 'source_excerpt' => 'Max. Memory: 192 GB']);
+        $candidate = [...$fact, 'evidence' => 'corrected', 'reason' => 'The retailer observation is outdated for this model.',
+            'considered_source_urls' => [$other['source_url']]];
+
+        $result = (new ProductSpecificationEvidenceGuard)->normalizeAndValidate([$fact], [$candidate], [$other], []);
+
+        $this->assertSame([[...$candidate, 'evidence' => 'confirmed']], $result);
+        $this->assertSame('corrected', $candidate['evidence']);
+    }
+
+    #[DataProvider('unsafeStatusRepairs')]
+    public function test_status_repair_never_bypasses_evidence_or_actual_value_checks(array $changes, string $error): void
+    {
+        $fact = $this->fact(['value' => '256 GB', 'source_excerpt' => 'Max. Memory: 256 GB']);
+        $candidate = [...$fact, 'evidence' => 'corrected', 'reason' => 'Retained the observed capacity.', ...$changes];
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage($error);
+
+        (new ProductSpecificationEvidenceGuard)->normalizeAndValidate([$fact], [$candidate], [], []);
+    }
+
+    public static function unsafeStatusRepairs(): array
+    {
+        return [
+            'fabricated quote still contains value' => [['source_excerpt' => 'Official verified maximum: 256 GB'], 'excerpt was not observed'],
+            'quote lacks value' => [['source_excerpt' => 'Max. Memory'], 'corrected but unchanged'],
+            'no reason' => [['reason' => ''], 'corrected value requires a reason'],
+            'separate unit changed' => [['unit' => 'MB'], 'corrected but unchanged'],
+            'unit case is not equivalent' => [['value' => '256 Gb', 'source_excerpt' => 'Max. Memory: 256 Gb'], 'corrected but unchanged'],
+            'confirmed value changed' => [['value' => '192 GB', 'evidence' => 'confirmed'], 'confirmed but changed'],
+        ];
+    }
+
+    public function test_normalized_status_still_requires_review_of_the_other_cited_source(): void
+    {
+        $fact = $this->fact();
+        $other = $this->fact(['value' => '48 GB', 'source_url' => 'https://shop.example/product', 'source_excerpt' => 'RAM: 48 GB']);
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('Missing source URLs: https://shop.example/product.');
+
+        (new ProductSpecificationEvidenceGuard)->normalizeAndValidate([$fact], [[...$fact, 'evidence' => 'corrected',
+            'reason' => 'The original value is retained.']], [$other], []);
+    }
+
+    public function test_even_an_old_cited_value_needs_its_full_literal_value_in_the_quote_for_status_repair(): void
+    {
+        $fact = $this->fact(['value' => 'Wi-Fi 6E', 'source_excerpt' => 'Wireless: Wi-Fi']);
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('corrected but unchanged');
+
+        (new ProductSpecificationEvidenceGuard)->normalizeAndValidate([$fact], [[...$fact, 'evidence' => 'corrected',
+            'reason' => '6E is not documented, removing the unsupported detail.']], [], []);
+    }
+
+    public function test_status_repair_cannot_promote_uncertain_label_provenance(): void
+    {
+        $label = ['key' => 'ram', 'value' => '64 GB', 'source_kind' => 'photo_label', 'source_ref' => 'photo:1',
+            'source_excerpt' => 'RAM: 64 GB', 'confidence' => 0.4, 'uncertain_characters' => ['6']];
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('photo_label excerpt was not observed');
+
+        (new ProductSpecificationEvidenceGuard)->normalizeAndValidate([$label], [[...$label, 'evidence' => 'corrected',
+            'reason' => 'The label capacity is retained.']], [], [], [$label]);
+    }
+
+    public function test_literal_value_must_not_be_cut_out_of_a_larger_number_or_unit(): void
+    {
+        $guard = new ProductSpecificationEvidenceGuard;
+        foreach (['Max. Memory: 1256 GB', 'Max. Memory: 256 GBps'] as $quote) {
+            $fact = $this->fact(['value' => '256 GB', 'source_excerpt' => $quote]);
+            try {
+                $guard->normalizeAndValidate([$fact], [[...$fact, 'evidence' => 'corrected', 'reason' => 'Retained.']], [], []);
+                $this->fail('A partial number or unit authorized metadata repair.');
+            } catch (RuntimeException $error) {
+                $this->assertStringContainsString('corrected but unchanged', $error->getMessage());
+            }
+        }
+    }
+
     public function test_old_supported_facts_cannot_be_dropped_without_accounting_for_their_sources(): void
     {
         $this->expectException(RuntimeException::class);

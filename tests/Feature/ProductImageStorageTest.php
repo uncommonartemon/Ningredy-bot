@@ -2180,7 +2180,8 @@ class ProductImageStorageTest extends TestCase
         ]);
     }
 
-    public function test_six_verified_exact_source_photos_are_staged_without_opening_a_second_source_to_reach_ten(): void
+    #[DataProvider('partialSourceFrames')]
+    public function test_six_verified_exact_source_photos_are_staged_without_opening_a_second_source_to_reach_ten(bool $withStaticTail): void
     {
         Storage::fake('public');
         Http::preventStrayRequests();
@@ -2200,8 +2201,8 @@ class ProductImageStorageTest extends TestCase
             return ['images' => $attachments->keys()->map(fn (int $index): array => [
                 'index' => $index + 1, 'exact_match' => true, 'color_match' => true,
                 'publishable' => true, 'kind' => 'product', 'view' => 'angle',
-                'gallery_rank' => $index + 1, 'score' => 98,
-                'reason' => 'Exact source and a usable product photograph.',
+                'gallery_rank' => $index + 1, 'score' => 10,
+                'reason' => 'Exact source and a valid product feature photograph; low aesthetic score.',
             ])->all()];
         })->preventStrayPrompts();
         $discovery = \Mockery::mock(app(ProductImageCandidateDiscovery::class))->makePartial();
@@ -2214,14 +2215,14 @@ class ProductImageStorageTest extends TestCase
         )->andReturn($photos);
         $resolver->shouldReceive('sourceContextForImage')->andReturn($source);
         $resolver->shouldReceive('isConfirmedGalleryImage')->andReturn(false);
-        $resolver->shouldReceive('isPartialGalleryImage')->andReturn(true);
-        $resolver->shouldReceive('download')->times(6)->andReturnUsing(function (string $url): array {
+        $resolver->shouldReceive('isPartialGalleryImage')->andReturnUsing(fn (string $url): bool => ! $withStaticTail || ! str_ends_with($url, '6.jpg'));
+        $resolver->shouldReceive('download')->times(6)->andReturnUsing(function (string $url) use ($withStaticTail): array {
             preg_match('/partial-(\d+)/', $url, $match);
 
             return [
                 'bytes' => $this->jpeg((int) $match[1]), 'source_url' => $url,
                 'mime_type' => 'image/jpeg', 'width' => 720, 'height' => 600,
-                'confirmed_gallery' => false, 'partial_gallery' => true,
+                'confirmed_gallery' => false, 'partial_gallery' => ! $withStaticTail || ! str_ends_with($url, '6.jpg'),
             ];
         });
         $this->mock(ProductSpecificationReconciler::class)->shouldReceive('reconcile')->once()
@@ -2256,6 +2257,35 @@ class ProductImageStorageTest extends TestCase
         ]);
         Http::assertNothingSent();
         GalleryFrameReviewAgent::assertNeverPrompted();
+    }
+
+    public static function partialSourceFrames(): array
+    {
+        return ['recipe frames' => [false], 'recipe frames and static tail' => [true]];
+    }
+
+    public function test_deferred_recipe_metadata_never_substitutes_for_current_pixel_review(): void
+    {
+        $draft = $this->confirmedGalleryDraft(frameCount: 3);
+        $this->mock(ConfirmedProductGalleryVerifier::class)->shouldReceive('verify')->once()
+            ->andReturnUsing(fn (string $url, $candidates): array => ['mode' => 'ambiguous',
+                'candidates' => $candidates->take(2), 'cached' => true]);
+        $calls = 0;
+        ProductImageVisionAgent::fake(function (string $prompt, $attachments) use (&$calls): array {
+            $calls++;
+
+            return ['images' => $attachments->keys()->map(fn (int $i): array => [
+                'index' => $i + 1, 'exact_match' => false, 'color_match' => false, 'publishable' => false,
+                'catalog_photo' => false, 'kind' => 'screenshot', 'view' => 'other', 'gallery_rank' => $i + 1,
+                'score' => 0, 'reason' => 'The current files contain unrelated screenshots.',
+            ])->all()];
+        })->preventStrayPrompts();
+
+        $this->assertSame(0, app(ProductImageStorage::class)->stage($draft->fresh()));
+        $this->assertSame(1, $calls);
+        $this->assertSame(0, $draft->media()->count());
+        $this->assertDatabaseHas('product_source_attempts', ['product_draft_id' => $draft->id,
+            'action' => 'verify_deferred_source', 'output->accepted_images' => 0]);
     }
 
     public function test_staging_reviews_all_ten_current_photos_even_from_a_preverified_exact_slider(): void
@@ -2755,6 +2785,55 @@ class ProductImageStorageTest extends TestCase
         $this->assertSame('exact', $fresh->photo_source_context['_photo_applicability']['verdict']);
         $this->assertSame('source_metadata_and_current_pixels', $fresh->photo_source_context['_photo_applicability']['assessment_scope']);
         $this->assertCount(8, $fresh->photo_source_context['_photo_visual_review']['frames']);
+        $this->assertDatabaseMissing('product_source_attempts', ['product_draft_id' => $draft->id,
+            'action' => 'verify_gallery', 'decision' => 'try_next_source_before_vision']);
+        Http::assertNotSent(fn (Request $request): bool => str_contains($request->url(), '93.184.216.37'));
+    }
+
+    public function test_single_cpu_frame_with_matching_observed_mpn_is_reviewed_before_another_source_despite_unknown_revision(): void
+    {
+        $draft = $this->confirmedGalleryDraft(frameCount: 1);
+        Http::fake(fn (Request $request) => str_contains($request->url(), '/gallery-')
+            ? Http::response($this->jpeg(1), 200, ['Content-Type' => 'image/jpeg'])
+            : Http::response('<html><body><h1>AMD Ryzen 7 9800X3D BOX</h1><p>MPN 100-100001084WOF</p></body></html>',
+                200, ['Content-Type' => 'text/html']));
+        Category::where('slug', 'components')->update(['minimum_verified_images' => 1]);
+        $draft->update(['category' => 'components', 'product_type' => 'component', 'brand' => 'AMD',
+            'title' => 'AMD Ryzen 7 9800X3D Boxed', 'model' => 'Ryzen 7 9800X3D', 'color' => null,
+            'specifications' => [['key' => 'mpn', 'value' => '100-100001084WOF']],
+        ]);
+        $source = [...$draft->sources[0], '_preflight_index' => 0,
+            '_preflight_identity_evidence' => 'AMD Ryzen 7 9800X3D BOX, MPN 100-100001084WOF',
+            '_preflight_page_identity' => ['observed_url' => $draft->primary_source_url,
+                'product' => ['name' => 'AMD Ryzen 7 9800X3D BOX', 'mpn' => '100-100001084WOF']],
+        ];
+        $this->partialMock(SourceQueueBuilder::class)->shouldReceive('buildSourceQueue')->once()
+            ->andReturn([collect([$source, [...$source, 'url' => 'https://93.184.216.37/second-source']]), collect([$source])]);
+        $this->partialMock(ProductIdentityMatcher::class)->shouldReceive('confirmsExactIdentifier')->andReturn(false);
+        $this->mock(ProductPhotoApplicability::class)->shouldReceive('assess')
+            ->andReturnUsing(fn (ProductDraft $target, array $page): array => ProductPhotoApplicability::bind($target, $page, [
+                'verdict' => 'uncertain', 'source_model' => 'AMD Ryzen 7 9800X3D BOX',
+                'reason' => 'Same product and MPN; hardware revision not stated.',
+                'plausible_target' => true, 'may_inspect_gallery' => true,
+                'physical_checks' => ['platform' => ['status' => 'match'], 'revision' => ['status' => 'unknown'],
+                    'construction' => ['status' => 'match'], 'color' => ['status' => 'unknown']],
+            ]));
+        $batches = [];
+        ProductImageVisionAgent::fake(function (string $prompt, $attachments) use (&$batches): array {
+            $batches[] = $attachments->count();
+
+            return ['images' => [['index' => 1, 'exact_match' => true, 'color_match' => true,
+                'color_observability' => 'clear', 'physical_match' => 'match', 'catalog_photo' => true,
+                'publishable' => true, 'kind' => 'product', 'view' => 'front', 'gallery_rank' => 1,
+                'score' => 95, 'reason' => 'Current downloaded frame shows the requested boxed processor.',
+            ]]];
+        })->preventStrayPrompts();
+
+        $this->assertSame(1, app(ProductImageStorage::class)->stage($draft->fresh()));
+        $this->assertSame([1], $batches);
+        $assessment = $draft->fresh()->photo_source_context['_photo_applicability'];
+        $this->assertSame('uncertain', $assessment['verdict']);
+        $this->assertSame('unknown', $assessment['physical_checks']['revision']['status']);
         $this->assertDatabaseMissing('product_source_attempts', ['product_draft_id' => $draft->id,
             'action' => 'verify_gallery', 'decision' => 'try_next_source_before_vision']);
         Http::assertNotSent(fn (Request $request): bool => str_contains($request->url(), '93.184.216.37'));

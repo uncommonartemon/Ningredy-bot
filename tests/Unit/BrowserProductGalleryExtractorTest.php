@@ -23,6 +23,37 @@ class BrowserProductGalleryExtractorTest extends TestCase
 {
     use RefreshDatabase;
 
+    public function test_reused_ambiguous_recipe_keeps_files_partial_without_retraining_or_proof(): void
+    {
+        config(['product-images.browser_fallback.enabled' => true]);
+        $this->mock(ProductGalleryRecipeTrainer::class)->shouldNotReceive('train');
+        $recipe = ProductGalleryRecipe::create(['domain' => 'shop.example', 'path_pattern' => '*',
+            'status' => 'active', 'success_count' => 4, 'failure_count' => 0, 'recipe' => [
+                'gallery_present' => true, 'content_confirmed_product' => true,
+                'gallery_verification_mode' => 'ambiguous', 'collect_selectors' => ['img.full'], 'actions' => [],
+            ]]);
+        $urls = ['https://cdn.example/detail-1.jpg', 'https://cdn.example/detail-2.jpg'];
+        $browser = $this->extractorReturning(['images' => $urls,
+            'learned_recipe' => ['collect_selectors' => ['img.full'], 'actions' => []],
+            'diagnostics' => ['observed_gallery_count' => 0, 'validated_candidates' => 2]]);
+        $this->assertSame($urls, $browser->extract('https://shop.example/component',
+            context: ['minimum_verified_images' => 1]));
+        foreach ($urls as $url) {
+            $this->assertTrue($browser->isPartialGalleryImage($url));
+            $this->assertFalse($browser->isConfirmedGalleryImage($url));
+        }
+        $this->assertSame(4, $recipe->fresh()->success_count);
+        $this->assertSame(0, $recipe->fresh()->failure_count);
+        $this->assertDatabaseMissing('product_source_attempts', ['action' => 'confirmed_recipe_execution']);
+
+        $recipe->update(['path_pattern' => '/notebooks/*']);
+        $attempt = $this->invokeCompatibleAttempt($browser, 'https://shop.example/components/cpu');
+        $this->assertTrue($attempt['passed']);
+        $this->assertSame($urls, $attempt['images']);
+        $this->assertNull($recipe->fresh()->compatible_path_patterns);
+        $this->assertSame(4, $recipe->success_count);
+    }
+
     public function test_card_assembly_page_reads_get_the_assembly_window_not_the_spent_search_clock(): void
     {
         // A reviewer's reproduction: assembly had 60 seconds left, its browser was given one.

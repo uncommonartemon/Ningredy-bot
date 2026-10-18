@@ -392,6 +392,11 @@ class ProductImageStorage
         if ($resumed !== null) {
             return $resumed;
         }
+        if (ProductPhotoKeyboardContext::pendingSources($draft->photo_source_context ?? []) !== []
+            && $draft->media()->where('verification_status', 'pending')->exists()) {
+            // A late text fact requires checking retained pixels, not reopening their source.
+            return $draft->media()->count();
+        }
 
         // A completed check may have rejected some pending files while keeping
         // a verified partial set. Do not later resurrect the stale collection.
@@ -705,10 +710,10 @@ class ProductImageStorage
             $confirmedGallery = collect($allCandidates)
                 ->filter(fn (array $candidate): bool => (bool) ($candidate['confirmed_gallery'] ?? false))
                 ->values();
-            // An observed full model with unresolved colour has a useful next
-            // step right here: inspect the downloaded originals, not another shop.
-            $colourNeedsPixels = $this->modelConfirmedAwaitingColour($source);
-            $structurallyConfirmed = ($sourceIdentityConfirmed || $colourNeedsPixels)
+            // Missing visual evidence has a useful next step right here:
+            // inspect the downloaded originals before opening another shop.
+            $needsPixelInspection = $this->modelAwaitingPixelInspection($draft, $source);
+            $structurallyConfirmed = ($sourceIdentityConfirmed || $needsPixelInspection)
                 && ! $configurationConflict
                 && $confirmedGallery->count() >= $minimumCompleteGallerySize;
 
@@ -746,11 +751,15 @@ class ProductImageStorage
                 // Verify an already downloaded exact-source set before spending
                 // the next time slice training another page. Canvas viewers can
                 // otherwise consume all working time while these files wait.
-                if ($galleryVerification === null && $sourceIdentityConfirmed
+                if ($galleryVerification === null && ($sourceIdentityConfirmed || $needsPixelInspection)
                     && ! $configurationConflict && count($allCandidates) >= $minimumCompleteGallerySize) {
                     $progress?->__invoke('Подходящий источник уже дал фотографии; проверяю их Vision до обучения следующей страницы.');
+                    $partialTraversal = $confirmedGallery->isEmpty()
+                        && collect($allCandidates)->contains(fn (array $frame): bool => (bool) ($frame['partial_gallery'] ?? false));
                     try {
-                        $verified = $this->selectFromCandidates($draft, $allCandidates, $target, $telegramUpdateId);
+                        $verified = ($partialTraversal || $needsPixelInspection)
+                            ? $this->checkedGalleryFrames($allCandidates, $draft, $telegramUpdateId, $minimumCompleteGallerySize, $progress)
+                            : $this->selectFromCandidates($draft, $allCandidates, $target, $telegramUpdateId);
                     } catch (ProductSearchCancelled $exception) {
                         $this->destroy($allCandidates);
                         throw $exception;
@@ -758,6 +767,12 @@ class ProductImageStorage
                         report($exception);
                         $this->destroy($allCandidates);
                         $progress?->__invoke('Vision временно недоступен; продолжаю поиск другим источником.');
+
+                        continue;
+                    }
+                    if ($verified === null) {
+                        $reserve = $this->keepBestReserve($reserve,
+                            GallerySourceResult::interrupted($allCandidates, $target, $source, 'static'));
 
                         continue;
                     }
@@ -786,7 +801,7 @@ class ProductImageStorage
                         $deferredVisionSets = [];
                         $reserve = null;
                         $selected = $result->candidates;
-                        $outcome = collect($verified)->every(fn (array $frame): bool => (bool) ($frame['partial_gallery'] ?? false))
+                        $outcome = $partialTraversal
                             ? GalleryOutcome::Partial : $result->outcome;
                         $chosenSource = $result->source;
                         $chosenMethod = $result->method;
@@ -831,7 +846,6 @@ class ProductImageStorage
                 $deferredVisionSets[] = [
                     'candidates' => $allCandidates,
                     'source' => $source,
-                    'already_verified' => $galleryVerification !== null,
                 ];
                 usort($deferredVisionSets, fn (array $left, array $right): int => count($right['candidates']) <=> count($left['candidates'])
                 );
@@ -945,9 +959,8 @@ class ProductImageStorage
                 $verificationInterrupted = false;
 
                 try {
-                    $verified = ($set['already_verified'] ?? false)
-                        ? $candidates
-                        : $this->selectFromCandidates($draft, $candidates, $target, $telegramUpdateId);
+                    // Recipe metadata is not a review of the current pixels.
+                    $verified = $this->selectFromCandidates($draft, $candidates, $target, $telegramUpdateId);
                     $verified = $this->removeNearDuplicates($verified, $excludedHashes);
                     $this->destroyUnselected($candidates, $verified);
                 } catch (ProductSearchCancelled $exception) {
@@ -1721,8 +1734,12 @@ class ProductImageStorage
         ], ...$reconciliationResult['fields']];
         try {
             DB::transaction(function () use ($draft, $stagedMedia, $previousMedia, $reusedMediaIds, $stored, $finalFields): void {
+                $keyboardStaging = $stored > 0 ? $stagedMedia : null;
+                $finalFields = [...$finalFields, ...$this->reconciledKeyboardFields(
+                    $draft, $finalFields, $finalFields['photo_source_context'] ?? [], $keyboardStaging,
+                )];
                 if ($stored > 0) {
-                    $this->commitStagedGallery($draft, $stagedMedia, $previousMedia, $reusedMediaIds);
+                    $this->commitStagedGallery($draft, $keyboardStaging, $previousMedia, $reusedMediaIds);
                 }
                 ProductDraft::withReconciliationWrite(fn () => $draft->update($finalFields));
             });
@@ -1990,11 +2007,15 @@ class ProductImageStorage
         }
         $reconciled = $outcome->isReconciled();
         $result = $this->reconciliationCardFields($draft, $outcome, $primarySourceUrl, $telegramUpdateId);
-        ProductDraft::withReconciliationWrite(fn () => $draft->update([...[
-            'gallery_status' => $reconciled ? 'complete' : 'partial',
-            'gallery_search_stop_reason' => $result['stop_reason'],
-            'images_staged_at' => now(),
-        ], ...$result['fields']]));
+        DB::transaction(function () use ($draft, $reconciled, $result): void {
+            $fields = [...[
+                'gallery_status' => $reconciled ? 'complete' : 'partial',
+                'gallery_search_stop_reason' => $result['stop_reason'],
+                'images_staged_at' => now(),
+            ], ...$result['fields']];
+            $fields = [...$fields, ...$this->reconciledKeyboardFields($draft, $fields, $draft->photo_source_context ?? [])];
+            ProductDraft::withReconciliationWrite(fn () => $draft->update($fields));
+        });
         $progress?->__invoke(match (true) {
             $reconciled => 'Характеристики сверены с источником фото.',
             $outcome->isBudgetExhausted() => 'Бюджет поиска исчерпан; сверка характеристик приостановлена.',
@@ -2209,7 +2230,10 @@ class ProductImageStorage
         // Select the final album only AFTER checking the entire pending set.
         $checked = array_slice($checked, 0, max(1, $maximumImages));
         $keptIds = collect($checked)->pluck('media_id')->filter()->all();
-        $reviewedContext = $this->sourceAfterPixelReview($draft, $draft->photo_source_context ?? [], $checked);
+        $retainedReviews = collect($draft->photo_source_context['_photo_visual_review']['frames'] ?? [])
+            ->filter(fn (array $review): bool => ! in_array($review['source_url'] ?? null, $pending->pluck('source_url')->all(), true))
+            ->map(fn (array $review): array => ['photo_visual_review' => $review])->values()->all();
+        $reviewedContext = $this->sourceAfterPixelReview($draft, $draft->photo_source_context ?? [], [...$checked, ...$retainedReviews]);
         $draft->media()->whereIn('id', $keptIds)->get()->each(fn ($media) => $media->update([
             'verification_status' => 'source_verified',
             'verification_notes' => 'Проверка содержания завершена при продолжении поиска.',
@@ -2224,7 +2248,7 @@ class ProductImageStorage
         // cover, or keep gaps in its ordering. Paths need not be renamed.
         foreach ($draft->media()->get()->values() as $index => $media) {
             $media->update(['sort_order' => $index, 'is_primary' => $index === 0,
-                'role' => ['primary', 'secondary'][$index] ?? 'detail']);
+                'role' => ['primary', 'secondary'][$index] ?? 'detail', 'photo_source_context' => $reviewedContext]);
         }
         $draft->update([
             'image_urls' => $draft->media()->orderBy('sort_order')->pluck('source_url')->filter()->values()->all(),
@@ -2264,12 +2288,16 @@ class ProductImageStorage
             : null;
         $reconciliationPending = $reconciliationOutcome !== null && ! $reconciliationOutcome->isReconciled();
         $reconciliationResult = $this->reconciliationCardFields($draft, $reconciliationOutcome, $primarySourceUrl, $telegramUpdateId);
-        ProductDraft::withReconciliationWrite(fn () => $draft->update([...[
-            'gallery_status' => ($gallerySufficient && ! $reconciliationPending) ? 'complete' : 'partial',
-            'gallery_confirmed_sufficient' => $gallerySufficient,
-            'gallery_search_stop_reason' => ! $gallerySufficient ? 'exhausted' : $reconciliationResult['stop_reason'],
-            'images_staged_at' => now(),
-        ], ...$reconciliationResult['fields']]));
+        DB::transaction(function () use ($draft, $gallerySufficient, $reconciliationPending, $reconciliationResult): void {
+            $fields = [...[
+                'gallery_status' => ($gallerySufficient && ! $reconciliationPending) ? 'complete' : 'partial',
+                'gallery_confirmed_sufficient' => $gallerySufficient,
+                'gallery_search_stop_reason' => ! $gallerySufficient ? 'exhausted' : $reconciliationResult['stop_reason'],
+                'images_staged_at' => now(),
+            ], ...$reconciliationResult['fields']];
+            $fields = [...$fields, ...$this->reconciledKeyboardFields($draft, $fields, $draft->photo_source_context ?? [])];
+            ProductDraft::withReconciliationWrite(fn () => $draft->update($fields));
+        });
         $progress?->__invoke('Проверка завершена без повторного поиска: '.$stored.' фото подтверждено.');
 
         return $stored;
@@ -2354,6 +2382,39 @@ class ProductImageStorage
         return $kept;
     }
 
+    private function modelAwaitingPixelInspection(ProductDraft $draft, array $source): bool
+    {
+        if ($this->modelConfirmedAwaitingColour($source)) {
+            return true;
+        }
+
+        $assessment = $source['_photo_applicability'] ?? [];
+        $checks = $assessment['physical_checks'] ?? [];
+        $observed = $source['_preflight_page_identity'] ?? [];
+        if (($assessment['verdict'] ?? null) !== 'uncertain'
+            || ! ($assessment['plausible_target'] ?? false) || ! ($assessment['may_inspect_gallery'] ?? false)
+            || blank($assessment['source_model'] ?? null) || ($checks['platform']['status'] ?? null) !== 'match'
+            || ($checks['revision']['status'] ?? null) !== 'unknown'
+            || collect($checks)->contains(fn (array $check): bool => ($check['status'] ?? null) === 'conflicting')
+            || blank($observed['observed_url'] ?? null)
+            || rtrim($observed['observed_url'], '/') !== rtrim($source['url'] ?? '', '/')) {
+            return false;
+        }
+
+        // Only the observed main Product can corroborate a code, never search
+        // labels or recommended products. This admits a pixel check; it does
+        // not turn an unknown revision into exact identity or allow promotion
+        // from a matching colour alone.
+        $normalize = fn (mixed $value): string => mb_strtolower(trim((string) $value));
+        $codes = collect($draft->specifications ?? [])
+            ->filter(fn (mixed $spec): bool => is_array($spec)
+                && in_array($spec['key'] ?? null, ['sku', 'mpn', 'ean', 'upc', 'gtin'], true))
+            ->map(fn (array $spec): string => $normalize($spec['value'] ?? ''))->filter();
+
+        return collect($observed['product'] ?? [])->only(['sku', 'mpn', 'gtin', 'gtin8', 'gtin12', 'gtin13', 'gtin14'])
+            ->contains(fn (mixed $value): bool => is_scalar($value) && $codes->contains($normalize($value)));
+    }
+
     private function modelConfirmedAwaitingColour(array $source): bool
     {
         $assessment = $source['_photo_applicability'] ?? [];
@@ -2378,7 +2439,10 @@ class ProductImageStorage
                 && ($review['keyboard_requirement_scope'] ?? null) === 'product'))
             ->pluck('keyboard_layout_note')->filter()->unique()->values()->all();
         $source['_photo_visual_review'] = ['scope' => 'current_downloaded_frames',
+            'keyboard_target' => ProductPhotoKeyboardContext::target($draft->specifications ?? []),
+            'photo_requirement' => ProductPhotoKeyboardContext::photoRequirement(ProductInputContext::forDraft($draft)),
             'differences' => $differences, 'frames' => $reviews->values()->all()];
+        unset($source['_photo_keyboard_reconciliation']);
         if ($this->modelConfirmedAwaitingColour($source)
             && $reviews->contains(fn (array $review): bool => ($review['color_observability'] ?? null) === 'clear'
                 && ($review['color_match'] ?? false))) {
@@ -2392,6 +2456,50 @@ class ProductImageStorage
         }
 
         return $source;
+    }
+
+    /** Called inside the existing card/media transaction; never downloads or re-encodes photos. */
+    private function reconciledKeyboardFields(ProductDraft $draft, array $fields, array $source, ?array &$staged = null): array
+    {
+        if (! isset($fields['specifications'])) {
+            return [];
+        }
+        $updated = ProductPhotoKeyboardContext::reconcile($source, $fields['specifications'], ProductInputContext::forDraft($draft));
+        $pending = ProductPhotoKeyboardContext::pendingSources($updated);
+        if ($pending !== []) {
+            // Pixel review may cover more frames than the final album retained.
+            $actualUrls = $staged !== null
+                ? array_column(array_column($staged, 'attributes'), 'source_url')
+                : $draft->media()->pluck('source_url')->all();
+            $pending = array_values(array_filter($pending, fn (string $url): bool => $url === '*' || in_array($url, $actualUrls, true)));
+            $updated['_photo_keyboard_reconciliation']['pending_source_urls'] = $pending;
+            if ($pending === []) {
+                $updated['_photo_keyboard_reconciliation']['status'] = 'not_compared';
+            }
+        }
+        if ($updated === $source) {
+            return [];
+        }
+        $attributes = fn (array $media): array => [
+            'photo_source_context' => $updated,
+            ...(in_array($media['verification_status'] ?? null, ['verified', 'source_verified'], true)
+                && (in_array('*', $pending, true) || in_array($media['source_url'] ?? null, $pending, true))
+                    ? ['verification_status' => 'pending'] : []),
+        ];
+        if ($staged !== null) {
+            foreach ($staged as &$item) {
+                $item['attributes'] = [...$item['attributes'], ...$attributes($item['attributes'])];
+            }
+            unset($item);
+        } else {
+            foreach ($draft->media()->get() as $media) {
+                $media->update($attributes($media->getAttributes()));
+            }
+        }
+
+        return ['photo_source_context' => $updated, ...($pending !== [] ? [
+            'gallery_status' => 'partial', 'gallery_search_stop_reason' => 'photo_verification_pending',
+        ] : [])];
     }
 
     private function verifyConfirmedGallerySafely(
