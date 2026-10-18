@@ -21,6 +21,7 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Storage;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 class TelegramProductUploadIntakeTest extends TestCase
@@ -48,15 +49,39 @@ class TelegramProductUploadIntakeTest extends TestCase
         });
     }
 
-    public function test_captioned_photo_delegates_to_manual_intake_without_starting_search_or_ocr(): void
+    #[DataProvider('uploadCaptions')]
+    public function test_captioned_photo_delegates_to_manual_intake_without_starting_search_or_ocr(string $caption): void
     {
-        $update = $this->photo(5001, caption: 'Dell Latitude 5450, used, 16 GB RAM');
+        $update = $this->photo(5001, caption: $caption);
         (new TranscribeTelegramPhoto($update->id))->handle(app(TelegramClient::class), app(AiErrorPresenter::class));
 
         Queue::assertPushed(ProcessTelegramProductUpload::class, fn ($job) => $job->telegramUpdateId === $update->id);
         Queue::assertNotPushed(ProcessTelegramMessage::class);
         Http::assertNothingSent();
         $this->assertTrue(data_get($update->fresh()->payload, '_manual_product_upload'));
+    }
+
+    public static function uploadCaptions(): array
+    {
+        return [
+            'description' => ['Dell Latitude 5450, used, 16 GB RAM'],
+            'new product description' => ['Новый MSI Stealth 16, 32 ГБ RAM, 1 ТБ SSD'],
+            'negative Russian request' => ['Не ищи в интернете, добавь по описанию'],
+            'negative English request' => ["Don't search the web; use my photos and description."],
+            'explicit manual command' => ['/add Dell Latitude 5450, find extra information later'],
+            'Find is a phone model' => ['OPPO Find X7 Ultra, новый, 512 ГБ'],
+        ];
+    }
+
+    public function test_explicit_manual_marker_keeps_a_search_caption_in_upload_flow(): void
+    {
+        $update = $this->photo(5050, caption: 'Search extra information later.');
+        $update->update(['payload' => [...$update->payload, '_manual_product_upload' => true]]);
+        (new TranscribeTelegramPhoto($update->id))->handle(app(TelegramClient::class), app(AiErrorPresenter::class));
+
+        Queue::assertPushed(ProcessTelegramProductUpload::class, 1);
+        Queue::assertNotPushed(ProcessTelegramMessage::class);
+        Http::assertNothingSent();
     }
 
     public function test_album_and_description_create_one_manual_draft_preserving_origin_and_originals(): void

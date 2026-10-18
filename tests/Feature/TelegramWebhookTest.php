@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Jobs\ProcessTelegramMessage;
+use App\Jobs\ProcessTelegramProductUpload;
 use App\Jobs\TranscribeTelegramPhoto;
 use App\Jobs\TranscribeTelegramVoice;
 use App\Models\TelegramChatState;
@@ -10,6 +11,7 @@ use App\Models\TelegramUpdate;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 class TelegramWebhookTest extends TestCase
@@ -93,11 +95,13 @@ class TelegramWebhookTest extends TestCase
         Queue::assertNotPushed(ProcessTelegramMessage::class);
     }
 
-    public function test_it_queues_allowed_photo_messages_for_transcription(): void
+    #[DataProvider('searchPhotoCaptions')]
+    public function test_it_queues_allowed_photo_messages_for_transcription(?string $caption): void
     {
         Queue::fake();
         $payload = $this->messagePayload(updateId: 1004);
         unset($payload['message']['text']);
+        $payload['message']['caption'] = $caption;
         $payload['message']['photo'] = [
             ['file_id' => 'photo-small', 'width' => 90, 'height' => 68, 'file_size' => 900],
             ['file_id' => 'photo-large', 'width' => 800, 'height' => 600, 'file_size' => 90000],
@@ -108,6 +112,37 @@ class TelegramWebhookTest extends TestCase
         ])->assertOk()->assertJson(['photo' => true]);
 
         Queue::assertPushed(TranscribeTelegramPhoto::class, 1);
+        Queue::assertNotPushed(ProcessTelegramMessage::class);
+        Queue::assertNotPushed(ProcessTelegramProductUpload::class);
+    }
+
+    public static function searchPhotoCaptions(): array
+    {
+        return [
+            'bare label' => [null],
+            'English search' => ['Search this as a new product and prepare a draft.'],
+            'Russian search' => ['Найди фотографии и характеристики этого ноутбука'],
+            'short photo search' => ['поиск по фото'],
+            'web enrichment' => ['Дополни товар через поиск в интернете'],
+        ];
+    }
+
+    public function test_descriptions_and_negative_search_captions_remain_manual_uploads(): void
+    {
+        Queue::fake();
+        foreach (['Dell Latitude 5450, used, 16 GB RAM', 'Не ищи в интернете, добавь по описанию',
+            "Don't search the web, use this description.", '/add Dell Latitude, search details later'] as $index => $caption) {
+            $payload = $this->messagePayload(updateId: 9050 + $index);
+            unset($payload['message']['text']);
+            $payload['message']['caption'] = $caption;
+            $payload['message']['photo'] = [['file_id' => 'operator-photo', 'width' => 800, 'height' => 600]];
+            $this->postJson('/api/telegram/webhook', $payload, [
+                'X-Telegram-Bot-Api-Secret-Token' => 'test-secret',
+            ])->assertOk()->assertJson(['upload' => true]);
+        }
+
+        Queue::assertPushed(ProcessTelegramProductUpload::class, 4);
+        Queue::assertNotPushed(TranscribeTelegramPhoto::class);
         Queue::assertNotPushed(ProcessTelegramMessage::class);
     }
 

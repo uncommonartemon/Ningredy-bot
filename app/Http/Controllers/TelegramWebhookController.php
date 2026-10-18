@@ -26,6 +26,7 @@ use App\Models\ProductDraftMedia;
 use App\Models\TelegramUpdate;
 use App\Services\Products\ProductDraftWorkflow;
 use App\Services\Products\ProductGalleryRecipeRouter;
+use App\Services\Products\ProductSearchIntentDetector;
 use App\Services\Products\ProductSourcePriority;
 use App\Services\Telegram\CatalogTelegramNavigation;
 use App\Services\Telegram\DraftAccess;
@@ -180,7 +181,8 @@ class TelegramWebhookController extends Controller
 
                 return response()->json(['ok' => true, 'upload' => true]);
             }
-            if (Cache::has($createKey) || $hasImageDocument || $caption !== '' || filled(data_get($payload, 'message.media_group_id'))) {
+            if (Cache::has($createKey) || $hasImageDocument || filled(data_get($payload, 'message.media_group_id'))
+                || ($caption !== '' && ! app(ProductSearchIntentDetector::class)->hasExplicitSearchRequest($caption))) {
                 $this->clearManualCreate((string) $chatId, (string) $telegramUserId);
                 app(TelegramProductUploadIntake::class)->queue($update, $caption);
 

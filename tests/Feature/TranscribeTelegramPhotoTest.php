@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Ai\Agents\TelegramPhotoTextAgent;
 use App\Jobs\ProcessTelegramMessage;
+use App\Jobs\ProcessTelegramProductUpload;
 use App\Jobs\TranscribeTelegramPhoto;
 use App\Models\AiRun;
 use App\Models\TelegramUpdate;
@@ -13,13 +14,15 @@ use App\Services\Telegram\TelegramClient;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 class TranscribeTelegramPhotoTest extends TestCase
 {
     use RefreshDatabase;
 
-    public function test_a_photo_with_a_readable_label_is_transcribed_and_sent_to_the_same_ai_pipeline(): void
+    #[DataProvider('searchCaptions')]
+    public function test_a_photo_with_a_readable_label_is_transcribed_and_sent_to_the_same_ai_pipeline(?string $caption): void
     {
         config(['services.telegram.bot_token' => 'test-token']);
         Queue::fake();
@@ -42,7 +45,7 @@ class TranscribeTelegramPhotoTest extends TestCase
             'telegram_user_id' => '12345',
             'chat_id' => '98765',
             'message_id' => 57,
-            'payload' => ['message' => ['photo' => [
+            'payload' => ['message' => ['caption' => $caption, 'photo' => [
                 ['file_id' => 'small-file', 'width' => 90, 'height' => 68, 'file_size' => 900],
                 ['file_id' => 'large-file', 'width' => 800, 'height' => 600, 'file_size' => 90000],
             ]]],
@@ -56,10 +59,12 @@ class TranscribeTelegramPhotoTest extends TestCase
 
         $this->assertDatabaseHas('telegram_updates', [
             'id' => $update->id,
-            'text' => 'HP OmniBook 3 Laptop 17-dp0005sfx, AMD Ryzen 5 40 APU, SSD 512 Go, 8 Go RAM',
+            'text' => 'HP OmniBook 3 Laptop 17-dp0005sfx, AMD Ryzen 5 40 APU, SSD 512 Go, 8 Go RAM'
+                .($caption === null ? '' : "\n".$caption),
             'status' => 'transcribed',
         ]);
         Queue::assertPushed(ProcessTelegramMessage::class, fn ($job) => $job->telegramUpdateId === $update->id);
+        Queue::assertNotPushed(ProcessTelegramProductUpload::class);
         Http::assertSent(fn ($request) => str_contains($request->url(), '/getFile')
             && $request['file_id'] === 'large-file');
         $run = AiRun::sole();
@@ -68,10 +73,26 @@ class TranscribeTelegramPhotoTest extends TestCase
         $this->assertSame('completed', $run->status);
         $this->assertNotNull($run->usage);
         $input = ProductInputContext::forUpdate($update->fresh());
-        $this->assertNull($input['original_operator_request']);
+        $this->assertSame($caption, $input['original_operator_request']);
         $this->assertSame('photo_transcription', $input['input_evidence'][0]['source_kind']);
         $this->assertSame('telegram-photo:'.$update->id.':1', $input['input_evidence'][0]['source_ref']);
         $this->assertNotEmpty(data_get($update->fresh()->payload, '_product_input.photos.0.sha256'));
+    }
+
+    public static function searchCaptions(): array
+    {
+        return [
+            'bare label' => [null],
+            'live MSI request' => ['Search this as a new product and prepare a draft.'],
+            'Russian model search' => ['Найди этот товар и подготовь черновик'],
+            'Russian photo search' => ['Поищи фото этого ноутбука'],
+            'short photo search' => ['поиск по фото'],
+            'short search' => ['поиск'],
+            'short Ukrainian search' => ['пошук'],
+            'web enrichment' => ['Дополни товар через поиск в интернете'],
+            'Ukrainian search' => ['Знайди цей ноутбук і характеристики'],
+            'find command' => ['/find@catalog_bot товар по этикетке'],
+        ];
     }
 
     private function jpeg(): string

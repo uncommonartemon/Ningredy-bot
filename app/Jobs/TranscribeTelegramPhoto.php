@@ -5,6 +5,7 @@ namespace App\Jobs;
 use App\Models\TelegramUpdate;
 use App\Services\Ai\AiErrorPresenter;
 use App\Services\Products\ProductInputContext;
+use App\Services\Products\ProductSearchIntentDetector;
 use App\Services\Telegram\TelegramClient;
 use App\Services\Telegram\TelegramProductUploadIntake;
 use App\Services\Vision\VisionCallContext;
@@ -35,11 +36,13 @@ class TranscribeTelegramPhoto implements ShouldQueue
         if (! $update || $update->processed_at || $update->status === 'cancelled') {
             return;
         }
-        // Supplied product material creates a manual draft; a bare label photo
-        // keeps the existing OCR-to-search behaviour.
+        $caption = trim((string) data_get($update->payload, 'message.caption', ''));
+        // Descriptions/albums remain manual material. A standalone labelled
+        // photo explicitly asking for search uses the same OCR path as a bare
+        // label; its caption remains the human request, not extracted evidence.
         if (data_get($update->payload, '_manual_product_upload')
             || data_get($update->payload, 'message.media_group_id')
-            || trim((string) data_get($update->payload, 'message.caption', '')) !== '') {
+            || ($caption !== '' && ! app(ProductSearchIntentDetector::class)->hasExplicitSearchRequest($caption))) {
             app(TelegramProductUploadIntake::class)->queue($update);
 
             return;
@@ -48,7 +51,6 @@ class TranscribeTelegramPhoto implements ShouldQueue
         $largest = is_array($sizes) ? end($sizes) : false;
         $fileId = is_array($largest) ? (string) data_get($largest, 'file_id') : '';
         $size = is_array($largest) ? (int) data_get($largest, 'file_size', 0) : 0;
-        $caption = trim((string) data_get($update->payload, 'message.caption', ''));
         $maxBytes = (int) config('services.telegram_photo.max_bytes', 10485760);
 
         if ($fileId === '' || $size > $maxBytes) {
