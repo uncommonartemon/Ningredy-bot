@@ -51,6 +51,26 @@ class ProductImageVisionVerifierTest extends TestCase
         $this->assertSame($candidates, $selected);
     }
 
+    public function test_the_reviewers_cover_pick_leads_the_gallery_instead_of_a_promotional_first_frame(): void
+    {
+        GalleryFrameReviewAgent::fake(fn (): array => ['non_product_frames' => [], 'uncertain_content_frames' => [],
+            'foreign_text_frames' => [], 'cover_frame' => 3, 'reason' => 'Frame 1 carries a sale badge; frame 3 is a clean shot.'])
+            ->preventStrayPrompts();
+        $candidates = $this->languageFrames(4);
+
+        $selected = app(ProductImageVisionVerifier::class)->checkedGalleryFrames($candidates, new ProductDraft(['title' => 'Laptop']));
+
+        $this->assertSame([$candidates[2], $candidates[0], $candidates[1], $candidates[3]], $selected);
+    }
+
+    public function test_a_cover_pick_that_is_also_rejected_is_an_invalid_review_not_a_cover(): void
+    {
+        GalleryFrameReviewAgent::fake(fn (): array => ['non_product_frames' => [2], 'uncertain_content_frames' => [],
+            'foreign_text_frames' => [], 'cover_frame' => 2, 'reason' => 'Contradictory.'])->preventStrayPrompts();
+
+        $this->assertNull(app(ProductImageVisionVerifier::class)->checkedGalleryFrames($this->languageFrames(3), new ProductDraft(['title' => 'Laptop'])));
+    }
+
     public function test_second_language_batch_failure_leaves_the_entire_gallery_unconfirmed(): void
     {
         $calls = 0;

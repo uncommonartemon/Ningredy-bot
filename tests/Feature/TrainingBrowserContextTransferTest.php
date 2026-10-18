@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Ai\Agents\ProductGalleryPreflightAgent;
 use App\Ai\Agents\ProductGalleryRecipeTrainerAgent;
+use App\Ai\Agents\ProductPhotoApplicabilityAgent;
 use App\Models\AiRun;
 use App\Models\ProductDraft;
 use App\Models\ProductGalleryRecipe;
@@ -56,6 +57,14 @@ class TrainingBrowserContextTransferTest extends TestCase
         ]);
         ProductGalleryPreflightAgent::fake()->preventStrayPrompts();
         ProductGalleryRecipeTrainerAgent::fake()->preventStrayPrompts();
+        // The rendered page's verdict is photo applicability's: it observed another product.
+        ProductPhotoApplicabilityAgent::fake(fn (string $prompt): array => [
+            'verdict' => str_contains($prompt, 'MODEL-008IT') ? 'conflicting' : 'uncertain',
+            'reason' => 'Fixture verdict on the rendered page.', 'source_model' => '', 'differences' => [], 'evidence' => [],
+            'plausible_target' => true, 'may_inspect_gallery' => false,
+            'physical_checks' => array_fill_keys(['platform', 'revision', 'construction', 'dimensions', 'ports', 'color'],
+                ['status' => 'unknown', 'evidence' => '']),
+        ])->preventStrayPrompts();
         $request = TelegramUpdate::create([
             'update_id' => 918281, 'chat_id' => '1', 'telegram_user_id' => '1',
             'payload' => [], 'status' => 'completed', 'text' => 'MODEL-009IT',

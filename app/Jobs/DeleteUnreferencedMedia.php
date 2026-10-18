@@ -5,6 +5,7 @@ namespace App\Jobs;
 use App\Models\Product;
 use App\Models\ProductDraftMedia;
 use App\Models\ProductMedia;
+use App\Models\ProductPhotoFrame;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
 use Illuminate\Support\Facades\Storage;
@@ -46,7 +47,7 @@ class DeleteUnreferencedMedia implements ShouldQueue
                 return;
             }
             // References belonging to another record protect shared files too.
-            foreach ([ProductMedia::class, ProductDraftMedia::class] as $model) {
+            foreach ([ProductMedia::class, ProductDraftMedia::class, ProductPhotoFrame::class] as $model) {
                 if ($model::query()->where('disk', $this->disk)->where('path', 'like', $this->path.'/%')->exists()) {
                     return;
                 }
@@ -56,7 +57,7 @@ class DeleteUnreferencedMedia implements ShouldQueue
             return;
         }
 
-        foreach ([ProductMedia::class, ProductDraftMedia::class] as $model) {
+        foreach ([ProductMedia::class, ProductDraftMedia::class, ProductPhotoFrame::class] as $model) {
             if ($model::query()->where('disk', $this->disk)->where('path', $this->path)->exists()) {
                 return;
             }

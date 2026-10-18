@@ -4,6 +4,7 @@ namespace App\Services\Products;
 
 use App\Models\ProductDraft;
 use App\Models\ProductSourceAttempt;
+use App\Services\ProductSearch\Recovery\FailureDiagnosis;
 use Throwable;
 
 class ProductSourceAttemptRecorder
@@ -12,6 +13,15 @@ class ProductSourceAttemptRecorder
     public function record(array $attributes): ?ProductSourceAttempt
     {
         try {
+            if (in_array($attributes['status'] ?? null, ['failed', 'interrupted', 'blocked'], true)
+                && ! isset($attributes['output']['failure_diagnosis'])) {
+                $attributes['output'] = [...($attributes['output'] ?? []), 'failure_diagnosis' => FailureDiagnosis::make(
+                    (string) ($attributes['phase'] ?? 'unknown'),
+                    (string) ($attributes['output']['repair_context']['failure_kind'] ?? $attributes['output']['reason'] ?? $attributes['decision'] ?? 'operation'),
+                    serverReason: ($attributes['actor'] ?? 'system') === 'agent' ? null : ($attributes['message'] ?? null),
+                    agentComment: ($attributes['actor'] ?? 'system') === 'agent' ? ($attributes['message'] ?? null) : null,
+                )];
+            }
             $url = (string) ($attributes['product_url'] ?? '');
             $telegramUpdateId = isset($attributes['telegram_update_id'])
                 ? (int) $attributes['telegram_update_id']

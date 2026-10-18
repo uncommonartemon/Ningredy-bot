@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Services\Products\ProductPhotoBatchStorage;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
@@ -136,6 +137,9 @@ class ProductDraft extends Model
 
     protected static function booted(): void
     {
+        // The database cascade would drop frame rows without their files.
+        static::deleting(fn (ProductDraft $draft) => ProductPhotoBatchStorage::deleteForDraft($draft->id));
+
         static::saving(function (ProductDraft $draft): void {
             if (static::$writingReconciliation || $draft->isDirty('specifications_reconciled_source_url')) {
                 return;

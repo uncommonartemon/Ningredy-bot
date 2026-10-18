@@ -2,7 +2,10 @@
 
 namespace App\Filament\Resources\AiRuns\Schemas;
 
+use App\Filament\Resources\TelegramUpdates\TelegramUpdateResource;
+use App\Filament\Schemas\FailureDiagnosisInfolist;
 use App\Models\AiRun;
+use App\Services\Admin\DatabaseValueRedactor;
 use Carbon\CarbonInterface;
 use Filament\Infolists\Components\KeyValueEntry;
 use Filament\Infolists\Components\TextEntry;
@@ -13,15 +16,14 @@ class AiRunInfolist
 {
     public static function configure(Schema $schema): Schema
     {
-        $json = fn (mixed $state): string => $state === null || $state === []
-            ? '—'
-            : (json_encode($state, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?: '—');
+        $json = fn (mixed $state): string => app(DatabaseValueRedactor::class)->text($state);
 
         return $schema
             ->components([
                 Section::make(__('Запуск'))
                     ->schema([
-                        TextEntry::make('telegramUpdate.id')->label('Telegram update'),
+                        TextEntry::make('telegramUpdate.id')->label('Telegram update')
+                            ->url(fn (AiRun $record): ?string => $record->telegram_update_id ? TelegramUpdateResource::getUrl('view', ['record' => $record->telegram_update_id]) : null),
                         TextEntry::make('invocation_id')->label('Invocation ID')->placeholder('—')->copyable(),
                         TextEntry::make('provider')->label(__('Провайдер'))->badge(),
                         TextEntry::make('model')->label(__('Модель')),
@@ -45,11 +47,12 @@ class AiRunInfolist
                     ])
                     ->columns(4)
                     ->columnSpanFull(),
+                FailureDiagnosisInfolist::section('activity.failure_diagnosis'),
                 Section::make(__('Промпт и ответ'))
                     ->schema([
-                        TextEntry::make('prompt')->label(__('Промпт'))->columnSpanFull(),
-                        TextEntry::make('response')->label(__('Ответ'))->formatStateUsing($json)->columnSpanFull(),
-                        TextEntry::make('error')->label(__('Ошибка'))->placeholder('—')->columnSpanFull(),
+                        TextEntry::make('prompt')->label(__('Промпт'))->formatStateUsing($json)->columnSpanFull(),
+                        TextEntry::make('response')->label(__('Ответ'))->state(fn (AiRun $record): string => $json($record->response))->columnSpanFull(),
+                        TextEntry::make('error')->label(__('Ошибка'))->formatStateUsing($json)->placeholder('—')->columnSpanFull(),
                     ])
                     ->collapsed()
                     ->columnSpanFull(),
@@ -64,7 +67,7 @@ class AiRunInfolist
                 Section::make(__('Активность'))
                     ->description(__('Подтверждённые события провайдера (подключение, запуск/выполнение/завершение поиска).'))
                     ->schema([
-                        TextEntry::make('activity')->label(null)->formatStateUsing($json)->columnSpanFull(),
+                        TextEntry::make('activity')->label(null)->state(fn (AiRun $record): string => $json($record->activity))->columnSpanFull(),
                     ])
                     ->collapsed()
                     ->columnSpanFull(),

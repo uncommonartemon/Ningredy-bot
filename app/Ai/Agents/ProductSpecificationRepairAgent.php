@@ -18,10 +18,15 @@ class ProductSpecificationRepairAgent extends ProductSpecificationReconciliation
 
             TARGETED REPAIR OUTPUT CONTRACT (replaces the full-card output instruction above):
             Return only base_hash, decision, changes, unresolved_fields and summary. Never return a new card.
-            Copy repair.base_hash exactly. Each change has an exact path from repair.allowed_values and
+            Copy repair.base_hash exactly. Each change has an exact path from repair.allowed_paths and
             value_json: the JSON-encoded replacement value (a quoted JSON string, array, object or null).
-            The original current_specifications remain the comparison baseline. repair.allowed_values
-            are from the rejected candidate; affected_candidate_facts are read-only context including
+            The original current_specifications remain the comparison baseline. repair.current_values
+            are the OLD values from the rejected candidate, NOT an enum of permitted replacements.
+            You may replace them with newly supported values, including adding observed source URLs
+            to considered_source_urls or input references to considered_source_refs at a permitted path.
+            citation_obligations lists sources whose differing observations still need an explanation;
+            these are not automatically correct values and are not a restricted list of possible citations.
+            affected_candidate_facts are read-only context including
             their current values and citations. Repair only listed paths. Keep other work unchanged.
             Do not claim to have considered a source by merely adding its URL: read retained/tool evidence
             and explain applicability. Existing evidence, identity and photo checks all run again after merge.

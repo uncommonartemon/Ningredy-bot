@@ -28,7 +28,7 @@ class CardRepairReconciliationTest extends TestCase
         ProductSpecificationReconciliationAgent::fake(fn (): array => $candidate)->preventStrayPrompts();
         ProductSpecificationRepairAgent::fake(function (string $prompt) use ($candidate): array {
             $payload = json_decode($prompt, true);
-            $this->assertSame(['specifications.ram.source_url'], array_keys($payload['repair']['allowed_values']));
+            $this->assertSame(['specifications.ram.source_url'], $payload['repair']['allowed_paths']);
             $this->assertSame($candidate['specifications'][0], $payload['repair']['affected_candidate_facts']['ram']);
             $this->assertSame('16 GB', $payload['current_specifications'][0]['value']);
             $this->assertArrayNotHasKey('previous_candidate', $payload['previous_assembly_feedback']['repair_context']);

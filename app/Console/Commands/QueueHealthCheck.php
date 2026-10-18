@@ -40,9 +40,16 @@ class QueueHealthCheck extends Command
      */
     private const AI_CALL_CEILING_SECONDS = 1500;
 
+    /** A message never picked up after this long reached nobody. */
+    private const LOST_AFTER_SECONDS = 300;
+
+    /** Only recent losses are worth a notice; old history is not news. */
+    private const LOST_LOOKBACK_SECONDS = 7200;
+
     public function handle(TelegramClient $telegram): int
     {
         $this->releaseAbandonedJobs($telegram);
+        $this->alertLostUpdates($telegram);
 
         $oldestPending = DB::table('jobs')
             ->whereNull('reserved_at')
@@ -143,6 +150,47 @@ class QueueHealthCheck extends Command
                         '♻️ Обработка поиска прервалась. Задача возвращена в очередь и продолжится, когда воркер будет запущен.',
                     );
                 }
+            } catch (Throwable $exception) {
+                report($exception);
+            }
+        }
+    }
+
+    /**
+     * An allowed message still "received" with no queued job of its own, or
+     * already marked processed with no outcome, reached nobody. Live #391: a
+     * forwarded photo got processed_at a second after arrival, no job and no
+     * reply, and the next text was answered without it. The operator is told
+     * once to resend it; nothing is re-run automatically, since the cause
+     * may have been a deliberate consumption this check cannot see.
+     */
+    private function alertLostUpdates(TelegramClient $telegram): void
+    {
+        $candidates = TelegramUpdate::query()->where('status', 'received')->whereNotNull('chat_id')
+            ->whereBetween('created_at', [now()->subSeconds(self::LOST_LOOKBACK_SECONDS), now()->subSeconds(self::LOST_AFTER_SECONDS)])
+            ->get();
+        if ($candidates->isEmpty()) {
+            return;
+        }
+        $queued = DB::table('jobs')->get(['payload'])
+            ->map(fn (object $job): ?int => $this->telegramUpdateIdFor($job))->filter()->flip();
+
+        foreach ($candidates as $update) {
+            if (($update->processed_at === null && $queued->has($update->id))
+                || data_get($update->payload, '_lost_update_alerted_at')
+                || ! Cache::add('queue-health:lost-update:'.$update->id, true, self::LOST_LOOKBACK_SECONDS)) {
+                continue;
+            }
+            $update->update(['payload' => [...($update->payload ?? []), '_lost_update_alerted_at' => now()->toIso8601String()]]);
+            $kind = match (true) {
+                data_get($update->payload, 'message.photo') !== null => 'фото',
+                data_get($update->payload, 'message.voice') !== null => 'голосовое сообщение',
+                data_get($update->payload, 'message.document') !== null => 'файл',
+                default => 'сообщение',
+            };
+            try {
+                $telegram->sendMessage((string) $update->chat_id,
+                    "⚠️ {$kind} от {$update->created_at->format('H:i')} не попало в обработку и не было учтено. Отправьте его ещё раз.");
             } catch (Throwable $exception) {
                 report($exception);
             }

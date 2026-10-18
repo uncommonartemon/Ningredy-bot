@@ -63,6 +63,7 @@ class AiAttributeGroupResearchTest extends TestCase
             'specifications' => [$specification], 'specification_evidence' => [],
             'sources' => [['title' => 'Exact Laptop', 'url' => $source, 'type' => 'retailer', 'image_urls' => []]],
             'primary_source_url' => $source, 'official_source_url' => null, 'image_urls' => [], 'confidence' => 0.95,
+            'selected_identity' => $this->observedIdentity('A123', $source),
         ]])->preventStrayPrompts();
         $resolver = $this->mock(ProductImageResolver::class);
         $resolver->shouldNotReceive('resolve');

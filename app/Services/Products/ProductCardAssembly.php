@@ -6,6 +6,7 @@ use App\Models\ProductDraft;
 use App\Services\Ai\AiSettings;
 use App\Services\Ai\ProductSearchCancellation;
 use App\Services\Ai\ProductSearchTimeBudget;
+use App\Services\ProductSearch\Recovery\FailureDiagnosis;
 use App\Services\ProductSearch\Recovery\RecoveryContext;
 
 /**
@@ -34,6 +35,8 @@ class ProductCardAssembly
     // Bump when recovery/response contracts change so a repaired implementation
     // can retry failures persisted by an older contract.
     private const int REPAIR_STATE_VERSION = 1;
+
+    private const int REPAIR_CONTRACT_VERSION = 2;
 
     public function __construct(
         private readonly ProductSpecificationReconciler $reconciler,
@@ -77,7 +80,12 @@ class ProductCardAssembly
         sort($observations);
         $evidence = hash('sha256', json_encode($observations, JSON_THROW_ON_ERROR));
         $previous = $state['last_failure'] ?? null;
-        if (is_array($previous)
+        // A supervisor step (new guidance or a widened repair scope) is changed
+        // input even when no new web quotation was saved.
+        $supervisorGeneration = (int) ($state['supervisor']['generation'] ?? 0);
+        $supervisorPending = $supervisorGeneration !== (int) ($state['supervisor_attempted'] ?? 0);
+        if (! $supervisorPending
+            && ($state['contract_version'] ?? 1) === self::REPAIR_CONTRACT_VERSION && is_array($previous)
             && (($previous['repair_context']['failure_kind'] ?? null) === 'response_format'
                 || ($state['evidence'] ?? null) === $evidence)) {
             return ($previous['status'] ?? null) === SpecificationReconciliationStatus::NotReady->value
@@ -88,8 +96,13 @@ class ProductCardAssembly
         if (is_array($state['previous_feedback'] ?? null)) {
             $source['_previous_assembly_feedback'] = $state['previous_feedback'];
         }
+        if ($supervisorPending && is_string($state['supervisor']['guidance'] ?? null) && $state['supervisor']['guidance'] !== '') {
+            $source['_previous_assembly_feedback']['supervisor_guidance'] = $state['supervisor']['guidance'];
+        }
         $seenSignatures = is_array($state['seen_signatures'] ?? null) ? $state['seen_signatures'] : [];
         $outcome = $this->completeWithHistory($draft, $source, $updateId, $seenSignatures);
+        $state['supervisor_attempted'] = $supervisorGeneration;
+        $state['contract_version'] = self::REPAIR_CONTRACT_VERSION;
         $state['seen_signatures'] = array_values(array_unique($seenSignatures));
         $state['previous_feedback'] = $source['_previous_assembly_feedback'] ?? null;
         $observations = array_keys(app(ProductEvidenceProgress::class)->snapshot($draft));
@@ -152,7 +165,15 @@ class ProductCardAssembly
                 'message' => $outcome->summary ?? $outcome->unavailableReason,
                 'output' => ['attempt' => $attempt, 'model' => $model, 'made_progress' => $outcome->madeProgress,
                     'reason' => $outcome->unavailableReason,
-                    'repair_context' => $outcome->repairContext, 'offer_selection' => $outcome->offerSelection],
+                    'repair_context' => $outcome->repairContext, 'offer_selection' => $outcome->offerSelection,
+                    ...($outcome->isReconciled() ? [] : ['failure_diagnosis' => FailureDiagnosis::make(
+                        'card_assembly', $outcome->repairContext['failure_kind'] ?? $outcome->unavailableReason ?? $outcome->status->value,
+                        serverReason: ! empty($outcome->repairContext['validation_errors']) ? json_encode($outcome->repairContext['validation_errors'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) : $outcome->unavailableReason,
+                        agentComment: $outcome->status === SpecificationReconciliationStatus::NotReady ? $outcome->summary : null,
+                        blockedBy: array_column($outcome->repairContext['unresolved_fields'] ?? [], 'key'),
+                        suggestedNextAction: $outcome->repairContext['recovery_action'] ?? null,
+                        retained: ['source_url' => $source['url'] ?? null, 'photos_preserved' => true],
+                    )])],
             ]);
 
             if ($outcome->isReconciled() || $outcome->isBudgetExhausted()

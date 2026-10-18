@@ -222,7 +222,7 @@ class ProductSpecificationReconcilerTest extends TestCase
             $payload = json_decode($prompt, true);
             $feedback = $payload['previous_assembly_feedback'];
             $this->assertSame('invalid_response', $feedback['reason']);
-            $this->assertSame(['model' => null], $payload['repair']['allowed_values']);
+            $this->assertSame(['model' => null], $payload['repair']['current_values']);
             $this->assertArrayNotHasKey('previous_candidate', $feedback['repair_context']);
             $this->assertArrayHasKey('model', $feedback['repair_context']['validation_errors']);
 
@@ -448,6 +448,33 @@ class ProductSpecificationReconcilerTest extends TestCase
         $this->assertNull($draft->fresh()->specifications_reconciled_source_url);
     }
 
+    public function test_a_failure_cached_under_the_previous_repair_contract_is_assembled_again(): void
+    {
+        app(AiSettings::class)->saveModel('gpt-6-luna');
+        app(AiSettings::class)->saveCardAssemblyFallbackModel('gpt-6-sol');
+        $draft = $this->seedDraft(['image_urls' => ['https://shop.example/retained.jpg']]);
+        $calls = 0;
+        ProductSpecificationReconciliationAgent::fake(function () use (&$calls): array {
+            $calls++;
+
+            return [];
+        })->preventStrayPrompts();
+        $source = ['url' => 'https://shop.example/photos', '_photo_applicability' => ['verdict' => 'exact']];
+        $state = [];
+        app(ProductCardAssembly::class)->resumeFacts($draft, $source, $draft->telegram_update_id, $state);
+        $this->assertSame(3, $calls);
+
+        // A job persisted before contract v2 had no contract_version: its
+        // failure was judged under the old agent payload and cannot be reused.
+        unset($state['contract_version']);
+        $state = json_decode(json_encode($state), true);
+        app(ProductCardAssembly::class)->resumeFacts($draft->fresh(), $source, $draft->telegram_update_id, $state);
+
+        // Assembled again (already-seen failure signatures still stop repeats early).
+        $this->assertGreaterThan(3, $calls);
+        $this->assertSame(2, $state['contract_version']);
+    }
+
     public function test_observed_physical_conflict_reopens_photo_selection_instead_of_freezing_a_wrong_gallery(): void
     {
         $draft = $this->seedDraft(['color' => 'Black']);
@@ -593,7 +620,7 @@ class ProductSpecificationReconcilerTest extends TestCase
             $field = ['title', 'model', 'description', 'summary'][$calls - 1];
             $calls++;
             $payload = json_decode($prompt, true);
-            $this->assertArrayHasKey($field, $payload['repair']['allowed_values']);
+            $this->assertArrayHasKey($field, $payload['repair']['current_values']);
 
             return $this->fakeRepair($prompt, [$field => $this->fakeReconciled()[$field]]);
         })->preventStrayPrompts();

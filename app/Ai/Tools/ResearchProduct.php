@@ -11,7 +11,6 @@ use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
 use App\Services\Ai\AiErrorPresenter;
 use App\Services\Ai\AiSettings;
-use App\Services\Ai\OpenAiHeavyOperationGate;
 use App\Services\Ai\ProductSearchCancellation;
 use App\Services\Ai\ProductSearchCostBudget;
 use App\Services\Ai\ProductSearchTimeBudget;
@@ -31,6 +30,7 @@ use App\Services\Products\ProductSourcePriority;
 use App\Services\Products\ProductTextEvidenceContract;
 use App\Services\ProductSearch\Research\InvalidResearchResponse;
 use App\Services\ProductSearch\Research\RecoverableProductResearch;
+use App\Services\ProductSearch\Research\ResearchSourceRoles;
 use App\Services\ProductSearch\Research\ResearchWebSearchTrace;
 use App\Services\Telegram\ProductCardPresenter;
 use App\Services\Telegram\TelegramClient;
@@ -38,6 +38,7 @@ use App\Services\Telegram\TelegramProgressReporter;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 use Laravel\Ai\Contracts\Tool;
 use Laravel\Ai\Responses\AgentResponse;
 use Laravel\Ai\Streaming\Events\ProviderToolEvent;
@@ -284,100 +285,8 @@ class ResearchProduct implements Tool
             $progress->info('Результат поиска получен; проверяю совпадение и источники.');
             $data = $research['data'];
 
-            if ($data['status'] === 'found') {
-                $resolvedCategory = app(ProductCategoryResolver::class)->resolve(
-                    $data['product_type'] ?? null,
-                    $data['category'] ?? null,
-                );
-
-                if ($resolvedCategory) {
-                    $data['category'] = $resolvedCategory->slug;
-                }
-            }
-
-            $configurationGuard = app(ProductResearchConfigurationGuard::class);
-            $configurationIssues = $configurationGuard->issues($data);
-            if (($data['status'] ?? null) === 'found'
-                && ! app(ProductCategoryResolver::class)->resolve(
-                    $data['product_type'] ?? null,
-                    $data['category'] ?? null,
-                )) {
-                $configurationIssues[] = 'Category and product_type are incompatible or ambiguous in the live category configuration.';
-            }
-            $correctionAttempt = 0;
-
-            while (
-                $configurationIssues !== []
-                && $correctionAttempt < 2
-                && ! $this->isCancelled()
-                && $timeBudget->canStart($this->update->id, 30)
-                && ! app(ProductSearchCostBudget::class)->exceeded($this->update->id)
-            ) {
-                $run->update([
-                    'invocation_id' => $response->invocationId,
-                    'status' => 'completed',
-                    'response' => $data,
-                    'usage' => [
-                        ...$response->usage->toArray(),
-                        'web_search_calls' => count($webSearchItems),
-                    ],
-                    'completed_at' => now(),
-                ]);
-                $correctionAttempt++;
-                $progress->info('Проверка обнаружила смешение конфигураций или категории; возвращаю агенту точные причины для самостоятельного исправления.');
-                $correctionPrompt = $researchPrompt.PHP_EOL
-                    .'The previous result failed deterministic catalog validation. Return a completely corrected result for one exact sellable configuration. '
-                    .'Do not defend or summarize the previous result. Validation issues: '
-                    .implode(' | ', $configurationIssues).PHP_EOL
-                    .'Previous result: '.(json_encode($data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?: '{}');
-                $correctionTimeout = $timeBudget->timeoutFor(
-                    $this->update->id,
-                    $settings->productResearchTimeoutSeconds(),
-                );
-                $run = AiRun::query()->create([
-                    'telegram_update_id' => $this->update->id,
-                    'provider' => $provider,
-                    'model' => $model,
-                    'status' => 'running',
-                    'prompt' => $correctionPrompt,
-                    'started_at' => now(),
-                ]);
-                $response = app(OpenAiHeavyOperationGate::class)->run(
-                    $provider,
-                    $correctionTimeout,
-                    fn () => ProductResearchAgent::make()->prompt(
-                        $correctionPrompt,
-                        provider: $provider,
-                        model: $model,
-                        timeout: $correctionTimeout,
-                    ),
-                );
-                $webSearchItems = [];
-                if ($this->isCancelled()) {
-                    return $this->cancelledResult($run, $response);
-                }
-                $data = $this->validateCorrectedResearchResponse($response->toArray());
-                $resolvedCategory = app(ProductCategoryResolver::class)->resolve(
-                    $data['product_type'] ?? null,
-                    $data['category'] ?? null,
-                );
-                if ($resolvedCategory) {
-                    $data['category'] = $resolvedCategory->slug;
-                }
-                $configurationIssues = $configurationGuard->issues($data);
-                if (($data['status'] ?? null) === 'found' && ! $resolvedCategory) {
-                    $configurationIssues[] = 'Category and product_type remain incompatible or ambiguous.';
-                }
-            }
-
             if ($this->isCancelled()) {
                 return $this->cancelledResult($run, $response, count($webSearchItems));
-            }
-
-            if ($configurationIssues !== []) {
-                $data['status'] = 'not_found';
-                $data['research_notes'] = 'Exact configuration validation did not pass after automatic correction: '
-                    .implode(' | ', $configurationIssues);
             }
 
             $publicDescription = $this->publicDescription ?? app(ProductPublicDescription::class);
@@ -388,8 +297,13 @@ class ResearchProduct implements Tool
             $data['sources'] = $sourcePriority->sortSources($reportedSources, $data['brand'] ?? null);
             // Text evidence has its own ledger: a PDF or a second observation
             // of the same field must not disappear with gallery dedup/ranking.
+            // A page kept only as a compatible photo candidate sells another
+            // configuration: its quotations are not facts of the selected one.
+            $photoOnly = collect($reportedSources)->reject(fn (array $source): bool => ResearchSourceRoles::maySupplyFacts($source))
+                ->map(fn (array $source): string => rtrim((string) $source['url'], '/'))->all();
             $data['specification_evidence'] = array_values(array_filter($data['specification_evidence'] ?? [],
-                fn (array $fact): bool => ! $sourcePriority->isBlockedUrl($fact['source_url'])));
+                fn (array $fact): bool => ! $sourcePriority->isBlockedUrl($fact['source_url'])
+                    && ! in_array(rtrim((string) $fact['source_url'], '/'), $photoOnly, true)));
             $attemptRecorder = app(ProductSourceAttemptRecorder::class);
             $blockedSourceCount = 0;
             foreach ($reportedSources as $source) {
@@ -723,9 +637,13 @@ class ResearchProduct implements Tool
             ]);
 
             if ($exception instanceof InvalidResearchResponse) {
+                $notes = $exception->evidence['result']['research_notes'] ?? null;
+
                 return $this->json(['ok' => false, 'status' => 'research_interrupted', 'retryable' => false,
                     'reason' => $exception->reason,
-                    'message' => 'Не удалось восстановить полный ответ поиска в текущем запуске. Это не означает, что товар не найден. Полученные данные сохранены в журнале. Не запускай поиск повторно без запроса пользователя.']);
+                    'blocked_by' => array_keys((array) ($exception->evidence['validation_errors'] ?? [])),
+                    'agent_comment' => is_string($notes) && $notes !== '' ? mb_substr($notes, 0, 800) : null,
+                    'message' => 'Не удалось восстановить полный ответ поиска в текущем запуске. Это не означает, что товар не найден. Полученные данные сохранены в журнале. Если blocked_by называет selected_identity, объясни, что модель или комплектация не подтверждена однозначно, и перескажи agent_comment своими словами. Не запускай поиск повторно без запроса пользователя.']);
             }
 
             throw $exception;
@@ -762,7 +680,7 @@ class ResearchProduct implements Tool
             ->normalize($response);
 
         $data = Validator::make($normalized, [
-            'status' => ['required', 'in:found,not_found'],
+            'status' => ['required', 'in:found,not_found,unresolved'],
             'title' => ['nullable', 'string', 'max:255'],
             'brand' => ['nullable', 'string', 'max:255'],
             'model' => ['nullable', 'string', 'max:255'],
@@ -774,6 +692,13 @@ class ResearchProduct implements Tool
             'condition' => ['sometimes', 'required', Rule::in(ProductCondition::VALUES)],
             'description' => ['nullable', 'string', 'max:5000'],
             'research_notes' => ['nullable', 'string', 'max:5000'],
+            'selected_identity' => ['sometimes', 'nullable', 'array:basis,model_scope,observed_model,source_url,source_excerpt,reason'],
+            'selected_identity.basis' => ['required_with:selected_identity', 'in:commercial_code,full_model'],
+            'selected_identity.model_scope' => ['required_with:selected_identity', 'in:single_product,product_family,unknown'],
+            'selected_identity.observed_model' => ['required_with:selected_identity', 'string', 'max:255'],
+            'selected_identity.source_url' => ['required_with:selected_identity', 'url:http,https', 'max:2048'],
+            'selected_identity.source_excerpt' => ['required_with:selected_identity', 'string', 'max:800'],
+            'selected_identity.reason' => ['required_with:selected_identity', 'string', 'max:800'],
             'specifications' => ['present', 'array', 'max:100'],
             'specifications.*.key' => ['required', 'string', 'max:100', 'regex:/^[a-z0-9_]+$/'],
             'specifications.*.name' => ['required', 'string', 'max:255'],
@@ -786,6 +711,9 @@ class ResearchProduct implements Tool
             'sources.*.title' => ['required', 'string', 'max:500'],
             'sources.*.url' => ['required', 'url:http,https', 'max:2048'],
             'sources.*.type' => ['nullable', 'in:manufacturer,retailer,marketplace,review,database,web'],
+            'sources.*.roles' => ['sometimes', 'required', 'array', 'min:1', 'max:3'],
+            'sources.*.roles.*' => ['required', Rule::in(ResearchSourceRoles::VALUES)],
+            'sources.*.applicability_reason' => ['sometimes', 'required', 'string', 'max:800'],
             'sources.*.image_urls' => ['present', 'array', 'max:10'],
             'sources.*.image_urls.*' => ['url:http,https', 'max:2048'],
             'primary_source_url' => ['nullable', 'url:http,https', 'max:2048'],
@@ -794,6 +722,18 @@ class ResearchProduct implements Tool
             'image_urls.*' => ['url:http,https', 'max:2048'],
             'confidence' => ['required', 'numeric', 'between:0,1'],
         ])->validate();
+
+        foreach ($data['sources'] as $index => $source) {
+            $roles = $source['roles'] ?? [];
+            if (in_array('exact_photo', $roles, true) && in_array('compatible_photo_candidate', $roles, true)) {
+                throw ValidationException::withMessages(["sources.{$index}.roles" => 'A photo candidate cannot be both exact and a different potentially compatible configuration. Keep the observed source and choose its actual candidate role; neither role verifies the gallery.']);
+            }
+        }
+
+        if ($data['status'] === 'unresolved') {
+            throw ValidationException::withMessages(['selected_identity' => 'Identity/configuration remains unresolved: '
+                .($data['research_notes'] ?? 'Explain the concrete missing evidence.').' Retain useful observations and repair only the missing evidence; this is not proof that the product does not exist.']);
+        }
 
         if ($data['status'] === 'found') {
             Validator::make($data, [
@@ -805,6 +745,18 @@ class ResearchProduct implements Tool
             Validator::make(['primary_source' => $this->primarySource($sources)], [
                 'primary_source' => ['required', 'array'],
             ], ['primary_source.required' => 'The found result has no eligible unblocked product-source candidate. Keep observed URLs and facts, but provide a manufacturer, retailer, marketplace, or unclassified web HTML candidate. A web document, review or database cannot be the primary candidate; do not invent or relabel its source type.'])->validate();
+
+            $category = app(ProductCategoryResolver::class)->resolve($data['product_type'] ?? null, $data['category'] ?? null);
+            $issues = app(ProductResearchConfigurationGuard::class)->issues($data);
+            if (! $category) {
+                $issues[] = 'Category and product_type are incompatible or ambiguous in the live category configuration.';
+            }
+            if ($issues !== []) {
+                // These failures share the same retained response, budget and
+                // cancellation-aware recovery as transport/schema failures.
+                throw ValidationException::withMessages(['configuration' => $issues]);
+            }
+            $data['category'] = $category->slug;
         }
 
         return $data;
@@ -818,6 +770,8 @@ class ResearchProduct implements Tool
         // gallery checks still decide applicability; no paid relabel is needed.
         // Preserve the existing classified-source fallback without promoting
         // generic web documents or text-only review/database entries into it.
+        $sources = array_values(array_filter($sources, fn (array $source): bool => ResearchSourceRoles::mayIdentifySelectedProduct($source)));
+
         return collect($sources)->first(fn (array $source): bool => in_array($source['type'] ?? null, ['manufacturer', 'retailer', 'marketplace', 'web'], true)
             && $discovery->looksLikeHtmlProductPage((string) ($source['url'] ?? '')))
             ?? collect($sources)->first(fn (array $source): bool => in_array($source['type'] ?? null, ['manufacturer', 'retailer', 'marketplace'], true));

@@ -52,21 +52,8 @@ class FlagDomainRecipeNote implements Tool
             class_basename(self::class),
             'flag_domain_recipe_note',
             ['domain' => $this->domainSettings->domain, 'category' => $category, 'note' => $note],
-            function () use ($category, $note): array {
-                $autoLines = array_values(array_filter(
-                    preg_split('/\R/', (string) $this->domainSettings->auto_agent_hint) ?: [],
-                    fn (string $line): bool => trim($line) !== '',
-                ));
-
-                $autoLines[] = '[auto '.$category.' '.now()->toDateString().'] '.$note;
-                $autoLines = array_slice($autoLines, -self::MAX_AUTO_NOTES);
-
-                $this->domainSettings->update([
-                    'auto_agent_hint' => implode("\n", $autoLines),
-                ]);
-
-                return ['ok' => true, 'auto_notes_count' => count($autoLines)];
-            },
+            fn (): array => ['ok' => true,
+                'auto_notes_count' => $this->domainSettings->appendAutoNote($category, $note, self::MAX_AUTO_NOTES)],
             ProductSourceDomain::class,
             $this->domainSettings->id,
         );

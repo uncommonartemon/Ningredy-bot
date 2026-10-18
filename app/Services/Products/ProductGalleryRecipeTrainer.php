@@ -1098,6 +1098,10 @@ class ProductGalleryRecipeTrainer
                                 'decision' => 'agent_abandoned', 'round' => $attempt,
                                 'output' => ['assessment' => $candidate, 'persistent_page_rule' => false],
                             ]);
+                            // The agent's own conclusion is the domain's memory:
+                            // the next product here starts from it instead of
+                            // repeating the same rounds (live acer.com #278/#285).
+                            $domainSettings->appendAutoNote('abandoned_page', $agentAbandonReason);
                             $debug?->__invoke('warning', 'Агент завершил попытку на этой странице: '.$agentAbandonReason
                                 .' Найденное сохраняю; рецепт домена не отключаю.');
 
@@ -1224,6 +1228,18 @@ class ProductGalleryRecipeTrainer
                 // still decides which candidates are safe to store.
                 $bestPartialResult = $this->mergePartialResult($bestPartialResult, $candidateResult);
                 $bestPartialImages = $bestPartialResult['images'];
+                // Access refusal is not a recipe error: no new selector plan
+                // opens a page the host refuses or never answers, so asking the
+                // trainer again only buys the same failure (live: four paid
+                // rounds after "Host refused 2 times in a row"). Found photos stay.
+                if (in_array($executionInterruption['failure_kind'] ?? null, ['host_refusing', 'host_unreachable'], true)) {
+                    $failureKind = $executionInterruption['failure_kind'];
+                    $attempts[] = ['attempt' => $attempt, 'selectors_tried' => $candidate,
+                        'error' => $failureKind.': '.$executionInterruption['error']];
+                    $debug?->__invoke('warning', 'Сайт не открывает страницу ('.$failureKind.'); обучение этой страницы остановлено без новых платных раундов.');
+
+                    break;
+                }
                 $contextMinimum = max(0, (int) ($context['minimum_verified_images'] ?? 0));
                 $validation = $this->resultValidator->validate(
                     $candidate,

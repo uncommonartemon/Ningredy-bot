@@ -4,6 +4,7 @@ namespace Tests;
 
 use App\Ai\Agents\GalleryFrameReviewAgent;
 use App\Ai\Agents\GalleryTextLanguageAgent;
+use App\Ai\Agents\ProductCardRecoveryAgent;
 use App\Ai\Agents\ProductPhotoApplicabilityAgent;
 use App\Ai\Agents\ProductSourceIdentityAgent;
 use Illuminate\Foundation\Testing\TestCase as BaseTestCase;
@@ -62,6 +63,14 @@ abstract class TestCase extends BaseTestCase
                 ['status' => 'unknown', 'evidence' => '']),
         ])->preventStrayPrompts();
 
+        // Card recovery supervision runs only with a measurable search budget.
+        // A test that reaches it without configuring a decision gets an honest
+        // "blocked", never a paid provider call.
+        ProductCardRecoveryAgent::fake(fn (): array => [
+            'action' => 'blocked', 'comment' => 'No recovery decision configured by this test.',
+            'guidance' => '', 'query_or_url' => '', 'repair_paths' => [], 'blocked_by' => [],
+        ])->preventStrayPrompts();
+
         GalleryTextLanguageAgent::fake(fn (): array => [
             'foreign_text_frames' => [],
             'reason' => 'Иностранного текста не найдено.',
@@ -71,5 +80,13 @@ abstract class TestCase extends BaseTestCase
             'foreign_text_frames' => [], 'non_product_frames' => [], 'uncertain_content_frames' => [],
             'reason' => 'Product frames, no foreign text (test fixture).',
         ])->preventStrayPrompts();
+    }
+
+    /** Research answer evidence that the source page names this one complete model. */
+    protected function observedIdentity(string $model, string $url): array
+    {
+        return ['basis' => 'full_model', 'model_scope' => 'single_product', 'observed_model' => $model,
+            'source_url' => $url, 'source_excerpt' => "Buy {$model} - specifications and price",
+            'reason' => 'The page title names this one complete model, not a family.'];
     }
 }

@@ -12,6 +12,7 @@ use App\Services\Products\ProductImageResolver;
 use App\Services\Products\ProductSourceAttemptRecorder;
 use App\Services\Products\ProductSourcePageMetadata;
 use App\Services\Products\ProductSourcePriority;
+use App\Services\ProductSearch\Research\ResearchSourceRoles;
 use Illuminate\Support\Collection;
 
 /** Builds and journals the source queue; never trains recipes or publishes a draft. */
@@ -107,6 +108,7 @@ class SourceQueueBuilder
                 $url = is_array($source) && is_string($source['url'] ?? null) ? $source['url'] : '';
                 $reason = match (true) {
                     $url === '' => 'invalid_source',
+                    ! ResearchSourceRoles::maySupplyPhotos($source) => 'text_evidence_only',
                     // web means an unclassified source, not proof that its
                     // HTML is not a product card. Let page evidence decide.
                     ! in_array($source['type'] ?? null, ['retailer', 'marketplace', 'manufacturer', 'web'], true) => 'not_product_card_type',

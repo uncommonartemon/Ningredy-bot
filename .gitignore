@@ -60,3 +60,5 @@ storage/app/browser-profiles/
 # Per-run gallery extraction checkpoints/screenshots from real Playwright
 # sessions - runtime debugging state, never project code.
 /storage/framework/product-gallery-browser/
+# Local database snapshots taken before migrations - production data, never code.
+/storage/backups/

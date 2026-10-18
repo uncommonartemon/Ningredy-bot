@@ -499,6 +499,42 @@ class ProductGalleryRecipeTrainerTest extends TestCase
         $this->assertSame(0, ProductGalleryRecipe::latest('id')->first()->failure_count);
     }
 
+    public function test_an_abandoned_product_page_leaves_its_reason_in_the_domain_memory_once(): void
+    {
+        $reason = 'Scene7 canvas viewer exposes no image URLs; full screen is blocked.';
+        ProductGalleryRecipeTrainerAgent::fake(fn (): array => ['training_decision' => 'abandon_page', 'page_kind' => 'product_card',
+            'confidence' => 0.8, 'page_assessment_evidence' => ['Canvas only.'], 'reason' => $reason])->preventStrayPrompts();
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('scout')->twice()->andReturn(['scout' => ['title' => 'Product', 'fragments' => ['<div>Gallery</div>']]]);
+        });
+
+        app(ProductGalleryRecipeTrainer::class)->train('https://canvas-memory.example/product-a', force: true);
+        app(ProductGalleryRecipeTrainer::class)->train('https://canvas-memory.example/product-b', force: true);
+
+        $hint = (string) ProductSourceDomain::query()->where('domain', 'canvas-memory.example')->value('auto_agent_hint');
+        $this->assertSame(1, substr_count($hint, $reason));
+        $this->assertStringContainsString('[auto abandoned_page ', $hint);
+    }
+
+    public function test_a_refusing_host_ends_page_training_without_another_paid_round(): void
+    {
+        $calls = 0;
+        ProductGalleryRecipeTrainerAgent::fake(function () use (&$calls): array {
+            $calls++;
+
+            return $this->validRecipeResponse(['actions' => [], 'open_selectors' => []]);
+        })->preventStrayPrompts();
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('scout')->once()->andReturn(['scout' => ['title' => 'Product', 'fragments' => ['<div>Gallery</div>']]]);
+            $mock->shouldReceive('executeRecipe')->once()->andReturn(['images' => [],
+                'failure_kind' => 'host_refusing', 'error' => 'Host refused 2 times in a row.']);
+        });
+
+        $this->assertSame([], app(ProductGalleryRecipeTrainer::class)->train('https://refusing-host.example/product', force: true));
+        $this->assertSame(1, $calls);
+        $this->assertSame('interrupted', ProductGalleryRecipeVersion::latest('id')->firstOrFail()->status);
+    }
+
     public function test_execution_recovery_does_not_start_another_agent_round_when_time_has_run_out(): void
     {
         $failed = false;

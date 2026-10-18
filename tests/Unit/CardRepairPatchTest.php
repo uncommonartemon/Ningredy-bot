@@ -24,6 +24,37 @@ class CardRepairPatchTest extends TestCase
         $this->assertSame($base['specifications'][1], app(CardRepairPatch::class)->forAgent($repair)['affected_candidate_facts']['ram']);
     }
 
+    public function test_empty_current_citation_list_does_not_forbid_adding_a_required_source(): void
+    {
+        $base = $this->candidate();
+        $base['specifications'][1]['considered_source_urls'] = [];
+        $repair = $this->prepare($base, ['ram: differing observations require reason and considered_source_urls.']);
+        $payload = app(CardRepairPatch::class)->forAgent($repair);
+        $this->assertSame([], $payload['current_values']['specifications.ram.considered_source_urls']);
+        $this->assertContains('specifications.ram.considered_source_urls', $payload['allowed_paths']);
+        $this->assertArrayNotHasKey('allowed_values', $payload);
+        $result = app(CardRepairPatch::class)->apply($repair, $this->repairResponse($repair, [
+            'specifications.ram.considered_source_urls' => ['https://manufacturer.example/other-offer'],
+            'specifications.ram.reason' => 'The other offer has different installed memory.',
+        ]));
+        $this->assertSame(['https://manufacturer.example/other-offer'], $result['specifications'][1]['considered_source_urls']);
+        $this->assertSame($base['specifications'][1]['value'], $result['specifications'][1]['value']);
+        $this->assertSame($base['specifications'][0], $result['specifications'][0]);
+        $this->assertSame($base['description'], $result['description']);
+    }
+
+    public function test_recovery_can_expand_only_fields_of_already_affected_facts(): void
+    {
+        $repair = $this->prepare($this->candidate(), ['ram: considered_source_urls missing.']);
+        $helper = app(CardRepairPatch::class);
+        $expanded = $helper->expandForRecovery($repair, ['specifications.ram.source_excerpt']);
+        $this->assertNotSame($repair['base_hash'], $expanded['base_hash']);
+        $this->assertSame($repair['base'], $expanded['base']);
+        $this->assertRejected($expanded, $this->repairResponse($repair, ['specifications.ram.reason' => 'Old scope']));
+        $this->expectException(ValidationException::class);
+        $helper->expandForRecovery($repair, ['specifications.cpu.value']);
+    }
+
     public function test_unrelated_field_new_specification_and_wrong_hash_cannot_escape_scope(): void
     {
         $repair = $this->prepare($this->candidate(), ['specifications.1.source_url' => ['Invalid URL']]);

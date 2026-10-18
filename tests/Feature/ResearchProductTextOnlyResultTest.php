@@ -26,7 +26,7 @@ class ResearchProductTextOnlyResultTest extends TestCase
 
     private const SOURCE = 'https://shop.example/lenovo-exact-123';
 
-    private function research(string $stopReason, bool $assembled, bool $moneyRemains = false, bool $moneyExhausted = false, int $photoCount = 0, string $verificationStatus = 'verified', bool $filesExist = true, string $sourceType = 'retailer'): array
+    private function research(string $stopReason, bool $assembled, bool $moneyRemains = false, bool $moneyExhausted = false, int $photoCount = 0, string $verificationStatus = 'verified', bool $filesExist = true, string $sourceType = 'retailer', array $responseOverrides = []): array
     {
         Storage::fake('public');
         Http::preventStrayRequests();
@@ -41,6 +41,8 @@ class ResearchProductTextOnlyResultTest extends TestCase
                 ...($sourceType === 'web' ? [['key' => 'mpn', 'name' => 'Part number', 'value' => 'EXACT-123']] : [])],
             'sources' => [['title' => 'Exact laptop', 'url' => self::SOURCE, 'type' => $sourceType, 'image_urls' => []]],
             'primary_source_url' => self::SOURCE, 'official_source_url' => null, 'image_urls' => [], 'confidence' => 0.95,
+            ...($sourceType === 'web' ? [] : ['selected_identity' => $this->observedIdentity('Exact 123', self::SOURCE)]),
+            ...$responseOverrides,
         ]])->preventStrayPrompts();
         $update = TelegramUpdate::query()->create(['update_id' => 1234567, 'telegram_user_id' => '123', 'chat_id' => '456',
             'message_id' => 10, 'text' => 'Find Lenovo Exact 123', 'payload' => [], 'status' => 'processing']);
@@ -212,5 +214,55 @@ class ResearchProductTextOnlyResultTest extends TestCase
         $this->assertSame('card_assembly_paused', $result['status']);
         $this->assertFalse($result['partial_photo_result']);
         $this->assertSame(0, $result['partial_photo_count']);
+    }
+
+    public function test_unresolved_identity_reaches_the_assistant_as_its_real_blocker_not_as_not_found(): void
+    {
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []])]);
+        Queue::fake();
+        $notes = 'Two configurations share this title; no observed page names the installed CPU.';
+        $unresolved = ['status' => 'unresolved', 'title' => 'Lenovo Exact', 'brand' => 'Lenovo', 'model' => 'Exact',
+            'product_type' => 'laptop', 'category' => 'laptops', 'color' => null, 'condition' => 'new',
+            'description' => null, 'research_notes' => $notes, 'specifications' => [],
+            'sources' => [['title' => 'Exact laptop', 'url' => self::SOURCE, 'type' => 'retailer', 'image_urls' => []]],
+            'primary_source_url' => null, 'official_source_url' => null, 'image_urls' => [], 'confidence' => 0.4];
+        ProductResearchAgent::fake([$unresolved, $unresolved])->preventStrayPrompts();
+        $update = TelegramUpdate::query()->create(['update_id' => 1234568, 'telegram_user_id' => '123', 'chat_id' => '456',
+            'message_id' => 11, 'text' => 'Find Lenovo Exact', 'payload' => [], 'status' => 'processing']);
+        $resolver = $this->mock(ProductImageResolver::class);
+        $resolver->shouldNotReceive('resolve');
+        $storage = $this->mock(ProductImageStorage::class);
+        $storage->shouldNotReceive('stage');
+        $costBudget = $this->mock(ProductSearchCostBudget::class);
+        $costBudget->shouldReceive('hasRemaining')->andReturn(true);
+        $costBudget->shouldReceive('exceeded')->andReturn(false);
+
+        $result = json_decode((string) (new ResearchProduct($update, $resolver, imageStorage: $storage))
+            ->handle(new Request(['query' => $update->text])), true, flags: JSON_THROW_ON_ERROR);
+
+        $this->assertSame('research_interrupted', $result['status']);
+        $this->assertContains('selected_identity', $result['blocked_by']);
+        $this->assertSame($notes, $result['agent_comment']);
+        $this->assertStringContainsString('не означает, что товар не найден', $result['message']);
+        $this->assertSame(0, ProductDraft::query()->count());
+    }
+
+    public function test_quotations_from_a_compatible_photo_only_page_never_become_selected_product_evidence(): void
+    {
+        $photoPage = 'https://other-shop.example/lenovo-exact-125';
+        $quote = fn (string $url, string $value): array => ['key' => 'ram', 'name' => 'Memory', 'value' => $value,
+            'source_url' => $url, 'source_excerpt' => "Memory: {$value}", 'applicability' => 'Observed on this page.'];
+        $this->research('cost_budget', assembled: false, responseOverrides: [
+            'sources' => [
+                ['title' => 'Exact laptop', 'url' => self::SOURCE, 'type' => 'retailer', 'image_urls' => []],
+                ['title' => 'Sibling', 'url' => $photoPage, 'type' => 'retailer', 'image_urls' => [],
+                    'roles' => ['compatible_photo_candidate'], 'applicability_reason' => 'Same chassis, different memory.'],
+            ],
+            'specification_evidence' => [$quote(self::SOURCE, '16 GB'), $quote($photoPage, '32 GB')],
+        ]);
+
+        $evidence = ProductDraft::query()->sole()->specification_evidence;
+        $this->assertSame([self::SOURCE], array_column($evidence, 'source_url'));
+        $this->assertSame('16 GB', $evidence[0]['value']);
     }
 }

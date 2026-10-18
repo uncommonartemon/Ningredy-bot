@@ -57,6 +57,12 @@ class VisionService
                 if (array_intersect($data['non_product_frames'], $data['uncertain_content_frames']) !== []) {
                     throw new UnexpectedValueException('A frame cannot be both confirmed non-product and uncertain.');
                 }
+                $cover = $data['cover_frame'] ?? 0;
+                if (! is_int($cover) || $cover < 0 || $cover > count($attachments)
+                    || in_array($cover, [...$data['foreign_text_frames'], ...$data['non_product_frames'], ...$data['uncertain_content_frames']])) {
+                    throw new UnexpectedValueException('Invalid cover_frame: expected 0 or an index of a frame not listed as a problem.');
+                }
+                $data['cover_frame'] = $cover;
 
                 return $data;
             });

@@ -922,6 +922,7 @@ class ProcessTelegramMessageTest extends TestCase
                 ->map(fn (int $index): string => "https://example.com/legion-{$index}.jpg")
                 ->all(),
             'confidence' => 0.95,
+            'selected_identity' => $this->observedIdentity('Legion 5 16IRX9', 'https://www.amazon.com/dp/LEGION'),
         ]]);
         $update = $this->update();
 
@@ -989,6 +990,7 @@ class ProcessTelegramMessageTest extends TestCase
             'research_notes' => null,
             'image_urls' => [],
             'confidence' => 0.95,
+            'selected_identity' => $this->observedIdentity('Blade 14', 'https://www.pbtech.com/product/NBKRAZ530633/model'),
         ]]);
         $update = $this->update();
         $resolver = $this->mock(ProductImageResolver::class);
@@ -1053,6 +1055,7 @@ class ProcessTelegramMessageTest extends TestCase
             'research_notes' => null,
             'image_urls' => [],
             'confidence' => 0.95,
+            'selected_identity' => $this->observedIdentity('Blade 14', 'https://www.pbtech.com/product/NBKRAZ530633/model'),
         ]]);
         $update = $this->update();
         $resolver = $this->mock(ProductImageResolver::class);
@@ -1322,6 +1325,7 @@ class ProcessTelegramMessageTest extends TestCase
             'research_notes' => null,
             'image_urls' => [],
             'confidence' => 0.95,
+            'selected_identity' => $this->observedIdentity('Legion 5 16IRX9', 'https://www.amazon.com/dp/LEGION'),
         ]]);
         $update = $this->update();
         $resolver = $this->mock(ProductImageResolver::class);
@@ -1386,6 +1390,7 @@ class ProcessTelegramMessageTest extends TestCase
             'research_notes' => null,
             'image_urls' => [],
             'confidence' => 0.95,
+            'selected_identity' => $this->observedIdentity('Legion 5 16IRX9', 'https://www.amazon.com/dp/LEGION'),
         ]]);
         $update = $this->update();
         $resolver = $this->mock(ProductImageResolver::class);

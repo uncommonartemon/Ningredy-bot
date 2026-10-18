@@ -21,6 +21,7 @@ use App\Services\ProductSearch\Discovery\DiscoveryResponseParser;
 use App\Services\ProductSearch\Discovery\InvalidDiscoveryResponse;
 use App\Services\ProductSearch\Recovery\RecoveryContext;
 use App\Services\ProductSearch\Research\InvalidResearchResponse;
+use App\Services\ProductSearch\Research\ResearchSourceRoles;
 use Illuminate\Support\Facades\Log;
 use Laravel\Ai\Streaming\Events\ProviderToolEvent;
 use Throwable;
@@ -326,7 +327,8 @@ class ProductImageCandidateDiscovery
     private function imageSources(array $sources): array
     {
         return collect($sources)
-            ->filter(fn (array $source): bool => $this->looksLikeHtmlProductPage((string) ($source['url'] ?? '')))
+            ->filter(fn (array $source): bool => ResearchSourceRoles::maySupplyPhotos($source)
+                && $this->looksLikeHtmlProductPage((string) ($source['url'] ?? '')))
             ->values()
             ->all();
     }
@@ -456,8 +458,18 @@ class ProductImageCandidateDiscovery
             })
             ->whereIn('phase', ['gallery_preflight', 'source_selection', 'source_resolution', 'image_verification'])
             ->latest('id')->limit(15)->get(['product_url', 'action', 'status', 'decision'])
+            ->map(fn (ProductSourceAttempt $attempt): array => [...$attempt->toArray(),
+                'site_name' => self::siteName((string) $attempt->product_url)])
             ->toArray();
-        $searchJournal = json_encode(['previous_search_results' => $searchHistory, 'previous_source_failures' => $sourceHistory],
+        // Regional storefronts of one network (allegro.pl/.cz/.sk, galaxus.nl/.de)
+        // usually refuse together; the agent sees that link instead of guessing.
+        $networkFailures = collect($sourceHistory)->groupBy('site_name')
+            ->map(fn ($rows): array => ['hosts' => $rows->map(fn (array $row): string => (string) parse_url((string) $row['product_url'], PHP_URL_HOST))->unique()->values()->all(),
+                'failures' => $rows->count()])
+            ->filter(fn (array $network, $name): bool => $name !== '' && count($network['hosts']) > 1)->all();
+        $searchJournal = json_encode(['previous_search_results' => $searchHistory, 'previous_source_failures' => $sourceHistory,
+            ...($networkFailures === [] ? [] : ['failed_site_networks' => $networkFailures,
+                'network_note' => 'Several regional domains of the same site_name already failed. A sibling domain of that network usually fails the same way; prefer an independent site unless you have evidence otherwise.'])],
             JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
         $cardRecovery = $draft->reconciliationPending()
             ? ProductSourceAttempt::where('product_draft_id', $draft->id)
@@ -511,6 +523,27 @@ class ProductImageCandidateDiscovery
     }
 
     /** @param array<int, string> $excludedSourceUrls */
+    /**
+     * The site's own name without its public suffix: shop.allegro.pl and
+     * allegro.cz are both "allegro", amazon.co.uk is "amazon". A short
+     * second-level label under a two-letter country code is treated as part
+     * of the suffix. Advisory only, so an imperfect split costs nothing.
+     */
+    public static function siteName(string $url): string
+    {
+        $labels = explode('.', strtolower((string) (parse_url($url, PHP_URL_HOST) ?: '')));
+        if (count($labels) < 2) {
+            return '';
+        }
+        $tld = array_pop($labels);
+        $name = array_pop($labels);
+        if ($labels !== [] && strlen($tld) === 2 && strlen($name) <= 3) {
+            $name = array_pop($labels);
+        }
+
+        return $name;
+    }
+
     private function sourceExcluded(string $url, array $excludedSourceUrls): bool
     {
         $host = ProductSourcePriority::host($url);

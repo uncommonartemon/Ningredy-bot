@@ -2,6 +2,9 @@
 
 namespace App\Services\Products;
 
+use App\Services\ProductSearch\Research\ResearchSourceRoles;
+use Illuminate\Support\Str;
+
 class ProductResearchConfigurationGuard
 {
     private const IDENTITY_KEYS = ['sku', 'mpn', 'ean', 'upc', 'gtin'];
@@ -26,8 +29,12 @@ class ProductResearchConfigurationGuard
             ->first(fn (string $value): bool => $value !== '' && ! $this->ambiguous($value));
         $issues = [];
 
-        if (! $identity && ! $this->hasExactRetailOffer($data)) {
-            $issues[] = 'No exact reusable SKU/MPN/GTIN or exact retailer offer identifies one sellable configuration.';
+        if (! $identity && ! $this->hasObservedFullModel($data)) {
+            $issues[] = 'The selected identity is unresolved: provide an observed reusable SKU/MPN/GTIN or selected_identity with the full model, single_product scope, observed source URL and verbatim excerpt. A family title, source publisher type, or letters and digits alone cannot identify one configuration. Keep useful sources and facts; missing identity evidence is not not_found.';
+        }
+        if (is_array($data['selected_identity'] ?? null)
+            && ($data['selected_identity']['model_scope'] ?? null) !== 'single_product') {
+            $issues[] = 'selected_identity still describes a product family or unknown scope, not one selected product.';
         }
 
         foreach (self::CONFIGURATION_KEYS as $key) {
@@ -61,22 +68,47 @@ class ProductResearchConfigurationGuard
         ) === 1;
     }
 
-    private function hasExactRetailOffer(array $data): bool
+    private function hasObservedFullModel(array $data): bool
     {
         $model = trim((string) ($data['model'] ?? ''));
-
-        if ($model === '' || $this->ambiguous($model)) {
+        $identity = $data['selected_identity'] ?? null;
+        if ($model === '' || $this->ambiguous($model) || ! is_array($identity)
+            || ($identity['basis'] ?? null) !== 'full_model' || ($identity['model_scope'] ?? null) !== 'single_product'
+            || trim((string) ($identity['reason'] ?? '')) === '') {
             return false;
         }
-
-        $primaryUrl = trim((string) ($data['primary_source_url'] ?? ''));
-        $primary = collect($data['sources'] ?? [])->first(
+        $url = trim((string) ($identity['source_url'] ?? ''));
+        $source = collect($data['sources'] ?? [])->first(
             fn (mixed $source): bool => is_array($source)
-                && rtrim((string) ($source['url'] ?? ''), '/') === rtrim($primaryUrl, '/'),
+                && self::samePage((string) ($source['url'] ?? ''), $url)
+                && ResearchSourceRoles::mayIdentifySelectedProduct($source),
         );
+        $text = static fn (string $value): string => Str::lower(Str::squish($value));
+        $needle = $text($model);
+        $observed = $text((string) ($identity['observed_model'] ?? ''));
+        $excerpt = $text((string) ($identity['source_excerpt'] ?? ''));
+        $contains = static fn (string $haystack): bool => preg_match(
+            '/(?<![\p{L}\p{N}])'.preg_quote($needle, '/').'(?![\p{L}\p{N}])/u', $haystack) === 1;
 
-        return is_array($primary)
-            && in_array($primary['type'] ?? null, ['retailer', 'marketplace'], true)
-            && preg_match('/[a-z].*\d|\d.*[a-z]/i', $model) === 1;
+        // The page must prove the WHOLE selected model: a verbatim excerpt that
+        // contains it. A page naming more ("Brand Family MODEL-123 Silver")
+        // proves "MODEL-123"; a page naming only the family does not prove a
+        // longer model. Retained Web Search evidence admits a candidate; it does
+        // not create a browser observation, verified fact or photo verdict.
+        return is_array($source) && $excerpt !== '' && ! $this->ambiguous($excerpt)
+            && $contains($excerpt) && ($observed === $needle || $contains($observed));
+    }
+
+    /** Same product page despite scheme, host case, www., fragment or trailing slash. */
+    private static function samePage(string $left, string $right): bool
+    {
+        $key = static function (string $url): string {
+            $parts = parse_url(trim($url));
+            $host = preg_replace('/^www\./', '', strtolower((string) ($parts['host'] ?? '')));
+
+            return $host.rtrim((string) ($parts['path'] ?? ''), '/').(isset($parts['query']) ? '?'.$parts['query'] : '');
+        };
+
+        return trim($left) !== '' && trim($right) !== '' && $key($left) === $key($right);
     }
 }

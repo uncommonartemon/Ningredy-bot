@@ -87,6 +87,38 @@ class QueueHealthCheckCommandTest extends TestCase
         Http::assertSentCount(1);
     }
 
+    public function test_a_photo_marked_processed_without_any_outcome_is_reported_once_for_resending(): void
+    {
+        config(['services.telegram.bot_token' => 'test-token']);
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []])]);
+        $lost = TelegramUpdate::create([
+            'update_id' => 92001, 'chat_id' => '98765', 'telegram_user_id' => '12345',
+            'payload' => ['message' => ['photo' => [['file_id' => 'f']]]], 'status' => 'received',
+        ]);
+        $lost->forceFill(['processed_at' => now()->subMinutes(9), 'created_at' => now()->subMinutes(9)])->save();
+
+        $this->artisan('queue:health-check')->assertSuccessful();
+        $this->artisan('queue:health-check')->assertSuccessful();
+
+        Http::assertSentCount(1);
+        Http::assertSent(fn (HttpRequest $request): bool => $request['chat_id'] === '98765'
+            && str_contains((string) $request['text'], 'фото') && str_contains((string) $request['text'], 'ещё раз'));
+        $this->assertNotNull($lost->fresh()->payload['_lost_update_alerted_at']);
+    }
+
+    public function test_a_received_message_still_waiting_in_the_queue_is_not_lost(): void
+    {
+        config(['services.telegram.bot_token' => 'test-token']);
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []])]);
+        $this->queueJob(now()->subMinutes(9)->timestamp);
+        DB::table('jobs')->update(['reserved_at' => now()->timestamp]);
+        TelegramUpdate::query()->update(['status' => 'received', 'created_at' => now()->subMinutes(9)]);
+
+        $this->artisan('queue:health-check')->assertSuccessful();
+
+        Http::assertNothingSent();
+    }
+
     private function queueJob(int $createdAt): void
     {
         $update = TelegramUpdate::create([

@@ -104,6 +104,7 @@ class ProductSpecificationEvidenceGuard
         }
 
         $errors = [];
+        $citationObligations = [];
         foreach ($result as $item) {
             $key = $item['key'];
             $dropped = $item['evidence'] === 'dropped';
@@ -169,6 +170,11 @@ class ProductSpecificationEvidenceGuard
                 $missing = array_diff($needed->unique()->all(), $considered);
                 $missingRefs = array_diff($neededRefs, $consideredRefs);
                 if ($missing !== [] || $missingRefs !== [] || trim((string) ($item['reason'] ?? '')) === '') {
+                    $citationObligations[$key] = [
+                        'source_urls' => array_values($missing),
+                        'source_refs' => array_values($missingRefs),
+                        'explanation_required' => true,
+                    ];
                     $error = $key.': differing or dropped cited observations require reason and considered_source_urls for the other sources. For retained fields, source_url is already counted and need not be repeated.';
                     if ($missing !== []) {
                         $error .= ' Missing source URLs: '.implode(', ', $missing).'.';
@@ -185,7 +191,7 @@ class ProductSpecificationEvidenceGuard
         }
 
         if ($errors !== []) {
-            throw new InvalidSpecificationEvidence($errors);
+            throw new InvalidSpecificationEvidence($errors, $citationObligations);
         }
     }
 

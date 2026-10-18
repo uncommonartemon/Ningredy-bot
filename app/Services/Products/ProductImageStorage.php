@@ -20,6 +20,8 @@ use App\Services\Photos\GallerySourceContext;
 use App\Services\Photos\ImageGeometry;
 use App\Services\Photos\ImageRenditionDeduplicator;
 use App\Services\Photos\ImageUrls;
+use App\Services\ProductSearch\Recovery\ProductCardRecoverySupervisor;
+use App\Services\ProductSearch\Research\ResearchSourceRoles;
 use App\Services\ProductSearch\SourceQueueBuilder;
 use GdImage;
 use Illuminate\Support\Collection;
@@ -255,7 +257,24 @@ class ProductImageStorage
                     && is_array($lastTextFailure)
                     && ($lastTextFailure['repair_context']['recovery_action'] ?? null) !== 'try_other_source') {
                     // Assembly has already tried targeted text tools and its fallback model.
-                    // A text gap must not buy the same photo discovery cycle again.
+                    // A text gap must not buy the same photo discovery cycle again. With
+                    // budget left, a supervisor chooses a DIFFERENT text step and only the
+                    // saved gallery's card is reconciled again.
+                    if ($updateId) {
+                        $supervisor = app(ProductCardRecoverySupervisor::class);
+                        while ($supervisor->recover($draft, (int) $updateId, $progress)) {
+                            $resumed = $this->resumeOutstandingReconciliation($draft, $updateId, $progress);
+                            $draft->refresh();
+                            if ($resumed === null) {
+                                break;
+                            }
+                            $result = $draft->media()->count();
+                            if (! $draft->reconciliationPending()
+                                || $draft->gallery_search_stop_reason !== 'specifications_unreconciled') {
+                                return $result;
+                            }
+                        }
+                    }
                     $this->attempts->record([
                         'telegram_update_id' => $updateId, 'product_draft_id' => $draft->id,
                         'product_url' => $draft->primary_source_url, 'actor' => 'server',
@@ -323,6 +342,9 @@ class ProductImageStorage
             try {
                 $state = $draft->fresh() ?? $draft;
                 $cancelled = $failure instanceof ProductSearchCancelled;
+                if ($cancelled) {
+                    app(ProductPhotoBatchStorage::class)->discard($state);
+                }
                 $status = $cancelled ? 'cancelled' : ($failure !== null ? 'interrupted' : ($state->gallery_status ?: 'unknown'));
                 $count = $state->media()->count();
                 $reason = $cancelled ? 'cancelled' : ($failure !== null ? 'exception' : ($state->gallery_search_stop_reason ?: 'none'));
@@ -389,6 +411,19 @@ class ProductImageStorage
         // again from the top - open the page, run the recipe, download every
         // frame - to arrive back at the one step that had actually failed. The
         // frames are already on disk; what is missing is the verdict on them.
+        // Frames are saved before Vision, so a worker that died mid-check
+        // leaves them on disk: they join the pending-photo resume below.
+        $photoBatches = app(ProductPhotoBatchStorage::class);
+        try {
+            $photoBatches->purgeStale($draft);
+            if ($photoBatches->materializePending($draft, $telegramUpdateId) > 0) {
+                $progress?->__invoke('Продолжаю проверку фото, сохранённых до прерванной проверки Vision.');
+            }
+        } catch (ProductSearchCancelled $exception) {
+            throw $exception;
+        } catch (Throwable $exception) {
+            report($exception);
+        }
         $completedSourceUrls = [];
         $resumed = $this->resumeInterruptedVerification($draft, $minimumCompleteGallerySize, $target, $telegramUpdateId, $progress, $completedSourceUrls);
 
@@ -588,8 +623,22 @@ class ProductImageStorage
                     'url' => $resolvedFinalUrl,
                 ];
                 $photoAssessment = app(ProductSourceIdentityGate::class)->assessPhotos($draft, $runtimeSourceEvidence, $telegramUpdateId);
-                $this->recordPhotoAssessment($draft, $runtimeSourceEvidence, $photoAssessment, $telegramUpdateId);
+                $this->recordPhotoAssessment($draft, $runtimeSourceEvidence, $photoAssessment, $telegramUpdateId, $originalSourceUrl);
+                // A page with another product's identifier is never the facts
+                // source. Its photos (and old seeds) stay usable only when photo
+                // applicability positively accepted them as the same or compatible.
+                $identityConflict = app(ProductSourceIdentityGate::class)->knownConflict($draft, $runtimeSourceEvidence, $telegramUpdateId);
+                if ($identityConflict) {
+                    $this->attempts->record([
+                        'telegram_update_id' => $telegramUpdateId, 'product_draft_id' => $draft->id,
+                        'product_url' => $resolvedFinalUrl, 'actor' => 'identity_validator',
+                        'phase' => 'source_selection', 'action' => 'validate_resolved_source_identity',
+                        'status' => 'failed', 'decision' => 'reject_runtime_identifier_mismatch',
+                        'input' => ['url' => $originalSourceUrl], 'output' => $runtimeSourceEvidence,
+                    ]);
+                }
                 if (($photoAssessment['verdict'] ?? null) === 'conflicting'
+                    || ($identityConflict && ! in_array($photoAssessment['verdict'] ?? null, ['exact', 'compatible'], true))
                     || (($photoAssessment['verdict'] ?? null) === 'uncertain' && ! ($photoAssessment['may_inspect_gallery'] ?? false))) {
                     $progress?->__invoke('Источник отложен: пригодность фотографий не подтверждена. '.$photoAssessment['reason']);
 
@@ -2456,6 +2505,45 @@ class ProductImageStorage
         return $stored;
     }
 
+    /**
+     * Freshly downloaded frames are written to disk before Vision and each
+     * returned batch of verdicts is committed before the next one is bought,
+     * so a dead worker or a time slice loses neither. Returns the accepted
+     * frames, null while any frame still awaits a verdict, or false when the
+     * frames are not fresh (already pending draft photos) or cannot be saved.
+     *
+     * @return array<int, array<string, mixed>>|null|false
+     */
+    private function durablyReviewedFrames(array $candidates, ProductDraft $draft, ?int $telegramUpdateId): array|null|false
+    {
+        $fresh = $candidates !== [] && collect($candidates)->every(fn (array $candidate): bool => ! isset($candidate['media_id'])
+            && ! isset($candidate['photo_frame_id']) && ($candidate['image'] ?? null) instanceof GdImage);
+        $first = $candidates[array_key_first($candidates) ?? 0] ?? [];
+        $source = is_array($first['page_source_context'] ?? null) && is_string($first['page_source_context']['url'] ?? null)
+            ? $first['page_source_context']
+            : ['url' => (string) ($first['product_page_url'] ?? $first['source_url'] ?? '')];
+        if (! $fresh || $source['url'] === '') {
+            return false;
+        }
+        $batches = app(ProductPhotoBatchStorage::class);
+        try {
+            $batch = $batches->prepare($draft, $candidates, $source, $telegramUpdateId);
+        } catch (ProductSearchCancelled) {
+            // Only a real cancellation stops the search; an in-memory draft
+            // that merely differs from its row keeps the ordinary review.
+            app(ProductSearchCancellation::class)->throwIfCancelled($telegramUpdateId);
+
+            return false;
+        } catch (Throwable $exception) {
+            report($exception);
+
+            return false;
+        }
+        $review = $batches->review($batch, $draft, $candidates, $this->visionVerifier, $telegramUpdateId);
+
+        return $review->isComplete() ? $review->accepted : null;
+    }
+
     private function checkedGalleryFrames(
         array $candidates,
         ProductDraft $draft,
@@ -2467,7 +2555,10 @@ class ProductImageStorage
         // Exact page identity is provenance, never a waiver for the current
         // pixels: UGC, another colour/body and visible keyboard differences all
         // require the same full review as a compatible source.
-        $kept = $this->visionVerifier->reviewCompleteGallery($candidates, $draft, $telegramUpdateId);
+        $kept = $this->durablyReviewedFrames($candidates, $draft, $telegramUpdateId);
+        if ($kept === false) {
+            $kept = $this->visionVerifier->reviewCompleteGallery($candidates, $draft, $telegramUpdateId);
+        }
         app(ProductSearchCancellation::class)->throwIfCancelled($telegramUpdateId);
 
         if ($kept === null) {
@@ -3182,11 +3273,12 @@ class ProductImageStorage
         return $source;
     }
 
-    private function recordPhotoAssessment(ProductDraft $draft, array $source, array $assessment, ?int $updateId): void
+    private function recordPhotoAssessment(ProductDraft $draft, array $source, array $assessment, ?int $updateId, ?string $requestedUrl = null): void
     {
         $this->attempts->record([
             'telegram_update_id' => $updateId, 'product_draft_id' => $draft->id,
             'product_url' => $source['url'] ?? '', 'actor' => 'identity_validator',
+            'input' => $requestedUrl === null ? null : ['url' => $requestedUrl],
             'phase' => 'source_selection', 'action' => 'assess_photo_applicability',
             'status' => in_array($assessment['verdict'] ?? null, ['exact', 'compatible'], true) ? 'completed' : 'interrupted',
             'decision' => $assessment['verdict'] ?? 'unavailable',
@@ -3260,14 +3352,26 @@ class ProductImageStorage
      */
     private function textCardSourceUrl(ProductDraft $draft, ?int $runId): string
     {
+        // A page kept only as a compatible photo candidate sells another
+        // configuration; it is never the source of the card's facts.
+        $photoOnly = collect($draft->sources ?? [])
+            ->filter(fn (mixed $source): bool => is_array($source) && ! ResearchSourceRoles::maySupplyFacts($source))
+            ->map(fn (array $source): string => trim((string) ($source['url'] ?? '')))
+            ->all();
+
         return (string) collect([$draft->primary_source_url, ...collect($draft->sources ?? [])->pluck('url')->all()])
             ->filter(fn (mixed $url): bool => is_string($url) && trim($url) !== '')
             ->map(fn (string $url): string => trim($url))
             ->unique()
-            ->first(fn (string $url): bool => ! $this->rejectedAsDifferentProduct($draft, $url, $runId), '');
+            ->first(fn (string $url): bool => ! in_array($url, $photoOnly, true)
+                && ! $this->rejectedAsDifferentProduct($draft, $url, $runId), '');
     }
 
-    /** Whether this run already saw the page (as asked for or as landed on) selling another product. */
+    /**
+     * Whether this run already saw the page (as asked for or as landed on)
+     * selling another product: an identifier mismatch, or a photo
+     * applicability verdict that observed a different physical product.
+     */
     private function rejectedAsDifferentProduct(ProductDraft $draft, string $url, ?int $runId): bool
     {
         $url = rtrim($url, '/');
@@ -3275,7 +3379,8 @@ class ProductImageStorage
         return ProductSourceAttempt::query()
             ->where('product_draft_id', $draft->id)
             ->where('telegram_update_id', $runId)
-            ->where('decision', 'reject_runtime_identifier_mismatch')
+            ->where(fn ($query) => $query->where('decision', 'reject_runtime_identifier_mismatch')
+                ->orWhere(fn ($query) => $query->where('action', 'assess_photo_applicability')->where('decision', 'conflicting')))
             ->get(['product_url', 'input'])
             ->contains(fn (ProductSourceAttempt $attempt): bool => in_array($url, [
                 rtrim((string) $attempt->product_url, '/'),

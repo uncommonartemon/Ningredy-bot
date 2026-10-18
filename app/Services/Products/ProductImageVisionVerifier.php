@@ -165,6 +165,7 @@ class ProductImageVisionVerifier
         int $limit,
         ?int $telegramUpdateId,
         bool $galleryFramePolicy,
+        ?array &$verdicts = null,
     ): array {
         if ($limit <= 0 || $candidates === []) {
             return [];
@@ -336,6 +337,12 @@ class ProductImageVisionVerifier
 
         $reviews = $this->rankReviews($reviewed->filter(fn (array $review): bool => $qualifies($review)
             && ! ($forbidsPackaging && $review['kind'] === 'packaging')));
+
+        // Missing or invalid entries are unresolved, not negative reviews.
+        // Keep explicit verdicts separate from the selected array so a later
+        // failed batch cannot erase earlier work or reject unseen frames.
+        $verdicts = ['reviews' => $reviewed->keyBy('index')->all(),
+            'interruption_reason' => $lastException?->getMessage()];
 
         return $reviews->take($limit)->map(function (array $review) use ($candidates, $model): array {
             return [
@@ -510,6 +517,45 @@ class ProductImageVisionVerifier
         }
 
         return $accepted;
+    }
+
+    /** Explicit decisions for one paid batch; only consistent returned reviews are final. */
+    public function reviewFrameBatch(array $candidates, ProductDraft $draft, ?int $updateId = null): GalleryBatchReview
+    {
+        if (count($candidates) > 40) {
+            throw new \InvalidArgumentException('A Vision review batch may contain at most 40 frames.');
+        }
+        $indexed = [];
+        foreach (array_values($candidates) as $index => $candidate) {
+            $indexed[] = [...$candidate, '_review_index' => $index + 1];
+        }
+        $verdicts = null;
+        try {
+            $accepted = $this->selectWithPolicy($draft, $indexed, count($indexed), $updateId, true, $verdicts);
+        } catch (ProductSearchCancelled $exception) {
+            throw $exception;
+        } catch (Throwable $exception) {
+            report($exception);
+
+            return new GalleryBatchReview([], [], $candidates, $exception->getMessage());
+        }
+        $acceptedIndices = array_column($accepted, '_review_index');
+        $rejected = $pending = [];
+        foreach ($indexed as $candidate) {
+            $index = $candidate['_review_index'];
+            if (in_array($index, $acceptedIndices, true)) {
+                continue;
+            }
+            if (isset($verdicts['reviews'][$index])) {
+                $rejected[] = [...$candidate, 'frame_review' => $verdicts['reviews'][$index]];
+            } else {
+                $pending[] = $candidate;
+            }
+        }
+        $accepted = array_map(fn (array $candidate): array => [...$candidate,
+            'frame_review' => $verdicts['reviews'][$candidate['_review_index']] ?? []], $accepted);
+
+        return new GalleryBatchReview($accepted, $rejected, $pending, $verdicts['interruption_reason'] ?? null);
     }
 
     private function rankReviews($reviews)
@@ -695,6 +741,7 @@ class ProductImageVisionVerifier
         $runId = $telegramUpdateId ?? $draft->telegram_update_id;
         $batches = array_chunk(array_values($candidates), 40);
         $accepted = [];
+        $cover = null;
 
         foreach ($batches as $batchIndex => $frames) {
             $cancellation->throwIfCancelled($runId);
@@ -733,6 +780,8 @@ class ProductImageVisionVerifier
                 $rejected = array_fill_keys(array_unique(array_map('intval', $indices)), true);
                 foreach ($frames as $index => $candidate) {
                     if (! isset($rejected[$index + 1])) {
+                        // The reviewer's cover pick leads the gallery; the rest keep source order.
+                        $cover ??= ($data['cover_frame'] ?? 0) === $index + 1 ? count($accepted) : null;
                         $accepted[] = $candidate;
                     }
                 }
@@ -743,6 +792,9 @@ class ProductImageVisionVerifier
 
                 return null;
             }
+        }
+        if ($cover !== null && $cover > 0) {
+            array_unshift($accepted, ...array_splice($accepted, $cover, 1));
         }
 
         return $accepted;

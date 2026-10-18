@@ -14,19 +14,7 @@ final class ProductSourceIdentityGate
 
     public function assess(ProductDraft $draft, array $source, ?int $runId): string
     {
-        // A rejection from this very browser execution is not a new question
-        // for the model. Never downgrade it because a later check lost the
-        // scout's H1/title, ran out of budget or could not reach the provider.
-        $observed = $source['_observed_identity'] ?? null;
-        if (is_array($observed)
-            && ($observed['verdict'] ?? null) === 'conflicting'
-            && ($observed['product_draft_id'] ?? null) === $draft->id
-            && ($observed['telegram_update_id'] ?? null) === $runId
-            && ($observed['source']['url'] ?? null) === ($source['url'] ?? null)) {
-            return 'conflicting';
-        }
-
-        if ($this->matcher->conflictsSource($draft, $source)) {
+        if ($this->knownConflict($draft, $source, $runId)) {
             return 'conflicting';
         }
         if ($this->matcher->confirmsExactIdentifier($draft, $source)) {
@@ -36,6 +24,24 @@ final class ProductSourceIdentityGate
         // The existing judge owns budget, caching and the distinction between
         // uncertain evidence and an unavailable check. Neither is a conflict.
         return $this->judge->judge($draft, $source, $runId);
+    }
+
+    /** The part of assess() that never asks the judge: an observed rejection or a hard identifier mismatch. */
+    public function knownConflict(ProductDraft $draft, array $source, ?int $runId): bool
+    {
+        // A rejection from this very browser execution is not a new question
+        // for the model. Never downgrade it because a later check lost the
+        // scout's H1/title, ran out of budget or could not reach the provider.
+        $observed = $source['_observed_identity'] ?? null;
+        if (is_array($observed)
+            && ($observed['verdict'] ?? null) === 'conflicting'
+            && ($observed['product_draft_id'] ?? null) === $draft->id
+            && ($observed['telegram_update_id'] ?? null) === $runId
+            && ($observed['source']['url'] ?? null) === ($source['url'] ?? null)) {
+            return true;
+        }
+
+        return $this->matcher->conflictsSource($draft, $source);
     }
 
     /** Gallery eligibility is independent of the configuration used for technical facts. */

@@ -9,8 +9,10 @@ use App\Services\Ai\ProductSearchCostBudget;
 use App\Services\Ai\ProductSearchTimeBudget;
 use App\Services\Ai\StreamingProductResearch;
 use App\Services\Products\ProductSourceAttemptRecorder;
+use App\Services\ProductSearch\Recovery\FailureDiagnosis;
 use App\Services\ProductSearch\Recovery\RecoveryContext;
 use Closure;
+use Illuminate\Support\Arr;
 use Illuminate\Validation\ValidationException;
 use Laravel\Ai\Responses\AgentResponse;
 use Laravel\Ai\Streaming\Events\ProviderToolEvent;
@@ -73,9 +75,21 @@ class RecoverableProductResearch
 
                 return ['response' => $response, 'data' => $data];
             } catch (InvalidResearchResponse $error) {
+                $retainedResult = is_array($error->evidence['result'] ?? null) ? $error->evidence['result'] : [];
+                $validationErrors = is_array($error->evidence['validation_errors'] ?? null) ? $error->evidence['validation_errors'] : [];
+                $diagnosis = FailureDiagnosis::make(
+                    stage: 'product_research',
+                    failureKind: $error->reason,
+                    serverReason: $validationErrors === [] ? $error->getMessage() : implode(' | ', Arr::flatten($validationErrors)),
+                    agentComment: is_string($retainedResult['research_notes'] ?? null) ? $retainedResult['research_notes'] : null,
+                    blockedBy: array_keys($validationErrors),
+                    retained: ['source_count' => is_array($retainedResult['sources'] ?? null) ? count($retainedResult['sources']) : 0,
+                        'specification_count' => is_array($retainedResult['specifications'] ?? null) ? count($retainedResult['specifications']) : 0,
+                        'reported_status' => $retainedResult['status'] ?? null],
+                );
                 $run->update(['invocation_id' => $error->invocationId, 'status' => 'failed',
                     'activity' => [...($run->activity ?? []), 'provider_web_search_items' => $searchTrace],
-                    'response' => ['recovery_snapshot' => $error->evidence, 'failure_kind' => $error->reason],
+                    'response' => ['recovery_snapshot' => $error->evidence, 'failure_kind' => $error->reason, 'failure_diagnosis' => $diagnosis],
                     'usage' => $error->usage === null ? null : [...$error->usage, 'web_search_calls' => count($searchItems)],
                     'error' => $error->getMessage(), 'completed_at' => now()]);
                 $this->cancellation->throwIfCancelled($updateId);
@@ -95,11 +109,11 @@ class RecoverableProductResearch
                 $context = new RecoveryContext('product_research', $error->reason,
                     $error->getMessage(), ['repair_structured_result', 'reuse_retained_sources', 'web_search_missing_evidence'],
                     retained: ['attempts' => $retainedAttempts],
-                    evidence: ['stop_reason' => $stop, 'usage_known' => $error->usage !== null, 'web_search_calls' => count($searchItems)]);
+                    evidence: ['stop_reason' => $stop, 'usage_known' => $error->usage !== null, 'web_search_calls' => count($searchItems), 'failure_diagnosis' => $diagnosis]);
                 $this->attempts->record(['telegram_update_id' => $updateId, 'actor' => 'server', 'phase' => 'research_recovery',
                     'action' => 'repair_response', 'status' => $stop === null ? 'retrying' : 'interrupted',
                     'decision' => $stop ?? 'agent_repair', 'message' => $error->getMessage(),
-                    'output' => ['ai_run_id' => $run->id, 'recovery' => $context->toArray()]]);
+                    'output' => ['ai_run_id' => $run->id, 'recovery' => $context->toArray(), 'failure_diagnosis' => $diagnosis]]);
                 if ($stop !== null) {
                     throw new InvalidResearchResponse($stop, $error->evidence, $error->usage, $error->invocationId, false, $error);
                 }

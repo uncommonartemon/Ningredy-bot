@@ -98,6 +98,9 @@ class ProductResearchResponseNormalizer
                     'url' => $url,
                     'type' => $type,
                     'image_urls' => $this->httpUrls($source['image_urls'] ?? [], 10),
+                    // Invalid explicit roles must reach validation, not turn
+                    // into an unrestricted legacy source during normalization.
+                    ...array_intersect_key($source, array_flip(['roles', 'applicability_reason'])),
                 ];
             })
             ->filter()

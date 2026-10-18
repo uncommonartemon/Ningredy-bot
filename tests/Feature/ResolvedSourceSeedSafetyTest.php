@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Ai\Agents\ProductImageDiscoveryAgent;
 use App\Ai\Agents\ProductImageVisionAgent;
+use App\Ai\Agents\ProductPhotoApplicabilityAgent;
 use App\Ai\Agents\ProductSourceIdentityAgent;
 use App\Models\AiRun;
 use App\Models\AppSetting;
@@ -51,6 +52,13 @@ class ResolvedSourceSeedSafetyTest extends TestCase
                 'reason' => 'Fixture verdict based on the newly observed page, not old search seeds.',
             ];
         })->preventStrayPrompts();
+        ProductPhotoApplicabilityAgent::fake(fn (string $prompt): array => [
+            'verdict' => str_contains($prompt, '008US') ? 'conflicting' : 'uncertain',
+            'reason' => 'Fixture verdict on the newly observed page.', 'source_model' => '', 'differences' => [], 'evidence' => [],
+            'plausible_target' => true, 'may_inspect_gallery' => ! str_contains($prompt, '008US'),
+            'physical_checks' => array_fill_keys(['platform', 'revision', 'construction', 'dimensions', 'ports', 'color'],
+                ['status' => 'unknown', 'evidence' => '']),
+        ])->preventStrayPrompts();
         $this->mock(ProductSpecificationReconciler::class)->shouldNotReceive('reconcile');
     }
 
@@ -73,9 +81,12 @@ class ResolvedSourceSeedSafetyTest extends TestCase
         $result = $this->invokeEntryPoint($entryPoint, $draft);
 
         $this->assertSame(0, $result);
+        // Top-up asks the identity judge; stage asks photo applicability about the same page.
         $this->assertTrue(ProductSourceAttempt::query()
             ->where('product_draft_id', $draft->id)
-            ->where('decision', 'reject_runtime_identifier_mismatch')->exists());
+            ->where(fn ($query) => $query->where('decision', 'reject_runtime_identifier_mismatch')
+                ->orWhere(fn ($query) => $query->where('action', 'assess_photo_applicability')->where('decision', 'conflicting')))
+            ->exists());
         $this->assertSame(0, $draft->media()->count());
         $this->assertNull($draft->fresh()->specifications_reconciled_source_url);
         Http::assertNothingSent();

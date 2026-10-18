@@ -16,6 +16,7 @@ use App\Models\Product;
 use App\Models\ProductDraft;
 use App\Models\ProductDraftMedia;
 use App\Models\ProductGalleryRecipe;
+use App\Models\ProductPhotoBatch;
 use App\Models\ProductSourceAttempt;
 use App\Models\ProductSourceStat;
 use App\Models\ProductVariant;
@@ -6237,7 +6238,11 @@ class ProductImageStorageTest extends TestCase
             ProductDraftMedia::setEventDispatcher($dispatcher);
         }
         $this->assertSame(0, $draft->media()->count());
-        $this->assertSame([], Storage::disk('public')->allFiles('drafts/'.$draft->id));
+        // The checkpoint's own files roll back; frames saved before Vision
+        // stay so the next run resumes instead of downloading them again.
+        $this->assertSame([], array_values(array_filter(Storage::disk('public')->allFiles('drafts/'.$draft->id),
+            fn (string $path): bool => ! str_contains($path, '/photo-batches/'))));
+        $this->assertTrue(ProductPhotoBatch::query()->where('product_draft_id', $draft->id)->whereNull('selected_at')->whereHas('frames')->exists());
         $this->assertArrayNotHasKey('_photo_checkpoint', $draft->fresh()->photo_source_context ?? []);
     }
 

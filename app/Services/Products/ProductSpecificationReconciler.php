@@ -188,7 +188,7 @@ class ProductSpecificationReconciler
             $payload['repair'] = app(CardRepairPatch::class)->forAgent($repair);
             // Keep one scoped view, not several copies of the full rejected card.
             $payload['previous_assembly_feedback'] = array_intersect_key($previousFeedback,
-                array_flip(['status', 'reason', 'summary']));
+                array_flip(['status', 'reason', 'summary', 'supervisor_guidance']));
             $payload['previous_assembly_feedback']['repair_context'] = array_diff_key(
                 $previousFeedback['repair_context'] ?? [], array_flip(['previous_candidate', 'patch_repair']));
         }
@@ -504,6 +504,7 @@ class ProductSpecificationReconciler
                             : ($exception instanceof InvalidSpecificationEvidence ? 'specification_evidence' : 'operation')),
                     ...($repair !== null && ! $patchApplied ? ['patch_repair' => $repair] : []),
                     ...($exception instanceof CardRepairValidationException ? ['repair_targets' => $exception->repairTargets] : []),
+                    ...($exception instanceof InvalidSpecificationEvidence ? ['citation_obligations' => $exception->citationObligations] : []),
                     'validation_errors' => match (true) {
                         $exception instanceof ValidationException => $exception->errors(),
                         $exception instanceof InvalidSpecificationEvidence => $exception->violations,

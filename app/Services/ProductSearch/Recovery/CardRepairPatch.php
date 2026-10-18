@@ -13,6 +13,10 @@ final class CardRepairPatch
 {
     private const VERSION = 1;
 
+    // What the agent sees: allowed_paths + current_values (version 1 called
+    // the old values allowed_values, which models read as an enum).
+    private const AGENT_CONTRACT_VERSION = 2;
+
     private const FACT_FIELDS = ['value', 'evidence', 'reason', 'source_kind', 'source_ref', 'source_url', 'source_excerpt', 'considered_source_urls', 'considered_source_refs'];
 
     public function prepare(ProductDraft $draft, array $source, ?int $updateId, array $feedback): ?array
@@ -89,7 +93,8 @@ final class CardRepairPatch
 
         return ['version' => self::VERSION, 'context_hash' => $context, 'base' => $base,
             'paths' => $paths, 'base_hash' => $this->hash([$context, $base, $paths]),
-            'repair_targets' => $targets];
+            'repair_targets' => $targets,
+            'citation_obligations' => $feedback['repair_context']['citation_obligations'] ?? []];
     }
 
     public function forAgent(array $repair): array
@@ -104,7 +109,9 @@ final class CardRepairPatch
             }
         }
 
-        return ['version' => self::VERSION, 'base_hash' => $repair['base_hash'], 'allowed_values' => $values,
+        return ['version' => self::AGENT_CONTRACT_VERSION, 'base_hash' => $repair['base_hash'],
+            'allowed_paths' => array_keys($values), 'current_values' => $values,
+            'citation_obligations' => $repair['citation_obligations'] ?? [],
             'affected_candidate_facts' => $facts,
             'conditional_paths' => $this->dependencies($repair), 'repair_targets' => $repair['repair_targets']];
     }
@@ -114,6 +121,28 @@ final class CardRepairPatch
         if (! hash_equals($repair['context_hash'], $this->contextHash($draft, $source, $updateId))) {
             $this->reject('The draft generation or baseline changed while repairing; the old patch cannot be applied.');
         }
+    }
+
+    /** Supervisor may widen fields of an already affected fact, never unrelated product data. */
+    public function expandForRecovery(array $repair, array $requestedPaths): array
+    {
+        $affected = [];
+        foreach ($repair['paths'] as $segments) {
+            if ($segments[0] === 'specifications') {
+                $affected[$repair['base']['specifications'][$segments[1]]['key']] = $segments[1];
+            }
+        }
+        foreach ($requestedPaths as $path) {
+            $parts = explode('.', $path);
+            if (count($parts) !== 3 || $parts[0] !== 'specifications'
+                || ! array_key_exists($parts[1], $affected) || ! in_array($parts[2], self::FACT_FIELDS, true)) {
+                $this->reject('Recovery cannot expand an unrelated field: '.$path);
+            }
+            $repair['paths'][$path] = ['specifications', $affected[$parts[1]], $parts[2]];
+        }
+        $repair['base_hash'] = $this->hash([$repair['context_hash'], $repair['base'], $repair['paths']]);
+
+        return $repair;
     }
 
     public function apply(array $repair, array $patch): array
