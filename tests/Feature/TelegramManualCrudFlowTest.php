@@ -28,6 +28,7 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Storage;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 class TelegramManualCrudFlowTest extends TestCase
@@ -50,16 +51,36 @@ class TelegramManualCrudFlowTest extends TestCase
             ? [['message_id' => ++$message]] : ['message_id' => ++$message]], 200));
     }
 
-    public function test_captioned_album_goes_to_upload_not_search_and_duplicate_update_is_ignored(): void
+    #[DataProvider('albumCaptions')]
+    public function test_captioned_album_goes_to_upload_not_search_and_duplicate_update_is_ignored(string $caption): void
     {
         $payload = ['update_id' => ++$this->updateNumber, 'message' => ['message_id' => 55, 'from' => ['id' => 12345],
-            'chat' => ['id' => 12345], 'caption' => 'My Dell, used, 16 GB', 'media_group_id' => 'album-a',
+            'chat' => ['id' => 12345], 'caption' => $caption, 'media_group_id' => 'album-a',
             'photo' => [['file_id' => 'photo-a', 'width' => 1200, 'height' => 800]]]];
         $this->postJson('/api/telegram/webhook', $payload, $this->headers())->assertOk();
         $this->postJson('/api/telegram/webhook', $payload, $this->headers())->assertJson(['duplicate' => true]);
         Queue::assertPushed(ProcessTelegramProductUpload::class, 1);
         Queue::assertNotPushed(ProcessTelegramMessage::class);
+        Queue::assertNotPushed(TranscribeTelegramPhoto::class);
         $this->assertDatabaseCount('products', 0);
+    }
+
+    public static function albumCaptions(): array
+    {
+        return [['My Dell, used, 16 GB'], ['Search this as a new product and prepare a draft.']];
+    }
+
+    public function test_add_mode_preserves_manual_upload_even_with_a_search_caption(): void
+    {
+        $this->message('/add');
+        $payload = ['update_id' => ++$this->updateNumber, 'message' => ['message_id' => 56, 'from' => ['id' => 12345],
+            'chat' => ['id' => 12345], 'caption' => 'Search extra information later.',
+            'photo' => [['file_id' => 'operator-photo', 'width' => 1200, 'height' => 800]]]];
+        $this->postJson('/api/telegram/webhook', $payload, $this->headers())->assertOk()->assertJson(['upload' => true]);
+
+        Queue::assertPushed(ProcessTelegramProductUpload::class, 1);
+        Queue::assertNotPushed(TranscribeTelegramPhoto::class);
+        Queue::assertNotPushed(ProcessTelegramMessage::class);
     }
 
     public function test_add_text_is_a_manual_draft_and_cancel_clears_capture(): void

@@ -6,6 +6,7 @@ use App\Ai\Agents\ProductResearchAgent;
 use App\Ai\Agents\ServerAssistantAgent;
 use App\Ai\Tools\ResearchProduct;
 use App\Jobs\ContinueDraftGallerySearch;
+use App\Models\AiRun;
 use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
 use App\Services\Ai\ProductSearchCostBudget;
@@ -25,7 +26,7 @@ class ResearchProductTextOnlyResultTest extends TestCase
 
     private const SOURCE = 'https://shop.example/lenovo-exact-123';
 
-    private function research(string $stopReason, bool $assembled, bool $moneyRemains = false, bool $moneyExhausted = false, int $photoCount = 0, string $verificationStatus = 'verified', bool $filesExist = true): array
+    private function research(string $stopReason, bool $assembled, bool $moneyRemains = false, bool $moneyExhausted = false, int $photoCount = 0, string $verificationStatus = 'verified', bool $filesExist = true, string $sourceType = 'retailer'): array
     {
         Storage::fake('public');
         Http::preventStrayRequests();
@@ -35,8 +36,10 @@ class ResearchProductTextOnlyResultTest extends TestCase
             'status' => 'found', 'title' => 'Lenovo Exact 123', 'brand' => 'Lenovo', 'model' => 'Exact 123',
             'product_type' => 'laptop', 'category' => 'laptops', 'color' => 'Black', 'condition' => 'new',
             'description' => 'Initial research description.', 'research_notes' => null,
-            'specifications' => [['key' => 'ram', 'name' => 'Memory', 'value' => '16 GB']],
-            'sources' => [['title' => 'Exact laptop', 'url' => self::SOURCE, 'type' => 'retailer', 'image_urls' => []]],
+            'specifications' => [['key' => 'ram', 'name' => 'Memory', 'value' => '16 GB'],
+                // Live #413 already had exact label identifiers; source kind was its only blocker.
+                ...($sourceType === 'web' ? [['key' => 'mpn', 'name' => 'Part number', 'value' => 'EXACT-123']] : [])],
+            'sources' => [['title' => 'Exact laptop', 'url' => self::SOURCE, 'type' => $sourceType, 'image_urls' => []]],
             'primary_source_url' => self::SOURCE, 'official_source_url' => null, 'image_urls' => [], 'confidence' => 0.95,
         ]])->preventStrayPrompts();
         $update = TelegramUpdate::query()->create(['update_id' => 1234567, 'telegram_user_id' => '123', 'chat_id' => '456',
@@ -79,6 +82,18 @@ class ResearchProductTextOnlyResultTest extends TestCase
     public static function terminalBudgetStops(): array
     {
         return [['cost_budget'], ['time_budget']];
+    }
+
+    public function test_unclassified_web_html_candidate_reaches_the_gallery_stage_without_relabel_or_retry(): void
+    {
+        $result = $this->research('cost_budget', assembled: false, sourceType: 'web');
+        $draft = ProductDraft::query()->sole();
+
+        $this->assertSame($draft->id, $result['draft_id']);
+        $this->assertSame(self::SOURCE, $draft->primary_source_url);
+        $this->assertSame('web', $draft->sources[0]['type']);
+        $this->assertSame(1, AiRun::query()->count());
+        $this->assertDatabaseMissing('product_source_attempts', ['phase' => 'research_recovery']);
     }
 
     #[DataProvider('terminalBudgetStops')]

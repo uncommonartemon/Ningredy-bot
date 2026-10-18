@@ -421,30 +421,9 @@ class ResearchProduct implements Tool
             $progress->info($researchSummary);
 
             if ($data['status'] === 'found') {
-                Validator::make($data, [
-                    'title' => ['required', 'string'],
-                    'sources' => ['required', 'array', 'min:1'],
-                    'primary_source_url' => ['required', 'url:http,https'],
-                ])->validate();
-
-                // A shop's PDF datasheet is typed "manufacturer" like any other
-                // page, so it could become the card's headline source: draft #98
-                // shipped to review with a gzhls.at blob as its "Источник" and
-                // no photographs. The same test the search uses to decide what
-                // it may open decides what the card may claim.
-                $discovery = app(ProductImageCandidateDiscovery::class);
-                $primarySource = collect($data['sources'])
-                    ->filter(fn (array $source): bool => in_array($source['type'] ?? null, ['manufacturer', 'retailer', 'marketplace'], true))
-                    ->first(fn (array $source): bool => $discovery->looksLikeHtmlProductPage((string) ($source['url'] ?? '')))
-                    ?? collect($data['sources'])->first(
-                        fn (array $source): bool => in_array($source['type'] ?? null, ['manufacturer', 'retailer', 'marketplace'], true),
-                    );
-
-                Validator::make(['primary_source' => $primarySource], [
-                    'primary_source' => ['required', 'array'],
-                    'primary_source.type' => ['required', 'in:manufacturer,retailer,marketplace'],
-                ])->validate();
-
+                // Already checked inside RecoverableProductResearch's callback,
+                // so an unusable found response is repaired before reaching here.
+                $primarySource = $this->primarySource($data['sources']);
                 $data['primary_source_url'] = $primarySource['url'];
                 // Direct image URLs are optional seeds. stage() owns the one
                 // Playwright pass after the draft is persisted, so research
@@ -774,7 +753,7 @@ class ResearchProduct implements Tool
         $normalized = ($this->responseNormalizer ?? app(ProductResearchResponseNormalizer::class))
             ->normalize($response);
 
-        return Validator::make($normalized, [
+        $data = Validator::make($normalized, [
             'status' => ['required', 'in:found,not_found'],
             'title' => ['nullable', 'string', 'max:255'],
             'brand' => ['nullable', 'string', 'max:255'],
@@ -807,6 +786,33 @@ class ResearchProduct implements Tool
             'image_urls.*' => ['url:http,https', 'max:2048'],
             'confidence' => ['required', 'numeric', 'between:0,1'],
         ])->validate();
+
+        if ($data['status'] === 'found') {
+            Validator::make($data, [
+                'title' => ['required', 'string'],
+                'sources' => ['required', 'array', 'min:1'],
+                'primary_source_url' => ['required', 'url:http,https'],
+            ])->validate();
+            $sources = app(ProductSourcePriority::class)->sortSources($data['sources'], $data['brand'] ?? null);
+            Validator::make(['primary_source' => $this->primarySource($sources)], [
+                'primary_source' => ['required', 'array'],
+            ], ['primary_source.required' => 'The found result has no eligible unblocked product-source candidate. Keep observed URLs and facts, but provide a manufacturer, retailer, marketplace, or unclassified web HTML candidate. A web document, review or database cannot be the primary candidate; do not invent or relabel its source type.'])->validate();
+        }
+
+        return $data;
+    }
+
+    private function primarySource(array $sources): ?array
+    {
+        $discovery = app(ProductImageCandidateDiscovery::class);
+
+        // web is an unclassified candidate, not a verified retailer. Page and
+        // gallery checks still decide applicability; no paid relabel is needed.
+        // Preserve the existing classified-source fallback without promoting
+        // generic web documents or text-only review/database entries into it.
+        return collect($sources)->first(fn (array $source): bool => in_array($source['type'] ?? null, ['manufacturer', 'retailer', 'marketplace', 'web'], true)
+            && $discovery->looksLikeHtmlProductPage((string) ($source['url'] ?? '')))
+            ?? collect($sources)->first(fn (array $source): bool => in_array($source['type'] ?? null, ['manufacturer', 'retailer', 'marketplace'], true));
     }
 
     public function schema(JsonSchema $schema): array

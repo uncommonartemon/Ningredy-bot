@@ -17,6 +17,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Validator;
 use Laravel\Ai\Tools\Request;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 class ResearchResponseRecoveryTest extends TestCase
@@ -135,6 +136,44 @@ class ResearchResponseRecoveryTest extends TestCase
         $this->assertDatabaseCount('product_drafts', 0);
     }
 
+    #[DataProvider('unusableFoundResponses')]
+    public function test_found_requirements_are_repaired_inside_recovery_with_the_original_sources_retained(array $found, string $errorKey): void
+    {
+        $first = ['status' => 'found', 'title' => 'MSI Stealth 16 AI A2HWGG-009IT',
+            'specifications' => [], 'image_urls' => [], 'confidence' => 0.9, ...$found];
+        $repaired = ['status' => 'not_found', 'title' => null, 'specifications' => [], 'sources' => [],
+            'image_urls' => [], 'confidence' => 0, 'research_notes' => 'No usable product card after inspecting retained sources.'];
+        $this->responses([json_encode($first), json_encode($repaired)], telegram: true);
+        $update = $this->update();
+
+        $result = json_decode((string) (new ResearchProduct($update, app(ProductImageResolver::class)))
+            ->handle(new Request(['query' => $update->text])), true);
+
+        $this->assertSame('not_found', $result['status']);
+        $runs = AiRun::orderBy('id')->get();
+        $this->assertSame(['failed', 'completed'], $runs->pluck('status')->all());
+        $this->assertArrayHasKey($errorKey, $runs[0]->response['recovery_snapshot']['validation_errors']);
+        $this->assertSame($first['sources'], $runs[0]->response['recovery_snapshot']['result']['sources']);
+        $this->assertSame(120, $runs[0]->usage['prompt_tokens']);
+        $this->assertDatabaseCount('product_drafts', 0);
+        $this->assertDatabaseHas('product_source_attempts', ['phase' => 'research_recovery', 'decision' => 'agent_repair']);
+    }
+
+    public static function unusableFoundResponses(): array
+    {
+        $case = static function (string $type, string $url): array {
+            return [['sources' => [['title' => 'Observed exact model', 'url' => $url, 'type' => $type, 'image_urls' => []]],
+                'primary_source_url' => $url], 'primary_source'];
+        };
+
+        return [
+            'web PDF is not a product card' => $case('web', 'https://shop.example/specifications.pdf'),
+            'review remains text evidence' => $case('review', 'https://review.example/laptop'),
+            'database remains text evidence' => $case('database', 'https://database.example/laptop'),
+            'genuinely empty found' => [['title' => null, 'sources' => [], 'primary_source_url' => null], 'title'],
+        ];
+    }
+
     private function execute(AiRun &$run): array
     {
         return app(RecoverableProductResearch::class)->run($run, app(StreamingProductResearch::class),
@@ -172,6 +211,6 @@ class ResearchResponseRecoveryTest extends TestCase
                 'output' => [['type' => 'message', 'status' => 'completed', 'content' => [['type' => 'output_text', 'text' => $text]]]],
                 'usage' => ['input_tokens' => 120, 'output_tokens' => 30]]]];
 
-        return implode('',array_map(fn ($e) => 'data: '.json_encode($e)."\n\n",$events));
+        return implode('', array_map(fn ($e) => 'data: '.json_encode($e)."\n\n", $events));
     }
 }
