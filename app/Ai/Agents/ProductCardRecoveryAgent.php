@@ -30,6 +30,11 @@ class ProductCardRecoveryAgent implements Agent, HasStructuredOutput
               product. The server searches other text sources and saves evidence; photos are unchanged.
             read_text: provide a public HTTP(S) URL to read for the missing evidence. The server applies
               its existing URL/network policy and saves observed text; a known URL alone proves nothing.
+            lookup_code: provide one EAN/UPC barcode or part number (the server adds the draft's brand). Free
+              structured databases (Icecat, UPCitemdb) say which product the code belongs to and may supply
+              an official datasheet the assembly can cite. A hint, not verification; nothing is applied.
+            stronger_model: last resort, about 20 times pricier. Use it once, only when the evidence is all
+              present and the ordinary assembly model keeps failing to compose a valid card from it.
             blocked: only if no available distinct action can resolve the remaining blocker. Explain
               the unavailable capability or required operator input. A model's previous refusal or
               absence of an optional detail is not itself a reason to abandon the whole card.
@@ -37,7 +42,7 @@ class ProductCardRecoveryAgent implements Agent, HasStructuredOutput
             the contract/reusing evidence over another web search. Do not spend simply to exhaust money.
             Keep mandatory user requirements. Optional unproved facts can be omitted through ordinary
             validated assembly; do not fabricate facts, accept conflicts or approve a card yourself.
-            query_or_url is empty for repair_contract/blocked. repair_paths is empty except for a
+            query_or_url is empty for repair_contract/stronger_model/blocked. repair_paths is empty except for a
             demonstrably incomplete repair scope. guidance explains the next correction. blocked_by
             lists field keys or concrete capabilities that caused the stall.
             PROMPT;
@@ -46,7 +51,7 @@ class ProductCardRecoveryAgent implements Agent, HasStructuredOutput
     public function schema(JsonSchema $schema): array
     {
         return [
-            'action' => $schema->string()->enum(['repair_contract', 'research_text', 'read_text', 'blocked'])->required(),
+            'action' => $schema->string()->enum(['repair_contract', 'research_text', 'read_text', 'lookup_code', 'stronger_model', 'blocked'])->required(),
             'comment' => $schema->string()->max(1500)->required(),
             'guidance' => $schema->string()->max(2500)->required(),
             'query_or_url' => $schema->string()->max(2000)->required(),

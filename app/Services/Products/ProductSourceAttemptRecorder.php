@@ -36,6 +36,16 @@ class ProductSourceAttemptRecorder
                     ->latest('id')
                     ->value('id');
             }
+            // Page text can carry broken UTF-8; one bad byte used to lose the whole row (live #441).
+            foreach (['input', 'output'] as $field) {
+                if (is_array($attributes[$field] ?? null)) {
+                    $attributes[$field] = json_decode((string) json_encode($attributes[$field],
+                        JSON_INVALID_UTF8_SUBSTITUTE | JSON_PARTIAL_OUTPUT_ON_ERROR), true);
+                }
+            }
+            if (is_string($attributes['message'] ?? null)) {
+                $attributes['message'] = mb_scrub($attributes['message'], 'UTF-8');
+            }
 
             return ProductSourceAttempt::query()->create([
                 ...$attributes,

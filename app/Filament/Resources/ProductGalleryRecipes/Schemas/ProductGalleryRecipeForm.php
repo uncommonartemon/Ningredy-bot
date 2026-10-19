@@ -18,7 +18,7 @@ class ProductGalleryRecipeForm
         // Without an explicit columns(1), EditRecord/CreateRecord default
         // this top-level schema to columns(2) and our single Section below
         // only fills one of those tracks, halving the usable width.
-        return $schema
+        return $schema->dense()
             ->columns(1)
             ->components([
                 Section::make(__('Сайт и состояние'))
@@ -45,7 +45,7 @@ class ProductGalleryRecipeForm
                             ->native(false),
                         Toggle::make('source_blocked')
                             ->label(__('Исключить область этого рецепта'))
-                            ->helperText(__('Блокируется только указанный шаблон пути. Для всего домена используйте «Заблокировать домен» на странице просмотра. Шаблон * действует на весь домен.')),
+                            ->hintIcon('heroicon-o-question-mark-circle', tooltip: __('Блокируется только указанный шаблон пути. Для всего домена используйте «Заблокировать домен» на странице просмотра. Шаблон * действует на весь домен.')),
                         Textarea::make('source_block_reason')
                             ->label(__('Причина блокировки источника'))
                             ->rows(3)

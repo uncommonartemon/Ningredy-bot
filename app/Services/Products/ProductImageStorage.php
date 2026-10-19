@@ -23,6 +23,7 @@ use App\Services\Photos\ImageUrls;
 use App\Services\ProductSearch\Recovery\ProductCardRecoverySupervisor;
 use App\Services\ProductSearch\Research\ResearchSourceRoles;
 use App\Services\ProductSearch\SourceQueueBuilder;
+use App\Services\ProductSearch\Supervision\SearchProgressSupervisor;
 use GdImage;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
@@ -232,6 +233,7 @@ class ProductImageStorage
         ]);
         try {
             app(ProductSearchCancellation::class)->throwIfCancelled($updateId);
+            app(SearchProgressSupervisor::class)->beginSession($updateId);
 
             $recoveringCard = false;
             while (true) {
@@ -520,6 +522,20 @@ class ProductImageStorage
             if (! $this->timeBudget->canStart($telegramUpdateId, 20)) {
                 $progress?->__invoke('Резерв времени достигнут: новые источники больше не открываю, завершаю текущий результат.');
                 break;
+            }
+
+            // The search watcher may skip this source or end the photo search; what
+            // was already found goes on to verification and card assembly as usual.
+            $watch = app(SearchProgressSupervisor::class)->review($telegramUpdateId, $draft, [
+                'kind' => 'next_source', 'url' => $source['url'], 'position' => $sourceIndex + 1,
+                'queue_size' => $sourceQueue->count(), 'photo_sets_waiting_for_check' => count($deferredVisionSets),
+                'best_unfinished_set_photos' => $reserve === null ? 0 : count($reserve->candidates),
+            ], $progress);
+            if ($watch['decision'] === 'deliver_now') {
+                break;
+            }
+            if ($watch['decision'] === 'leave_current_page') {
+                continue;
             }
 
             if ($progress) {
@@ -1628,6 +1644,13 @@ class ProductImageStorage
         // ProductSpecificationReconciler's own docblock for the full
         // contract and PROJECT_STRATEGY.md's "Единый источник карточки".
         $chosenSourceUrl = trim((string) ($chosenSource['url'] ?? ''));
+        // A technical failure of the applicability check is not a verdict. The gallery that
+        // won is checked once more before assembly reads it as unconfirmed and gives up a
+        // good source for another one (live #443).
+        if ($stored > 0 && is_array($chosenSource) && ($chosenSource['_photo_applicability']['technical_failure'] ?? false) === true) {
+            $chosenSource['_photo_applicability'] = app(ProductSourceIdentityGate::class)->assessPhotos($draft, $chosenSource, $telegramUpdateId);
+            $this->recordPhotoAssessment($draft, $chosenSource, $chosenSource['_photo_applicability'], $telegramUpdateId);
+        }
         // No photograph is not a reason to deliver nothing. With no gallery
         // at all, the card is assembled against the page research selected
         // and sent as a text card; approve() still refuses a draft without

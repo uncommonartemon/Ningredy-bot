@@ -8,7 +8,9 @@ use App\Models\AiRun;
 use App\Models\AppSetting;
 use App\Models\ProductDraft;
 use App\Models\ProductSourceAttempt;
+use App\Models\ProductSourcePageEvidence;
 use App\Models\TelegramUpdate;
+use App\Services\Ai\AiSettings;
 use App\Services\Ai\ProductSearchCostBudget;
 use App\Services\Products\ProductImageCandidateDiscovery;
 use App\Services\Products\ProductImageStorage;
@@ -18,6 +20,7 @@ use App\Services\Products\SpecificationReconciliationOutcome;
 use App\Services\ProductSearch\Recovery\CardRepairPatch;
 use App\Services\ProductSearch\Recovery\ProductCardRecoverySupervisor;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\ValidationException;
 use Tests\TestCase;
@@ -86,6 +89,41 @@ class ProductCardRecoverySupervisorTest extends TestCase
         $this->assertSame('no_new_evidence', $history[0]['outcome']);
         $this->assertDatabaseHas('product_source_attempts', ['product_draft_id' => $draft->id,
             'phase' => 'card_recovery', 'decision' => 'repeat_without_new_evidence']);
+    }
+
+    public function test_lookup_code_saves_an_official_datasheet_as_new_evidence_and_asks_for_a_new_assembly(): void
+    {
+        $this->measurableBudget(spent: 0.3);
+        config(['services.icecat.username' => 'tester']);
+        Http::fake(['https://live.icecat.biz/*' => Http::response(['data' => [
+            'GeneralInfo' => ['Title' => 'Alienware 16X Aurora AC16251', 'Brand' => 'Dell', 'BrandPartCode' => 'AC16251-X',
+                'IcecatId' => '777', 'ProductName' => '16X Aurora', 'GTIN' => ['0730143314930']],
+            'Gallery' => [], 'FeaturesGroups' => [['FeatureGroup' => ['Name' => ['Value' => 'Processor']],
+                'Features' => [['PresentationValue' => 'Intel Core Ultra 9 290HX', 'Feature' => ['Name' => ['Value' => 'Processor model']]]]]],
+        ]])]);
+        $draft = $this->draftWithFailure();
+        ProductCardRecoveryAgent::fake(fn (): array => $this->decision('lookup_code', '0730143314930', 'Check which product the label code is.'))
+            ->preventStrayPrompts();
+
+        $this->assertTrue(app(ProductCardRecoverySupervisor::class)->recover($draft, $draft->telegram_update_id));
+
+        $this->assertSame('code_found', $draft->fresh()->card_repair_state['supervisor']['history'][0]['outcome']);
+        $this->assertTrue(ProductSourcePageEvidence::query()->where('product_draft_id', $draft->id)->where('captured_via', 'icecat')->exists());
+        $this->assertTrue(ProductSourceAttempt::query()->where('phase', 'code_lookup')->where('action', 'lookup_icecat')->where('decision', 'found')->exists());
+    }
+
+    public function test_stronger_model_is_a_one_time_last_resort_for_the_next_assembly(): void
+    {
+        $this->measurableBudget(spent: 0.3);
+        app(AiSettings::class)->saveCardAssemblyFallbackModel('gpt-6-sol');
+        $draft = $this->draftWithFailure();
+        ProductCardRecoveryAgent::fake(fn (): array => $this->decision('stronger_model', '', 'Evidence is complete; the model keeps mis-quoting it.'))
+            ->preventStrayPrompts();
+
+        $this->assertTrue(app(ProductCardRecoverySupervisor::class)->recover($draft, $draft->telegram_update_id));
+        $this->assertTrue($draft->fresh()->card_repair_state['supervisor']['stronger_model']);
+        // The same last resort on unchanged evidence is not bought twice.
+        $this->assertFalse(app(ProductCardRecoverySupervisor::class)->recover($draft->fresh(), $draft->telegram_update_id));
     }
 
     public function test_blocked_keeps_the_agents_own_explanation_and_does_not_retry(): void

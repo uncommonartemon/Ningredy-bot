@@ -24,7 +24,7 @@ class ProductPhotoApplicability
         private readonly ProductSearchTimeBudget $timeBudget,
     ) {}
 
-    public function assess(ProductDraft $draft, array $source, ?int $updateId): array
+    public function assess(ProductDraft $draft, array $source, ?int $updateId, bool $isRetry = false): array
     {
         $updateId ??= $draft->telegram_update_id;
         app(ProductSearchCancellation::class)->throwIfCancelled($updateId);
@@ -102,9 +102,13 @@ class ProductPhotoApplicability
         } catch (Throwable $exception) {
             $run?->update(['status' => 'failed', 'error' => mb_substr($exception->getMessage(), 0, 2000), 'completed_at' => now()]);
             report($exception);
+            // One timeout or malformed answer is not a verdict (live #443 lost a good gallery to two).
+            if (! $isRetry && $this->timeBudget->canStart($updateId, 10)) {
+                return $this->assess($draft, $source, $updateId, isRetry: true);
+            }
 
             return [...$unavailable('Технический сбой оценки применимости фотографий; совпадение не подтверждено.'),
-                'ai_run_id' => $run?->id];
+                'ai_run_id' => $run?->id, 'technical_failure' => true];
         }
     }
 

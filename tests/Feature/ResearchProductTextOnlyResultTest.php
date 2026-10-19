@@ -8,11 +8,14 @@ use App\Ai\Tools\ResearchProduct;
 use App\Jobs\ContinueDraftGallerySearch;
 use App\Models\AiRun;
 use App\Models\ProductDraft;
+use App\Models\ProductSourceAttempt;
+use App\Models\ProductSourcePageEvidence;
 use App\Models\TelegramUpdate;
 use App\Services\Ai\ProductSearchCostBudget;
 use App\Services\Products\ProductImageResolver;
 use App\Services\Products\ProductImageStorage;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Storage;
@@ -276,5 +279,65 @@ class ResearchProductTextOnlyResultTest extends TestCase
         $this->assertSame(1, ProductDraft::query()->count());
         Http::assertSent(fn ($request): bool => str_contains((string) ($request['text'] ?? ''), 'Не найдено ни на одной странице: AWAC16251-9765BLU-PDE')
             && str_contains((string) ($request['text'] ?? ''), 'Продолжаю поиск по ближайшему товару'));
+    }
+
+    public function test_a_matching_official_datasheet_joins_the_photo_queue_and_a_mismatch_is_skipped_with_a_record(): void
+    {
+        config(['services.icecat.username' => 'tester']);
+        $part = '';
+        Http::fake(['https://live.icecat.biz/*' => function () use (&$part) {
+            return Http::response(['data' => [
+                'GeneralInfo' => ['Title' => 'Lenovo '.$part, 'Brand' => 'Lenovo', 'BrandPartCode' => $part, 'IcecatId' => '42',
+                    'ProductName' => 'Exact', 'GTIN' => []],
+                'Gallery' => [['Pic' => 'https://images.icecat.biz/img/gallery/one.jpg', 'PicWidth' => '1600', 'PicHeight' => '1200', 'No' => '1']],
+                'FeaturesGroups' => [['FeatureGroup' => ['Name' => ['Value' => 'Memory']], 'Features' => [
+                    ['PresentationValue' => '16 GB', 'Feature' => ['Name' => ['Value' => 'Internal memory']]]]]],
+            ]]);
+        }]);
+        foreach (['EXACT-123' => true, 'OTHER-999' => false] as $part => $matches) {
+            Cache::flush();
+            ProductDraft::query()->delete();
+            TelegramUpdate::query()->delete();
+
+            $this->research('cost_budget', assembled: false);
+            $draft = ProductDraft::query()->sole();
+            $official = collect($draft->sources)->firstWhere('_official_gallery', true);
+
+            if ($matches) {
+                $this->assertSame(['https://images.icecat.biz/img/gallery/one.jpg'], $official['image_urls']);
+                $this->assertTrue(ProductSourcePageEvidence::query()->where('product_draft_id', $draft->id)->where('captured_via', 'icecat')->exists());
+            } else {
+                $this->assertNull($official);
+                $this->assertTrue(ProductSourceAttempt::query()->where('action', 'offer_official_gallery')->where('decision', 'code_mismatch')->exists());
+            }
+        }
+    }
+
+    public function test_a_barcode_that_points_at_another_product_still_lets_the_selected_part_code_find_its_datasheet(): void
+    {
+        config(['services.icecat.username' => 'tester']);
+        Cache::flush();
+        Http::fake(['https://live.icecat.biz/*' => function ($request) {
+            $part = isset($request['GTIN']) ? 'OTHER-999' : 'EXACT-123';
+
+            return Http::response(['data' => [
+                'GeneralInfo' => ['Title' => 'Lenovo '.$part, 'Brand' => 'Lenovo', 'BrandPartCode' => $part, 'IcecatId' => '42',
+                    'ProductName' => 'Exact', 'GTIN' => isset($request['GTIN']) ? ['0887276868158'] : []],
+                'Gallery' => [['Pic' => 'https://images.icecat.biz/img/gallery/'.$part.'.jpg', 'PicWidth' => '1600', 'PicHeight' => '1200', 'No' => '1']],
+            ]]);
+        }]);
+
+        $this->research('cost_budget', assembled: false, responseOverrides: ['specifications' => [
+            ['key' => 'ram', 'name' => 'Memory', 'value' => '16 GB'], ['key' => 'ean', 'name' => 'EAN', 'value' => '0887276868158']],
+            // Live #439: the agent listed the datasheet page itself as a facts-only database entry.
+            'sources' => [['title' => 'Exact laptop', 'url' => self::SOURCE, 'type' => 'retailer', 'image_urls' => []],
+                ['title' => 'Icecat', 'url' => 'https://icecat.biz/p/lenovo/exact-123/exact-42.html', 'type' => 'database', 'roles' => ['facts'], 'image_urls' => []]]]);
+
+        // The barcode's record belongs to OTHER-999; the queued gallery is the selected part code's,
+        // and it replaces the agent's own entry for the same page instead of being shadowed by it.
+        $sources = collect(ProductDraft::query()->sole()->sources);
+        $official = $sources->firstWhere('_official_gallery', true);
+        $this->assertSame(['https://images.icecat.biz/img/gallery/EXACT-123.jpg'], $official['image_urls']);
+        $this->assertCount(1, $sources->filter(fn (array $source): bool => str_contains($source['url'], 'icecat.biz')));
     }
 }

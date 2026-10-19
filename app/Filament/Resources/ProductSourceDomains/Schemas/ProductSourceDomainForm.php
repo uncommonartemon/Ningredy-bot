@@ -14,7 +14,7 @@ class ProductSourceDomainForm
         // Without an explicit columns(1), EditRecord/CreateRecord default
         // this top-level schema to columns(2) and our single Section below
         // only fills one of those tracks, halving the usable width.
-        return $schema
+        return $schema->dense()
             ->columns(1)
             ->components([
                 Section::make(__('Настройки домена'))
@@ -22,13 +22,13 @@ class ProductSourceDomainForm
                     ->schema([
                         TextInput::make('domain')
                             ->label(__('Домен'))
-                            ->helperText(__('Можно вводить с www или без него; сохраняется канонический домен без www.'))
+                            ->hintIcon('heroicon-o-question-mark-circle', tooltip: __('Можно вводить с www или без него; сохраняется канонический домен без www.'))
                             ->required()
                             ->unique(ignoreRecord: true)
                             ->maxLength(255),
                         Textarea::make('agent_hint')
                             ->label(__('Подсказка агенту'))
-                            ->helperText(__('Опишите неочевидную механику галереи. Подсказка направляет агента, но не отменяет проверку DOM, безопасности и фактически полученного разрешения.'))
+                            ->hintIcon('heroicon-o-question-mark-circle', tooltip: __('Опишите неочевидную механику галереи. Подсказка направляет агента, но не отменяет проверку DOM, безопасности и фактически полученного разрешения.'))
                             ->rows(6)
                             ->maxLength(4000)
                             ->columnSpanFull(),

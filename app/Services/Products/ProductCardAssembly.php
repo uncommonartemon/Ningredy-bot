@@ -45,11 +45,11 @@ class ProductCardAssembly
         private readonly AiSettings $settings,
     ) {}
 
-    public function complete(ProductDraft $draft, array $source, ?int $updateId): SpecificationReconciliationOutcome
+    public function complete(ProductDraft $draft, array $source, ?int $updateId, bool $allowFallbackModel = false): SpecificationReconciliationOutcome
     {
         $seenSignatures = [];
 
-        return $this->completeWithHistory($draft, $source, $updateId, $seenSignatures);
+        return $this->completeWithHistory($draft, $source, $updateId, $seenSignatures, $allowFallbackModel);
     }
 
     /**
@@ -100,7 +100,10 @@ class ProductCardAssembly
             $source['_previous_assembly_feedback']['supervisor_guidance'] = $state['supervisor']['guidance'];
         }
         $seenSignatures = is_array($state['seen_signatures'] ?? null) ? $state['seen_signatures'] : [];
-        $outcome = $this->completeWithHistory($draft, $source, $updateId, $seenSignatures);
+        // The stronger (20x pricier) model is a last resort the recovery
+        // supervisor asks for explicitly, never an automatic second pass.
+        $outcome = $this->completeWithHistory($draft, $source, $updateId, $seenSignatures,
+            $supervisorPending && (bool) ($state['supervisor']['stronger_model'] ?? false));
         $state['supervisor_attempted'] = $supervisorGeneration;
         $state['contract_version'] = self::REPAIR_CONTRACT_VERSION;
         $state['seen_signatures'] = array_values(array_unique($seenSignatures));
@@ -119,17 +122,17 @@ class ProductCardAssembly
         return $outcome;
     }
 
-    private function completeWithHistory(ProductDraft $draft, array &$source, ?int $updateId, array &$seenSignatures): SpecificationReconciliationOutcome
+    private function completeWithHistory(ProductDraft $draft, array &$source, ?int $updateId, array &$seenSignatures, bool $allowFallbackModel = false): SpecificationReconciliationOutcome
     {
         $updateId ??= $draft->telegram_update_id;
         $outcome = $this->assemble($draft, $source, $updateId, null, $seenSignatures);
 
         // The assembly model could not finish the card: the fallback model
-        // takes over from its last attempt instead of the operator getting
-        // "search not finished" (request #51: gpt-6-luna quoted one display
-        // line four times the same wrong way).
+        // takes over from its last attempt (request #51) - but only when the
+        // caller allows it. Live data: it cost 19% of all spend as an
+        // automatic second pass (operator decision 2026-10-19).
         $fallback = $this->settings->cardAssemblyFallbackModel();
-        if ($fallback === null || $fallback === $this->settings->modelFor('product_specification_reconciliation')
+        if (! $allowFallbackModel || $fallback === null || $fallback === $this->settings->modelFor('product_specification_reconciliation')
             || $outcome->isReconciled() || $outcome->isBudgetExhausted()
             || $outcome->status === SpecificationReconciliationStatus::Disabled
             || ($outcome->repairContext['recovery_action'] ?? null) === 'try_other_source'

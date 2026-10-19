@@ -15,7 +15,7 @@ class TelegramUpdateInfolist
             ? '—'
             : (json_encode($state, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?: '—');
 
-        return $schema
+        return $schema->dense()
             ->components([
                 Section::make(__('Обновление'))
                     ->schema([

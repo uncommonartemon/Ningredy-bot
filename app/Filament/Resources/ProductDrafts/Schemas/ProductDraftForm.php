@@ -24,7 +24,7 @@ class ProductDraftForm
         // Without an explicit columns(1), EditRecord/CreateRecord default
         // this top-level schema to columns(2) and our sections below only
         // fill one of those tracks, halving the usable width.
-        return $schema
+        return $schema->dense()
             ->columns(1)
             ->components([
                 Section::make(__('Результат AI'))
@@ -81,7 +81,7 @@ class ProductDraftForm
                                 Select::make('type')->label(__('Тип'))->options(ProductSourceTypes::options())->default('web'),
                             ])->columns(3)->defaultItems(0)->columnSpanFull(),
                         TagsInput::make('image_urls')->label(__('Исходные ссылки на изображения'))
-                            ->helperText(__('Используются поиском как кандидаты. Сохранённые фотографии находятся в таблице «Галерея»; ссылки не заменяют проверенные файлы.'))
+                            ->hintIcon('heroicon-o-question-mark-circle', tooltip: __('Используются поиском как кандидаты. Сохранённые фотографии находятся в таблице «Галерея»; ссылки не заменяют проверенные файлы.'))
                             ->columnSpanFull(),
                     ])->columns(2)->columnSpanFull(),
                 Section::make(__('Состояние поиска фото'))

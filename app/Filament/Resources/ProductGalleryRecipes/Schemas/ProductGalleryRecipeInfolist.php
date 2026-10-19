@@ -15,7 +15,7 @@ class ProductGalleryRecipeInfolist
             ? '—'
             : (json_encode($state, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?: '—');
 
-        return $schema->components([
+        return $schema->dense()->components([
             Section::make(__('Сайт и состояние'))
                 ->schema([
                     TextEntry::make('domain')->label(__('Домен'))->copyable(),

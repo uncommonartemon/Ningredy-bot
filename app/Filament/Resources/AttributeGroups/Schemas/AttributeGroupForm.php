@@ -10,7 +10,7 @@ class AttributeGroupForm
 {
     public static function configure(Schema $schema): Schema
     {
-        return $schema->columns(1)->components([
+        return $schema->dense()->columns(1)->components([
             Section::make(__('catalog-groups.group'))
                 ->description(__('catalog-groups.form_help'))
                 ->schema(RelatedCatalogForms::attributeGroup())->columns(2),

@@ -159,7 +159,7 @@ class ProductPhotoApplicabilityTest extends TestCase
         $calls = 0;
         ProductPhotoApplicabilityAgent::fake(function () use (&$calls): array {
             $calls++;
-            if ($calls === 1) {
+            if ($calls <= 2) {
                 throw new RuntimeException('Fixture provider unavailable');
             }
 
@@ -168,14 +168,35 @@ class ProductPhotoApplicabilityTest extends TestCase
         $service = app(ProductPhotoApplicability::class);
         $source = $this->source('MSI Vector A16 HX A8WHG-018, Cosmos Gray');
 
+        // Both the call and its one retry fail: a technical failure, marked as such.
         $failed = $service->assess($draft, $source, $draft->telegram_update_id);
         $retried = $service->assess($draft, $source, $draft->telegram_update_id);
 
         $this->assertSame('unavailable', $failed['verdict']);
+        $this->assertTrue($failed['technical_failure']);
         $this->assertFalse($failed['may_inspect_gallery']);
         $this->assertSame('exact', $retried['verdict']);
-        $this->assertSame(2, $calls);
+        $this->assertSame(3, $calls);
         $this->assertDatabaseHas('ai_runs', ['id' => $failed['ai_run_id'], 'status' => 'failed']);
+    }
+
+    public function test_one_transient_failure_is_retried_within_the_same_check(): void
+    {
+        // Live #443: one 20s timeout used to leave a good gallery "unconfirmed".
+        $draft = $this->draft();
+        $calls = 0;
+        ProductPhotoApplicabilityAgent::fake(function () use (&$calls): array {
+            if (++$calls === 1) {
+                throw new RuntimeException('cURL error 28: Operation timed out after 20008 milliseconds');
+            }
+
+            return $this->decision('exact');
+        })->preventStrayPrompts();
+
+        $result = app(ProductPhotoApplicability::class)->assess($draft, $this->source('MSI Vector A16 HX A8WHG-018, Cosmos Gray'), $draft->telegram_update_id);
+
+        $this->assertSame('exact', $result['verdict']);
+        $this->assertSame(2, $calls);
     }
 
     public function test_identical_evidence_reuses_paid_result_but_changed_source_target_or_request_does_not(): void

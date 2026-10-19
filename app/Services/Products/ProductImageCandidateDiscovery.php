@@ -4,7 +4,6 @@ namespace App\Services\Products;
 
 use App\Ai\Agents\ProductImageDiscoveryAgent;
 use App\Exceptions\ProductSearchCancelled;
-use App\Models\AiOperation;
 use App\Models\AiRun;
 use App\Models\Category;
 use App\Models\ProductDraft;
@@ -23,6 +22,7 @@ use App\Services\ProductSearch\Discovery\InvalidDiscoveryResponse;
 use App\Services\ProductSearch\Recovery\RecoveryContext;
 use App\Services\ProductSearch\Research\InvalidResearchResponse;
 use App\Services\ProductSearch\Research\ResearchSourceRoles;
+use App\Services\ProductSearch\SearchJournal;
 use Illuminate\Support\Facades\Log;
 use Laravel\Ai\Streaming\Events\ProviderToolEvent;
 use Throwable;
@@ -467,23 +467,7 @@ class ProductImageCandidateDiscovery
         // one network sharing one failing media CDN because this journal never
         // showed training outcomes. The agent decides what is worth a visit.
         $runId = $telegramUpdateId ?? $draft->telegram_update_id;
-        $endedByAgent = AiOperation::query()->where('telegram_update_id', $runId)
-            ->where('action', 'abandon_training_attempt')->get(['payload'])
-            ->mapWithKeys(fn (AiOperation $operation): array => [
-                (string) parse_url((string) data_get($operation->payload, 'url'), PHP_URL_HOST) => mb_substr((string) data_get($operation->payload, 'reason'), 0, 300),
-            ]);
-        $photosByHost = $draft->media()->get(['photo_source_context'])
-            ->countBy(fn ($media): string => (string) parse_url((string) data_get($media->photo_source_context, 'url'), PHP_URL_HOST));
-        $pagesOpened = ProductSourceAttempt::query()->where('telegram_update_id', $runId)
-            ->whereIn('phase', ['gallery_preflight', 'gallery_training', 'source_resolution', 'image_download', 'image_verification'])
-            ->orderBy('id')->get(['product_url', 'action'])
-            ->groupBy(fn (ProductSourceAttempt $attempt): string => (string) parse_url((string) $attempt->product_url, PHP_URL_HOST))
-            ->filter(fn ($rows, string $host): bool => $host !== '')
-            ->map(fn ($rows, string $host): array => ['host' => $host, 'site_name' => self::siteName('https://'.$host),
-                'training_rounds' => $rows->where('action', 'propose_recipe')->count(),
-                'photos_saved' => (int) ($photosByHost[$host] ?? 0),
-                'ended_by_agent' => $endedByAgent[$host] ?? null])
-            ->values()->slice(-12)->values()->all();
+        $pagesOpened = SearchJournal::pagesOpened((int) $runId, $draft);
         // Storefronts of one network (allegro.pl/.cz/.sk, a.bkstr.com/b.bkstr.com)
         // usually fail together; the agent sees that link instead of guessing.
         $networkFailures = collect([

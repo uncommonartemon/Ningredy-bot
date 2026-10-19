@@ -3,6 +3,7 @@
 namespace App\Ai\Agents;
 
 use App\Ai\Tools\FetchProductSourcePageText;
+use App\Ai\Tools\LookupProductCode;
 use App\Ai\Tools\SearchProductTextEvidence;
 use App\Services\Products\AiAttributeGroups;
 use App\Services\Products\CatalogLocales;
@@ -40,6 +41,7 @@ class ProductSpecificationReconciliationAgent implements Agent, HasStructuredOut
         return [
             new FetchProductSourcePageText($this->sourceHost, $this->telegramUpdateId, $this->productDraftId, allowAdditionalSources: true),
             ...($this->productDraftId !== null ? [new SearchProductTextEvidence($this->productDraftId, $this->telegramUpdateId, $this->assemblySource)] : []),
+            new LookupProductCode($this->telegramUpdateId, $this->productDraftId),
         ];
     }
 

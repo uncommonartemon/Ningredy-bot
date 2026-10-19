@@ -16,6 +16,7 @@ use Filament\Navigation\NavigationGroup;
 use Filament\Pages\Dashboard;
 use Filament\Panel;
 use Filament\PanelProvider;
+use Filament\Schemas\Components\Section;
 use Filament\Support\Colors\Color;
 use Filament\Support\Enums\Width;
 use Filament\Tables\Table;
@@ -36,6 +37,8 @@ class AdminPanelProvider extends PanelProvider
             ->paginationPageOptions([25, 50, 100, 'all'])
             ->defaultPaginationPageOption('all')
             ->persistRecordsPerPageInSession(false));
+        // The product page's compact sections, everywhere in the panel.
+        Section::configureUsing(fn (Section $section): Section => $section->compact());
     }
 
     public function panel(Panel $panel): Panel

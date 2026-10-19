@@ -17,7 +17,7 @@ class ProductDraftInfolist
 {
     public static function configure(Schema $schema): Schema
     {
-        return $schema
+        return $schema->dense()
             ->components([
                 Section::make(__('Товар'))
                     ->schema([

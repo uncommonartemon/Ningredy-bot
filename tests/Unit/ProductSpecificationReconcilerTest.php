@@ -336,7 +336,7 @@ class ProductSpecificationReconcilerTest extends TestCase
             return [];
         })->preventStrayPrompts();
 
-        $result = app(ProductCardAssembly::class)->complete($draft, ['url' => 'https://shop.example/product'], $draft->telegram_update_id);
+        $result = app(ProductCardAssembly::class)->complete($draft, ['url' => 'https://shop.example/product'], $draft->telegram_update_id, allowFallbackModel: true);
 
         $this->assertSame(['gpt-6-luna', 'gpt-6-luna', 'gpt-6-sol'], $models);
         $this->assertSame('response_format', $result->repairContext['failure_kind']);
@@ -433,7 +433,8 @@ class ProductSpecificationReconcilerTest extends TestCase
         $source = ['url' => 'https://shop.example/photos', '_photo_applicability' => ['verdict' => 'exact']];
         $state = [];
         $first = app(ProductCardAssembly::class)->resumeFacts($draft, $source, $draft->telegram_update_id, $state);
-        $this->assertSame(3, $calls);
+        // The stronger model is not an automatic second pass any more.
+        $this->assertSame(2, $calls);
         $this->assertSame('invalid_response', $first->unavailableReason);
 
         // Simulate a different worker reading persisted JSON, with another
@@ -442,7 +443,7 @@ class ProductSpecificationReconcilerTest extends TestCase
         $this->seedEvidence($draft, 'https://shop.example/specs', 'RAM: 16 GB');
         $second = app(ProductCardAssembly::class)->resumeFacts($draft->fresh(), $source, $draft->telegram_update_id, $state);
 
-        $this->assertSame(3, $calls);
+        $this->assertSame(2, $calls);
         $this->assertSame('invalid_response', $second->unavailableReason);
         $this->assertSame(['https://shop.example/retained.jpg'], $draft->fresh()->image_urls);
         $this->assertNull($draft->fresh()->specifications_reconciled_source_url);
@@ -462,7 +463,7 @@ class ProductSpecificationReconcilerTest extends TestCase
         $source = ['url' => 'https://shop.example/photos', '_photo_applicability' => ['verdict' => 'exact']];
         $state = [];
         app(ProductCardAssembly::class)->resumeFacts($draft, $source, $draft->telegram_update_id, $state);
-        $this->assertSame(3, $calls);
+        $this->assertSame(2, $calls);
 
         // A job persisted before contract v2 had no contract_version: its
         // failure was judged under the old agent payload and cannot be reused.
@@ -471,7 +472,7 @@ class ProductSpecificationReconcilerTest extends TestCase
         app(ProductCardAssembly::class)->resumeFacts($draft->fresh(), $source, $draft->telegram_update_id, $state);
 
         // Assembled again (already-seen failure signatures still stop repeats early).
-        $this->assertGreaterThan(3, $calls);
+        $this->assertGreaterThan(2, $calls);
         $this->assertSame(2, $state['contract_version']);
     }
 
@@ -651,7 +652,12 @@ class ProductSpecificationReconcilerTest extends TestCase
             return $this->fakeRepair($prompt, ['title' => $model === 'gpt-6-luna' ? null : 'Test Product']);
         })->preventStrayPrompts();
 
-        $result = app(ProductCardAssembly::class)->complete($draft, ['url' => 'https://shop.example/product'], $draft->telegram_update_id);
+        $plain = app(ProductCardAssembly::class)->complete($draft, ['url' => 'https://shop.example/product'], $draft->telegram_update_id);
+        $this->assertFalse($plain->isReconciled(), 'without permission the 20x pricier model never runs');
+        $this->assertNotContains('gpt-6-sol', $models);
+        $models = [];
+
+        $result = app(ProductCardAssembly::class)->complete($draft->fresh(), ['url' => 'https://shop.example/product'], $draft->telegram_update_id, allowFallbackModel: true);
 
         $this->assertTrue($result->isReconciled());
         $this->assertSame(['gpt-6-luna', 'gpt-6-luna', 'gpt-6-sol'], $models, 'the cheap model until it repeats itself, then the fallback');

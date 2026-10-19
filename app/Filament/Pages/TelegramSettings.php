@@ -49,7 +49,7 @@ class TelegramSettings extends Page implements HasForms
 
     public function form(Schema $schema): Schema
     {
-        return $schema
+        return $schema->dense()
             ->components([Section::make(__('Подключение и доступ'))->schema([
                 TextInput::make('proxy_url')
                     ->label(__('Публичный proxy URL'))
@@ -69,7 +69,7 @@ class TelegramSettings extends Page implements HasForms
                 Textarea::make('allowed_user_ids')
                     ->label(__('Разрешённые Telegram ID'))
                     ->placeholder("123456789\n987654321")
-                    ->helperText(__('По одному ID на строку (или через запятую). Пусто — никто не сможет писать боту.'))
+                    ->hintIcon('heroicon-o-question-mark-circle', tooltip: __('По одному ID на строку (или через запятую). Пусто — никто не сможет писать боту.'))
                     ->rows(4),
             ])])
             ->statePath('data');

@@ -4,6 +4,7 @@ namespace Tests\Unit;
 
 use App\Ai\Agents\ProductSpecificationReconciliationAgent;
 use App\Ai\Tools\FetchProductSourcePageText;
+use App\Ai\Tools\LookupProductCode;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
 
@@ -31,14 +32,15 @@ class ProductSpecificationReconciliationAgentTest extends TestCase
         $this->assertSame([], iterator_to_array($agent->tools()));
     }
 
-    public function test_it_offers_the_fetch_tool_scoped_to_the_given_source_host_only(): void
+    public function test_it_offers_the_fetch_tool_scoped_to_the_given_source_host_and_the_optional_code_lookup(): void
     {
         $agent = new ProductSpecificationReconciliationAgent('shop.example');
 
         $tools = iterator_to_array($agent->tools());
 
-        $this->assertCount(1, $tools);
+        $this->assertCount(2, $tools);
         $this->assertInstanceOf(FetchProductSourcePageText::class, $tools[0]);
+        $this->assertInstanceOf(LookupProductCode::class, $tools[1]);
     }
 
     public function test_it_threads_the_telegram_update_id_into_the_fetch_tool(): void

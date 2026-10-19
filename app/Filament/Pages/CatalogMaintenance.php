@@ -76,7 +76,7 @@ class CatalogMaintenance extends LocalizedPage implements HasForms
                     Checkbox::make('dictionaries')->label(__('Очистить также справочники'))
                         ->helperText(__('Определения и группы характеристик, категории и бренды.'))->default(false)->live(),
                     Checkbox::make('recipes_history')->label(__('Очистить также обучение источников'))
-                        ->helperText(__('Рецепты, версии, статистика и автоматические правила страниц. Блокировки источников и аудит сохраняются.'))->default(false)->live(),
+                        ->hintIcon('heroicon-o-question-mark-circle', tooltip: __('Рецепты, версии, статистика и автоматические правила страниц. Блокировки источников и аудит сохраняются.'))->default(false)->live(),
                 ]),
         ])->statePath('data');
     }

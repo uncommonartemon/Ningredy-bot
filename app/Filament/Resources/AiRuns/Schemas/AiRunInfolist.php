@@ -18,7 +18,7 @@ class AiRunInfolist
     {
         $json = fn (mixed $state): string => app(DatabaseValueRedactor::class)->text($state);
 
-        return $schema
+        return $schema->dense()
             ->components([
                 Section::make(__('Запуск'))
                     ->schema([

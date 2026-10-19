@@ -4,6 +4,7 @@ namespace App\Services\ProductSearch\Recovery;
 
 use App\Ai\Agents\ProductCardRecoveryAgent;
 use App\Ai\Tools\FetchProductSourcePageText;
+use App\Ai\Tools\LookupProductCode;
 use App\Ai\Tools\SearchProductTextEvidence;
 use App\Exceptions\ProductSearchCancelled;
 use App\Models\AiRun;
@@ -31,7 +32,7 @@ use Throwable;
  */
 final class ProductCardRecoverySupervisor
 {
-    public const ACTIONS = ['repair_contract', 'research_text', 'read_text', 'blocked'];
+    public const ACTIONS = ['repair_contract', 'research_text', 'read_text', 'lookup_code', 'stronger_model', 'blocked'];
 
     // A bug guard, not a budget: money, time and repeat detection stop sooner.
     private const MAX_STEPS = 6;
@@ -99,6 +100,9 @@ final class ProductCardRecoverySupervisor
             'research_text' => $this->researchText($draft, $updateId, $decision),
             'read_text' => $this->readText($draft, $updateId, $decision),
             'repair_contract' => $this->repairContract($state, $decision),
+            'lookup_code' => $this->lookupCode($draft, $updateId, $decision),
+            // Last resort, 20x pricier: the next assembly may use the fallback model once.
+            'stronger_model' => ['changed' => $this->settings->cardAssemblyFallbackModel() !== null, 'outcome' => 'stronger_model_allowed', 'detail' => null],
             default => ['changed' => false, 'outcome' => 'blocked', 'detail' => null],
         };
         if (! $this->stillCurrent($draft, $generation, $updateId)) {
@@ -122,6 +126,7 @@ final class ProductCardRecoverySupervisor
             'history' => $history,
             'generation' => (int) ($state['supervisor']['generation'] ?? 0) + ($changed ? 1 : 0),
             'guidance' => $changed ? mb_substr($decision['guidance'], 0, 2500) : ($state['supervisor']['guidance'] ?? null),
+            'stronger_model' => $decision['action'] === 'stronger_model' && $changed,
         ];
         $draft->update(['card_repair_state' => $state]);
 
@@ -139,6 +144,8 @@ final class ProductCardRecoverySupervisor
             $progress?->__invoke(match ($decision['action']) {
                 'research_text' => 'Ищу недостающие сведения о характеристиках в других источниках; фото уже сохранены.',
                 'read_text' => 'Читаю дополнительную страницу с характеристиками; фото уже сохранены.',
+                'lookup_code' => 'Проверяю код товара в базах производителей; фото уже сохранены.',
+                'stronger_model' => 'Последняя попытка: собираю карточку более сильной моделью.',
                 default => 'Уточняю исправление карточки по уже собранным доказательствам.',
             });
         }
@@ -200,7 +207,7 @@ final class ProductCardRecoverySupervisor
         $data['guidance'] = trim((string) $data['guidance']);
         $data['query_or_url'] = trim((string) $data['query_or_url']);
         $data['repair_paths'] = array_values(array_unique($data['repair_paths']));
-        if (in_array($data['action'], ['research_text', 'read_text'], true) && $data['query_or_url'] === '') {
+        if (in_array($data['action'], ['research_text', 'read_text', 'lookup_code'], true) && $data['query_or_url'] === '') {
             throw ValidationException::withMessages(['query_or_url' => 'This action needs a question or URL.']);
         }
         if ($data['action'] === 'read_text' && ! $this->publicUrl($data['query_or_url'])) {
@@ -233,6 +240,16 @@ final class ProductCardRecoverySupervisor
 
         return ['changed' => false, 'outcome' => $fetched ? 'page_read' : 'page_not_read',
             'detail' => ['fetched' => $fetched, 'reason' => $result['reason'] ?? null, 'final_url' => $result['final_url'] ?? null]];
+    }
+
+    private function lookupCode(ProductDraft $draft, int $updateId, array $decision): array
+    {
+        $result = json_decode((string) (new LookupProductCode($updateId, $draft->id))
+            ->handle(new Request(['code' => $decision['query_or_url'], 'brand' => $draft->brand])), true) ?: [];
+        $found = collect($result['results'] ?? [])->where('status', 'found');
+
+        return ['changed' => false, 'outcome' => $found->isNotEmpty() ? 'code_found' : 'code_not_found',
+            'detail' => ['found' => $found->map(fn (array $item): array => array_intersect_key($item, array_flip(['source', 'title', 'part_number', 'page_url'])))->values()->all()]];
     }
 
     private function repairContract(array $state, array $decision): array

@@ -14,6 +14,7 @@ use App\Services\Ai\AiSettings;
 use App\Services\Ai\AiUsageReporter;
 use App\Services\Ai\ProductSearchCancellation;
 use App\Services\Ai\ProductSearchTimeBudget;
+use App\Services\ProductSearch\Recovery\SearchFailureSaver;
 use App\Services\Telegram\DraftAccess;
 use App\Services\Telegram\DraftTelegramPresenter;
 use App\Services\Telegram\ProductCardPresenter;
@@ -326,10 +327,13 @@ class ProcessTelegramMessage implements ShouldQueue
                 )
                 : $presented['message'];
 
-            try {
-                $telegram->sendMessage($update->chat_id, $message);
-            } catch (Throwable $notifyException) {
-                report($notifyException);
+            // A draft this request already saved is worth more than the error alone.
+            if (! app(SearchFailureSaver::class)->rescue($update, $presented, $run->id)) {
+                try {
+                    $telegram->sendMessage($update->chat_id, $message);
+                } catch (Throwable $notifyException) {
+                    report($notifyException);
+                }
             }
 
             if ($presented['retryable']) {
@@ -405,7 +409,9 @@ class ProcessTelegramMessage implements ShouldQueue
                     $presented['message'],
                 )
                 : $presented['message'];
-            app(TelegramClient::class)->sendMessage($update->chat_id, $message);
+            if (! app(SearchFailureSaver::class)->rescue($update, $presented, $run?->id)) {
+                app(TelegramClient::class)->sendMessage($update->chat_id, $message);
+            }
             $update->update(['processed_at' => now()]);
         } catch (Throwable $notificationError) {
             report($notificationError);

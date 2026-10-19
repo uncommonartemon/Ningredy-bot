@@ -33,6 +33,11 @@ class ProductSearchTimeBudget
         return max(0, $maxSeconds - $reserveSeconds - $elapsed);
     }
 
+    public function elapsedSeconds(?int $telegramUpdateId): ?int
+    {
+        return $telegramUpdateId ? (int) $this->startedAt($telegramUpdateId)->diffInSeconds(now()) : null;
+    }
+
     public function canStart(?int $telegramUpdateId, int $minimumSeconds = 15): bool
     {
         $remaining = $this->remainingWorkingSeconds($telegramUpdateId);

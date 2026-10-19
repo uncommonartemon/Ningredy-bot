@@ -16,7 +16,7 @@ class ProductSourceAttemptInfolist
     {
         $json = fn (mixed $state): string => app(DatabaseValueRedactor::class)->text($state);
 
-        return $schema->components([
+        return $schema->dense()->components([
             TextEntry::make('id')->label('#'),
             TextEntry::make('telegram_update_id')->label(__('Запрос Telegram #'))->placeholder('—')
                 ->url(fn ($record): ?string => $record->telegram_update_id ? TelegramUpdateResource::getUrl('view', ['record' => $record->telegram_update_id]) : null),

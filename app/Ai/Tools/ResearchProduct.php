@@ -8,6 +8,7 @@ use App\Jobs\ContinueDraftGallerySearch;
 use App\Models\AiRun;
 use App\Models\Category;
 use App\Models\ProductDraft;
+use App\Models\ProductSourcePageEvidence;
 use App\Models\TelegramUpdate;
 use App\Services\Ai\AiErrorPresenter;
 use App\Services\Ai\AiSettings;
@@ -28,6 +29,7 @@ use App\Services\Products\ProductResearchResponseNormalizer;
 use App\Services\Products\ProductSourceAttemptRecorder;
 use App\Services\Products\ProductSourcePriority;
 use App\Services\Products\ProductTextEvidenceContract;
+use App\Services\ProductSearch\Codes\ProductCodeLookup;
 use App\Services\ProductSearch\Research\InvalidResearchResponse;
 use App\Services\ProductSearch\Research\RecoverableProductResearch;
 use App\Services\ProductSearch\Research\ResearchSourceRoles;
@@ -145,6 +147,15 @@ class ResearchProduct implements Tool
         // that only ever revisited the same shops would never grow the list.
         $provenDomains = $sourcePriority->provenDomains();
         $inputContext = ProductInputContext::forUpdate($this->update);
+        // Barcodes in the request are looked up in structured databases first.
+        // A hint the agent may use or reject, never a verdict; any failure here
+        // only means the ordinary web search runs as it always did.
+        $codeLookup = app(ProductCodeLookup::class);
+        $queryGtins = ProductCodeLookup::gtins($query);
+        $codeHints = collect($queryGtins === [] ? [] : $codeLookup->lookup($queryGtins, null, [], $this->update->id, 'product_research'))
+            ->filter(fn (array $result): bool => $result['found'])
+            ->map(fn (array $result): array => array_intersect_key($result, array_flip(['source', 'code', 'title', 'brand', 'part_number', 'gtins', 'page_url', 'color'])))
+            ->values()->all();
         $researchPrompt = $query
             .PHP_EOL.'Input provenance and prioritized search alternatives (observations are not additional mandatory requirements): '
             .json_encode($inputContext, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
@@ -153,7 +164,12 @@ class ResearchProduct implements Tool
                 .implode(', ', $provenDomains)
                 .'. When one of them genuinely sells the exact requested product, include its product page among the sources.'
                 .' Never return a page from them for a different model, and never let this list narrow the search:'
-                .' an exact match anywhere else is always worth more than a familiar domain.');
+                .' an exact match anywhere else is always worth more than a familiar domain.')
+            .($codeHints === [] ? '' : PHP_EOL.'Structured product database results for codes in the request (hints, not verification; '
+                .'track record: '.json_encode($codeLookup->trackRecord()).'): '
+                .json_encode($codeHints, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
+                .'. Use them only if they match what the operator asked for; otherwise ignore them and search as usual.'
+                .' Report your decision in code_lookup_verdict.');
         $run = AiRun::query()->create([
             'telegram_update_id' => $this->update->id,
             'provider' => $provider,
@@ -304,6 +320,18 @@ class ResearchProduct implements Tool
             $data['specification_evidence'] = array_values(array_filter($data['specification_evidence'] ?? [],
                 fn (array $fact): bool => ! $sourcePriority->isBlockedUrl($fact['source_url'])
                     && ! in_array(rtrim((string) $fact['source_url'], '/'), $photoOnly, true)));
+            if (is_array($data['code_lookup_verdict'] ?? null)) {
+                $codeLookup->recordVerdict($this->update->id, (string) ($data['code_lookup_verdict']['decision'] ?? ''),
+                    (string) ($data['code_lookup_verdict']['reason'] ?? ''), 'product_research');
+            }
+            $officialGallery = $data['status'] === 'found' ? $this->officialGallery($codeLookup, $data, $queryGtins) : null;
+            if ($officialGallery !== null) {
+                // The agent may list the same datasheet page itself (it saw it in the hint) as a
+                // facts-only database entry; that entry must not shadow the gallery (live #439).
+                $officialUrl = ProductImageStorage::normalizeCandidateUrl($officialGallery['source']['url']);
+                $data['sources'] = [...array_values(array_filter($data['sources'], fn (array $source): bool => ProductImageStorage::normalizeCandidateUrl((string) ($source['url'] ?? '')) !== $officialUrl)),
+                    $officialGallery['source']];
+            }
             $attemptRecorder = app(ProductSourceAttemptRecorder::class);
             $blockedSourceCount = 0;
             foreach ($reportedSources as $source) {
@@ -432,7 +460,7 @@ class ResearchProduct implements Tool
                 class_basename(self::class),
                 'create_product_draft',
                 ['query' => $query],
-                function () use ($data, $run): array {
+                function () use ($data, $run, $officialGallery): array {
                     if ($this->isCancelled()) {
                         return ['ok' => true, 'status' => 'cancelled'];
                     }
@@ -457,6 +485,14 @@ class ResearchProduct implements Tool
                         'image_urls' => $data['image_urls'],
                         'confidence' => $data['confidence'],
                     ]);
+                    if ($officialGallery !== null && $officialGallery['specification_text'] !== '') {
+                        // The database datasheet becomes an observed page the
+                        // assembly agent may cite or ignore like any other.
+                        ProductSourcePageEvidence::query()->updateOrCreate(
+                            ['product_draft_id' => $draft->id, 'url_hash' => hash('sha256', ProductImageStorage::normalizeCandidateUrl($officialGallery['source']['url']))],
+                            ['url' => $officialGallery['source']['url'], 'specification_text' => $officialGallery['specification_text'], 'captured_via' => 'icecat'],
+                        );
+                    }
 
                     return [
                         'status' => 'found',
@@ -702,6 +738,9 @@ class ResearchProduct implements Tool
             'description' => ['nullable', 'string', 'max:5000'],
             'research_notes' => ['nullable', 'string', 'max:5000'],
             'unconfirmed_operator_codes' => ['sometimes', 'array', 'max:10'],
+            'code_lookup_verdict' => ['sometimes', 'nullable', 'array'],
+            'code_lookup_verdict.decision' => ['required_with:code_lookup_verdict', 'in:used,ignored,not_applicable'],
+            'code_lookup_verdict.reason' => ['required_with:code_lookup_verdict', 'string', 'max:500'],
             'unconfirmed_operator_codes.*' => ['string', 'max:100'],
             'selected_identity' => ['sometimes', 'nullable', 'array:basis,model_scope,observed_model,source_url,source_excerpt,reason'],
             'selected_identity.basis' => ['required_with:selected_identity', 'in:commercial_code,full_model'],
@@ -771,6 +810,70 @@ class ResearchProduct implements Tool
         }
 
         return $data;
+    }
+
+    /**
+     * The official datasheet of the selected product, offered as the first
+     * photo candidate - only when its code matches what research selected.
+     * Photo applicability and Vision still judge every frame; a mismatch or a
+     * database failure leaves the ordinary sources exactly as they were.
+     *
+     * @return array{source: array<string, mixed>, specification_text: string}|null
+     */
+    private function officialGallery(ProductCodeLookup $lookup, array $data, array $queryGtins): ?array
+    {
+        $specs = collect($data['specifications'] ?? []);
+        $codes = $specs->whereIn('key', ['sku', 'mpn', 'part_number', 'product_code'])->pluck('value')
+            ->push($data['model'] ?? null)->filter(fn (mixed $code): bool => is_string($code) && trim($code) !== '')
+            ->map(fn (string $code): string => trim($code))->unique()->values()->all();
+        $gtins = $specs->whereIn('key', ['ean', 'upc', 'gtin', 'gtin13', 'ean13'])->pluck('value')
+            ->map(fn (mixed $code): string => preg_replace('/\D/', '', (string) $code))
+            ->filter(fn (string $code): bool => ProductCodeLookup::validGtin($code))->merge($queryGtins)->unique()->values()->all();
+        $normal = static fn (string $code): string => strtoupper((string) preg_replace('/[^A-Za-z0-9]/', '', $code));
+        $samePart = fn (array $result): bool => in_array($normal((string) ($result['part_number'] ?? '')), array_map($normal, $codes), true);
+        $sameGtin = fn (array $result): bool => array_intersect(array_map(fn ($gtin) => ltrim((string) $gtin, '0'), (array) ($result['gtins'] ?? [])),
+            array_map(fn ($gtin) => ltrim((string) $gtin, '0'), $gtins)) !== [];
+        $matches = fn (array $result): bool => $samePart($result) || $sameGtin($result);
+        try {
+            $found = collect($lookup->lookup($gtins, $data['brand'] ?? null, $codes, $this->update->id, 'official_gallery'))
+                ->filter(fn (array $result): bool => $result['source'] === 'icecat' && $result['found'] && ($result['page_url'] ?? null) !== null);
+            // The selected part number is the strongest tie. A barcode may belong to
+            // another product, so the part code still gets its own look first.
+            $match = $found->first($samePart);
+            if ($match === null && $found->isNotEmpty() && filled($data['brand'] ?? null)) {
+                foreach (array_slice($codes, 0, 3) as $part) {
+                    $result = $lookup->icecat(null, (string) $data['brand'], $part, $this->update->id, 'official_gallery');
+                    if ($result['found'] && ($result['page_url'] ?? null) !== null && $samePart($result)) {
+                        $match = $result;
+                        break;
+                    }
+                }
+            }
+            $match ??= $found->first($sameGtin) ?? $found->first();
+        } catch (Throwable $exception) {
+            report($exception);
+
+            return null;
+        }
+        if ($match === null) {
+            return null;
+        }
+        $sameCode = $matches($match);
+        $images = collect($match['images'])->filter(fn (array $image): bool => $image['width'] >= 700 || $image['width'] === 0)
+            ->pluck('url')->take(10)->values()->all();
+        app(ProductSourceAttemptRecorder::class)->record(['telegram_update_id' => $this->update->id,
+            'product_url' => $match['page_url'], 'actor' => 'server', 'phase' => 'code_lookup', 'action' => 'offer_official_gallery',
+            'status' => $sameCode && $images !== [] ? 'completed' : 'skipped',
+            'decision' => $sameCode ? ($images === [] ? 'no_large_images' : 'queued_first') : 'code_mismatch',
+            'output' => ['part_number' => $match['part_number'], 'gtins' => $match['gtins'], 'images' => count($images), 'selected_codes' => $codes]]);
+        if (! $sameCode || $images === []) {
+            return null;
+        }
+
+        return ['source' => ['title' => 'Icecat datasheet: '.$match['title'], 'url' => $match['page_url'], 'type' => 'web',
+            'image_urls' => $images, 'roles' => ['facts', 'exact_photo'], '_official_gallery' => true,
+            'applicability_reason' => 'Official datasheet (Icecat) for the same part number/GTIN as the selected product.'],
+            'specification_text' => implode("\n", [$match['title'], ...$match['specifications']])];
     }
 
     private function primarySource(array $sources): ?array

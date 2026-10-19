@@ -28,6 +28,7 @@ use App\Services\GalleryRecipes\Training\RecipeExecution;
 use App\Services\GalleryRecipes\Training\RecipeRepairFeedback;
 use App\Services\Photos\ImageUrls;
 use App\Services\ProductSearch\Recovery\RecoveryContext;
+use App\Services\ProductSearch\Supervision\SearchProgressSupervisor;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Validator;
@@ -797,6 +798,27 @@ class ProductGalleryRecipeTrainer
                     }
 
                     break;
+                }
+
+                // From the third round on, the search watcher may tell a page that keeps
+                // collecting the same frames to step aside. Its answer ends this page the
+                // way the trainer's own abandonment does; found photos stay.
+                if ($attempt >= 3 && $telegramUpdateId) {
+                    $watch = app(SearchProgressSupervisor::class)->review($telegramUpdateId,
+                        ProductDraft::query()->find($context[ProductRequestContext::CONTEXT_KEY] ?? null), [
+                            'kind' => 'gallery_training', 'url' => $url, 'host' => $host, 'round' => $attempt,
+                            'rounds_with_same_frames' => $sameFrameRounds, 'rounds_without_progress' => $stagnantRounds,
+                            'photos_found_on_this_page' => count($bestPartialImages ?? []),
+                        ]);
+                    if ($watch['decision'] !== 'continue') {
+                        $agentAbandoned = true;
+                        $agentAbandonReason = 'Наблюдатель поиска: '.$watch['reason'];
+                        $failureKind = 'agent_abandoned';
+                        $attempts[] = ['attempt' => $attempt, 'error' => 'agent_abandoned: '.$agentAbandonReason];
+                        $debug?->__invoke('warning', $agentAbandonReason.' Найденное сохраняю; рецепт домена не отключаю.');
+
+                        break;
+                    }
                 }
 
                 // Field order matters for OpenAI's automatic prompt caching,

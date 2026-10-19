@@ -47,6 +47,25 @@ class ObservedSourceQueueTest extends TestCase
         $this->assertStringContainsString('17-dp0005sfx', $result['specification_text']);
     }
 
+    public function test_the_official_datasheet_gallery_opens_first_whatever_preflight_ranking_says(): void
+    {
+        // Live #440: preflight ranked the primary shop first and the official gallery fourth.
+        $shop = 'https://93.184.216.41/t7-shield';
+        $official = 'https://93.184.216.42/p/samsung/mu-pe2t0s-am/t7-shield-1.html';
+        Http::fake(['*' => Http::response('<html><title>Samsung T7 Shield 2TB MU-PE2T0S/AM</title><h1>Samsung T7 Shield 2TB MU-PE2T0S/AM</h1></html>',
+            200, ['Content-Type' => 'text/html'])]);
+        $draft = new ProductDraft(['brand' => 'Samsung', 'model' => 'MU-PE2T0S/AM', 'primary_source_url' => $shop, 'sources' => [
+            ['url' => $shop, 'type' => 'retailer', 'roles' => ['facts', 'exact_photo']],
+            ['url' => $official, 'type' => 'web', 'roles' => ['facts', 'exact_photo'], '_official_gallery' => true,
+                'image_urls' => ['https://93.184.216.42/img/gallery/a.jpg']],
+        ]]);
+
+        [$queue] = app(SourceQueueBuilder::class)->buildSourceQueue($draft, [], [], true, 3, null, null);
+
+        $this->assertSame($official, $queue->first()['url']);
+        $this->assertContains($shop, $queue->pluck('url')->all());
+    }
+
     public function test_a_facts_only_page_still_reaches_photo_checks_after_photo_hinted_pages(): void
     {
         config(['product-images.source_preflight' => false]);

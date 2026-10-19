@@ -176,6 +176,12 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
             with another page's code), and name the closest product's own code and page in research_notes. Leave
             unconfirmed_operator_codes empty when every supplied code was observed.
 
+            The prompt may include structured product database results (Icecat, UPCitemdb) for codes in the
+            request, with their recent track record. They are hints, not verification: use them when brand, code
+            and product agree with the request, ignore them when they describe something else. Either way say so
+            in code_lookup_verdict (used, ignored or not_applicable, with a short reason); the search continues on
+            the web either way.
+
             status is a commitment, not a guess: return found only when you are also returning a non-empty title,
             at least one entry in sources, and a primary_source_url pointing at one of those sources. If any of
             those three would be empty, null, or missing, never found with an empty or
@@ -272,6 +278,10 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
             'condition' => $schema->string()->enum(ProductCondition::VALUES)->required(),
             'description' => $schema->string()->max(5000)->nullable()->required(),
             'research_notes' => $schema->string()->max(5000)->nullable()->required(),
+            'code_lookup_verdict' => $schema->object([
+                'decision' => $schema->string()->enum(['used', 'ignored', 'not_applicable'])->required(),
+                'reason' => $schema->string()->max(500)->required(),
+            ])->required()->description('Your decision about structured product database results in the prompt.'),
             'unconfirmed_operator_codes' => $schema->array()->max(10)->items($schema->string()->max(100))->required()
                 ->description('Operator-supplied EAN/UPC, SKU or part numbers that no observed page shows; empty when all were observed.'),
             'selected_identity' => $schema->object([

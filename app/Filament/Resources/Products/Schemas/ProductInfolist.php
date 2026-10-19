@@ -19,7 +19,7 @@ class ProductInfolist
 {
     public static function configure(Schema $schema): Schema
     {
-        return $schema->components([
+        return $schema->dense()->components([
             Section::make(__('Карточка товара'))->schema([
                 ImageEntry::make('gallery')->label(__('Фотографии'))
                     ->state(fn ($record): array => $record->media->where('type', 'image')

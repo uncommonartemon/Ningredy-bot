@@ -82,7 +82,11 @@ class SourceQueueBuilder
                 $seenSourceUrls[$key] = true;
             }
         }
+        // Of two entries for one URL the official gallery wins; order is restored below.
+        $officialUrls = collect($rawSources)->filter(fn ($source): bool => is_array($source) && ($source['_official_gallery'] ?? false) === true)
+            ->map(fn (array $source): string => rtrim((string) ($source['url'] ?? ''), '/'))->flip();
         $prioritizedSources = collect($this->sourcePriority->sortSources($rawSources, $draft->brand))
+            ->reject(fn (array $source): bool => isset($officialUrls[rtrim((string) ($source['url'] ?? ''), '/')]) && ($source['_official_gallery'] ?? false) !== true)
             ->unique(fn (array $source): string => rtrim((string) ($source['url'] ?? ''), '/'))
             ->values()
             ->all();
@@ -159,6 +163,10 @@ class SourceQueueBuilder
         // nothing to do so.
         $cardSources = $this->knownShopsFirst($cardSources);
         $cardSources = $this->limitPerHost($cardSources, $progress);
+        // An official datasheet gallery for the same code is tried first: its
+        // frames still pass photo applicability and Vision like any other page.
+        [$official, $others] = $cardSources->partition(fn (array $source): bool => ($source['_official_gallery'] ?? false) === true);
+        $cardSources = $official->concat($others)->values();
 
         if (config('product-images.source_preflight', true)) {
             $progress?->__invoke('Быстро проверяю доступность карточек, CAPTCHA/WAF, статические фото и готовые рецепты до запуска Playwright.');
@@ -238,6 +246,10 @@ class SourceQueueBuilder
         // why, and for which of them are worth queueing twice.
         $sourceQueue = collect($this->sourcePriority->reuseFirstQueue($cardSources->all(), $activeRecipeOnly));
         $reuseFirstCount = $sourceQueue->count() - $cardSources->count();
+        // Preflight ranking and recipe reuse reorder the queue; the official gallery
+        // still opens first (live #440 had it fourth, behind a shop with a recipe).
+        [$officialSteps, $otherSteps] = $sourceQueue->partition(fn (array $source): bool => ($source['_official_gallery'] ?? false) === true);
+        $sourceQueue = $officialSteps->concat($otherSteps)->values();
         $queueSummary = 'Очередь: '.$cardSources->count().' карточек; шагов обработки: '.$sourceQueue->count()
             .' (включая отдельные пробы готовых рецептов: '.$reuseFirstCount.').';
         $this->attempts->record([

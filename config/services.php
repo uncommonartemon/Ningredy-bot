@@ -35,6 +35,19 @@ return [
         ],
     ],
 
+    // Structured product databases looked up by code before and beside web
+    // search. Open Icecat is free for sponsoring brands (attribution "Specs
+    // Icecat" where its data is shown; no AI training use).
+    'icecat' => [
+        'username' => env('ICECAT_USERNAME'),
+        'url' => env('ICECAT_URL', 'https://live.icecat.biz/api/'),
+    ],
+
+    'upcitemdb' => [
+        'url' => env('UPCITEMDB_URL', 'https://api.upcitemdb.com/prod/trial/lookup'),
+        'daily_limit' => (int) env('UPCITEMDB_DAILY_LIMIT', 90),
+    ],
+
     'telegram' => [
         'bot_token' => env('TELEGRAM_BOT_TOKEN'),
         'webhook_secret' => env('TELEGRAM_WEBHOOK_SECRET'),
@@ -71,7 +84,9 @@ return [
     'product_source_identity' => [
         'provider' => 'openai',
         'model' => env('AI_PRODUCT_SOURCE_IDENTITY_MODEL', 'gpt-5.4-mini'),
-        'timeout' => (int) env('AI_PRODUCT_SOURCE_IDENTITY_TIMEOUT', 20),
+        // Also bounds the photo-applicability check. 14 days to 2026-10-19: median 11s,
+        // p90 16s, slowest success 20s - and two calls in #443 cut off at exactly 20s.
+        'timeout' => (int) env('AI_PRODUCT_SOURCE_IDENTITY_TIMEOUT', 40),
     ],
 
     'product_specification_reconciliation' => [
@@ -97,6 +112,18 @@ return [
         'provider' => 'openai',
         'model' => env('AI_GALLERY_RECIPE_TRAINING_MODEL', 'gpt-5.4'),
         'timeout' => (int) env('AI_GALLERY_RECIPE_TRAINING_TIMEOUT', 180),
+    ],
+
+    // Looks at a long-running search every few minutes and may end the
+    // current page or the photo search early. Its answer is advice: any
+    // failure means "continue" and the search goes on unchanged.
+    'search_progress_supervisor' => [
+        'provider' => 'openai',
+        'model' => env('AI_SEARCH_PROGRESS_SUPERVISOR_MODEL', 'gpt-5.4-mini'),
+        'timeout' => (int) env('AI_SEARCH_PROGRESS_SUPERVISOR_TIMEOUT', 45),
+        'enabled' => (bool) env('AI_SEARCH_PROGRESS_SUPERVISOR_ENABLED', true),
+        'after_seconds' => (int) env('AI_SEARCH_PROGRESS_SUPERVISOR_AFTER_SECONDS', 480),
+        'interval_seconds' => (int) env('AI_SEARCH_PROGRESS_SUPERVISOR_INTERVAL_SECONDS', 240),
     ],
 
     'server_assistant' => [
