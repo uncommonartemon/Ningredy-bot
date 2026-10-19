@@ -41,7 +41,13 @@ return [
             'busy_timeout' => (int) env('DB_BUSY_TIMEOUT', 60000),
             'journal_mode' => env('DB_JOURNAL_MODE', 'WAL'),
             'synchronous' => env('DB_SYNCHRONOUS', 'NORMAL'),
-            'transaction_mode' => 'DEFERRED',
+            // A DEFERRED transaction that reads, then writes, gets "database is
+            // locked" at once - not after busy_timeout - when another connection
+            // wrote in between. The queue reserves jobs exactly that way, so a
+            // burst of webhooks failed a request outright (live #448). IMMEDIATE
+            // takes the write lock up front, where busy_timeout does wait. No
+            // transaction in the app holds a network or AI call.
+            'transaction_mode' => env('DB_TRANSACTION_MODE', 'IMMEDIATE'),
         ],
 
         'mysql' => [

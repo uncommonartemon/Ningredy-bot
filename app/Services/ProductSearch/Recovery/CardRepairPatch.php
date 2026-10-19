@@ -147,6 +147,16 @@ final class CardRepairPatch
 
     public function apply(array $repair, array $patch): array
     {
+        // Commentary length must not discard a paid patch: structured output does not
+        // enforce maxLength, and the full assembly already shortens the same fields.
+        if (is_string($patch['summary'] ?? null)) {
+            $patch['summary'] = mb_substr($patch['summary'], 0, 500);
+        }
+        foreach ((array) ($patch['unresolved_fields'] ?? []) as $index => $field) {
+            if (is_array($field) && is_string($field['reason'] ?? null)) {
+                $patch['unresolved_fields'][$index]['reason'] = mb_substr($field['reason'], 0, 300);
+            }
+        }
         Validator::make(['patch' => $patch], [
             'patch' => ['required', 'array:base_hash,decision,changes,unresolved_fields,summary'],
             'patch.base_hash' => ['required', 'string'], 'patch.decision' => ['required', 'in:patch,not_ready'],

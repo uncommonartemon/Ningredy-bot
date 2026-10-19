@@ -24,6 +24,23 @@ class CardRepairPatchTest extends TestCase
         $this->assertSame($base['specifications'][1], app(CardRepairPatch::class)->forAgent($repair)['affected_candidate_facts']['ram']);
     }
 
+    public function test_long_commentary_is_shortened_instead_of_discarding_the_patch(): void
+    {
+        $base = $this->candidate();
+        $repair = $this->prepare($base, ['specifications.1.source_url' => ['Invalid URL']]);
+        $patch = $this->repairResponse($repair, ['specifications.ram.source_url' => 'https://maker.example/ram']);
+        $patch['summary'] = str_repeat('Пояснение ', 80);
+
+        $result = app(CardRepairPatch::class)->apply($repair, $patch);
+        $this->assertSame('https://maker.example/ram', $result['specifications'][1]['source_url']);
+
+        $notReady = ['base_hash' => $repair['base_hash'], 'decision' => 'not_ready', 'changes' => [],
+            'unresolved_fields' => [['key' => 'ram', 'status' => 'unknown', 'reason' => str_repeat('Нет данных ', 50)]], 'summary' => 'Blocked'];
+        $blocked = app(CardRepairPatch::class)->apply($repair, $notReady);
+        $this->assertSame('not_ready', $blocked['overall_status']);
+        $this->assertSame(300, mb_strlen($blocked['unresolved_fields'][0]['reason']));
+    }
+
     public function test_empty_current_citation_list_does_not_forbid_adding_a_required_source(): void
     {
         $base = $this->candidate();
