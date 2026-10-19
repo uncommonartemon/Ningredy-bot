@@ -569,6 +569,32 @@ class ProductGalleryRecipeTrainerTest extends TestCase
         $this->assertStringNotContainsString('Unrelated site', $hint);
     }
 
+    public function test_the_agent_sees_when_different_plans_keep_collecting_the_same_frames(): void
+    {
+        $prompts = [];
+        ProductGalleryRecipeTrainerAgent::fake(function ($prompt) use (&$prompts): array {
+            $prompts[] = json_decode($prompt, true);
+
+            return count($prompts) < 3
+                ? $this->validRecipeResponse(['collect_selectors' => ['.gallery-'.count($prompts).' img'], 'expected_image_count' => 19])
+                : ['training_decision' => 'abandon_page', 'page_kind' => 'product_card', 'confidence' => 0.8,
+                    'page_assessment_evidence' => ['Same frames every round.'], 'reason' => 'Same six frames regardless of plan.'];
+        })->preventStrayPrompts();
+        $frames = ['https://cdn.example/a.jpg', 'https://cdn.example/b.jpg'];
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock) use ($frames): void {
+            $mock->shouldReceive('scout')->once()->andReturn(['scout' => ['title' => 'Product', 'fragments' => ['<div>Gallery</div>']]]);
+            $mock->shouldReceive('executeRecipe')->twice()->andReturn(['images' => $frames,
+                'diagnostics' => ['observed_gallery_count' => 19]]);
+        });
+
+        app(ProductGalleryRecipeTrainer::class)->train('https://same-frames.example/product', force: true);
+
+        $this->assertSame(1, $prompts[1]['previous_attempt_feedback']['rounds_with_same_frames']);
+        $this->assertNull($prompts[1]['previous_attempt_feedback']['same_frames_note']);
+        $this->assertSame(2, $prompts[2]['previous_attempt_feedback']['rounds_with_same_frames']);
+        $this->assertStringContainsString('not progress', $prompts[2]['previous_attempt_feedback']['same_frames_note']);
+    }
+
     public function test_a_refusing_host_ends_page_training_without_another_paid_round(): void
     {
         $calls = 0;

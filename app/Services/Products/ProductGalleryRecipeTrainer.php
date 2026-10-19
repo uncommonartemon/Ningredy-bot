@@ -744,6 +744,8 @@ class ProductGalleryRecipeTrainer
             $previousCandidateResult = null;
             $previousProgressSignature = null;
             $stagnantRounds = 0;
+            $previousFrameSet = null;
+            $sameFrameRounds = 0;
             $emptyRounds = 0;
             $identicalFailures = 0;
             $lastFailureSignature = null;
@@ -1404,6 +1406,14 @@ class ProductGalleryRecipeTrainer
                     $stagnantRounds = 0;
                 }
                 $previousProgressSignature = $progressSignature;
+                // The outcome itself, apart from which clicks led there: live #436
+                // collected the same six photographs eleven rounds running while
+                // every new plan reset the counter above. The agent sees it.
+                $frameSet = hash('sha256', json_encode(collect($candidateImages)
+                    ->filter(fn (mixed $url): bool => is_string($url) && $url !== '')
+                    ->map(fn (string $url): string => ImageUrls::imageAssetKey($url))->unique()->sort()->values()->all()));
+                $sameFrameRounds = $candidateImages !== [] && $frameSet === $previousFrameSet ? $sameFrameRounds + 1 : 0;
+                $previousFrameSet = $frameSet;
 
                 // Repeated outcomes are evidence for the agent, not a verdict
                 // that this page cannot work. The operator permits returning to
@@ -1431,6 +1441,10 @@ class ProductGalleryRecipeTrainer
                     );
                 $feedback = [
                     'consecutive_unchanged_outcomes' => $stagnantRounds + 1,
+                    'rounds_with_same_frames' => $candidateImages === [] ? 0 : $sameFrameRounds + 1,
+                    'same_frames_note' => $sameFrameRounds > 0
+                        ? 'The last rounds collected exactly the same photographs. Different clicks that end on the same frames are not progress: decide whether these frames are the product gallery (confirm it), whether a genuinely different control exists, or end the page.'
+                        : null,
                     'selector_repair_guidance' => 'If a positional control was missing, clicked the wrong target or '
                         .'did not advance, inspect current action_candidates and gallery fragments. Prefer an '
                         .'observed selector scoped to the gallery/viewer; do not guess another global index or '
