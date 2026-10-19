@@ -54,6 +54,11 @@ class TelegramProgressReporter
 
     private int $repeatedLineCount = 1;
 
+    /** Domain and text of the gallery-training line that is rewritten each round. */
+    private ?string $liveTrainingDomain = null;
+
+    private ?string $liveTrainingText = null;
+
     /** @var array<int, array<int, array{text: string, callback_data: string}>>|null */
     private ?array $cancelButtonMarkup = null;
 
@@ -114,11 +119,36 @@ class TelegramProgressReporter
 
     public function info(string $message): void
     {
+        // One line per page, rewritten every training round: live #436 trained
+        // twelve silent rounds for 25 minutes because each round line was noise.
+        if (preg_match('/^AI-тренер: проверяю рецепт, раунд (\S+) · (\S+)/u', $message, $round) === 1) {
+            $this->trainingRound($round[1], $round[2]);
+
+            return;
+        }
         if ($this->isNoise($message)) {
             return;
         }
 
         $this->appendLog("🔎 {$this->elapsed()}с · {$this->condense($message)}");
+        $this->render();
+    }
+
+    private function trainingRound(string $round, string $url): void
+    {
+        $domain = $this->detectDomain($url);
+        $line = "🔁 {$this->elapsed()}с · обучаю галерею: раунд {$round}";
+        $last = count($this->log) - 1;
+        if ($domain !== null && $domain === $this->liveTrainingDomain && $last >= 0
+            && $this->log[$last] === $this->liveTrainingText) {
+            $this->log[$last] = $line;
+            $this->lastLineText = $line;
+            $this->lastLineMeaning = $this->lineMeaning($line);
+        } else {
+            $this->appendLog($line.' · '.$url);
+        }
+        $this->liveTrainingDomain = $domain;
+        $this->liveTrainingText = $this->log[count($this->log) - 1] ?? null;
         $this->render();
     }
 

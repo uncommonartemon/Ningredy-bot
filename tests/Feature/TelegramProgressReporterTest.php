@@ -391,4 +391,22 @@ class TelegramProgressReporterTest extends TestCase
             return true;
         });
     }
+
+    public function test_gallery_training_rounds_rewrite_one_line_instead_of_staying_silent(): void
+    {
+        config(['services.telegram.bot_token' => 'test-token']);
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => ['message_id' => 555]])]);
+        $progress = new TelegramProgressReporter(app(TelegramClient::class), '123');
+        $url = 'https://www.extreme-pc.ca/lenovo-legion-pro-7.html';
+        foreach ([1, 2, 3] as $round) {
+            $progress->info("AI-тренер: проверяю рецепт, раунд {$round} · {$url}");
+        }
+        $progress->done('finished');
+
+        $last = collect(Http::recorded())->map(fn (array $pair) => (string) ($pair[0]['text'] ?? ''))->filter()->last();
+        $this->assertSame(1, substr_count($last, 'обучаю галерею: раунд'));
+        $this->assertStringContainsString('обучаю галерею: раунд 3', $last);
+        $this->assertStringNotContainsString('раунд 1', $last);
+        $this->assertSame(1, substr_count($last, 'extreme-pc.ca:'));
+    }
 }
