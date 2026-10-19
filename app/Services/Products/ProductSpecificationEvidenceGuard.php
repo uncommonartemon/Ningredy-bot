@@ -25,8 +25,23 @@ class ProductSpecificationEvidenceGuard
     public function normalizeAndValidate(array $input, array $result, array $observedFacts, array $observedPages, array $inputEvidence = [], ?string $operatorRequest = null): array
     {
         $originals = collect($input)->keyBy('key');
+        // A saved page is an observation too: live #450 re-cited the same RAM type
+        // from the Icecat datasheet and lost the card to "corrected but unchanged".
+        // validate() below still requires the quote to be on that page.
+        $pageUrls = collect($observedPages)->flatMap(fn ($page): array => is_array($page)
+            ? array_filter([$page['url'] ?? null, $page['final_url'] ?? null], 'is_string') : [])->all();
         foreach ($result as $index => $item) {
             $old = $originals->get($item['key']);
+            // The reverse slip: a changed value with its own explanation labelled
+            // "confirmed" (live #451, MPN). It becomes the correction it is, and
+            // every correction requirement in validate() still applies to it.
+            if (($item['evidence'] ?? null) === 'confirmed' && $old !== null
+                && $this->text((string) ($old['value'] ?? '')) !== $this->text((string) ($item['value'] ?? ''))
+                && trim((string) ($item['reason'] ?? '')) !== '' && $this->quoteHoldsValue($item)) {
+                $result[$index]['evidence'] = 'corrected';
+
+                continue;
+            }
             if (($item['evidence'] ?? null) !== 'corrected' || $old === null
                 || ! $this->sameActualValue($old, $item)
                 || trim((string) ($item['reason'] ?? '')) === '') {
@@ -46,15 +61,8 @@ class ProductSpecificationEvidenceGuard
                             && filled($item['source_ref'] ?? null) && ($fact['source_ref'] ?? null) === $item['source_ref']
                         : $this->isCitedFact($fact) && ($fact['source_kind'] ?? 'web') === 'web'
                             && $fact['source_url'] === ($item['source_url'] ?? null)),
-            );
-            $literal = $this->literalText((string) $item['value']);
-            $unit = $this->literalText((string) ($item['unit'] ?? ''));
-            if ($unit !== '' && ! str_ends_with($literal, ' '.$unit)) {
-                $literal .= ' '.$unit;
-            }
-            $quote = $this->literalText((string) ($item['source_excerpt'] ?? ''));
-            if ($support && $literal !== '' && $this->containsWholeNumbers($quote, $literal)
-                && preg_match('/(?<![\p{L}\p{N}])'.preg_quote($literal, '/').'(?![\p{L}\p{N}])/u', $quote) === 1) {
+            ) || (! $label && in_array($item['source_url'] ?? null, $pageUrls, true));
+            if ($support && $this->quoteHoldsValue($item)) {
                 $result[$index]['evidence'] = 'confirmed';
             }
         }
@@ -62,6 +70,20 @@ class ProductSpecificationEvidenceGuard
         $this->validate($input, $result, $observedFacts, $observedPages, $inputEvidence, $operatorRequest);
 
         return $result;
+    }
+
+    /** The chosen quote literally contains the whole value (and unit), not a piece of a larger number. */
+    private function quoteHoldsValue(array $item): bool
+    {
+        $literal = $this->literalText((string) ($item['value'] ?? ''));
+        $unit = $this->literalText((string) ($item['unit'] ?? ''));
+        if ($unit !== '' && ! str_ends_with($literal, ' '.$unit)) {
+            $literal .= ' '.$unit;
+        }
+        $quote = $this->literalText((string) ($item['source_excerpt'] ?? ''));
+
+        return $literal !== '' && $this->containsWholeNumbers($quote, $literal)
+            && preg_match('/(?<![\p{L}\p{N}])'.preg_quote($literal, '/').'(?![\p{L}\p{N}])/u', $quote) === 1;
     }
 
     private function sameActualValue(array $left, array $right): bool

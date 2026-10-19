@@ -237,6 +237,43 @@ class ProductSpecificationEvidenceGuardTest extends TestCase
         $this->assertSame('corrected', $candidate['evidence']);
     }
 
+    public function test_the_same_value_quoted_from_a_saved_page_is_confirmed_not_rejected_as_unchanged(): void
+    {
+        // Live #450: research's RAM type stayed, re-cited from the Icecat datasheet.
+        $fact = $this->fact(['key' => 'ram_type', 'name' => 'RAM type', 'value' => 'LPDDR5x',
+            'source_url' => 'https://shop.example/xps', 'source_excerpt' => 'Paměť: 32 GB LPDDR5x']);
+        $datasheet = 'https://icecat.biz/p/dell/xps9440/xps-14-1.html';
+        $candidate = [...$fact, 'evidence' => 'corrected', 'source_url' => $datasheet,
+            'source_excerpt' => '32 GB LPDDR5x-SDRAM 7467 MHz', 'reason' => 'The datasheet is more specific than the shop.',
+            'considered_source_urls' => ['https://shop.example/xps']];
+        $pages = [['url' => $datasheet, 'specification_text' => "Memory · Internal memory: 32 GB LPDDR5x-SDRAM 7467 MHz\nMemory · Slots: none"]];
+
+        $result = (new ProductSpecificationEvidenceGuard)->normalizeAndValidate([$fact], [$candidate], [], $pages);
+
+        $this->assertSame('confirmed', $result[0]['evidence']);
+
+        // The page still has to hold the quote.
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('excerpt was not observed');
+        (new ProductSpecificationEvidenceGuard)->normalizeAndValidate([$fact], [[...$candidate, 'source_excerpt' => 'Official: LPDDR5x']], [], $pages);
+    }
+
+    public function test_a_changed_value_with_its_reason_and_quote_is_a_correction_even_when_labelled_confirmed(): void
+    {
+        // Live #451: the exact listing's part number replaced research's, labelled "confirmed".
+        $fact = $this->fact(['key' => 'mpn', 'name' => 'MPN', 'value' => '21KC0063US',
+            'source_url' => 'https://shop.example/x1', 'source_excerpt' => 'Part: 21KC0063US']);
+        $listing = 'https://other.example/x1-21kdsn2000';
+        $candidate = [...$fact, 'evidence' => 'confirmed', 'value' => '21KDSN2000', 'source_url' => $listing,
+            'source_excerpt' => 'Model 21KDSN2000', 'reason' => 'The exact-configuration listing names this part number.',
+            'considered_source_urls' => ['https://shop.example/x1']];
+        $pages = [['url' => $listing, 'specification_text' => 'Lenovo ThinkPad X1 Carbon Gen 12 · Model 21KDSN2000 · 32 GB']];
+
+        $result = (new ProductSpecificationEvidenceGuard)->normalizeAndValidate([$fact], [$candidate], [], $pages);
+
+        $this->assertSame('corrected', $result[0]['evidence']);
+    }
+
     #[DataProvider('unsafeStatusRepairs')]
     public function test_status_repair_never_bypasses_evidence_or_actual_value_checks(array $changes, string $error): void
     {
