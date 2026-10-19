@@ -281,6 +281,22 @@ class ProductSpecificationEvidenceGuardTest extends TestCase
             'reason' => '6E is not documented, removing the unsupported detail.']], [], []);
     }
 
+    public function test_an_operator_typed_code_can_be_carried_with_operator_provenance_but_not_invented(): void
+    {
+        $request = 'Alienware 16X Aurora; AC16251; AWAC16251-9765BLU-PDE. Blue. 32GB memory; 1TB SSD';
+        $sku = ['key' => 'sku', 'name' => 'SKU', 'value' => 'AWAC16251-9765BLU-PDE', 'evidence' => 'added',
+            'source_kind' => 'operator_request', 'source_url' => null, 'source_ref' => null,
+            'source_excerpt' => 'AWAC16251-9765BLU-PDE', 'reason' => 'Operator label code; no observed page repeats it.'];
+        $guard = new ProductSpecificationEvidenceGuard;
+
+        $this->assertSame('AWAC16251-9765BLU-PDE', $guard->normalizeAndValidate([], [$sku], [], [], [], $request)[0]['value']);
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('operator_request excerpt must be copied verbatim');
+        $guard->normalizeAndValidate([], [[...$sku, 'value' => 'AWAC16251-1111RED-PDE',
+            'source_excerpt' => 'AWAC16251-1111RED-PDE']], [], [], [], $request);
+    }
+
     public function test_status_repair_cannot_promote_uncertain_label_provenance(): void
     {
         $label = ['key' => 'ram', 'value' => '64 GB', 'source_kind' => 'photo_label', 'source_ref' => 'photo:1',

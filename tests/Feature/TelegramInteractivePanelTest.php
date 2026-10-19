@@ -370,7 +370,8 @@ class TelegramInteractivePanelTest extends TestCase
 
             return str_contains((string) $request['text'], 'Частичный результат поиска #'.$draft->id)
                 && ! str_contains((string) $request['text'], 'готов к добавлению')
-                && $buttons->pluck('callback_data')->all() === ["draft:edit:{$draft->id}", "draft:reject:{$draft->id}"];
+                // Operator decision 2026-10-19: checked photos may be accepted as they are.
+                && $buttons->pluck('callback_data')->all() === ["draft:asis:{$draft->id}", "draft:edit:{$draft->id}", "draft:reject:{$draft->id}"];
         });
         $this->assertSame(3, $draft->media()->count());
         Queue::assertNothingPushed();

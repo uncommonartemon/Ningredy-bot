@@ -32,7 +32,10 @@ class ProductResearchConfigurationGuard
         if (! $identity && ! $this->hasObservedFullModel($data)) {
             $issues[] = 'The selected identity is unresolved: provide an observed reusable SKU/MPN/GTIN or selected_identity with the full model, single_product scope, observed source URL and verbatim excerpt. A family title, source publisher type, or letters and digits alone cannot identify one configuration. Keep useful sources and facts; missing identity evidence is not not_found.';
         }
-        if (is_array($data['selected_identity'] ?? null)
+        // With a code already identifying the product, an honestly family-scoped
+        // observation is provenance, not a second blocker (live #430: operator
+        // label SKU kept, page model string names the family).
+        if (! $identity && is_array($data['selected_identity'] ?? null)
             && ($data['selected_identity']['model_scope'] ?? null) !== 'single_product') {
             $issues[] = 'selected_identity still describes a product family or unknown scope, not one selected product.';
         }

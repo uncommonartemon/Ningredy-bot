@@ -47,6 +47,22 @@ class ObservedSourceQueueTest extends TestCase
         $this->assertStringContainsString('17-dp0005sfx', $result['specification_text']);
     }
 
+    public function test_a_facts_only_page_still_reaches_photo_checks_after_photo_hinted_pages(): void
+    {
+        config(['product-images.source_preflight' => false]);
+        $maker = 'https://93.184.216.40/shop/family-page';
+        $retailer = 'https://93.184.216.41/laptop';
+        $draft = new ProductDraft(['brand' => 'Dell', 'model' => 'AC16251', 'sources' => [
+            ['url' => $maker, 'type' => 'manufacturer', 'roles' => ['facts']],
+            ['url' => $retailer, 'type' => 'retailer', 'roles' => ['facts', 'exact_photo']],
+        ]]);
+
+        [, $cards] = app(SourceQueueBuilder::class)->buildSourceQueue($draft, [], [], true, 3, null, null);
+
+        // Roles are research hints: the manufacturer's page is not dropped, the photo agent judges it.
+        $this->assertSame([$retailer, $maker], $cards->pluck('url')->all());
+    }
+
     public function test_reciprocal_locale_mirrors_are_reserved_after_independent_sources_without_being_deleted(): void
     {
         config(['product-images.source_preflight' => true, 'product-images.max_preflight_sources' => 4]);

@@ -340,6 +340,15 @@ class ResearchProduct implements Tool
                 ],
             ]);
             $progress->info($researchSummary);
+            // Warn before photos and assembly are bought, then keep searching
+            // for the closest real product instead of stopping (live #429-#431).
+            $unconfirmedCodes = array_values(array_filter((array) ($data['unconfirmed_operator_codes'] ?? []),
+                fn (mixed $code): bool => is_string($code) && trim($code) !== ''));
+            if ($data['status'] === 'found' && $unconfirmedCodes !== []) {
+                $progress->info('⚠️ Не найдено ни на одной странице: '.implode(', ', $unconfirmedCodes)
+                    .'. Продолжаю поиск по ближайшему товару: '.($data['title'] ?? $data['model'] ?? 'без названия')
+                    .'. Код оставлю в карточке как указанный тобой.');
+            }
 
             if ($data['status'] === 'found') {
                 // Already checked inside RecoverableProductResearch's callback,
@@ -692,6 +701,8 @@ class ResearchProduct implements Tool
             'condition' => ['sometimes', 'required', Rule::in(ProductCondition::VALUES)],
             'description' => ['nullable', 'string', 'max:5000'],
             'research_notes' => ['nullable', 'string', 'max:5000'],
+            'unconfirmed_operator_codes' => ['sometimes', 'array', 'max:10'],
+            'unconfirmed_operator_codes.*' => ['string', 'max:100'],
             'selected_identity' => ['sometimes', 'nullable', 'array:basis,model_scope,observed_model,source_url,source_excerpt,reason'],
             'selected_identity.basis' => ['required_with:selected_identity', 'in:commercial_code,full_model'],
             'selected_identity.model_scope' => ['required_with:selected_identity', 'in:single_product,product_family,unknown'],

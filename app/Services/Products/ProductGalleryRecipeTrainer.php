@@ -327,9 +327,7 @@ class ProductGalleryRecipeTrainer
             $domainHint = is_string($domainSettings->agent_hint) && trim($domainSettings->agent_hint) !== ''
                 ? mb_substr(trim($domainSettings->agent_hint), 0, 4000)
                 : null;
-            $autoDomainHint = is_string($domainSettings->auto_agent_hint) && trim($domainSettings->auto_agent_hint) !== ''
-                ? mb_substr(trim($domainSettings->auto_agent_hint), 0, 2000)
-                : null;
+            $autoDomainHint = $this->autoDomainNotes($domainSettings);
 
             if ($recipe->status === 'disabled' && ! $force) {
                 $debug?->__invoke('warning', "Playwright для {$host} отключён после подтверждённой CAPTCHA/WAF.");
@@ -1009,6 +1007,9 @@ class ProductGalleryRecipeTrainer
                     // its agent origin and reason so later reuse is auditable.
                     $agentSizeVerdict = $failureKind === 'source_frames_too_small';
                     $agentAbandoned = ! $agentSizeVerdict;
+                    // The agent's own conclusion is the domain's memory, whichever
+                    // way it ended the page (live #428: bkstr storefronts).
+                    $domainSettings->appendAutoNote($agentSizeVerdict ? 'source_frames_too_small' : 'abandoned_page', $agentAbandonReason);
                     $debug?->__invoke(
                         'warning',
                         "AI-тренер: агент сам решил прекратить обучение на этом URL ({$agentAbandonReason}); перехожу к следующему источнику.",
@@ -1832,6 +1833,30 @@ class ProductGalleryRecipeTrainer
             'telegram_update_id' => $runId,
             'source' => $source,
         ];
+    }
+
+    /**
+     * This domain's own AI notes, then a few from sibling storefronts of the
+     * same site network (a.bkstr.com / b.bkstr.com usually share one media
+     * delivery). Sibling lines are labelled so the agent verifies them here.
+     */
+    private function autoDomainNotes(ProductSourceDomain $settings): ?string
+    {
+        $site = ProductImageCandidateDiscovery::siteName('https://'.$settings->domain);
+        $lines = array_filter(preg_split('/\R/', trim((string) $settings->auto_agent_hint)) ?: [], fn (string $line): bool => trim($line) !== '');
+        if ($site !== '') {
+            $siblings = ProductSourceDomain::query()->where('domain', '!=', $settings->domain)
+                ->where('domain', 'like', '%'.$site.'%')->whereNotNull('auto_agent_hint')->get(['domain', 'auto_agent_hint'])
+                ->filter(fn (ProductSourceDomain $domain): bool => ProductImageCandidateDiscovery::siteName('https://'.$domain->domain) === $site);
+            foreach ($siblings as $sibling) {
+                foreach (array_slice(array_filter(preg_split('/\R/', trim((string) $sibling->auto_agent_hint)) ?: []), -2) as $line) {
+                    $lines[] = '[sibling storefront '.$sibling->domain.'] '.trim($line);
+                }
+            }
+        }
+        $text = trim(implode("\n", $lines));
+
+        return $text === '' ? null : mb_substr($text, 0, 2000);
     }
 
     /**

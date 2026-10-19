@@ -308,6 +308,12 @@ class ProductSpecificationReconciler
             if (is_string($normalized['summary'] ?? null)) {
                 $normalized['summary'] = mb_substr($normalized['summary'], 0, 500);
             }
+            // Live #430 lost a whole answer to a blocker explanation past 300.
+            foreach ((array) ($normalized['unresolved_fields'] ?? []) as $index => $field) {
+                if (is_array($field) && is_string($field['reason'] ?? null)) {
+                    $normalized['unresolved_fields'][$index]['reason'] = mb_substr($field['reason'], 0, 300);
+                }
+            }
             // The same for each value's explanation: request #102 threw away a
             // whole card over a 19th field's reason running past 300 characters.
             $inputByKey = collect($inputSpecifications)->keyBy('key');
@@ -355,7 +361,7 @@ class ProductSpecificationReconciler
                 'specifications.*.group' => ['sometimes', 'nullable', 'array:id,name,name_cs'],
                 'specifications.*.evidence' => ['required', 'in:confirmed,corrected,dropped'],
                 'specifications.*.source_url' => ['nullable', 'url:http,https', 'max:2048'],
-                'specifications.*.source_kind' => ['sometimes', 'in:web,photo_label'],
+                'specifications.*.source_kind' => ['sometimes', 'in:web,photo_label,operator_request'],
                 'specifications.*.source_ref' => ['sometimes', 'nullable', 'string', 'max:255'],
                 'specifications.*.source_excerpt' => ['nullable', 'string', 'max:800'],
                 'specifications.*.reason' => ['nullable', 'string', 'max:300'],
@@ -414,7 +420,8 @@ class ProductSpecificationReconciler
                     ]]);
                 }
                 $data['specifications'] = $this->evidenceGuard->normalizeAndValidate($inputSpecifications, $data['specifications'],
-                    $draft->fresh()->specification_evidence ?? [], $observedPages, $inputEvidence);
+                    $draft->fresh()->specification_evidence ?? [], $observedPages, $inputEvidence,
+                    is_string($originalOperatorRequest) ? $originalOperatorRequest : null);
                 $offerSelection = app(CardOfferSelection::class)->validate($draft, $source, $data, $observedPages, $updateId);
             }
 

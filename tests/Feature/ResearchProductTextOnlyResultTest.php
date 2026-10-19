@@ -265,4 +265,16 @@ class ResearchProductTextOnlyResultTest extends TestCase
         $this->assertSame([self::SOURCE], array_column($evidence, 'source_url'));
         $this->assertSame('16 GB', $evidence[0]['value']);
     }
+
+    public function test_an_operator_code_nobody_shows_is_warned_about_at_once_and_the_search_continues(): void
+    {
+        $result = $this->research('cost_budget', assembled: true, responseOverrides: [
+            'unconfirmed_operator_codes' => ['AWAC16251-9765BLU-PDE'],
+        ]);
+
+        $this->assertSame('found', $result['status']);
+        $this->assertSame(1, ProductDraft::query()->count());
+        Http::assertSent(fn ($request): bool => str_contains((string) ($request['text'] ?? ''), 'Не найдено ни на одной странице: AWAC16251-9765BLU-PDE')
+            && str_contains((string) ($request['text'] ?? ''), 'Продолжаю поиск по ближайшему товару'));
+    }
 }

@@ -38,6 +38,16 @@ class ProductResearchIdentityAdmissionTest extends TestCase
         }
     }
 
+    public function test_a_kept_label_code_identifies_the_product_when_the_page_model_string_names_the_family(): void
+    {
+        $data = $this->modelOnly();
+        $data['selected_identity']['model_scope'] = 'product_family';
+        $this->assertNotEmpty(app(ProductResearchConfigurationGuard::class)->issues($data), 'no code: family scope stays unresolved');
+
+        $data['specifications'][] = ['key' => 'sku', 'value' => 'AWAC16251-9765BLU-PDE'];
+        $this->assertSame([], app(ProductResearchConfigurationGuard::class)->issues($data));
+    }
+
     public function test_legacy_coded_result_keeps_working_and_alternative_hardware_remains_invalid(): void
     {
         $data = $this->modelOnly();

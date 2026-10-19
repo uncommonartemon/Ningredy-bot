@@ -5,6 +5,7 @@ namespace App\Services\Telegram;
 use App\Jobs\ContinueDraftGallerySearch;
 use App\Models\Category;
 use App\Models\ProductDraft;
+use App\Models\ProductSourceAttempt;
 use App\Models\TelegramUpdate;
 use App\Services\Ai\AiSettings;
 use App\Services\Ai\ProductSearchCancellation;
@@ -207,6 +208,34 @@ class DraftTelegramPresenter
             ]]);
     }
 
+    /** Second step of "Принять как есть": the operator sees exactly what stays unreconciled. */
+    public function sendAcceptAsIsConfirmation(TelegramClient $telegram, string $chatId, ProductDraft $draft): array
+    {
+        $fields = collect($this->unreconciledFields($draft))
+            ->map(fn (array $field): string => '• '.$field['key'].': '.mb_substr((string) ($field['reason'] ?? ''), 0, 160))
+            ->take(8)->implode("\n");
+
+        return $this->messageLifecycle->replaceControlMessage($telegram, $draft, $chatId,
+            "⚠️ Принять черновик #{$draft->id} как есть?\nФото проверены, но характеристики не сверены"
+                .($fields !== '' ? ":\n{$fields}" : '.')
+                ."\nТовар попадёт в каталог с этими данными без дополнительной проверки.", ['inline_keyboard' => [
+                    [['text' => '✅ Да, принять как есть', 'callback_data' => "draft:asisok:{$draft->id}:{$draft->telegram_update_id}"]],
+                    [['text' => '← Назад', 'callback_data' => "draft:review:{$draft->id}"]],
+                ]]);
+    }
+
+    /** @return array<int, array{key: string, reason?: string}> */
+    public function unreconciledFields(ProductDraft $draft): array
+    {
+        $fields = data_get($draft->card_repair_state, 'last_failure.repair_context.unresolved_fields');
+        if (! is_array($fields) || $fields === []) {
+            $fields = data_get(ProductSourceAttempt::query()->where('product_draft_id', $draft->id)
+                ->where('action', 'reconcile_card')->latest('id')->value('output'), 'repair_context.unresolved_fields', []);
+        }
+
+        return array_values(array_filter((array) $fields, fn (mixed $field): bool => is_array($field) && is_string($field['key'] ?? null)));
+    }
+
     public function sendEditMenu(TelegramClient $telegram, string $chatId, ProductDraft $draft): array
     {
         $rows = [];
@@ -349,6 +378,11 @@ class DraftTelegramPresenter
 
         if ($this->reconciliationPending($draft)) {
             $rows = [];
+            // Operator decision 2026-10-19: verified photos may be accepted with
+            // the specifications as they are, after seeing what is unreconciled.
+            if ($mediaCount > 0 && ! $draft->media()->where('verification_status', 'pending')->exists()) {
+                $rows[] = [['text' => '✅ Принять как есть', 'callback_data' => "draft:asis:{$draft->id}"]];
+            }
             if (in_array($draft->gallery_search_stop_reason, ['cost_budget', 'time_budget'], true)) {
                 $rows[] = [[
                     'text' => '▶️ Продолжить поиск (+$'.number_format(app(AiSettings::class)->maxSearchCostUsd(), 2).')',

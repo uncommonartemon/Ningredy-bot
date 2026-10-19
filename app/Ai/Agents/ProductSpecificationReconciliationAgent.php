@@ -122,6 +122,13 @@ class ProductSpecificationReconciliationAgent implements Agent, HasStructuredOut
             input_evidence, its literal source_excerpt, and source_url=null. Web facts use source_kind=web,
             source_ref=null. For a disagreement with label evidence, include its source_ref in
             considered_source_refs and explain the difference, just as for considered_source_urls.
+            A value the operator literally typed in original_operator_request (often a label or regional code no
+            observed page repeats) uses source_kind=operator_request, source_url=null, source_ref=null and a
+            source_excerpt copied verbatim from original_operator_request that contains the value. It records the
+            operator's statement, not website verification, and is enough to carry that value on the card: an
+            operator-supplied code that no page repeats is not a blocker by itself. When an observed page states a
+            different value for the same physical product, cite it in considered_source_urls and explain which value
+            the card carries and why.
             No source type automatically wins: a retailer and a readable product label can establish facts;
             there is no manufacturer-only confirmation requirement. Unknown optional marketing labels
             or undisclosed panel technology may be dropped instead of blocking already supported facts.
@@ -195,7 +202,7 @@ class ProductSpecificationReconciliationAgent implements Agent, HasStructuredOut
                     'evidence' => $schema->string()->description('confirmed preserves an existing value; corrected changes that value with a reason; dropped removes it. New supported facts use confirmed.')->enum(['confirmed', 'corrected', 'dropped'])->required(),
                     'group' => AiAttributeGroups::schema($schema),
                     'reason' => $schema->string()->max(300)->nullable()->required(),
-                    'source_kind' => $schema->string()->enum(['web', 'photo_label'])->required(),
+                    'source_kind' => $schema->string()->enum(['web', 'photo_label', 'operator_request'])->required(),
                     'source_ref' => $schema->string()->max(255)->nullable()->required(),
                     'source_url' => $schema->string()->max(2048)->nullable()->required(),
                     'source_excerpt' => $schema->string()->description('A verbatim supporting excerpt from observed evidence at source_url, not an invented quotation or translation. Each passage must be continuous in the source. Separate nonadjacent passages or table rows with a newline or semicolon. Null only for dropped fields.')->max(800)->nullable()->required(),

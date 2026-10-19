@@ -4,6 +4,7 @@ namespace App\Services\Products;
 
 use App\Ai\Agents\ProductImageDiscoveryAgent;
 use App\Exceptions\ProductSearchCancelled;
+use App\Models\AiOperation;
 use App\Models\AiRun;
 use App\Models\Category;
 use App\Models\ProductDraft;
@@ -461,13 +462,39 @@ class ProductImageCandidateDiscovery
             ->map(fn (ProductSourceAttempt $attempt): array => [...$attempt->toArray(),
                 'site_name' => self::siteName((string) $attempt->product_url)])
             ->toArray();
-        // Regional storefronts of one network (allegro.pl/.cz/.sk, galaxus.nl/.de)
-        // usually refuse together; the agent sees that link instead of guessing.
-        $networkFailures = collect($sourceHistory)->groupBy('site_name')
-            ->map(fn ($rows): array => ['hosts' => $rows->map(fn (array $row): string => (string) parse_url((string) $row['product_url'], PHP_URL_HOST))->unique()->values()->all(),
-                'failures' => $rows->count()])
+        // Every page this search already opened and how it ended, gallery
+        // training included. Live #428 trained storefront after storefront of
+        // one network sharing one failing media CDN because this journal never
+        // showed training outcomes. The agent decides what is worth a visit.
+        $runId = $telegramUpdateId ?? $draft->telegram_update_id;
+        $endedByAgent = AiOperation::query()->where('telegram_update_id', $runId)
+            ->where('action', 'abandon_training_attempt')->get(['payload'])
+            ->mapWithKeys(fn (AiOperation $operation): array => [
+                (string) parse_url((string) data_get($operation->payload, 'url'), PHP_URL_HOST) => mb_substr((string) data_get($operation->payload, 'reason'), 0, 300),
+            ]);
+        $photosByHost = $draft->media()->get(['photo_source_context'])
+            ->countBy(fn ($media): string => (string) parse_url((string) data_get($media->photo_source_context, 'url'), PHP_URL_HOST));
+        $pagesOpened = ProductSourceAttempt::query()->where('telegram_update_id', $runId)
+            ->whereIn('phase', ['gallery_preflight', 'gallery_training', 'source_resolution', 'image_download', 'image_verification'])
+            ->orderBy('id')->get(['product_url', 'action'])
+            ->groupBy(fn (ProductSourceAttempt $attempt): string => (string) parse_url((string) $attempt->product_url, PHP_URL_HOST))
+            ->filter(fn ($rows, string $host): bool => $host !== '')
+            ->map(fn ($rows, string $host): array => ['host' => $host, 'site_name' => self::siteName('https://'.$host),
+                'training_rounds' => $rows->where('action', 'propose_recipe')->count(),
+                'photos_saved' => (int) ($photosByHost[$host] ?? 0),
+                'ended_by_agent' => $endedByAgent[$host] ?? null])
+            ->values()->slice(-12)->values()->all();
+        // Storefronts of one network (allegro.pl/.cz/.sk, a.bkstr.com/b.bkstr.com)
+        // usually fail together; the agent sees that link instead of guessing.
+        $networkFailures = collect([
+            ...array_map(fn (array $row): array => ['site_name' => $row['site_name'], 'host' => (string) parse_url((string) $row['product_url'], PHP_URL_HOST)], $sourceHistory),
+            ...array_map(fn (array $page): array => ['site_name' => $page['site_name'], 'host' => $page['host']],
+                array_filter($pagesOpened, fn (array $page): bool => $page['photos_saved'] === 0)),
+        ])->groupBy('site_name')
+            ->map(fn ($rows): array => ['hosts' => $rows->pluck('host')->unique()->values()->all(), 'failures' => $rows->count()])
             ->filter(fn (array $network, $name): bool => $name !== '' && count($network['hosts']) > 1)->all();
         $searchJournal = json_encode(['previous_search_results' => $searchHistory, 'previous_source_failures' => $sourceHistory,
+            'pages_opened_this_search' => $pagesOpened,
             ...($networkFailures === [] ? [] : ['failed_site_networks' => $networkFailures,
                 'network_note' => 'Several regional domains of the same site_name already failed. A sibling domain of that network usually fails the same way; prefer an independent site unless you have evidence otherwise.'])],
             JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
@@ -504,6 +531,10 @@ class ProductImageCandidateDiscovery
             {$cardRecoveryInstruction}
             Persistent history from this same search, including earlier queue jobs:
             {$searchJournal}
+            pages_opened_this_search shows how every page already opened in this search ended: gallery training
+            rounds, photos saved and the gallery agent's own reason for ending the page. Pages of one site_name
+            usually share one platform and media delivery; when such a page ended without photos, prefer an
+            independent site over another storefront of that network unless you have evidence it differs.
             Empty previous results are feedback: change your search queries, retailer, language or market instead
             of repeating the same unsuccessful approach. Previously blocked sources need a concrete new access
             method before another visit. Requirements stated by the operator remain mandatory. Research-inferred

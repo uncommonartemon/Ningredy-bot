@@ -108,7 +108,6 @@ class SourceQueueBuilder
                 $url = is_array($source) && is_string($source['url'] ?? null) ? $source['url'] : '';
                 $reason = match (true) {
                     $url === '' => 'invalid_source',
-                    ! ResearchSourceRoles::maySupplyPhotos($source) => 'text_evidence_only',
                     // web means an unclassified source, not proof that its
                     // HTML is not a product card. Let page evidence decide.
                     ! in_array($source['type'] ?? null, ['retailer', 'marketplace', 'manufacturer', 'web'], true) => 'not_product_card_type',
@@ -135,6 +134,12 @@ class SourceQueueBuilder
                 return $reason === null;
             })
             ->values();
+        // Research roles are discovery hints, not verdicts: a page tagged for
+        // facts only (live #428: the manufacturer's own family page, same body
+        // and colour) still reaches photo applicability, just after the pages
+        // research expected photos from. The photo agent decides.
+        [$photoHinted, $factsOnly] = $cardSources->partition(fn (array $source): bool => ResearchSourceRoles::maySupplyPhotos($source));
+        $cardSources = $photoHinted->concat($factsOnly)->values();
 
         // A colour filter stood here and it was a word list. It dropped a Grey
         // listing for a Gray request, a "Золотой" one for a Gold request, and

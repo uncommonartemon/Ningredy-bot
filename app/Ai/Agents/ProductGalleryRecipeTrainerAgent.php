@@ -184,6 +184,8 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
             Use it only as a hypothesis and verify every claimed control or transition against the current
             DOM/action/network evidence. It may be stale or wrong, never overrides domain_hint or operator_hint,
             and cannot justify a selector, navigation, product identity, or successful rendition by itself.
+            Lines marked [sibling storefront host] come from another storefront of the same site network; it
+            often shares this page's media delivery, so a failure recorded there is a hypothesis to check first.
             When notes conflict, current evidence wins.
 
             attempt_history lists every earlier round on this same page in order, each with the selectors it

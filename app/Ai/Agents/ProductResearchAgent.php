@@ -169,6 +169,12 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
             when a reusable code settles identity and include that code in specifications. Retain uncertain or
             family scope honestly; never invent a quotation to pass validation. No separate code is required
             when the complete model and observed configuration are self-sufficient.
+            An explicit EAN/UPC, SKU or part number from the operator that no observed page shows does not stop the
+            search: list it in unconfirmed_operator_codes (the operator is warned at once), select the closest
+            observed product whose complete model, configuration and colour match the request, with selected_identity
+            on that page, keep the operator's code unchanged as their label fact in specifications (never replace it
+            with another page's code), and name the closest product's own code and page in research_notes. Leave
+            unconfirmed_operator_codes empty when every supplied code was observed.
 
             status is a commitment, not a guess: return found only when you are also returning a non-empty title,
             at least one entry in sources, and a primary_source_url pointing at one of those sources. If any of
@@ -266,6 +272,8 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
             'condition' => $schema->string()->enum(ProductCondition::VALUES)->required(),
             'description' => $schema->string()->max(5000)->nullable()->required(),
             'research_notes' => $schema->string()->max(5000)->nullable()->required(),
+            'unconfirmed_operator_codes' => $schema->array()->max(10)->items($schema->string()->max(100))->required()
+                ->description('Operator-supplied EAN/UPC, SKU or part numbers that no observed page shows; empty when all were observed.'),
             'selected_identity' => $schema->object([
                 'basis' => $schema->string()->enum(['commercial_code', 'full_model'])->required(),
                 'model_scope' => $schema->string()->enum(['single_product', 'product_family', 'unknown'])->required(),

@@ -516,6 +516,59 @@ class ProductGalleryRecipeTrainerTest extends TestCase
         $this->assertStringContainsString('[auto abandoned_page ', $hint);
     }
 
+    public function test_a_page_ended_through_the_abandon_tool_also_leaves_its_reason_in_domain_memory(): void
+    {
+        AppSetting::put('ai.gallery_agent_write_tools_enabled', '1');
+        $trainerAgent = null;
+        $this->app->resolving(ProductGalleryRecipeTrainerAgent::class, function (ProductGalleryRecipeTrainerAgent $agent) use (&$trainerAgent): void {
+            $trainerAgent = $agent;
+        });
+        $reason = 'Frames 02-04 return HTTP 400 in every rendition; only frame 01 loads.';
+        ProductGalleryRecipeTrainerAgent::fake(function () use (&$trainerAgent, $reason): array {
+            collect(iterator_to_array($trainerAgent->tools(), false))
+                ->first(fn (object $tool): bool => $tool instanceof AbandonGalleryTrainingAttempt)
+                ->handle(new Request(['reason' => $reason]));
+
+            return $this->workingRecipe();
+        })->preventStrayPrompts();
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('scout')->andReturn(['scout' => [
+                'title' => 'Laptop', 'fragments' => ['<div>Photos</div>'], 'access_gate' => false, 'rate_limited' => false,
+            ]]);
+            $mock->shouldNotReceive('executeRecipe');
+        });
+
+        app(ProductGalleryRecipeTrainer::class)->train('https://store-a.campusnet.example/product', force: true);
+
+        $this->assertStringContainsString($reason,
+            (string) ProductSourceDomain::query()->where('domain', 'store-a.campusnet.example')->value('auto_agent_hint'));
+    }
+
+    public function test_notes_from_a_sibling_storefront_of_the_same_site_reach_the_trainer_labelled(): void
+    {
+        ProductSourceDomain::query()->create(['domain' => 'store-a.campusnet.example',
+            'auto_agent_hint' => '[auto abandoned_page 2026-10-19] Frames 02-04 return HTTP 400 on the shared media CDN.']);
+        ProductSourceDomain::query()->create(['domain' => 'campusnetwork.example',
+            'auto_agent_hint' => '[auto other 2026-10-19] Unrelated site with a similar name.']);
+        $prompts = [];
+        ProductGalleryRecipeTrainerAgent::fake(function ($prompt) use (&$prompts): array {
+            $prompts[] = json_decode($prompt, true);
+
+            return ['training_decision' => 'abandon_page', 'page_kind' => 'product_card', 'confidence' => 0.8,
+                'page_assessment_evidence' => ['Same CDN failure.'], 'reason' => 'Verified the sibling note: frames 02-04 fail here too.'];
+        })->preventStrayPrompts();
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('scout')->once()->andReturn(['scout' => ['title' => 'Product', 'fragments' => ['<div>Gallery</div>']]]);
+        });
+
+        app(ProductGalleryRecipeTrainer::class)->train('https://store-b.campusnet.example/product', force: true);
+
+        $hint = (string) data_get($prompts, '0.auto_domain_hint');
+        $this->assertStringContainsString('[sibling storefront store-a.campusnet.example]', $hint);
+        $this->assertStringContainsString('HTTP 400 on the shared media CDN', $hint);
+        $this->assertStringNotContainsString('Unrelated site', $hint);
+    }
+
     public function test_a_refusing_host_ends_page_training_without_another_paid_round(): void
     {
         $calls = 0;

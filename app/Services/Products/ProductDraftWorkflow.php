@@ -39,19 +39,20 @@ class ProductDraftWorkflow
         ProductDraft $draft,
         ?User $reviewer = null,
         ?string $telegramReviewerId = null,
+        bool $acceptUnreconciled = false,
     ): Product {
         try {
-            return $this->doApprove($draft, $reviewer, $telegramReviewerId);
+            return $this->doApprove($draft, $reviewer, $telegramReviewerId, $acceptUnreconciled);
         } catch (UniqueConstraintViolationException) {
             // Two approvals for the same product raced (near-simultaneous
             // double-click/retry): the other one committed first, so
             // canonical_key now exists. Retry once; the shared identity
             // lookup now sees the committed product and its variant.
-            return $this->doApprove($draft, $reviewer, $telegramReviewerId);
+            return $this->doApprove($draft, $reviewer, $telegramReviewerId, $acceptUnreconciled);
         }
     }
 
-    private function assertReadyForApproval(ProductDraft $draft): void
+    private function assertReadyForApproval(ProductDraft $draft, bool $acceptUnreconciled = false): void
     {
         throw_unless($draft->status === 'pending_review', \RuntimeException::class, 'Черновик уже обработан.');
         if ($draft->isManualUpload()) {
@@ -105,8 +106,10 @@ class ProductDraftWorkflow
         // checks the two actually agree. Independent of gallery_status: a
         // 'partial' gallery is already publishable today, so this has to
         // gate on its own persisted fact, not on that column.
+        // "Принять как есть" (operator decision 2026-10-19): the operator saw the
+        // list of unreconciled fields and accepted them; photo checks above stay.
         throw_if(
-            $draft->reconciliationPending(),
+            ! $acceptUnreconciled && $draft->reconciliationPending(),
             UnreconciledDraftSpecificationsException::class,
             'Характеристики черновика не сверены с источником выбранных фотографий — публикация невозможна, пока сверка не завершится.',
         );
@@ -116,10 +119,11 @@ class ProductDraftWorkflow
         ProductDraft $draft,
         ?User $reviewer,
         ?string $telegramReviewerId,
+        bool $acceptUnreconciled = false,
     ): Product {
-        return DB::transaction(function () use ($draft, $reviewer, $telegramReviewerId): Product {
+        return DB::transaction(function () use ($draft, $reviewer, $telegramReviewerId, $acceptUnreconciled): Product {
             $draft = ProductDraft::query()->lockForUpdate()->with(['telegramUpdate', 'media'])->findOrFail($draft->id);
-            $this->assertReadyForApproval($draft);
+            $this->assertReadyForApproval($draft, $acceptUnreconciled);
             $normalizedDescription = $this->publicDescription->normalize([
                 'title' => $draft->title,
                 'model' => $draft->model,

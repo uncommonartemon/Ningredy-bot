@@ -902,6 +902,19 @@ class TelegramWebhookController extends Controller
             return;
         }
 
+        if (preg_match('/^draft:asis:(\d+)$/', $data, $asIsMatches) === 1) {
+            $draft = ProductDraft::query()->find((int) $asIsMatches[1]);
+            if ($draft?->status === 'pending_review') {
+                $this->draftPresenter->sendAcceptAsIsConfirmation($this->telegram, $chatId, $draft);
+                $this->telegram->answerCallbackQuery($callbackId, 'Проверьте, что останется несверенным.');
+            } else {
+                $this->telegram->answerCallbackQuery($callbackId, 'Черновик уже обработан.');
+            }
+            $this->markCommandProcessed($update);
+
+            return;
+        }
+
         if (preg_match('/^draft:review:(\d+)$/', $data, $reviewMatches) === 1) {
             $this->handleDraftReview(
                 draftId: (int) $reviewMatches[1],
@@ -938,7 +951,7 @@ class TelegramWebhookController extends Controller
             return;
         }
 
-        if (preg_match('/^draft:(add|approve|reject):(\d+)$/', $data, $matches) !== 1) {
+        if (preg_match('/^draft:(add|approve|reject|asisok):(\d+)(?::(\d+))?$/', $data, $matches) !== 1) {
             $this->telegram->answerCallbackQuery($callbackId, 'Неизвестное действие.');
             $update->update(['status' => 'ignored', 'processed_at' => now()]);
 
@@ -959,11 +972,19 @@ class TelegramWebhookController extends Controller
             return;
         }
 
-        $approved = in_array($matches[1], ['add', 'approve'], true);
+        $asIs = $matches[1] === 'asisok';
+        if ($asIs && (int) ($matches[3] ?? 0) !== (int) $draft->telegram_update_id) {
+            $this->telegram->answerCallbackQuery($callbackId, 'Черновик изменился после показа списка. Откройте его заново.');
+            $update->update(['status' => 'already_processed', 'processed_at' => now()]);
+
+            return;
+        }
+        $unreconciled = $asIs ? $this->draftPresenter->unreconciledFields($draft) : [];
+        $approved = in_array($matches[1], ['add', 'approve', 'asisok'], true);
 
         try {
             $product = $approved
-                ? $this->draftWorkflow->approve($draft, telegramReviewerId: $update->telegram_user_id)
+                ? $this->draftWorkflow->approve($draft, telegramReviewerId: $update->telegram_user_id, acceptUnreconciled: $asIs)
                 : null;
         } catch (LowResolutionDraftMediaException|MissingDraftMediaException|UnverifiedDraftMediaException $exception) {
             $message = match (true) {
@@ -1004,10 +1025,10 @@ class TelegramWebhookController extends Controller
             'telegram_update_id' => $update->id,
             'telegram_user_id' => $update->telegram_user_id,
             'tool' => 'TelegramCallback',
-            'action' => $approved ? 'add_draft_to_catalog' : 'reject_product_draft',
+            'action' => $approved ? ($asIs ? 'add_draft_to_catalog_as_is' : 'add_draft_to_catalog') : 'reject_product_draft',
             'target_type' => ProductDraft::class,
             'target_id' => $draft->id,
-            'payload' => ['draft_id' => $draft->id],
+            'payload' => ['draft_id' => $draft->id, ...($asIs ? ['accepted_unreconciled_fields' => $unreconciled] : [])],
             'result' => ['product_id' => $product?->id],
             'status' => 'completed',
             'executed_at' => now(),

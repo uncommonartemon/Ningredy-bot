@@ -22,7 +22,7 @@ class ProductSpecificationEvidenceGuard
     }
 
     /** Repair only a status label, then run every provenance/conflict check. */
-    public function normalizeAndValidate(array $input, array $result, array $observedFacts, array $observedPages, array $inputEvidence = []): array
+    public function normalizeAndValidate(array $input, array $result, array $observedFacts, array $observedPages, array $inputEvidence = [], ?string $operatorRequest = null): array
     {
         $originals = collect($input)->keyBy('key');
         foreach ($result as $index => $item) {
@@ -59,7 +59,7 @@ class ProductSpecificationEvidenceGuard
             }
         }
 
-        $this->validate($input, $result, $observedFacts, $observedPages, $inputEvidence);
+        $this->validate($input, $result, $observedFacts, $observedPages, $inputEvidence, $operatorRequest);
 
         return $result;
     }
@@ -77,7 +77,7 @@ class ProductSpecificationEvidenceGuard
         return trim(preg_replace('/[\s\p{Z}]+/u', ' ', html_entity_decode($text, ENT_QUOTES | ENT_HTML5, 'UTF-8')) ?? $text);
     }
 
-    public function validate(array $input, array $result, array $observedFacts, array $observedPages, array $inputEvidence = []): void
+    public function validate(array $input, array $result, array $observedFacts, array $observedPages, array $inputEvidence = [], ?string $operatorRequest = null): void
     {
         $originals = collect($input)->keyBy('key');
         $facts = collect([...$input, ...$observedFacts])->filter(fn ($fact) => $this->isCitedFact($fact));
@@ -120,7 +120,17 @@ class ProductSpecificationEvidenceGuard
             if (! $dropped) {
                 $url = trim((string) ($item['source_url'] ?? ''));
                 $quote = $this->text((string) ($item['source_excerpt'] ?? ''));
-                if (($item['source_kind'] ?? 'web') === 'photo_label') {
+                if (($item['source_kind'] ?? 'web') === 'operator_request') {
+                    // The operator's own words (live #430: a label SKU no page
+                    // repeats). Copied verbatim and containing the value, so it
+                    // cannot be invented; it never counts as website evidence.
+                    $request = $this->text((string) $operatorRequest);
+                    if ($request === '' || $quote === '' || $url !== ''
+                        || ! $this->observed([$request], $quote, (string) ($item['source_excerpt'] ?? ''))
+                        || ! str_contains($quote, $this->text((string) $item['value']))) {
+                        $errors[] = $key.': operator_request excerpt must be copied verbatim from original_operator_request and contain this value; it records the operator\'s statement, not website evidence.';
+                    }
+                } elseif (($item['source_kind'] ?? 'web') === 'photo_label') {
                     $reference = trim((string) ($item['source_ref'] ?? ''));
                     // Intake and catalog may name the same field ram_capacity
                     // and ram. Provenance follows the photo and literal quote;
