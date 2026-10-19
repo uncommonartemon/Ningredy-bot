@@ -41,6 +41,20 @@ class CardRepairPatchTest extends TestCase
         $this->assertSame(300, mb_strlen($blocked['unresolved_fields'][0]['reason']));
     }
 
+    public function test_unquoted_prose_is_read_as_a_string_but_a_broken_object_is_still_rejected(): void
+    {
+        $base = $this->candidate();
+        $repair = $this->prepare($base, ['specifications.1.source_url' => ['Invalid URL']]);
+        $patch = ['base_hash' => $repair['base_hash'], 'decision' => 'patch', 'unresolved_fields' => [], 'summary' => 'Repaired',
+            // Live #450: the URL was quoted, nothing else in the answer was wrong.
+            'changes' => [['path' => 'specifications.ram.source_url', 'value_json' => 'https://maker.example/ram']]];
+
+        $this->assertSame('https://maker.example/ram', app(CardRepairPatch::class)->apply($repair, $patch)['specifications'][1]['source_url']);
+
+        $patch['changes'][0]['value_json'] = '{"broken": ';
+        $this->assertRejected($repair, $patch);
+    }
+
     public function test_empty_current_citation_list_does_not_forbid_adding_a_required_source(): void
     {
         $base = $this->candidate();

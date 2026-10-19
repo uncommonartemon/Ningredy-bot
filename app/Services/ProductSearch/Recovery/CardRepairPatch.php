@@ -157,6 +157,15 @@ final class CardRepairPatch
                 $patch['unresolved_fields'][$index]['reason'] = mb_substr($field['reason'], 0, 300);
             }
         }
+        // Prose often arrives without its JSON quotes while the neighbouring values
+        // have them (live #450 lost two paid patches to that). Plain text is read as
+        // the string it is; it still passes every evidence check below.
+        foreach ((array) ($patch['changes'] ?? []) as $index => $change) {
+            $raw = is_array($change) ? ($change['value_json'] ?? null) : null;
+            if (is_string($raw) && $raw !== '' && ! json_validate($raw) && ! in_array(ltrim($raw)[0] ?? '', ['{', '['], true)) {
+                $patch['changes'][$index]['value_json'] = json_encode($raw, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            }
+        }
         Validator::make(['patch' => $patch], [
             'patch' => ['required', 'array:base_hash,decision,changes,unresolved_fields,summary'],
             'patch.base_hash' => ['required', 'string'], 'patch.decision' => ['required', 'in:patch,not_ready'],
