@@ -190,7 +190,13 @@ class SourceQueueBuilder
                         ...$source,
                         'title' => trim((string) ($preflight['identity_evidence'] ?? '')) !== ''
                             ? null : ($source['title'] ?? null),
-                        'image_urls' => array_values(array_unique([
+                        // An official gallery's own frames come before whatever the page
+                        // scrape adds (live #454: 48 thumbnails and logos pushed eight
+                        // 2000px datasheet photos out of the download window).
+                        'image_urls' => array_values(array_unique(($source['_official_gallery'] ?? false) === true ? [
+                            ...$this->candidateUrls->cleanUrls($source['image_urls'] ?? []),
+                            ...$this->candidateUrls->cleanUrls($preflight['static_image_urls'] ?? []),
+                        ] : [
                             ...$this->candidateUrls->cleanUrls($preflight['static_image_urls'] ?? []),
                             ...$this->candidateUrls->cleanUrls($source['image_urls'] ?? []),
                         ])),
