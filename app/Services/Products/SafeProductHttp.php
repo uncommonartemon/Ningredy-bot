@@ -24,7 +24,7 @@ class SafeProductHttp
     }
 
     /** One hop only. The caller owns redirect policy and checks every next URL. */
-    public function get(string $url, array $headers, int $maximumBytes): Response
+    public function get(string $url, array $headers, int $maximumBytes, ?int $timeout = null): Response
     {
         if (! extension_loaded('curl')) {
             throw new RuntimeException('Safe product downloads require cURL DNS pinning.');
@@ -55,7 +55,7 @@ class SafeProductHttp
                         },
                     ])
                     ->connectTimeout((int) config('product-images.http.connect_timeout', 3))
-                    ->timeout((int) config('product-images.http.timeout', 7))
+                    ->timeout($timeout ?? (int) config('product-images.http.timeout', 7))
                     ->get($url);
                 // Fakes/alternative handlers may not write to the sink. Real cURL
                 // already enforces this during decompression, before body() exists.

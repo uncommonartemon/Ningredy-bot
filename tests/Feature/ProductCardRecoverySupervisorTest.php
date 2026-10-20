@@ -116,6 +116,7 @@ class ProductCardRecoverySupervisorTest extends TestCase
     {
         $this->measurableBudget(spent: 0.3);
         app(AiSettings::class)->saveCardAssemblyFallbackModel('gpt-6-sol');
+        app(AiSettings::class)->saveStrongerModelEnabled(true);
         $draft = $this->draftWithFailure();
         ProductCardRecoveryAgent::fake(fn (): array => $this->decision('stronger_model', '', 'Evidence is complete; the model keeps mis-quoting it.'))
             ->preventStrayPrompts();

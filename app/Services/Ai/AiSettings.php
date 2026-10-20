@@ -168,11 +168,34 @@ class AiSettings
      * the quoting check are completed here instead of reaching the operator
      * as "search not finished" (requests #99, #51 on gpt-6-luna).
      */
+    /** The stronger model in use: none unless the operator switched it on. */
     public function cardAssemblyFallbackModel(): ?string
+    {
+        return $this->strongerModelEnabled() ? $this->storedCardAssemblyFallbackModel() : null;
+    }
+
+    /** The model picked in the admin, kept even while the switch is off. */
+    public function storedCardAssemblyFallbackModel(): ?string
     {
         $model = AppSetting::valueFor('ai.card_assembly_fallback_model');
 
         return $this->models->has('openai', $model) ? $model : null;
+    }
+
+    /**
+     * Operator's switch for the stronger, pricier card model (2026-10-20: off,
+     * the ordinary model must cope). Off unless explicitly turned on.
+     */
+    public function strongerModelEnabled(): bool
+    {
+        $value = AppSetting::valueFor('ai.stronger_model_enabled');
+
+        return $value !== null && filter_var($value, FILTER_VALIDATE_BOOLEAN);
+    }
+
+    public function saveStrongerModelEnabled(bool $enabled): void
+    {
+        AppSetting::put('ai.stronger_model_enabled', $enabled ? '1' : '0');
     }
 
     public function saveCardAssemblyFallbackModel(?string $model): void

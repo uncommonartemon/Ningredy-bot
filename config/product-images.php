@@ -41,6 +41,11 @@ return [
     'http' => [
         'connect_timeout' => 3,
         'timeout' => 7,
+        // Photos are not pages: a 2000px manufacturer original can be over 8 MB
+        // and take longer than 7s. Live #504 lost four of seven official Icecat
+        // photos to the page limits and searched twenty minutes for others.
+        'image_timeout' => (int) env('PRODUCT_IMAGE_DOWNLOAD_TIMEOUT', 25),
+        'image_max_bytes' => (int) env('PRODUCT_IMAGE_DOWNLOAD_MAX_BYTES', 26_214_400),
         // Bounds the WHOLE download_candidates loop for one source, not a
         // single request - each request above is already capped, but many
         // slow-but-not-instantly-failing URLs in sequence can still add up

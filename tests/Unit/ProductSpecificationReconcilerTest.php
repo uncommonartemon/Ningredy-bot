@@ -192,6 +192,7 @@ class ProductSpecificationReconcilerTest extends TestCase
     public function test_agent_can_return_an_unverifiable_offer_to_search_without_repairing_or_publishing_it(): void
     {
         app(AiSettings::class)->saveCardAssemblyFallbackModel('gpt-6-sol');
+        app(AiSettings::class)->saveStrongerModelEnabled(true);
         $draft = $this->seedDraft();
         $calls = 0;
         ProductSpecificationReconciliationAgent::fake(function () use (&$calls): array {
@@ -324,6 +325,7 @@ class ProductSpecificationReconcilerTest extends TestCase
     {
         app(AiSettings::class)->saveModel('gpt-6-luna');
         app(AiSettings::class)->saveCardAssemblyFallbackModel('gpt-6-sol');
+        app(AiSettings::class)->saveStrongerModelEnabled(true);
         $draft = $this->seedDraft();
         $models = [];
         ProductSpecificationReconciliationAgent::fake(function (string $prompt, $attachments, $provider, string $model) use ($draft, &$models): array {
@@ -423,6 +425,7 @@ class ProductSpecificationReconcilerTest extends TestCase
     {
         app(AiSettings::class)->saveModel('gpt-6-luna');
         app(AiSettings::class)->saveCardAssemblyFallbackModel('gpt-6-sol');
+        app(AiSettings::class)->saveStrongerModelEnabled(true);
         $draft = $this->seedDraft(['image_urls' => ['https://shop.example/retained.jpg']]);
         $calls = 0;
         ProductSpecificationReconciliationAgent::fake(function () use (&$calls): array {
@@ -453,6 +456,7 @@ class ProductSpecificationReconcilerTest extends TestCase
     {
         app(AiSettings::class)->saveModel('gpt-6-luna');
         app(AiSettings::class)->saveCardAssemblyFallbackModel('gpt-6-sol');
+        app(AiSettings::class)->saveStrongerModelEnabled(true);
         $draft = $this->seedDraft(['image_urls' => ['https://shop.example/retained.jpg']]);
         $calls = 0;
         ProductSpecificationReconciliationAgent::fake(function () use (&$calls): array {
@@ -639,6 +643,7 @@ class ProductSpecificationReconcilerTest extends TestCase
         $settings = app(AiSettings::class);
         $settings->saveModel('gpt-6-luna');
         $settings->saveCardAssemblyFallbackModel('gpt-6-sol');
+        $settings->saveStrongerModelEnabled(true);
         $draft = $this->seedDraft();
         $models = [];
         ProductSpecificationReconciliationAgent::fake(function (string $prompt, $attachments, $provider, string $model) use (&$models): array {

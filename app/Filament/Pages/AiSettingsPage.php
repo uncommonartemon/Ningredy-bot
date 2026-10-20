@@ -50,7 +50,8 @@ class AiSettingsPage extends Page implements HasForms
         $this->form->fill([
             'model' => $settings->model(),
             'card_assembly_model' => $settings->cardAssemblyModel(),
-            'card_assembly_fallback_model' => $settings->cardAssemblyFallbackModel(),
+            'card_assembly_fallback_model' => $settings->storedCardAssemblyFallbackModel(),
+            'stronger_model_enabled' => $settings->strongerModelEnabled(),
             'image_model' => $settings->imageModel(),
             'gallery_recipe_training_model' => $settings->galleryRecipeTrainingModel()
                 ?: (string) config('services.gallery_recipe_training.model', 'gpt-5.4'),
@@ -160,6 +161,11 @@ class AiSettingsPage extends Page implements HasForms
                                             ->placeholder(__('Нет'))
                                             ->hintIcon('heroicon-o-question-mark-circle', tooltip: __('Доделывает карточку, если модель сборки не смогла её собрать. Так сборка может идти на дешёвой модели, а более сильная платится только за редкие трудные карточки — вместо «поиск не завершён».'))
                                             ->searchable(),
+                                        Toggle::make('stronger_model_enabled')
+                                            ->label(__('Разрешить сильную (запасную) модель'))
+                                            ->hintIcon('heroicon-o-question-mark-circle', tooltip: __('Выключено — карточки собирает только основная модель, запасная не вызывается вообще. Включено — агент восстановления может один раз позвать запасную модель, когда основная не справилась с уже собранными данными. Она в ~20 раз дороже.'))
+                                            ->default(false)
+                                            ->inline(false),
                                     ])->columns(['default' => 1, 'lg' => 3]),
                             ]),
                         Tab::make(__('Поиск фотографий'))
@@ -412,6 +418,7 @@ class AiSettingsPage extends Page implements HasForms
         $settings->saveGalleryRecipeTrainingModel($data['gallery_recipe_training_model'] ?? null);
         $settings->saveCardAssemblyModel($data['card_assembly_model'] ?? null);
         $settings->saveCardAssemblyFallbackModel($data['card_assembly_fallback_model'] ?? null);
+        $settings->saveStrongerModelEnabled((bool) ($data['stronger_model_enabled'] ?? false));
         $settings->saveGalleryBrowserMode($data['gallery_browser_mode'] ?? null);
         $settings->saveFallbackSourcesEnabled((bool) ($data['fallback_sources_enabled'] ?? false));
         $settings->saveGalleryPreferPlaywrightFirst((bool) ($data['gallery_prefer_playwright_first'] ?? false));

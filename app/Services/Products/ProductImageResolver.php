@@ -761,8 +761,9 @@ class ProductImageResolver
     /**
      * @return array{bytes: string, source_url: string, mime_type: string, width: int, height: int, confirmed_gallery: bool, partial_gallery: bool}|null
      */
-    public function download(string $url, int $maxBytes = 8_388_608, ?string &$failureReason = null, ?string $refererUrl = null): ?array
+    public function download(string $url, int $maxBytes = 0, ?string &$failureReason = null, ?string $refererUrl = null): ?array
     {
+        $maxBytes = $maxBytes > 0 ? $maxBytes : (int) config('product-images.http.image_max_bytes', 26_214_400);
         if (! $this->isPublicUrl($url)) {
             $failureReason = 'not_public_url';
 
@@ -787,7 +788,8 @@ class ProductImageResolver
         }
 
         try {
-            [$response, $finalUrl] = $this->fetch($url, $refererUrl, asDocument: false, maxBytes: $maxBytes);
+            [$response, $finalUrl] = $this->fetch($url, $refererUrl, asDocument: false, maxBytes: $maxBytes,
+                timeout: (int) config('product-images.http.image_timeout', 25));
             $bytes = $response->body();
 
             if ($bytes === '') {
@@ -903,6 +905,7 @@ class ProductImageResolver
         bool $asDocument = true,
         ?string $confineToHost = null,
         int $maxBytes = 8_388_608,
+        ?int $timeout = null,
     ): array {
         for ($redirects = 0; $redirects <= 3; $redirects++) {
             if (! $this->isPublicUrl($url)) {
@@ -924,7 +927,7 @@ class ProductImageResolver
                 ...$this->browserHeaders($asDocument),
                 'Referer' => $refererUrl !== null && $refererUrl !== '' ? $refererUrl : $this->origin($url).'/',
                 'Cache-Control' => 'no-cache',
-            ], $maxBytes);
+            ], $maxBytes, $timeout);
 
             if ($response->redirect()) {
                 $location = $response->header('Location');
