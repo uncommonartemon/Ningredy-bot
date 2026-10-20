@@ -537,6 +537,10 @@ class ProductImageCandidateDiscovery
             any rejected source/domain above, or any previously rejected image. Prefer working page URLs from several
             new domains; our server extracts their galleries. Return a direct image URL only when the current search
             result exposes that exact URL. Do not reconstruct or guess CDN paths.
+            Return a product's own main page, not its specifications or tech-specs sub-page. Search the exact model
+            code across markets and in local languages: retailers in any country (European, Ukrainian, Asian)
+            usually carry the same official gallery and open to our reader where large US retailers block it.
+            Text inside photos is checked separately; the page's country or language never disqualifies it.
             PROMPT;
     }
 
