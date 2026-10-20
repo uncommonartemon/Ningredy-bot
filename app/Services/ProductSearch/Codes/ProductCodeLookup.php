@@ -93,7 +93,7 @@ final class ProductCodeLookup
         $key = 'code-lookup:icecat:'.md5(json_encode($query));
         $cached = Cache::get($key);
         if (is_array($cached)) {
-            return $this->outcome('icecat', $code, $cached['status'], $cached['data'], $updateId, $caller, cached: true, brand: $brand);
+            return [...$this->outcome('icecat', $code, $cached['status'], $cached['data'], $updateId, $caller, cached: true, brand: $brand), 'queried_part' => $partCode];
         }
         try {
             $response = Http::timeout(20)->acceptJson()->get((string) config('services.icecat.url'), $query);
@@ -113,7 +113,8 @@ final class ProductCodeLookup
             Cache::put($key, ['status' => $status, 'data' => $data], now()->addDays(30));
         }
 
-        return $this->outcome('icecat', $code, $status, $data, $updateId, $caller, brand: $brand);
+        // The code asked matters: Icecat files ASUS GA403UV-G14.R94060 under part 90NR0I02-M003W0 (live #456).
+        return [...$this->outcome('icecat', $code, $status, $data, $updateId, $caller, brand: $brand), 'queried_part' => $partCode];
     }
 
     /** @return array<string, mixed> */

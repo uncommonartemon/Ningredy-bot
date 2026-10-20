@@ -835,7 +835,13 @@ class ResearchProduct implements Tool
             ->map(fn (mixed $code): string => preg_replace('/\D/', '', (string) $code))
             ->filter(fn (string $code): bool => ProductCodeLookup::validGtin($code))->merge($queryGtins)->unique()->values()->all();
         $normal = static fn (string $code): string => strtoupper((string) preg_replace('/[^A-Za-z0-9]/', '', $code));
-        $samePart = fn (array $result): bool => in_array($normal((string) ($result['part_number'] ?? '')), array_map($normal, $codes), true);
+        // A datasheet found by asking with the selected code is that code's datasheet,
+        // even when Icecat files it under another part number (live #456: ASUS model
+        // GA403UV-G14.R94060 → part 90NR0I02-M003W0, seven photos missed).
+        // The datasheet's own title must name that code too.
+        $samePart = fn (array $result): bool => in_array($normal((string) ($result['part_number'] ?? '')), array_map($normal, $codes), true)
+            || (filled($result['queried_part'] ?? null) && in_array($normal((string) $result['queried_part']), array_map($normal, $codes), true)
+                && str_contains($normal((string) ($result['title'] ?? '')), $normal((string) $result['queried_part'])));
         $sameGtin = fn (array $result): bool => array_intersect(array_map(fn ($gtin) => ltrim((string) $gtin, '0'), (array) ($result['gtins'] ?? [])),
             array_map(fn ($gtin) => ltrim((string) $gtin, '0'), $gtins)) !== [];
         $matches = fn (array $result): bool => $samePart($result) || $sameGtin($result);

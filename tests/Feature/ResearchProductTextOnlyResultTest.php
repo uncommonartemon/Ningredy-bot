@@ -313,6 +313,23 @@ class ResearchProductTextOnlyResultTest extends TestCase
         }
     }
 
+    public function test_a_datasheet_found_by_the_selected_code_matches_even_under_another_part_number(): void
+    {
+        // Live #456: Icecat files ASUS GA403UV-G14.R94060 under part 90NR0I02-M003W0.
+        config(['services.icecat.username' => 'tester']);
+        Cache::flush();
+        Http::fake(['https://live.icecat.biz/*' => Http::response(['data' => [
+            'GeneralInfo' => ['Title' => 'Lenovo Exact 123', 'Brand' => 'Lenovo', 'BrandPartCode' => '90NR0I02-M003W0', 'IcecatId' => '42',
+                'ProductName' => 'Exact', 'GTIN' => []],
+            'Gallery' => [['Pic' => 'https://images.icecat.biz/img/gallery/exact.jpg', 'PicWidth' => '2000', 'PicHeight' => '2000', 'No' => '1']],
+        ]])]);
+
+        $this->research('cost_budget', assembled: false);
+
+        $official = collect(ProductDraft::query()->sole()->sources)->firstWhere('_official_gallery', true);
+        $this->assertSame(['https://images.icecat.biz/img/gallery/exact.jpg'], $official['image_urls']);
+    }
+
     public function test_a_barcode_that_points_at_another_product_still_lets_the_selected_part_code_find_its_datasheet(): void
     {
         config(['services.icecat.username' => 'tester']);
