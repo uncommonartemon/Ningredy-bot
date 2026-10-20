@@ -686,7 +686,9 @@ class ProductImageStorage
             }
 
             // Browser/DOM gallery URLs are more reliable than AI-provided thumbnails.
-            $urls = array_values(array_unique([...$resolvedUrls, ...$urls]));
+            // An official gallery's own photos stay ahead of what its page adds (live #454).
+            $urls = array_values(array_unique(($source['_official_gallery'] ?? false) === true
+                ? [...$urls, ...$resolvedUrls] : [...$resolvedUrls, ...$urls]));
             $this->attempts->record([
                 'telegram_update_id' => $telegramUpdateId,
                 'product_draft_id' => $draft->id,

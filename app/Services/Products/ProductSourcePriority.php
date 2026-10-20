@@ -83,7 +83,8 @@ class ProductSourcePriority
                 array_values($reuseFirst),
             ),
             ...array_map(
-                fn (array $source): array => [...$source, '_reuse_only' => $trainingDisabled],
+                // An official datasheet gallery brings its photos with it: nothing to train on its page.
+                fn (array $source): array => [...$source, '_reuse_only' => $trainingDisabled || ($source['_official_gallery'] ?? false) === true],
                 $sources,
             ),
         ];
