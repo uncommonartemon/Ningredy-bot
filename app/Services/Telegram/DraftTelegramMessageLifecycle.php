@@ -150,6 +150,14 @@ class DraftTelegramMessageLifecycle
 
                 return $response;
             } catch (Throwable $exception) {
+                // Telegram refuses an edit that changes nothing; the message already
+                // shows this text and these buttons, so it stays where it is.
+                if (str_contains(strtolower($exception->getMessage()), 'message is not modified')) {
+                    $this->deleteStrayControlMessages($telegram, $chatId, $existingIds->slice(1));
+                    $this->rememberControlMessageIds($draft, $chatId, [$primaryId]);
+
+                    return ['ok' => true, 'result' => ['message_id' => $primaryId]];
+                }
                 // The message may no longer exist or be editable (aged out,
                 // deleted by the operator, ...) - fall through to a fresh send.
                 report($exception);
