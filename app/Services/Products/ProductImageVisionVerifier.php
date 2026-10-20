@@ -140,8 +140,8 @@ class ProductImageVisionVerifier
 
     /**
      * Reviews every frame of an ambiguous Playwright carousel in one request.
-     * This policy deliberately accepts useful lifestyle/feature photography
-     * when the requested product is still meaningfully visible.
+     * Unusual angles, details and lifestyle shots stay when the product is the
+     * clear subject; feature slides, internal illustrations and collages do not.
      *
      * @param  array<int, array<string, mixed>>  $candidates
      * @return array<int, array<string, mixed>>

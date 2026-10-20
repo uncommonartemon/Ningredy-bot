@@ -24,8 +24,10 @@ class ProductGalleryVisionAgent implements Agent, HasStructuredOutput
             never invent CSS selectors, and never claim that a visually identical chassis proves an exact SKU.
 
             Treat unusual angles, side/rear/top views, close-ups, a closed or folded product, lifestyle scenes,
-            dramatic backgrounds, glow/effects and professional feature graphics as valid product-bearing frames
-            whenever the requested product remains meaningfully visible. They are not failures by themselves.
+            dramatic backgrounds and glow/effects as valid product-bearing frames whenever the requested product
+            is the clear subject. They are not failures by themselves. Report illustrations of internal
+            components, infographics and feature slides built around a callout or graphic as not product-bearing:
+            the catalog publishes product photos the way an online store's gallery does.
 
             For each numbered attachment report whether the product is meaningfully visible, whether it appears
             visually consistent with the other attachments, its broad view, any visible conflicting brand/model/

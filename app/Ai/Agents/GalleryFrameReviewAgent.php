@@ -29,9 +29,14 @@ class GalleryFrameReviewAgent implements Agent, HasStructuredOutput
             does not allow missing-image placeholders or a contradictory brand/family, and does not
             apply to complete laptops or desktop computers. Do not infer an exact SKU from a logo.
             A logo printed ON a visible product or its physical retail box is not a standalone logo.
-            Accept useful side/rear/top views, closed/folded products, close-ups and details, renders,
-            and professional lifestyle/feature photos with people or effects. Do not reject a frame
-            for its angle, composition, background, or because an exact SKU/color cannot be read.
+            Catalog photos show the product the way an online store's product gallery does: the actual
+            product, or a real external detail of it (ports, keyboard, hinge, screen) or its retail box, is
+            the clear subject. Accept useful side/rear/top views, closed/folded products, close-ups and
+            details, studio renders, and lifestyle photos in which the product is the clear dominant subject.
+            Also return as non_product_frames: diagrams or illustrations of internal components (boards,
+            chips, cooling, signal paths), infographics, feature slides whose subject is a callout, icon or
+            graphic rather than the product, promotional compositions with overlaid graphics, and collages.
+            Do not reject a frame for its angle, background, or because an exact SKU/color cannot be read.
             Exact configuration identity is established by the product page, not guessed from pixels.
             If you genuinely cannot determine whether a product is depicted, use uncertain_content_frames,
             not non_product_frames; do not silently count uncertainty as successful verification.

@@ -24,10 +24,13 @@ class ProductImageVisionAgent implements Agent, HasStructuredOutput
             identity supplied in the prompt.
 
             The trusted complete-gallery policy in the prompt overrides generic aesthetic exclusions below.
-            For that policy, professional feature compositions, lifestyle scenes, banners/collages containing
-            the actual product, unusual angles, closed lids and useful details remain publishable. Do not reject
-            them for decoration, composition or a low aesthetic score, and do not guess an exact SKU from pixels
-            when the source already establishes identity. Check current pixels for real contradictions instead.
+            For that policy, unusual angles, closed lids, useful external details and lifestyle photos in which
+            the product is the clear dominant subject remain publishable. Do not reject them for background or a
+            low aesthetic score, and do not guess an exact SKU from pixels when the source already establishes
+            identity. Check current pixels for real contradictions instead. Catalog photos show the product the
+            way an online store's gallery does: feature slides with overlaid graphics or callouts, illustrations
+            of internal components, infographics, banners and collages are not catalog photos, even inside a
+            complete official gallery. The primary image shows the whole product.
             When the trusted source context explicitly establishes compatible-body applicability, its known regional
             SKU suffix or permitted keyboard difference alone is not a wrong-body verdict; keep the factual notice.
             A shared family name or resemblance alone does not establish that compatibility.
