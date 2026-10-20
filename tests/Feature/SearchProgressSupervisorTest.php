@@ -21,16 +21,19 @@ class SearchProgressSupervisorTest extends TestCase
 
     private const PAGE = 'https://shop.example/products/legion-pro-7';
 
+    private $budget;
+
     protected function setUp(): void
     {
         parent::setUp();
         Cache::flush();
         AppSetting::put('ai.max_search_cost_usd', '1');
-        $budget = $this->mock(ProductSearchCostBudget::class);
-        $budget->shouldReceive('exceeded')->andReturn(false);
-        $budget->shouldReceive('unmeasurable')->andReturn(false);
-        $budget->shouldReceive('spent')->andReturn(0.12);
-        $budget->shouldReceive('limit')->andReturn(1.0);
+        $this->budget = $this->mock(ProductSearchCostBudget::class);
+        $this->budget->shouldReceive('exceeded')->andReturn(false);
+        $this->budget->shouldReceive('unmeasurable')->andReturn(false);
+        $this->budget->shouldReceive('spent')->andReturn(0.12);
+        $this->budget->shouldReceive('spentFraction')->andReturn(0.12)->byDefault();
+        $this->budget->shouldReceive('limit')->andReturn(1.0);
     }
 
     public function test_a_young_search_is_never_reviewed(): void
@@ -40,6 +43,26 @@ class SearchProgressSupervisorTest extends TestCase
 
         $this->assertSame('continue', $this->review($draft)['decision']);
         $this->assertSame(0, AiRun::query()->where('activity->stage', 'search_progress_supervisor')->count());
+    }
+
+    public function test_a_young_search_that_has_spent_much_of_its_money_is_reviewed(): void
+    {
+        // Live #566 spent its dollar on empty discovery rounds in four minutes.
+        $this->budget->shouldReceive('spentFraction')->andReturn(0.45);
+        $draft = $this->draft(minutesAgo: 4);
+        $prompts = [];
+        SearchProgressAgent::fake(function (string $prompt) use (&$prompts): array {
+            $prompts[] = json_decode($prompt, true);
+
+            return ['decision' => 'deliver_now', 'reason' => 'Шесть пустых раундов подряд по этому коду.'];
+        })->preventStrayPrompts();
+
+        $verdict = app(SearchProgressSupervisor::class)->review($draft->telegram_update_id, $draft, [
+            'kind' => 'fallback_discovery', 'round' => 7, 'empty_discovery_rounds_in_a_row' => 6,
+        ]);
+
+        $this->assertSame('deliver_now', $verdict['decision']);
+        $this->assertSame(6, $prompts[0]['current_activity']['empty_discovery_rounds_in_a_row']);
     }
 
     public function test_a_stuck_page_is_left_with_the_agents_reason_recorded_and_the_next_review_waits(): void

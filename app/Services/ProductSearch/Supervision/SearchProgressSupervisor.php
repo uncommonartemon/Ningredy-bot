@@ -73,7 +73,9 @@ final class SearchProgressSupervisor
         }
         try {
             if (! config('services.search_progress_supervisor.enabled', true)
-                || ($this->timeBudget->elapsedSeconds($updateId) ?? 0) < (int) config('services.search_progress_supervisor.after_seconds', 480)
+                || (($this->timeBudget->elapsedSeconds($updateId) ?? 0) < (int) config('services.search_progress_supervisor.after_seconds', 480)
+                    // Money can go faster than time: live #566 spent a dollar in four minutes.
+                    && ($this->costBudget->spentFraction($updateId) ?? 0) < (float) config('services.search_progress_supervisor.after_spent_fraction', 0.4))
                 || $this->costBudget->limit() <= 0 || $this->costBudget->unmeasurable($updateId)
                 || $this->costBudget->exceeded($updateId) || ! $this->timeBudget->canStart($updateId, 30)
                 || ! Cache::add(self::REVIEW_KEY.$updateId, now()->toIso8601String(),

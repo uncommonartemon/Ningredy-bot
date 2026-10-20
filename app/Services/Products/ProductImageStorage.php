@@ -1111,6 +1111,7 @@ class ProductImageStorage
             ]);
             $fallbackExcludedSourceUrls = $cycleExcludedSourceUrls;
             $fallbackRound = 0;
+            $emptyDiscoveryRounds = 0;
             // In production price and elapsed time are the only retry limits.
             // Tests, explicitly budgetless operation, and a search whose
             // model has no configured pricing (so costBudget->exceeded()
@@ -1137,6 +1138,15 @@ class ProductImageStorage
                 if (! $this->timeBudget->canStart($telegramUpdateId, 30) || $this->costBudget->exceeded($telegramUpdateId)) {
                     break;
                 }
+                // The search watcher may end a run of empty discovery rounds: live #566
+                // spent its whole budget on eighteen of them in four minutes.
+                $watch = app(SearchProgressSupervisor::class)->review($telegramUpdateId, $draft, [
+                    'kind' => 'fallback_discovery', 'round' => $fallbackRound + 1,
+                    'empty_discovery_rounds_in_a_row' => $emptyDiscoveryRounds,
+                ], $progress);
+                if ($watch['decision'] === 'deliver_now') {
+                    break;
+                }
                 $fallbackRound++;
                 $attemptCheckpoint = ProductSourceAttempt::query()->max('id') ?? 0;
                 [$discoveredCandidates] = $this->discoverCandidates(
@@ -1149,6 +1159,7 @@ class ProductImageStorage
                     $fallbackRound,
                 );
 
+                $emptyDiscoveryRounds = $discoveredCandidates === [] ? $emptyDiscoveryRounds + 1 : 0;
                 $attemptedRoundSourceUrls = ProductSourceAttempt::query()
                     ->where('id', '>', $attemptCheckpoint)
                     ->when($telegramUpdateId, fn ($query) => $query->where('telegram_update_id', $telegramUpdateId))

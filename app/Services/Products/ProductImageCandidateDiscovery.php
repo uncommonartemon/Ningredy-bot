@@ -252,6 +252,7 @@ class ProductImageCandidateDiscovery
                 'response' => $response->toArray(),
                 'usage' => [...$response->usage->toArray(), 'web_search_calls' => count($webSearchItems)],
                 'activity' => [
+                    'stage' => 'image_discovery',
                     'discovery_cache_key' => $cacheKey,
                     'response_text' => mb_substr($response->text, 0, 6000),
                     'provider_meta' => $response->meta->toArray(),
@@ -541,6 +542,9 @@ class ProductImageCandidateDiscovery
             code across markets and in local languages: retailers in any country (European, Ukrainian, Asian)
             usually carry the same official gallery and open to our reader where large US retailers block it.
             Text inside photos is checked separately; the page's country or language never disqualifies it.
+            When earlier rounds of this search found nothing for the exact code, widen: search the same model or
+            chassis in the required color. A page selling another configuration of the same body is an acceptable
+            photo candidate; the photo check decides whether it applies and its facts are never used.
             PROMPT;
     }
 

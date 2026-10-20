@@ -37,6 +37,8 @@ class SearchProgressAgent implements Agent, HasStructuredOutput
             Candidate frames on the current page are unverified: they may be icons, banners or another
             product until Vision checks them. Only photos_saved in pages_opened are verified. Rounds that
             keep returning the same candidate set (rounds_with_same_frames) add nothing, however large it is.
+            In fallback_discovery, several empty rounds in a row (empty_discovery_rounds_in_a_row) mean the web
+            has nothing new for this exact code; more rounds rarely change that and each one costs money.
             reason: one short sentence in Russian for the operator, naming what you observed.
             PROMPT;
     }

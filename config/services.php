@@ -125,6 +125,7 @@ return [
         'timeout' => (int) env('AI_SEARCH_PROGRESS_SUPERVISOR_TIMEOUT', 45),
         'enabled' => (bool) env('AI_SEARCH_PROGRESS_SUPERVISOR_ENABLED', true),
         'after_seconds' => (int) env('AI_SEARCH_PROGRESS_SUPERVISOR_AFTER_SECONDS', 480),
+        'after_spent_fraction' => (float) env('AI_SEARCH_PROGRESS_SUPERVISOR_AFTER_SPENT_FRACTION', 0.4),
         'interval_seconds' => (int) env('AI_SEARCH_PROGRESS_SUPERVISOR_INTERVAL_SECONDS', 240),
     ],
 
