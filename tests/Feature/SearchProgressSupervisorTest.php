@@ -106,7 +106,7 @@ class SearchProgressSupervisorTest extends TestCase
     {
         return app(SearchProgressSupervisor::class)->review($draft->telegram_update_id, $draft, [
             'kind' => 'gallery_training', 'url' => self::PAGE, 'host' => 'shop.example', 'round' => 4,
-            'rounds_with_same_frames' => 3, 'rounds_without_progress' => 2, 'photos_found_on_this_page' => 4,
+            'rounds_with_same_frames' => 3, 'rounds_without_progress' => 2, 'candidate_frames_on_this_page' => 4,
         ], $progress);
     }
 

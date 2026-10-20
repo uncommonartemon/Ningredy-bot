@@ -34,6 +34,9 @@ class SearchProgressAgent implements Agent, HasStructuredOutput
             Repeated frames are only one sign of a stuck page. A page that has found no photos after four
             or more training rounds, whose last round collected nothing, is not making progress either:
             other sources in the queue are usually the better use of the remaining time.
+            Candidate frames on the current page are unverified: they may be icons, banners or another
+            product until Vision checks them. Only photos_saved in pages_opened are verified. Rounds that
+            keep returning the same candidate set (rounds_with_same_frames) add nothing, however large it is.
             reason: one short sentence in Russian for the operator, naming what you observed.
             PROMPT;
     }
