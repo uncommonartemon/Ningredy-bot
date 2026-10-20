@@ -79,6 +79,20 @@ class ProductCodeLookupTest extends TestCase
         $this->assertSame('quota', $lookup->upcitemdb('5032037278522', null, 'test')['status']);
     }
 
+    public function test_a_localisation_suffix_is_dropped_when_the_full_code_is_not_a_datasheet(): void
+    {
+        Http::fake(function ($request) {
+            return ($request['ProductCode'] ?? null) === '83F500NKUS'
+                ? Http::response(['data' => $this->datasheet()])
+                : Http::response(['Code' => 404, 'Message' => 'The requested product is not present in the Icecat database'], 404);
+        });
+
+        $results = app(ProductCodeLookup::class)->lookup([], 'Lenovo', ['83F500NKUS#ABA'], null, 'test');
+
+        $this->assertSame(['Lenovo 83F500NKUS#ABA', 'Lenovo 83F500NKUS'], array_column($results, 'code'));
+        $this->assertTrue($results[1]['found']);
+    }
+
     private function datasheet(): array
     {
         return [

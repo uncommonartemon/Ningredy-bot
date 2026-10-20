@@ -825,7 +825,10 @@ class ResearchProduct implements Tool
         $specs = collect($data['specifications'] ?? []);
         $codes = $specs->whereIn('key', ['sku', 'mpn', 'part_number', 'product_code'])->pluck('value')
             ->push($data['model'] ?? null)->filter(fn (mixed $code): bool => is_string($code) && trim($code) !== '')
-            ->map(fn (string $code): string => trim($code))->unique()->values()->all();
+            ->map(fn (string $code): string => trim($code))
+            // The datasheet's code has no localisation suffix (AA3B6UA#ABA → AA3B6UA).
+            ->flatMap(fn (string $code): array => str_contains($code, '#') ? [$code, trim((string) strstr($code, '#', true))] : [$code])
+            ->filter()->unique()->values()->all();
         $gtins = $specs->whereIn('key', ['ean', 'upc', 'gtin', 'gtin13', 'ean13'])->pluck('value')
             ->map(fn (mixed $code): string => preg_replace('/\D/', '', (string) $code))
             ->filter(fn (string $code): bool => ProductCodeLookup::validGtin($code))->merge($queryGtins)->unique()->values()->all();

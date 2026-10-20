@@ -105,7 +105,9 @@ return [
         // 30s was never enough for what this call actually does.
         // ProductSearchTimeBudget::timeoutFor() still caps this at however
         // much shared search time actually remains when that is tighter.
-        'timeout' => (int) env('AI_PRODUCT_SPECIFICATION_RECONCILIATION_TIMEOUT', 90),
+        // 14 days to 2026-10-20: median 16s, p90 68s, p95 79s, 18 successes
+        // past 80s and 8 calls cut off at 90s (#443, #452) - hence 120s.
+        'timeout' => (int) env('AI_PRODUCT_SPECIFICATION_RECONCILIATION_TIMEOUT', 120),
     ],
 
     'gallery_recipe_training' => [
