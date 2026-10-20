@@ -1046,7 +1046,11 @@ class TelegramWebhookController extends Controller
             try {
                 $this->telegram->removeInlineKeyboard($chatId, $messageId);
             } catch (Throwable $exception) {
-                report($exception);
+                // The pressed message may already have been replaced or left unchanged;
+                // the decision itself is saved, so only an unexpected failure is reported.
+                if (! preg_match('/message (to edit not found|is not modified)/i', $exception->getMessage())) {
+                    report($exception);
+                }
             }
         }
         if ($chatId !== '' && ! $approved) {
