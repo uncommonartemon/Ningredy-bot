@@ -85,9 +85,11 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
             after research, not here.
             For photographs return the product's own main page, where its gallery lives, not a specifications,
             tech-specs, support, compare or download sub-page of it; if a manufacturer's spec page is what you
-            found, also return that model's main product page. Search with the exact model code across markets
-            and languages: local retailers in any country (European, Ukrainian, Asian) often show the same
-            official gallery and open to automated readers where large US retailers block them.
+            found, also return that model's main product page. Rely on English and Czech pages first, for facts
+            above all. For photographs, retailers in any other country may add the same official gallery and
+            often open to automated readers where large US retailers block them; search the exact model code
+            there too. A regional variant with another keyboard layout but the same body may supply photos only
+            (compatible_photo_candidate), never facts.
 
             Select condition=new unless the operator explicitly requests another condition.
             Respect an explicit open-box/unsealed request as condition=open_box, used as used, and
