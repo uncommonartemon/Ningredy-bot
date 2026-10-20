@@ -31,6 +31,9 @@ class SearchProgressAgent implements Agent, HasStructuredOutput
             optional hints: their failure is not a reason to stop. Do not end a search that is adding new
             photos. A search with zero saved photos should usually continue unless every remaining
             direction has already failed the same way.
+            Repeated frames are only one sign of a stuck page. A page that has found no photos after four
+            or more training rounds, whose last round collected nothing, is not making progress either:
+            other sources in the queue are usually the better use of the remaining time.
             reason: one short sentence in Russian for the operator, naming what you observed.
             PROMPT;
     }

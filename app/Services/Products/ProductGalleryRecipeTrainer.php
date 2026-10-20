@@ -809,6 +809,9 @@ class ProductGalleryRecipeTrainer
                             'kind' => 'gallery_training', 'url' => $url, 'host' => $host, 'round' => $attempt,
                             'rounds_with_same_frames' => $sameFrameRounds, 'rounds_without_progress' => $stagnantRounds,
                             'photos_found_on_this_page' => count($bestPartialImages ?? []),
+                            // What the last round actually produced (live #453: six rounds, no photos).
+                            'frames_collected_last_round' => count($candidateImages ?? []),
+                            'last_round_failure' => $candidateResult['failure_kind'] ?? null,
                         ]);
                     if ($watch['decision'] !== 'continue') {
                         $agentAbandoned = true;
