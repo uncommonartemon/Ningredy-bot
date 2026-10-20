@@ -181,7 +181,8 @@ class ResearchProduct implements Tool
         ]);
 
         try {
-            $activity = [];
+            // The stream trace is written over the whole column; keep the stage label in it.
+            $activity = ['stage' => 'research'];
             $lastActivityWrite = 0.0;
             $cancelled = false;
             $reportedActivity = [];
@@ -280,7 +281,7 @@ class ResearchProduct implements Tool
                     function () use ($progress, &$webSearchItems, &$activity): void {
                         $progress->info('Ответ поиска пришёл неполным или не прошёл проверку; агент восстанавливает его по сохранённым данным.');
                         $webSearchItems = [];
-                        $activity = [];
+                        $activity = ['stage' => 'research'];
                     },
                 );
                 $response = $research['response'];
