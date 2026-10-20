@@ -912,6 +912,7 @@ class ProductGalleryRecipeTrainer
                     'model' => $model,
                     'status' => 'running',
                     'prompt' => $prompt ?: '{}',
+                    'activity' => ['stage' => 'gallery_training'],
                     'started_at' => now(),
                 ]);
                 $abandonSignal = new GalleryTrainingAbandonSignal;
@@ -2177,6 +2178,7 @@ class ProductGalleryRecipeTrainer
             'model' => $model,
             'status' => 'running',
             'prompt' => $prompt,
+            'activity' => ['stage' => 'gallery_preflight'],
             'started_at' => now(),
         ]) : null;
 

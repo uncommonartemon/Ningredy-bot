@@ -210,10 +210,10 @@ class ProductSpecificationReconciler
             'status' => 'running',
             'prompt' => $prompt,
             'started_at' => now(),
-            ...($repair === null ? [] : ['activity' => ['card_repair' => [
+            'activity' => $repair === null ? ['stage' => 'card_assembly'] : ['stage' => 'card_repair', 'card_repair' => [
                 'version' => $repair['version'], 'base_hash' => $repair['base_hash'],
                 'allowed_paths' => array_keys($repair['paths']),
-            ]]]),
+            ]],
         ]) : null;
 
         $sourceHost = trim((string) parse_url($url, PHP_URL_HOST));

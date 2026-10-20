@@ -6,6 +6,7 @@ use App\Models\AiRun;
 use App\Models\ProductDraft;
 use App\Models\ProductSourceAttempt;
 use App\Models\TelegramUpdate;
+use App\Services\Ai\AiUsageReporter;
 use App\Services\Ai\ProductSearchCostBudget;
 use Illuminate\Console\Command;
 use Illuminate\Support\Collection;
@@ -60,6 +61,8 @@ class SearchStats extends Command
         foreach ($this->totals($rows) as $label => $value) {
             $this->line(str_pad($label, 26).' '.(is_array($value) ? json_encode($value, JSON_UNESCAPED_UNICODE) : $value));
         }
+        $this->newLine();
+        $this->table(['Stage', 'Runs', 'Failed', 'Minutes', '$'], $this->stages($rows->pluck('update_id')->all()));
 
         return self::SUCCESS;
     }
@@ -119,6 +122,25 @@ class SearchStats extends Command
         return $draft->status === 'approved' && $draft->approved_product_id
             ? (int) $draft->product?->media()->count()
             : $draft->media()->count();
+    }
+
+    /**
+     * Where the time and money of these requests went, by the stage label each AI run carries.
+     *
+     * @param  list<int>  $updateIds
+     * @return list<array{0: string, 1: int, 2: int, 3: float, 4: ?float}>
+     */
+    private function stages(array $updateIds): array
+    {
+        $reporter = app(AiUsageReporter::class);
+
+        return AiRun::query()->whereIn('telegram_update_id', $updateIds)
+            ->get(['provider', 'model', 'usage', 'status', 'activity', 'started_at', 'completed_at'])
+            ->groupBy(fn (AiRun $run): string => (string) (data_get($run->activity, 'stage') ?: 'unlabelled'))
+            ->map(fn (Collection $runs, string $stage): array => [$stage, $runs->count(), $runs->where('status', 'failed')->count(),
+                round($runs->sum(fn (AiRun $run): int => $run->started_at && $run->completed_at ? (int) $run->started_at->diffInSeconds($run->completed_at) : 0) / 60, 1),
+                ($cost = $reporter->forRuns($runs)['estimated_cost_usd']) !== null ? round($cost, 3) : null])
+            ->sortByDesc(fn (array $row): float => (float) $row[4])->values()->all();
     }
 
     /** @param Collection<int, array<string, mixed>> $rows */

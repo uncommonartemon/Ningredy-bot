@@ -92,6 +92,7 @@ class SearchProductTextEvidence implements Tool
         $run = AiRun::create([
             'telegram_update_id' => $updateId, 'provider' => $provider, 'model' => $model,
             'status' => 'running', 'prompt' => $prompt, 'started_at' => now(),
+            'activity' => ['stage' => 'text_evidence'],
         ]);
         $searchItems = [];
         try {

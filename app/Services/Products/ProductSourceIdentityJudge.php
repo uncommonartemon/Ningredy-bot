@@ -131,6 +131,7 @@ class ProductSourceIdentityJudge
             'model' => $model,
             'status' => 'running',
             'prompt' => $prompt,
+            'activity' => ['stage' => 'source_identity'],
             'started_at' => now(),
         ]) : null;
 

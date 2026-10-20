@@ -126,7 +126,8 @@ class RecoverableProductResearch
                 $onRepair();
                 $this->cancellation->throwIfCancelled($updateId);
                 $run = AiRun::create(['telegram_update_id' => $updateId, 'provider' => $provider, 'model' => $model,
-                    'status' => 'running', 'prompt' => $prompt."\n".$feedback, 'started_at' => now()]);
+                    'status' => 'running', 'prompt' => $prompt."\n".$feedback, 'started_at' => now(),
+                    'activity' => ['stage' => 'research_repair']]);
             }
         }
     }

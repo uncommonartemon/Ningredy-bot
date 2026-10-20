@@ -176,6 +176,7 @@ class ResearchProduct implements Tool
             'model' => $model,
             'status' => 'running',
             'prompt' => $researchPrompt,
+            'activity' => ['stage' => 'research'],
             'started_at' => now(),
         ]);
 

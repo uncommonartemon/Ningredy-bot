@@ -220,7 +220,7 @@ class ProductImageCandidateDiscovery
             'model' => $model,
             'status' => 'running',
             'prompt' => $prompt,
-            'activity' => ['discovery_cache_key' => $cacheKey],
+            'activity' => ['stage' => 'image_discovery', 'discovery_cache_key' => $cacheKey],
             'started_at' => now(),
         ]);
         $webSearchItems = [];

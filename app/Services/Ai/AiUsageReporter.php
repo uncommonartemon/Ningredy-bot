@@ -49,6 +49,12 @@ class AiUsageReporter
         ];
     }
 
+    /** Usage and estimated cost of any set of runs, e.g. one search stage. @param Collection<int, AiRun> $runs @return array<string, mixed> */
+    public function forRuns(Collection $runs): array
+    {
+        return $this->summarizeRuns($runs->filter(fn (AiRun $run): bool => $run->usage !== null)->values());
+    }
+
     /** @return array<string, mixed> */
     private function period($from): array
     {

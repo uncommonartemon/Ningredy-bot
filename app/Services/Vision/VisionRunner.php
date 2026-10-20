@@ -37,7 +37,7 @@ class VisionRunner
             'telegram_update_id' => $context->telegramUpdateId,
             'provider' => $provider, 'model' => $model,
             'status' => 'running', 'prompt' => $prompt, 'started_at' => now(),
-            'activity' => ['vision_operation' => $operation, 'image_count' => count($attachments),
+            'activity' => ['stage' => 'vision', 'vision_operation' => $operation, 'image_count' => count($attachments),
                 'search_budget' => $context->useSearchBudget],
         ]);
 

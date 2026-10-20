@@ -135,6 +135,7 @@ class ProcessTelegramMessage implements ShouldQueue
             'model' => $model,
             'status' => 'running',
             'prompt' => $update->text,
+            'activity' => ['stage' => 'assistant'],
             'started_at' => now(),
         ]);
         $update->update(['status' => 'processing', 'error' => null]);
