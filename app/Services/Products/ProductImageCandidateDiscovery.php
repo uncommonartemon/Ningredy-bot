@@ -477,8 +477,11 @@ class ProductImageCandidateDiscovery
         ])->groupBy('site_name')
             ->map(fn ($rows): array => ['hosts' => $rows->pluck('host')->unique()->values()->all(), 'failures' => $rows->count()])
             ->filter(fn (array $network, $name): bool => $name !== '' && count($network['hosts']) > 1)->all();
+        $refusingHosts = SearchJournal::refusingHosts();
         $searchJournal = json_encode(['previous_search_results' => $searchHistory, 'previous_source_failures' => $sourceHistory,
             'pages_opened_this_search' => $pagesOpened,
+            ...($refusingHosts === [] ? [] : ['sites_refusing_us_recently' => $refusingHosts,
+                'refusal_note' => 'These sites refused every page fetch in recent searches and never gave a usable image. Prefer other sites unless you have a concrete reason to expect a different result.']),
             ...($networkFailures === [] ? [] : ['failed_site_networks' => $networkFailures,
                 'network_note' => 'Several regional domains of the same site_name already failed. A sibling domain of that network usually fails the same way; prefer an independent site unless you have evidence otherwise.'])],
             JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);

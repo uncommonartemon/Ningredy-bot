@@ -38,6 +38,31 @@ final class SearchJournal
             ->values()->slice(-$limit)->values()->all();
     }
 
+    /**
+     * Sites that refused every page fetch in recent searches and never gave a
+     * usable image (live #456: twelve of twenty discovered shops answered 403).
+     * A hint for agents choosing where to look, not a block list.
+     *
+     * @return list<array{host: string, refusals: int}>
+     */
+    public static function refusingHosts(int $days = 14, int $limit = 30): array
+    {
+        $since = now()->subDays($days);
+        $refusals = ['http_401', 'http_403', 'http_429', 'http_444', 'http_error', 'access_gate', 'unconfirmed_access_gate', 'blocked'];
+        $worked = ProductSourceAttempt::query()->where('created_at', '>=', $since)
+            ->where(fn ($query) => $query->where('decision', 'candidate_ranked')
+                ->orWhere(fn ($query) => $query->where('action', 'extract_page_images')->where('status', 'completed')))
+            ->distinct()->pluck('domain')->filter()->flip();
+
+        return ProductSourceAttempt::query()->where('created_at', '>=', $since)
+            ->where('action', 'check_source_access')->whereIn('decision', $refusals)
+            ->get(['domain'])->countBy('domain')
+            ->filter(fn (int $count, $host): bool => $count >= 2 && filled($host) && ! isset($worked[$host]))
+            ->sortDesc()->take($limit)
+            ->map(fn (int $count, string $host): array => ['host' => $host, 'refusals' => $count])
+            ->values()->all();
+    }
+
     /** Structured database lookups this search made, with their outcomes. @return list<array<string, mixed>> */
     public static function codeLookups(int $runId): array
     {
