@@ -441,7 +441,7 @@ class ResearchProduct implements Tool
                         $existingProduct,
                         '✅ Такой товар уже есть в каталоге',
                         condition: $data['condition'] ?? 'new',
-                        variantId: $catalogIdentity->variant($existingProduct, $data['specifications'] ?? [], $data['condition'] ?? 'new', activeOnly: true)?->id,
+                        variantId: $catalogIdentity->variant($existingProduct, $data['specifications'] ?? [], $data['condition'] ?? 'new', activeOnly: true, model: $data['model'] ?? null)?->id,
                         telegramUserId: $this->update->telegram_user_id,
                     );
                 } catch (Throwable $exception) {

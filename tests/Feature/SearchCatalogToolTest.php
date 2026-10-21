@@ -135,6 +135,53 @@ class SearchCatalogToolTest extends TestCase
         $this->assertSame([], $result['products']);
     }
 
+    public function test_a_model_code_stays_a_required_term_beside_a_brand_filter(): void
+    {
+        // The identity check lost its backslashes on 2026-08-10: "\d" became a
+        // literal "d", so codes without that letter were silently dropped.
+        $this->product('ASUS Zenbook 14 OLED', 'laptop', [], brand: 'ASUS', model: 'UX3405MA-PH77');
+        $wanted = $this->product('ASUS Zenbook 14 OLED', 'laptop', [], brand: 'ASUS', model: 'UX3405MA-PH99T');
+
+        $result = $this->search(['query' => 'ASUS Zenbook 14 UX3405MA-PH99T', 'brand' => 'ASUS', 'limit' => 10]);
+
+        $this->assertSame([$wanted->id], array_column($result['products'], 'id'));
+    }
+
+    public function test_capacities_in_the_request_are_filters_not_required_words(): void
+    {
+        $product = $this->product('ASUS Zenbook 14 OLED', 'laptop', ['ram' => ['32 GB', 32]], brand: 'ASUS', model: 'UX3405MA');
+
+        $result = $this->search(['query' => 'ASUS Zenbook 14 32GB 1TB', 'brand' => 'ASUS']);
+
+        $this->assertSame([$product->id], array_column($result['products'], 'id'));
+    }
+
+    public function test_an_exact_code_lists_its_product_first_even_when_the_words_miss_it(): void
+    {
+        // Live #567: the same card was researched again under its other code.
+        $gpu = $this->product('ASUS Dual GeForce RTX 4060 OC Edition 8GB GDDR6', 'component', [], brand: 'ASUS', model: 'DUAL-RTX4060-O8G');
+        $gpu->variants()->first()->update(['mpn' => '90YV0JC0-M0NA00']);
+        $mac = $this->product('Apple MacBook Pro 14-inch M3 Pro', 'laptop', [], brand: 'Apple', model: 'MacBook Pro 14-inch (M3 Pro, 2023)');
+        $mac->variants()->first()->update(['mpn' => 'MRX33CZ/A', 'gtin' => '195949076534']);
+        $this->product('Other laptop', 'laptop', []);
+
+        $byPart = $this->search(['query' => 'найди 90YV0JC0-M0NA00']);
+        $byModel = $this->search(['query' => 'ASUS Dual RTX 4060 (DUAL-RTX4060-O8G) белая', 'brand' => 'ASUS', 'color' => 'white']);
+        $byPaddedEan = $this->search(['query' => '0195949076534']);
+        $byFamily = $this->search(['query' => 'MRX33']);
+
+        $this->assertSame([$gpu->id, true, '90yv0jc0-m0na00'], [$byPart['products'][0]['id'], $byPart['products'][0]['exact_code_match'], $byPart['products'][0]['matched_code']]);
+        $this->assertSame($gpu->id, $byModel['products'][0]['id']);
+        $this->assertTrue($byModel['products'][0]['exact_code_match']);
+        $this->assertSame([$mac->id, true], [$byPaddedEan['products'][0]['id'], $byPaddedEan['products'][0]['exact_code_match']]);
+        $this->assertArrayNotHasKey('exact_code_match', $byFamily['products'][0] ?? []);
+    }
+
+    private function search(array $input): array
+    {
+        return json_decode((string) (new SearchCatalog)->handle(new ToolRequest($input)), true, flags: JSON_THROW_ON_ERROR);
+    }
+
     /** @param array<string, array{string, int|float|null}> $attributes */
     private function product(
         string $title,

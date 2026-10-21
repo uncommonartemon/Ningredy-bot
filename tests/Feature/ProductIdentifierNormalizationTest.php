@@ -65,6 +65,24 @@ class ProductIdentifierNormalizationTest extends TestCase
         $this->assertSame('FAMILY-1TB', $second->variants()->sole()->mpn);
     }
 
+    public function test_a_card_naming_the_same_item_by_another_code_joins_it_and_keeps_both_codes(): void
+    {
+        // Live #567: the second card for the same ASUS GPU carried only its
+        // model code and became a second product next to the first.
+        $first = app(ProductDraftWorkflow::class)->approve($this->draftWithIdentifiers(
+            [['key' => 'mpn', 'name' => 'MPN', 'value' => '90YV0JC0-M0NA00']],
+            ['model' => 'DUAL-RTX4060-O8G', 'title' => 'ASUS Dual GeForce RTX 4060 OC Edition 8GB GDDR6'],
+        ));
+        $second = app(ProductDraftWorkflow::class)->approve($this->draftWithIdentifiers(
+            [['key' => 'sku', 'name' => 'SKU', 'value' => 'DUAL-RTX4060-O8G']],
+            ['model' => 'DUAL-RTX4060-O8G', 'title' => 'ASUS Dual GeForce RTX 4060 OC Edition 8GB'],
+        ));
+
+        $this->assertSame($first->id, $second->id);
+        $variant = $first->variants()->sole();
+        $this->assertSame(['DUAL-RTX4060-O8G', '90YV0JC0-M0NA00'], [$variant->sku, $variant->mpn]);
+    }
+
     public function test_an_identifier_arriving_with_its_explanation_is_stored_clean(): void
     {
         // Seen live on a published MacBook Air: research wrote the part number

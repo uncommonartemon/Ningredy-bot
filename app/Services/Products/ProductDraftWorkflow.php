@@ -290,11 +290,14 @@ class ProductDraftWorkflow
         ], JSON_UNESCAPED_UNICODE));
         $targetVariantId = $draft->isManualUpload() ? data_get($draft->manualIntake(), 'target_variant_id') : null;
         $variant = $targetVariantId ? $product->variants()->findOrFail($targetVariantId) : (($identifiers->isNotEmpty()
-            ? app(ProductCatalogIdentity::class)->variant($product, $draft->specifications ?? [], $draft->condition ?? 'new')
+            ? app(ProductCatalogIdentity::class)->variant($product, $draft->specifications ?? [], $draft->condition ?? 'new', model: $draft->model)
             : null) ?? ProductVariant::query()->firstOrNew([
                 'product_id' => $product->id,
                 'fingerprint' => $fingerprint,
             ]));
+        // A card merged into a known variant may name it by another code; the
+        // code it does not mention stays. An operator's edit replaces them all.
+        $keepCodes = $variant->exists && ! $targetVariantId;
 
         $commercial = $draft->isManualUpload() ? ($draft->manualIntake()['commercial'] ?? []) : [];
         $quantityChanged = isset($commercial['quantity'])
@@ -302,9 +305,9 @@ class ProductDraftWorkflow
 
         $variant->fill([
             'name' => $targetVariantId ? $variant->name : ($draft->color ?: 'Базовая конфигурация'),
-            'sku' => $identifiers->get('sku'),
-            'mpn' => $identifiers->get('mpn'),
-            'gtin' => $identifiers->get('gtin') ?: $identifiers->get('ean') ?: $identifiers->get('upc'),
+            'sku' => $identifiers->get('sku') ?? ($keepCodes ? $variant->sku : null),
+            'mpn' => $identifiers->get('mpn') ?? ($keepCodes ? $variant->mpn : null),
+            'gtin' => ($identifiers->get('gtin') ?: $identifiers->get('ean') ?: $identifiers->get('upc')) ?: ($keepCodes ? $variant->gtin : null),
             'color' => $draft->color,
             'condition' => $draft->condition ?? 'new',
             'translations' => CatalogLocales::textTranslations($draft->translations),

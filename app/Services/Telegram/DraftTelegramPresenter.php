@@ -4,6 +4,7 @@ namespace App\Services\Telegram;
 
 use App\Jobs\ContinueDraftGallerySearch;
 use App\Models\Category;
+use App\Models\Product;
 use App\Models\ProductDraft;
 use App\Models\ProductSourceAttempt;
 use App\Models\TelegramUpdate;
@@ -12,6 +13,7 @@ use App\Services\Ai\ProductSearchCancellation;
 use App\Services\Ai\ProductSearchCostBudget;
 use App\Services\Catalog\AttributePresentation;
 use App\Services\Products\PhotoSourceNotice;
+use App\Services\Products\ProductCatalogIdentity;
 use App\Services\Products\ProductCondition;
 use App\Services\Products\ProductSourcePriority;
 use Illuminate\Support\Facades\Cache;
@@ -171,6 +173,8 @@ class DraftTelegramPresenter
             ? "\n\n<blockquote expandable>".$description."</blockquote>\n" : '';
         $photoNotice = $this->photoNotice($draft);
         $details .= $photoNotice !== '' ? "\nℹ️ ".htmlspecialchars($photoNotice, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8')."\n" : '';
+        $catalogNotice = $this->catalogNotice($draft);
+        $details .= $catalogNotice !== '' ? "\n⚠️ ".htmlspecialchars($catalogNotice, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8')."\n" : '';
 
         return $this->messageLifecycle->replaceControlMessage(
             $telegram,
@@ -694,6 +698,39 @@ class DraftTelegramPresenter
             $text = mb_substr($text, 3500);
         }
         $this->sendControls($telegram, $chatId, $draft);
+    }
+
+    /**
+     * Said beside the add button: the operator approved two MacBooks and two
+     * identical GPUs in one evening because nothing on the card mentioned the
+     * product already published (live #553, #567).
+     */
+    private function catalogNotice(ProductDraft $draft): string
+    {
+        if (blank($draft->title)) {
+            return '';
+        }
+        $card = $draft->only(['brand', 'model', 'title', 'specifications']);
+        $target = $draft->isManualUpload() ? (int) data_get($draft->manualIntake(), 'target_product_id') : 0;
+        $identity = app(ProductCatalogIdentity::class);
+        $exact = $identity->find($card);
+        if ($exact !== null && $exact->id !== $target) {
+            return $draft->isManualUpload()
+                ? "Этот товар уже есть в каталоге: #{$exact->id}. Измените его через /edit {$exact->id}."
+                : "Этот товар уже есть в каталоге: #{$exact->id}. «Добавить в каталог» обновит его, второй товар не появится.";
+        }
+        $similar = $identity->sameModel($card, $target ?: null);
+        if ($similar->isEmpty()) {
+            return '';
+        }
+        $list = $similar->map(function (Product $product): string {
+            $variant = $product->variants->sortByDesc('is_default')->first();
+            $code = collect([$variant?->mpn, $variant?->sku, $variant?->gtin])->first(fn ($value): bool => filled($value));
+
+            return '#'.$product->id.($code !== null ? " ({$code})" : '');
+        })->implode(', ');
+
+        return "Эта модель уже есть в каталоге: {$list}. Проверьте, не дубль ли это: у черновика другой артикул или комплектация.";
     }
 
     private function photoNotice(ProductDraft $draft, bool $compact = true): string

@@ -3,9 +3,11 @@
 namespace App\Ai\Tools;
 
 use App\Models\Product;
+use App\Models\ProductVariant;
 use App\Services\Products\ProductCondition;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Laravel\Ai\Contracts\Tool;
 use Laravel\Ai\Tools\Request;
@@ -15,7 +17,55 @@ class SearchCatalog implements Tool
 {
     public function description(): Stringable|string
     {
-        return 'Search the complete local electronics catalog, including product attributes and variants. Use this before web research. Pass structured brand, type, CPU, GPU, RAM, color or price filters when the request contains them. Results explicitly show whether a product is published and active.';
+        return 'Search the complete local electronics catalog, including product attributes and variants. Use this before web research. Pass structured brand, type, CPU, GPU, RAM, color or price filters when the request contains them. Results explicitly show whether a product is published and active. A product whose model, SKU, MPN or EAN exactly equals a code in the query is listed first with exact_code_match=true.';
+    }
+
+    /**
+     * Codes from the query that exactly equal a variant's SKU/MPN/GTIN or a
+     * product's model. Equality only: a family code that merely starts a SKU
+     * is not the same item.
+     *
+     * @return array<int, array{code: string, variant_id: ?int}>
+     */
+    private function exactCodeMatches(string $query, bool $activeOnly): array
+    {
+        $codes = collect(preg_split('/[\s,;]+/u', $query) ?: [])
+            ->map(fn (string $token): string => Str::lower(trim($token, " \t\n\r\0\x0B()[]{}\"'«».:!?")))
+            ->filter(fn (string $token): bool => mb_strlen($token) >= 5 && preg_match('/\d/', $token) === 1)
+            ->unique()->values()->all();
+        if ($codes === []) {
+            return [];
+        }
+        // GS1 pads GTIN-8/12/13 to 14 digits with leading zeroes; the stored
+        // value may be written in any of those lengths.
+        $gtins = collect($codes)->filter(fn (string $code): bool => preg_match('/^\d{8,14}$/', $code) === 1)
+            ->flatMap(fn (string $code): array => collect([8, 12, 13, 14])
+                ->filter(fn (int $length): bool => strlen(ltrim($code, '0')) <= $length)
+                ->map(fn (int $length): string => str_pad(ltrim($code, '0'), $length, '0', STR_PAD_LEFT))->all())
+            ->unique()->values()->all();
+        $matches = [];
+        ProductVariant::query()
+            ->when($activeOnly, fn ($variant) => $variant->where('is_active', true)->whereHas('product', fn ($product) => $product->visibleInCatalog()))
+            ->where(fn ($variant) => $variant->whereIn(DB::raw('lower(sku)'), $codes)->orWhereIn(DB::raw('lower(mpn)'), $codes)
+                ->when($gtins !== [], fn ($gtin) => $gtin->orWhereIn('gtin', $gtins)))
+            ->orderBy('id')
+            ->get(['id', 'product_id', 'sku', 'mpn', 'gtin'])
+            ->each(function (ProductVariant $variant) use (&$matches, $codes, $gtins): void {
+                $code = collect([$variant->sku, $variant->mpn])->map(fn ($value) => Str::lower((string) $value))
+                    ->first(fn (string $value): bool => in_array($value, $codes, true))
+                    ?? (in_array((string) $variant->gtin, $gtins, true) ? (string) $variant->gtin : null);
+                $matches[$variant->product_id] ??= ['code' => (string) $code, 'variant_id' => $variant->id];
+            });
+        Product::query()
+            ->when($activeOnly, fn ($product) => $product->visibleInCatalog())
+            ->whereIn(DB::raw('lower(model)'), $codes)
+            ->orderBy('id')
+            ->get(['id', 'model'])
+            ->each(function (Product $product) use (&$matches): void {
+                $matches[$product->id] ??= ['code' => (string) $product->model, 'variant_id' => null];
+            });
+
+        return $matches;
     }
 
     public function handle(Request $request): Stringable|string
@@ -108,11 +158,27 @@ class SearchCatalog implements Tool
             })
             ->latest('id')
             ->limit($limit)
-            ->get()
-            ->map(function (Product $product): array {
-                $variant = $product->variants->first();
+            ->get();
+        // A code in the request names one sellable item. Its product comes first
+        // even when the free-text terms or filters would have missed it, so the
+        // assistant can see the catalog already has it before paying for research.
+        $exact = $this->exactCodeMatches($query, $activeOnly);
+        if ($exact !== []) {
+            $products = Product::query()
+                ->with(['brand:id,name', 'category:id,name,slug', 'variants' => fn ($q) => $q->orderByDesc('is_default')->orderBy('id'),
+                    'variants.attributes.definition:id,key,label'])
+                ->whereKey(array_diff(array_keys($exact), $products->modelKeys()))->get()
+                ->merge($products)
+                ->sortByDesc(fn (Product $product): bool => isset($exact[$product->id]))
+                ->take($limit)->values();
+        }
+        $products = $products
+            ->map(function (Product $product) use ($exact): array {
+                $match = $exact[$product->id] ?? null;
+                $variant = ($match ? $product->variants->firstWhere('id', $match['variant_id']) : null) ?? $product->variants->first();
 
                 return [
+                    ...($match ? ['exact_code_match' => true, 'matched_code' => $match['code']] : []),
                     'id' => $product->id,
                     'title' => $product->title,
                     'brand' => $product->brand?->name,
@@ -206,7 +272,7 @@ class SearchCatalog implements Tool
     {
         return collect($values)
             ->flatMap(fn (string $value): array => preg_split(
-                '/[^pLpN]+/u',
+                '/[^\pL\pN]+/u',
                 Str::lower($value),
             ) ?: [])
             ->filter(fn (string $term): bool => mb_strlen($term) >= 2)
@@ -219,13 +285,15 @@ class SearchCatalog implements Tool
     {
         $term = Str::lower(trim($term));
 
-        if (preg_match('/^d+(?:st|nd|rd|th)$/', $term) === 1) {
+        // "32gb", "1tb", "144hz" are amounts, not model codes; a required match
+        // on them hides the product, whose title spells them "32 GB".
+        if (preg_match('/^\d+(?:st|nd|rd|th)$/', $term) === 1 || preg_match('/^\d+(?:[.,]\d+)?[a-z]{1,3}$/', $term) === 1) {
             return false;
         }
 
         if (mb_strlen($term) >= 4
             && preg_match('/[a-z]/', $term) === 1
-            && preg_match('/d/', $term) === 1) {
+            && preg_match('/\d/', $term) === 1) {
             return true;
         }
 

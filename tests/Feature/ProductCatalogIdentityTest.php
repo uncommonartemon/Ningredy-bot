@@ -69,6 +69,31 @@ class ProductCatalogIdentityTest extends TestCase
         $this->assertNull($identity->find($this->card(['mpn' => '0EXACT-A', 'gtin' => '0198156389541']), 'new', true));
     }
 
+    public function test_the_same_item_named_by_another_kind_of_code_is_found(): void
+    {
+        // Live #567: one ASUS card stored as MPN 90YV0JC0-M0NA00, researched
+        // again as SKU DUAL-RTX4060-O8G, and published twice.
+        $product = $this->product(['mpn' => '90YV0JC0-M0NA00']);
+        $product->update(['model' => 'DUAL-RTX4060-O8G']);
+        $identity = app(ProductCatalogIdentity::class);
+
+        $this->assertSame($product->id, $identity->find($this->card(['sku' => 'DUAL-RTX4060-O8G'], 'DUAL-RTX4060-O8G'), 'new', true)?->id);
+        $this->assertSame($product->id, $identity->find($this->card(['sku' => '90yv0jc0-m0na00'], 'Dual RTX 4060'), 'new', true)?->id);
+        $product->variants()->update(['mpn' => null, 'sku' => 'DUAL-RTX4060-O8G']);
+        $this->assertSame($product->id, $identity->find($this->card(['mpn' => '90YV0JC0-M0NA00'], 'DUAL-RTX4060-O8G'), 'new', true)?->id);
+    }
+
+    public function test_an_equal_family_model_without_an_equal_code_is_not_the_same_item(): void
+    {
+        $product = $this->product(['mpn' => '83DF00ABCD']);
+        $product->update(['model' => '16IRX9']);
+        $identity = app(ProductCatalogIdentity::class);
+
+        $this->assertNull($identity->find($this->card(['sku' => '83DF0046CK'], '16IRX9'), 'new', true));
+        // A code in another kind still has to agree with a code of the same kind.
+        $this->assertNull($identity->find($this->card(['mpn' => '83DF0046CK', 'sku' => '83DF00ABCD'], '16IRX9'), 'new', true));
+    }
+
     public function test_code_prefix_and_missing_identifiers_are_not_confirmations(): void
     {
         $product = $this->product(['mpn' => 'MODEL-123X']);

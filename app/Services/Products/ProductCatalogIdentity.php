@@ -4,6 +4,7 @@ namespace App\Services\Products;
 
 use App\Models\Product;
 use App\Models\ProductVariant;
+use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Support\Str;
 
 /** Catalog deduplication must not turn a shared family name into an exact variant match. */
@@ -26,7 +27,7 @@ final class ProductCatalogIdentity
             })->orderBy('id')->get();
 
         foreach ($candidates as $product) {
-            if ($this->variant($product, $card['specifications'] ?? [], $condition, $activeOnly) !== null) {
+            if ($this->variant($product, $card['specifications'] ?? [], $condition, $activeOnly, $card['model'] ?? null) !== null) {
                 return $product;
             }
             // Preserve the legacy, identifier-free path, but never let it
@@ -40,12 +41,30 @@ final class ProductCatalogIdentity
         return null;
     }
 
-    public function variant(Product $product, array $specifications, ?string $condition = null, bool $activeOnly = false): ?ProductVariant
+    /**
+     * Catalog products sharing the card's brand and model without being the
+     * same sellable item: another regional SKU or configuration of one family
+     * (live #553: MacBook Pro MRX33LL/A next to the stored MRX33CZ/A). Shown to
+     * the operator before approval; whether it is a duplicate is their call.
+     *
+     * @return Collection<int, Product>
+     */
+    public function sameModel(array $card, ?int $exceptProductId = null): Collection
+    {
+        $base = ProductIdentityKey::for($card['brand'] ?? null, $card['model'] ?? null, (string) ($card['title'] ?? ''));
+
+        return Product::query()->with('variants')
+            ->where(fn ($query) => $query->where('canonical_key', $base)->orWhere('canonical_key', 'like', $base.'-id-%'))
+            ->when($exceptProductId, fn ($query) => $query->whereKeyNot($exceptProductId))
+            ->orderBy('id')->limit(3)->get();
+    }
+
+    public function variant(Product $product, array $specifications, ?string $condition = null, bool $activeOnly = false, ?string $model = null): ?ProductVariant
     {
         $wanted = self::identifiers($specifications);
         $product->loadMissing('variants');
 
-        return $product->variants->sortByDesc('is_default')->first(function (ProductVariant $variant) use ($wanted, $condition, $activeOnly): bool {
+        return $product->variants->sortByDesc('is_default')->first(function (ProductVariant $variant) use ($wanted, $condition, $activeOnly, $product, $model): bool {
             if (($condition !== null && $variant->condition !== $condition) || ($activeOnly && ! $variant->is_active)) {
                 return false;
             }
@@ -63,8 +82,45 @@ final class ProductCatalogIdentity
                 $matched = true;
             }
 
-            return $matched;
+            return $matched || $this->sharesCodeAcrossKinds($wanted, $variant, $product->model, $model);
         });
+    }
+
+    /**
+     * One card can name a product by its part number and another by its model
+     * code: live #567 stored the same ASUS card once as MPN 90YV0JC0-M0NA00 and
+     * again as SKU DUAL-RTX4060-O8G. With no kind in common there is nothing to
+     * contradict, so an equal code under another label is the same item. A
+     * model is compared only when it is a single code; a family name such as
+     * "MacBook Pro 14-inch (M3 Pro, 2023)" covers many configurations.
+     *
+     * @param  array<string, string>  $wanted
+     */
+    private function sharesCodeAcrossKinds(array $wanted, ProductVariant $variant, ?string $storedModel, ?string $cardModel): bool
+    {
+        $codes = fn (array $values): array => collect($values)
+            ->filter(fn ($value): bool => is_string($value) && trim($value) !== '')
+            ->map(fn (string $value): string => self::comparableCode(self::cleanIdentifier($value)))
+            ->filter(fn (string $value): bool => $value !== '' && preg_match('/\s/u', $value) !== 1 && preg_match('/\d/', $value) === 1)
+            ->unique()->values()->all();
+        $card = $codes([...array_values($wanted), $cardModel]);
+        $stored = $codes([$variant->sku, $variant->mpn, $variant->gtin, $storedModel]);
+        $cardIdentifiers = $codes(array_values($wanted));
+        $storedIdentifiers = $codes([$variant->sku, $variant->mpn, $variant->gtin]);
+
+        // At least one side of each equal pair must be a real identifier: two
+        // equal model codes alone are the shared-family case this class refuses.
+        return array_intersect($cardIdentifiers, $stored) !== [] || array_intersect($card, $storedIdentifiers) !== [];
+    }
+
+    private static function comparableCode(string $value): string
+    {
+        $value = mb_strtolower(trim($value));
+        $digits = preg_replace('/\s+/u', '', $value) ?? $value;
+
+        return ctype_digit($digits) && in_array(strlen($digits), [8, 12, 13, 14], true)
+            ? str_pad($digits, 14, '0', STR_PAD_LEFT)
+            : $value;
     }
 
     public function keyForNewProduct(array $card): string
