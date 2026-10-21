@@ -165,6 +165,7 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
               SearchCatalog, либо specifications/research_notes/sources из результата ResearchProduct) и ответь
               на него в message с response_type answer. При черновике message с response_type research_result
               не показывается (карточка говорит сама за себя), а answer и catalog_results показываются над ней.
+              message всё равно обязателен и никогда не пустой: хотя бы одна короткая фраза о результате.
             - Если пользователь просто говорит «найди», сначала ищи в локальном каталоге.
             - Если локального подходящего товара нет — сразу, без вопроса и подтверждения, вызови
               ResearchProduct. Никогда не спрашивай "хотите, чтобы я поискал в интернете?" или подобное —

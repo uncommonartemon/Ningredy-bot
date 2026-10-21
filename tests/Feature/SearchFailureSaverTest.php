@@ -60,6 +60,18 @@ class SearchFailureSaverTest extends TestCase
             'phase' => 'delivery_guard', 'action' => 'deliver_saved_after_failure']);
     }
 
+    public function test_a_finished_draft_is_shown_instead_of_being_searched_again(): void
+    {
+        // Live #588: the card was assembled with ten photos when the reply failed.
+        [$update, $draft] = $this->failedSearch();
+        $draft->update(['images_staged_at' => now(), 'specifications_reconciled_source_url' => $draft->primary_source_url]);
+
+        (new ProcessTelegramMessage($update->id))->failed(new RuntimeException('Worker lost after the card was ready'));
+
+        Queue::assertNotPushed(ContinueDraftGallerySearch::class);
+        $this->assertSentText('отправляю черновик');
+    }
+
     public function test_a_configuration_failure_is_not_resumed_but_the_saved_draft_is_still_delivered(): void
     {
         [$update] = $this->failedSearch();

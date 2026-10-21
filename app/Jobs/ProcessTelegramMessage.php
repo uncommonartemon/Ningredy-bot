@@ -185,6 +185,11 @@ class ProcessTelegramMessage implements ShouldQueue
             if (is_string($normalizedResponse['message'] ?? null)) {
                 $normalizedResponse['message'] = mb_substr($normalizedResponse['message'], 0, 12000);
             }
+            // A finished search must not fail on a missing sentence: live #588 had
+            // a complete draft and was retried because the reply text was empty.
+            if (trim((string) ($normalizedResponse['message'] ?? '')) === '') {
+                $normalizedResponse['message'] = ! empty($normalizedResponse['draft_id']) ? 'Черновик подготовлен.' : 'Готово.';
+            }
 
             foreach (['product_ids', 'operation_ids'] as $idField) {
                 $normalizedResponse[$idField] = collect($normalizedResponse[$idField] ?? [])

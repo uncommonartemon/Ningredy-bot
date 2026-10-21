@@ -53,8 +53,11 @@ final class SearchFailureSaver
                 ->where('phase', 'delivery_guard')->where('action', 'resume_after_failure')->exists();
             $moneyLeft = $this->settings->maxSearchCostUsd() > 0 && ! $this->costBudget->unmeasurable($update->id)
                 && $this->costBudget->hasRemaining($update->id);
+            // A draft whose search finished and whose card is assembled has nothing
+            // left to resume (live #588 searched its complete card again): show it.
+            $finished = $draft->images_staged_at !== null && ! $draft->reconciliationPending();
 
-            if ($resumable && ! $alreadyResumed && $moneyLeft
+            if ($resumable && ! $finished && ! $alreadyResumed && $moneyLeft
                 && Cache::add("draft-gallery-continue:{$draft->id}:queued", true, 2100)) {
                 ContinueDraftGallerySearch::dispatch($draft->id, $chatId, $update->id, $draft->telegram_update_id);
                 $this->record($draft, $update, 'resume_after_failure', $presented, $photos);
