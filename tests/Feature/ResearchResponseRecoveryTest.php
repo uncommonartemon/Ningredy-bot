@@ -212,10 +212,37 @@ class ResearchResponseRecoveryTest extends TestCase
         };
 
         return [
-            'web PDF is not a product card' => $case('web', 'https://shop.example/specifications.pdf'),
-            'review remains text evidence' => $case('review', 'https://review.example/laptop'),
-            'database remains text evidence' => $case('database', 'https://database.example/laptop'),
             'genuinely empty found' => [['title' => null, 'sources' => [], 'primary_source_url' => null], 'title'],
+        ];
+    }
+
+    /** Operator, 2026-10-21: a product page is preferred, never required (live #629, Icecat only). */
+    #[DataProvider('nonShopSources')]
+    public function test_a_found_product_known_only_from_a_database_review_or_document_is_not_sent_back(string $type, string $url): void
+    {
+        $found = ['status' => 'found', 'title' => 'HP Victus 16-d0077nia', 'brand' => 'HP', 'model' => 'Victus 16-d0077nia',
+            'specifications' => [], 'image_urls' => [], 'confidence' => 0.9, 'primary_source_url' => $url,
+            'sources' => [['title' => 'Observed exact model', 'url' => $url, 'type' => $type, 'image_urls' => []]]];
+        $this->responses([json_encode($found)], telegram: true);
+        $update = $this->update();
+
+        try {
+            (new ResearchProduct($update, app(ProductImageResolver::class)))->handle(new Request(['query' => $update->text]));
+        } catch (\Throwable) {
+            // What follows research (staging) is not under test here.
+        }
+
+        // This minimal answer may still lack other fields; the source kind is never the objection.
+        $errors = (array) data_get(AiRun::orderBy('id')->first()->response, 'recovery_snapshot.validation_errors', []);
+        $this->assertArrayNotHasKey('primary_source', $errors);
+    }
+
+    public static function nonShopSources(): array
+    {
+        return [
+            'database record' => ['database', 'https://icecat.example/p/hp/6t878ea.html'],
+            'review' => ['review', 'https://review.example/laptop'],
+            'specification document' => ['web', 'https://shop.example/specifications.pdf'],
         ];
     }
 

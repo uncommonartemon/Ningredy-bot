@@ -806,7 +806,7 @@ class ResearchProduct implements Tool
             $sources = app(ProductSourcePriority::class)->sortSources($data['sources'], $data['brand'] ?? null);
             Validator::make(['primary_source' => $this->primarySource($sources)], [
                 'primary_source' => ['required', 'array'],
-            ], ['primary_source.required' => 'The found result has no eligible unblocked product-source candidate. Keep observed URLs and facts, but provide a manufacturer, retailer, marketplace, or unclassified web HTML candidate. A web document, review or database cannot be the primary candidate; do not invent or relabel its source type.'])->validate();
+            ], ['primary_source.required' => 'The found result has no unblocked source that identifies the exact product. Keep observed URLs and facts and add the page or record that shows this exact product; do not invent or relabel its source type.'])->validate();
 
             $category = app(ProductCategoryResolver::class)->resolve($data['product_type'] ?? null, $data['category'] ?? null);
             $issues = app(ProductResearchConfigurationGuard::class)->issues($data);
@@ -907,9 +907,14 @@ class ResearchProduct implements Tool
         // generic web documents or text-only review/database entries into it.
         $sources = array_values(array_filter($sources, fn (array $source): bool => ResearchSourceRoles::mayIdentifySelectedProduct($source)));
 
+        // A product page is preferred, never required (operator, 2026-10-21): live
+        // #629 had only the Icecat datasheet for an old regional SKU, and a card
+        // built from it beats "could not confirm". Any source that identifies the
+        // exact product may carry the card; the gallery is searched separately.
         return collect($sources)->first(fn (array $source): bool => in_array($source['type'] ?? null, ['manufacturer', 'retailer', 'marketplace', 'web'], true)
             && $discovery->looksLikeHtmlProductPage((string) ($source['url'] ?? '')))
-            ?? collect($sources)->first(fn (array $source): bool => in_array($source['type'] ?? null, ['manufacturer', 'retailer', 'marketplace'], true));
+            ?? collect($sources)->first(fn (array $source): bool => in_array($source['type'] ?? null, ['manufacturer', 'retailer', 'marketplace'], true))
+            ?? collect($sources)->first(fn (array $source): bool => filled($source['url'] ?? null));
     }
 
     public function schema(JsonSchema $schema): array
