@@ -9,7 +9,7 @@ import ProductCard from '../../Components/ProductCard.vue';
 import { useI18n } from '../../i18n';
 
 const props = defineProps({ products: { type: Object, required: true }, filters: { type: Object, required: true }, facets: { type: Object, required: true } });
-const { t, categoryName, productCount } = useI18n();
+const { t, categoryName, productCount, facetLabel, facetOptionLabel } = useI18n();
 const defaults = () => ({ search: '', category: '', brands: [], types: [], countries: [], colors: [], stock: [], attributes: {}, min_price: null, max_price: null, sort: 'newest', per_page: 12 });
 const normalizedFilters = () => {
     const state = defaults();
@@ -48,8 +48,8 @@ const selectedFilters = computed(() => {
     for (const [key, values] of Object.entries(form.attributes)) {
         const facet = props.facets.attributes.find((item) => item.key === key);
         for (const value of values) {
-            const label = facet?.options.find((option) => option.value === value)?.label || value;
-            chips.push({ key: 'attributes', attribute: key, value, label: `${t(`attributes.${key}`, facet?.label || key)}: ${label}` });
+            const option = facet?.options.find((item) => item.value === value);
+            chips.push({ key: 'attributes', attribute: key, value, label: `${facet ? facetLabel(facet) : t(`attributes.${key}`, key)}: ${option ? facetOptionLabel(option) : value}` });
         }
     }
     for (const key of ['min_price', 'max_price']) {

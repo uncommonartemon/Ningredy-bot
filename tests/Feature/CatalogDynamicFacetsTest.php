@@ -293,6 +293,49 @@ class CatalogDynamicFacetsTest extends TestCase
         $this->assertSame(0, $this->option($page, 'attributes', 'ram', '64 gb')['count']);
     }
 
+    public function test_filters_carry_the_translations_of_their_names_and_values(): void
+    {
+        $product = $this->product('laptops');
+        $definition = AttributeDefinition::create(['key' => 'wireless_lan_standard', 'label' => 'Wi-Fi standard', 'is_filterable' => true,
+            'translations' => ['en' => 'Wi-Fi standard', 'cs' => 'Standard Wi-Fi']]);
+        $product->defaultVariant->attributes()->create(['attribute_definition_id' => $definition->id, 'value' => 'Yes',
+            'translations' => ['cs' => 'Ano']]);
+
+        $facet = collect($this->catalog()['facets']['attributes'])->firstWhere('key', 'wireless_lan_standard');
+
+        $this->assertSame(['en' => 'Wi-Fi standard', 'cs' => 'Standard Wi-Fi'], $facet['label_translations']);
+        $this->assertSame(['cs' => 'Ano'], $facet['options'][0]['translations']);
+    }
+
+    public function test_a_filter_where_every_product_has_its_own_value_is_left_out(): void
+    {
+        for ($i = 1; $i <= 12; $i++) {
+            $product = $this->product('laptops');
+            $this->attribute($product->defaultVariant, 'weight', (1 + $i / 100).' kg');
+            $this->attribute($product->defaultVariant, 'ram', ($i % 3 === 0 ? 32 : 16).' GB');
+        }
+
+        $keys = array_column($this->catalog()['facets']['attributes'], 'key');
+
+        $this->assertNotContains('weight', $keys);
+        $this->assertContains('ram', $keys);
+    }
+
+    public function test_a_filter_carried_by_too_few_products_of_the_category_is_left_out(): void
+    {
+        for ($i = 1; $i <= 20; $i++) {
+            $product = $this->product('laptops');
+            $this->attribute($product->defaultVariant, 'ram', ($i % 2 === 0 ? 32 : 16).' GB');
+            if ($i === 1) {
+                $this->attribute($product->defaultVariant, 'cpu_architecture', 'Raptor Lake');
+            }
+        }
+
+        $keys = array_column($this->catalog(['category' => 'laptops'])['facets']['attributes'], 'key');
+
+        $this->assertSame(['ram'], $keys);
+    }
+
     public function test_many_distinct_filter_values_do_not_add_one_database_query_per_option(): void
     {
         $product = $this->product('laptops', variant: ['color' => 'Color 0']);

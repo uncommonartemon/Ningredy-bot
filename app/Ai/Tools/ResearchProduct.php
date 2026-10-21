@@ -6,6 +6,7 @@ use App\Ai\Agents\ProductResearchAgent;
 use App\Ai\Tools\Concerns\RecordsOperations;
 use App\Jobs\ContinueDraftGallerySearch;
 use App\Models\AiRun;
+use App\Models\AttributeDefinition;
 use App\Models\Category;
 use App\Models\ProductDraft;
 use App\Models\ProductSourcePageEvidence;
@@ -156,6 +157,12 @@ class ResearchProduct implements Tool
             ->filter(fn (array $result): bool => $result['found'])
             ->map(fn (array $result): array => array_intersect_key($result, array_flip(['source', 'code', 'title', 'brand', 'part_number', 'gtins', 'page_url', 'color'])))
             ->values()->all();
+        // Research named one thing under two keys (display_size beside screen_size)
+        // because it never saw which keys the catalog already has.
+        $vocabulary = AttributeDefinition::query()->has('values')->withCount('values')
+            ->orderByDesc('values_count')->limit(80)->get(['id', 'key', 'label', 'translations'])
+            ->map(fn (AttributeDefinition $definition): string => $definition->key.' ('.($definition->translations['en'] ?? $definition->label).')')
+            ->implode(', ');
         $researchPrompt = $query
             .PHP_EOL.'Input provenance and prioritized search alternatives (observations are not additional mandatory requirements): '
             .json_encode($inputContext, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
@@ -169,7 +176,10 @@ class ResearchProduct implements Tool
                 .'track record: '.json_encode($codeLookup->trackRecord()).'): '
                 .json_encode($codeHints, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
                 .'. Use them only if they match what the operator asked for; otherwise ignore them and search as usual.'
-                .' Report your decision in code_lookup_verdict.');
+                .' Report your decision in code_lookup_verdict.')
+            .($vocabulary === '' ? '' : PHP_EOL.'Specification keys this catalog already uses: '.$vocabulary
+                .'. Give a specification one of these keys when it means the same thing; a new snake_case key only'
+                .' for a concept not on the list. Two keys for one thing split the storefront filter in two.');
         $run = AiRun::query()->create([
             'telegram_update_id' => $this->update->id,
             'provider' => $provider,

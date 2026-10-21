@@ -22,6 +22,17 @@ class AttributeDefinition extends Model
         return 'label';
     }
 
+    /**
+     * Codes that name one sellable item. They stay on the product page but are
+     * not storefront filters: a checkbox per part number is the catalog again.
+     */
+    public const IDENTIFIER_KEYS = ['sku', 'mpn', 'gtin', 'ean', 'upc'];
+
+    public static function filterableByDefault(?string $key): bool
+    {
+        return ! in_array($key, self::IDENTIFIER_KEYS, true);
+    }
+
     protected $fillable = [
         'key', 'label', 'data_type', 'default_unit', 'is_filterable', 'is_variant', 'sort_order', 'translations', 'attribute_group_id',
     ];

@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Jobs\StoreProductImages;
 use App\Models\AiRun;
+use App\Models\AttributeDefinition;
 use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
 use App\Services\Products\ProductDraftWorkflow;
@@ -81,6 +82,8 @@ class ProductIdentifierNormalizationTest extends TestCase
         $this->assertSame($first->id, $second->id);
         $variant = $first->variants()->sole();
         $this->assertSame(['DUAL-RTX4060-O8G', '90YV0JC0-M0NA00'], [$variant->sku, $variant->mpn]);
+        // Codes stay on the product page but are not storefront filters.
+        $this->assertSame([false, false], AttributeDefinition::whereIn('key', ['mpn', 'sku'])->orderBy('key')->pluck('is_filterable')->all());
     }
 
     public function test_an_identifier_arriving_with_its_explanation_is_stored_clean(): void

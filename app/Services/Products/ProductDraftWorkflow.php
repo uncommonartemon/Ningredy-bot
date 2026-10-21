@@ -412,7 +412,7 @@ class ProductDraftWorkflow
                     'label' => $this->canonicalLabel($attributeKey, (string) $label),
                     'data_type' => $dataType,
                     'default_unit' => $unit,
-                    'is_filterable' => true,
+                    'is_filterable' => AttributeDefinition::filterableByDefault($attributeKey),
                     'is_variant' => $isVariantAttribute,
                 ],
             );

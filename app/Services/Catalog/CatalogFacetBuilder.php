@@ -2,6 +2,7 @@
 
 namespace App\Services\Catalog;
 
+use App\Models\AttributeDefinition;
 use App\Models\AttributeGroup;
 use App\Models\Category;
 use App\Models\Product;
@@ -65,13 +66,26 @@ class CatalogFacetBuilder
 
         $attributeRows = $this->scopedAttributes($filters['category'] ?? '');
         $groups = AttributeGroup::query()->whereIn('id', $attributeRows->pluck('attribute_group_id')->filter()->unique())->get()->keyBy('id');
+        $keys = $attributeRows->pluck('key')->unique()->values();
+        // The storefront names a filter and its options in the visitor's language,
+        // as the product page does; only the definition's own label was sent before.
+        $labelTranslations = AttributeDefinition::query()->whereIn('key', $keys)->pluck('translations', 'key');
+        $valueTranslations = $this->valueTranslations($keys);
+        $productsWith = $this->productsPerAttribute($filters['category'] ?? '');
+        // A filter carried by one laptop in forty narrows almost nothing; the
+        // catalog page then lists dozens of such sections.
+        $minimumCoverage = (int) ceil(0.1 * $this->products($this->normalize(['category' => $filters['category'] ?? '']))->count());
         $attributes = AttributePresentation::sort($attributeRows->groupBy('key')
-            ->map(function (Collection $rows, string $key) use ($filters, $total, $groups): array {
+            ->reject(fn (Collection $rows, string $key): bool => ($productsWith[$key] ?? 0) < $minimumCoverage
+                || $this->namesSingleProducts($rows, $productsWith[$key] ?? 0) || $this->readsLikeProse($rows))
+            ->map(function (Collection $rows, string $key) use ($filters, $total, $groups, $labelTranslations, $valueTranslations): array {
                 $options = $rows->unique('normalized_value')->sortBy('option_label')
-                    ->map(fn ($row) => ['label' => $row->option_label, 'value' => (string) $row->normalized_value])->values();
+                    ->map(fn ($row) => ['label' => $row->option_label, 'value' => (string) $row->normalized_value,
+                        'translations' => $valueTranslations[$key][(string) $row->normalized_value] ?? []])->values();
 
                 return [
                     'key' => $key, 'label' => $rows->first()->label,
+                    'label_translations' => $labelTranslations[$key] ?? [],
                     'sort_order' => (int) $rows->first()->sort_order,
                     'group' => AttributePresentation::group($groups->get($rows->first()->attribute_group_id)),
                     'options' => $this->counts($key, $options, $filters, $total, true),
@@ -93,6 +107,58 @@ class CatalogFacetBuilder
                 'currency' => $price?->min_currency === $price?->max_currency ? $price?->min_currency : null,
             ],
         ];
+    }
+
+    /**
+     * A filter whose every product has its own value (weight "1.86 kg",
+     * dimensions, a part number) only lists the catalog again as checkboxes;
+     * it is left out. Small lists stay, however unique their values.
+     */
+    private function namesSingleProducts(Collection $rows, int $productsWithAttribute): bool
+    {
+        $values = $rows->unique('normalized_value')->count();
+
+        return $values >= 12 && $values >= 0.9 * $productsWithAttribute;
+    }
+
+    /** A port list or an in-box sentence is a description, not a value to tick. */
+    private function readsLikeProse(Collection $rows): bool
+    {
+        $labels = $rows->unique('normalized_value')->pluck('option_label');
+
+        return $labels->filter(fn ($label): bool => mb_strlen((string) $label) > 60)->count() * 2 > $labels->count();
+    }
+
+    /** @return array<string, int> distinct visible products carrying each filterable attribute */
+    private function productsPerAttribute(string $category): array
+    {
+        $categoryId = $category === '' ? null : $this->categories()->firstWhere('slug', $category)?->id;
+
+        return $this->effectiveAttributes()
+            ->join('products', 'products.id', '=', 'product_variants.product_id')
+            ->when($categoryId !== null, fn (QueryBuilder $query) => $query->where('products.category_id', $categoryId))
+            ->groupBy('attribute_definitions.key')
+            ->selectRaw('attribute_definitions.key as attribute_key, COUNT(DISTINCT product_variants.product_id) as products')
+            ->pluck('products', 'attribute_key')->map(fn ($count): int => (int) $count)->all();
+    }
+
+    /** @return array<string, array<string, array<string, string>>> key => normalized value => locale => text */
+    private function valueTranslations(Collection $keys): array
+    {
+        $translations = [];
+        DB::table('attribute_values')
+            ->join('attribute_definitions', 'attribute_definitions.id', '=', 'attribute_values.attribute_definition_id')
+            ->whereIn('attribute_definitions.key', $keys)->whereNotNull('attribute_values.translations')
+            ->orderBy('attribute_values.id')
+            ->get(['attribute_definitions.key', 'attribute_values.normalized_value', 'attribute_values.translations'])
+            ->each(function (object $row) use (&$translations): void {
+                $decoded = json_decode((string) $row->translations, true);
+                if (is_array($decoded) && $decoded !== []) {
+                    $translations[$row->key][(string) $row->normalized_value] ??= $decoded;
+                }
+            });
+
+        return $translations;
     }
 
     private function categories(): Collection

@@ -200,6 +200,18 @@ const attributeLabel = (attribute) => attribute?.label_translations?.[contentLoc
     || attribute?.label;
 
 const attributeValue = (attribute) => attribute?.translations?.[contentLocale.value] || attribute?.value;
+
+// A filter is named like its attribute: the stored translation for this
+// language, then the interface's own label, then the English name. Before,
+// only the definition's single label was sent, so most Czech filters stayed English.
+const facetLabel = (facet) => facet?.label_translations?.[locale.value]
+    || read(messages[locale.value], `attributes.${facet?.key}`)
+    || facet?.label_translations?.[contentLocale.value]
+    || facet?.label_translations?.en
+    || facet?.label
+    || facet?.key;
+
+const facetOptionLabel = (option) => option?.translations?.[contentLocale.value] || option?.label;
 const attributeGroupName = (group) => group?.translations?.[contentLocale.value] || group?.name || '';
 
 // "15,6 inch" is spelled out in the value already; a unit is added only to a
@@ -212,5 +224,5 @@ if (typeof document !== 'undefined') document.documentElement.lang = locale.valu
 
 export const useI18n = () => ({
     locale, localeTag, setLocale, t, productCount, categoryName,
-    contentLocale, attributeLabel, attributeValue, attributeUnit, attributeGroupName,
+    contentLocale, attributeLabel, attributeValue, attributeUnit, attributeGroupName, facetLabel, facetOptionLabel,
 });
