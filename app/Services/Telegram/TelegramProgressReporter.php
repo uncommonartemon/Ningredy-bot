@@ -541,7 +541,10 @@ class TelegramProgressReporter
 
             $this->lastEditAt = microtime(true);
         } catch (Throwable $exception) {
-            report($exception);
+            // The line already shows this text: nothing failed.
+            if (! str_contains(strtolower($exception->getMessage()), 'message is not modified')) {
+                report($exception);
+            }
         }
     }
 
