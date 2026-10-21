@@ -66,6 +66,10 @@ class ProductSpecificationReconciliationAgent implements Agent, HasStructuredOut
             you may choose adopt_source_offer and rebuild the whole card for it. Explain the decision.
             A researcher-inferred SKU does not prohibit this choice; an explicitly requested SKU/model,
             configuration, color, keyboard layout or condition does. Never relax a user requirement.
+            A color the operator named is matched by name, not by resemblance: live #609 asked for silver and a
+            card was reconciled as Steel Grey "a grey-silver shade". When the observed color is not the one asked
+            for, keep the observed color in the card and return not_ready, naming the requested and the found
+            color; the operator can accept it as is. The same holds for keyboard layout and configuration.
             Keep offer_selection.source_url equal to the supplied source_url: this action cannot change
             the gallery. If that source cannot satisfy the request, return not_ready with the actual reason.
             Exception: photo_applicability.verdict=compatible is a separately approved illustration from
@@ -149,6 +153,8 @@ class ProductSpecificationReconciliationAgent implements Agent, HasStructuredOut
             Return reconciled when the whole card concerns the requested product, its explicit requirements
             are supported, and the gallery is exact or separately confirmed compatible. Do not restart photo
             search to settle an unrelated text fact. Otherwise explain not_ready in Russian summary.
+            summary is read by the operator and is always Russian, for reconciled cards too; Czech belongs only in
+            translations.cs (live #609 wrote its summary in Czech).
             For previous_assembly_feedback.repair_context.failure_kind=response_format, fix the response
             structure using retained evidence; additional web searches do not repair truncated/invalid JSON.
             PROMPT."\n\n".AiAttributeGroups::instructions();
