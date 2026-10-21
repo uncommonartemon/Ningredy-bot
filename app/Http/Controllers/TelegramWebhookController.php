@@ -28,6 +28,7 @@ use App\Services\Products\ProductDraftWorkflow;
 use App\Services\Products\ProductGalleryRecipeRouter;
 use App\Services\Products\ProductSearchIntentDetector;
 use App\Services\Products\ProductSourcePriority;
+use App\Services\ProductSearch\Recovery\RequestGuardian;
 use App\Services\Telegram\CatalogTelegramNavigation;
 use App\Services\Telegram\DraftAccess;
 use App\Services\Telegram\DraftTelegramActionConfirmation;
@@ -919,6 +920,12 @@ class TelegramWebhookController extends Controller
             return;
         }
 
+        if (preg_match('/^guard:(show|wait):(\d+)$/', $data, $guardMatches) === 1) {
+            $this->handleGuardianChoice($guardMatches[1], (int) $guardMatches[2], $callbackId, $chatId, $messageId, $update);
+
+            return;
+        }
+
         if (preg_match('/^draft:asis:(\d+)$/', $data, $asIsMatches) === 1) {
             $draft = ProductDraft::query()->find((int) $asIsMatches[1]);
             if ($draft?->status === 'pending_review') {
@@ -1523,7 +1530,7 @@ class TelegramWebhookController extends Controller
         }
 
         $resumable = in_array($draft->gallery_search_stop_reason, [
-            'cost_budget', 'time_budget', 'exhausted', 'specifications_unreconciled',
+            'cost_budget', 'time_budget', 'exhausted', 'specifications_unreconciled', 'stalled',
         ], true)
             || $draft->images_staged_at === null;
 
@@ -1626,6 +1633,36 @@ class TelegramWebhookController extends Controller
         }
 
         $update->update(['status' => 'completed', 'processed_at' => now()]);
+    }
+
+    /** The buttons under the request guardian's "search is slow" notice. */
+    private function handleGuardianChoice(string $choice, int $targetUpdateId, string $callbackId, string $chatId, mixed $messageId, TelegramUpdate $update): void
+    {
+        $target = TelegramUpdate::query()->find($targetUpdateId);
+        if (! $target || ! hash_equals((string) $target->chat_id, $chatId)
+            || ! hash_equals((string) $target->telegram_user_id, (string) $update->telegram_user_id)) {
+            $this->answerAndClose($callbackId, $update, 'Этот поиск создан в другом чате или другим пользователем.');
+
+            return;
+        }
+        if ($target->processed_at !== null || $target->cancel_requested_at !== null) {
+            $this->answerAndClose($callbackId, $update, 'Поиск уже завершён.');
+            $this->removeCallbackKeyboard($chatId, $messageId);
+
+            return;
+        }
+        if ($choice === 'wait') {
+            Cache::put('request-guard:wait:'.$target->id, now()->addMinutes(10)->getTimestamp(), now()->addMinutes(15));
+            $this->answerAndClose($callbackId, $update, 'Жду ещё 10 минут.');
+            $this->removeCallbackKeyboard($chatId, $messageId);
+
+            return;
+        }
+        $shown = app(RequestGuardian::class)->showFound($target, '📦 Показываю, что уже найдено, остальной поиск остановлен.');
+        $this->answerAndClose($callbackId, $update, $shown ? 'Показываю найденное.' : 'Пока показать нечего.');
+        if ($shown) {
+            $this->removeCallbackKeyboard($chatId, $messageId);
+        }
     }
 
     private function handleProductDeletion(

@@ -9,4 +9,5 @@ Artisan::command('inspire', function () {
 })->purpose('Display an inspiring quote');
 
 Schedule::command('queue:health-check')->everyTwoMinutes();
+Schedule::command('bot:guard')->everyMinute()->withoutOverlapping(10);
 Schedule::command('gallery:recover-stuck-drafts')->everyFifteenMinutes();

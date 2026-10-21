@@ -369,7 +369,8 @@ class ProcessTelegramMessage implements ShouldQueue
                 'response' => json_encode(['status' => 'cancelled']),
                 'completed_at' => now(),
             ]);
-            $update->update(['status' => 'cancelled', 'processed_at' => $update->processed_at ?: now()]);
+            $update->update(['status' => $this->guardianDelivered($update) ? 'completed' : 'cancelled',
+                'processed_at' => $update->processed_at ?: now()]);
 
             return;
         }
@@ -434,7 +435,13 @@ class ProcessTelegramMessage implements ShouldQueue
             'completed_at' => now(),
         ]);
         TelegramUpdate::query()->whereKey($update->id)
-            ->update(['status' => 'cancelled', 'processed_at' => now()]);
+            ->update(['status' => $this->guardianDelivered($update) ? 'completed' : 'cancelled', 'processed_at' => now()]);
+    }
+
+    /** The request guardian already showed what this request found; its late end is not a cancellation. */
+    private function guardianDelivered(TelegramUpdate $update): bool
+    {
+        return filled(data_get(TelegramUpdate::query()->find($update->id)?->payload, '_guard_delivered_at'));
     }
 
     private function usageFootnote(int $telegramUpdateId, bool $includeSearchDuration = false): string

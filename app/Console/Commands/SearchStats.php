@@ -109,7 +109,7 @@ class SearchStats extends Command
                 default => '-',
             },
             'watch' => $attempts->where('phase', 'search_supervision')->pluck('decision')->implode(',') ?: '-',
-            'saver' => $attempts->where('phase', 'delivery_guard')->pluck('action')->implode(',') ?: '-',
+            'saver' => $attempts->whereIn('phase', ['delivery_guard', 'guardian'])->pluck('action')->implode(',') ?: '-',
             'ai_failures' => $runs->where('status', 'failed')->count(),
             'ai_timeouts' => $runs->filter(fn (AiRun $run): bool => str_contains((string) $run->error, 'cURL error 28'))->count(),
             'status' => $draft?->status ?? $update->status,

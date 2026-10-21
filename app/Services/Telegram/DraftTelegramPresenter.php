@@ -57,10 +57,11 @@ class DraftTelegramPresenter
             return;
         }
         if ($this->reconciliationPending($draft)) {
-            $budgetStopped = in_array($draft->gallery_search_stop_reason, ['cost_budget', 'time_budget'], true);
+            $budgetStopped = in_array($draft->gallery_search_stop_reason, ['cost_budget', 'time_budget', 'stalled'], true);
             $reason = match ($draft->gallery_search_stop_reason) {
                 'cost_budget' => 'Денежный лимит поиска достигнут.',
                 'time_budget' => 'Время поиска закончилось.',
+                'stalled' => 'Поиск остановлен: один из шагов завис.',
                 default => 'Не удалось завершить проверку карточки по выбранному источнику после автоматического восстановления.',
             };
             if (! $budgetStopped && ! app(AiSettings::class)->specificationReconciliationEnabled()) {
@@ -355,7 +356,7 @@ class DraftTelegramPresenter
 
             return ['inline_keyboard' => $rows];
         }
-        $searchPaused = in_array($draft->gallery_search_stop_reason, ['cost_budget', 'time_budget', 'exhausted'], true);
+        $searchPaused = in_array($draft->gallery_search_stop_reason, ['cost_budget', 'time_budget', 'exhausted', 'stalled'], true);
 
         if ($searchPaused && $mediaCount === 0) {
             $buttonLabel = $draft->gallery_search_stop_reason === 'exhausted'
@@ -387,7 +388,7 @@ class DraftTelegramPresenter
             if ($mediaCount > 0 && ! $draft->media()->where('verification_status', 'pending')->exists()) {
                 $rows[] = [['text' => '✅ Принять как есть', 'callback_data' => "draft:asis:{$draft->id}"]];
             }
-            if (in_array($draft->gallery_search_stop_reason, ['cost_budget', 'time_budget'], true)) {
+            if (in_array($draft->gallery_search_stop_reason, ['cost_budget', 'time_budget', 'stalled'], true)) {
                 $rows[] = [[
                     'text' => '▶️ Продолжить поиск (+$'.number_format(app(AiSettings::class)->maxSearchCostUsd(), 2).')',
                     'callback_data' => "draft:continue-search:{$draft->id}",
@@ -413,7 +414,7 @@ class DraftTelegramPresenter
             $rows[] = [['text' => '📋 Все характеристики', 'callback_data' => "draft:details:{$draft->id}"]];
         }
 
-        if (in_array($draft->gallery_search_stop_reason, ['cost_budget', 'time_budget', 'exhausted', 'specifications_unreconciled'], true)) {
+        if (in_array($draft->gallery_search_stop_reason, ['cost_budget', 'time_budget', 'exhausted', 'specifications_unreconciled', 'stalled'], true)) {
             $label = match ($draft->gallery_search_stop_reason) {
                 'exhausted' => '▶️ Продолжить поиск',
                 'specifications_unreconciled' => '🔁 Повторить сверку характеристик',
@@ -612,7 +613,7 @@ class DraftTelegramPresenter
                 $footer .= "\nВ галерее показаны первые 10 фото; остальные оригиналы сохранены.";
             }
         }
-        $searchPaused = in_array($draft->gallery_search_stop_reason, ['cost_budget', 'time_budget', 'exhausted'], true);
+        $searchPaused = in_array($draft->gallery_search_stop_reason, ['cost_budget', 'time_budget', 'exhausted', 'stalled'], true);
         // images_staged_at stays null only when staging never ran to its own
         // completion at all - e.g. the job was killed by its hard timeout
         // mid-search - as opposed to a normal run that finished and decided
@@ -627,6 +628,7 @@ class DraftTelegramPresenter
             $usageFootnote = "\n".match ($draft->gallery_search_stop_reason) {
                 'cost_budget' => 'Денежный лимит поиска достигнут. Продолжить поиск фото можно новым бюджетным циклом.',
                 'time_budget' => 'Время поиска закончилось. Продолжить поиск фото можно новым бюджетным циклом.',
+                'stalled' => 'Поиск остановлен: один из шагов завис. Продолжить поиск фото можно новым бюджетным циклом.',
                 default => 'Подходящие фотографии не найдены. Поиск фото можно продолжить.',
             }.' Без фото добавление в каталог недоступно.'.$usageFootnote;
         } elseif (! $draft->isManualUpload() && ($searchPaused || $searchInterrupted) && $galleryCount === 0) {

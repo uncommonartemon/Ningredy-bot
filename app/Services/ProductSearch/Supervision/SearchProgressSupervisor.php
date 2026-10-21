@@ -60,9 +60,12 @@ final class SearchProgressSupervisor
     /**
      * @param  array<string, mixed>  $current  what the search is doing right now
      * @param  null|callable(string): void  $progress
+     * @param  bool  $fromOutside  asked by the request guardian about a stalled step: the
+     *                             search itself cannot reach its checkpoints, so the age,
+     *                             budget and interval gates that pace in-search reviews do not apply
      * @return array{decision: string, reason: ?string}
      */
-    public function review(?int $updateId, ?ProductDraft $draft, array $current, ?callable $progress = null): array
+    public function review(?int $updateId, ?ProductDraft $draft, array $current, ?callable $progress = null, bool $fromOutside = false): array
     {
         $continue = ['decision' => 'continue', 'reason' => null];
         if (! $updateId || $draft === null) {
@@ -73,17 +76,17 @@ final class SearchProgressSupervisor
         }
         try {
             if (! config('services.search_progress_supervisor.enabled', true)
-                || (($this->timeBudget->elapsedSeconds($updateId) ?? 0) < (int) config('services.search_progress_supervisor.after_seconds', 480)
+                || (! $fromOutside && (($this->timeBudget->elapsedSeconds($updateId) ?? 0) < (int) config('services.search_progress_supervisor.after_seconds', 480)
                     // Money can go faster than time: live #566 spent a dollar in four minutes.
-                    && ($this->costBudget->spentFraction($updateId) ?? 0) < (float) config('services.search_progress_supervisor.after_spent_fraction', 0.4))
-                || $this->costBudget->limit() <= 0 || $this->costBudget->unmeasurable($updateId)
-                || $this->costBudget->exceeded($updateId) || ! $this->timeBudget->canStart($updateId, 30)
-                || ! Cache::add(self::REVIEW_KEY.$updateId, now()->toIso8601String(),
-                    max(60, (int) config('services.search_progress_supervisor.interval_seconds', 240)))) {
+                    && ($this->costBudget->spentFraction($updateId) ?? 0) < (float) config('services.search_progress_supervisor.after_spent_fraction', 0.4)))
+                || (! $fromOutside && ($this->costBudget->limit() <= 0 || $this->costBudget->unmeasurable($updateId)
+                    || $this->costBudget->exceeded($updateId) || ! $this->timeBudget->canStart($updateId, 30)
+                    || ! Cache::add(self::REVIEW_KEY.$updateId, now()->toIso8601String(),
+                        max(60, (int) config('services.search_progress_supervisor.interval_seconds', 240)))))) {
                 return $continue;
             }
 
-            $verdict = $this->ask($draft, $updateId, $this->payload($draft, $updateId, $current));
+            $verdict = $this->ask($draft, $updateId, $this->payload($draft, $updateId, $current), $fromOutside);
         } catch (ProductSearchCancelled $exception) {
             throw $exception;
         } catch (Throwable $exception) {
@@ -120,20 +123,24 @@ final class SearchProgressSupervisor
         return ['decision' => $data['decision'], 'reason' => trim($data['reason'])];
     }
 
-    private function ask(ProductDraft $draft, int $updateId, array $payload): ?array
+    private function ask(ProductDraft $draft, int $updateId, array $payload, bool $fromOutside = false): ?array
     {
         $prompt = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE) ?: '{}';
         $provider = $this->settings->providerFor('search_progress_supervisor');
         $model = $this->settings->modelFor('search_progress_supervisor');
-        $timeout = $this->timeBudget->timeoutFor($updateId, (int) config('services.search_progress_supervisor.timeout', 45));
+        $timeout = $fromOutside
+            ? max(5, (int) config('services.request_guardian.outside_review_timeout', 30))
+            : $this->timeBudget->timeoutFor($updateId, (int) config('services.search_progress_supervisor.timeout', 45));
         $run = AiRun::query()->create([
             'telegram_update_id' => $updateId, 'provider' => $provider, 'model' => $model,
             'status' => 'running', 'prompt' => $prompt, 'started_at' => now(),
             'activity' => ['stage' => 'search_progress_supervisor', 'search_budget' => true, 'product_draft_id' => $draft->id],
         ]);
         try {
-            $response = app(OpenAiHeavyOperationGate::class)->run($provider, $timeout,
-                fn () => SearchProgressAgent::make()->prompt($prompt, provider: $provider, model: $model, timeout: $timeout));
+            $call = fn () => SearchProgressAgent::make()->prompt($prompt, provider: $provider, model: $model, timeout: $timeout);
+            // The stalled search may be the one holding the heavy-operation gate;
+            // a short look from outside must not queue behind it.
+            $response = $fromOutside ? $call() : app(OpenAiHeavyOperationGate::class)->run($provider, $timeout, $call);
             $run->update(['invocation_id' => $response->invocationId,
                 'response' => $response->toArray(), 'usage' => $response->usage->toArray()]);
             $verdict = $this->validate($response->toArray());

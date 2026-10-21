@@ -129,6 +129,16 @@ return [
         'interval_seconds' => (int) env('AI_SEARCH_PROGRESS_SUPERVISOR_INTERVAL_SECONDS', 240),
     ],
 
+    // Watches open requests from outside the search process (bot:guard).
+    'request_guardian' => [
+        'enabled' => (bool) env('REQUEST_GUARDIAN_ENABLED', true),
+        'queue_notice_after_seconds' => (int) env('REQUEST_GUARDIAN_QUEUE_NOTICE_AFTER', 60),
+        'stall_after_seconds' => (int) env('REQUEST_GUARDIAN_STALL_AFTER', 360),
+        'hard_stall_after_seconds' => (int) env('REQUEST_GUARDIAN_HARD_STALL_AFTER', 720),
+        'abandoned_after_seconds' => (int) env('REQUEST_GUARDIAN_ABANDONED_AFTER', 180),
+        'outside_review_timeout' => (int) env('REQUEST_GUARDIAN_REVIEW_TIMEOUT', 30),
+    ],
+
     'server_assistant' => [
         'provider' => 'openai',
         'model' => env('AI_SERVER_ASSISTANT_MODEL', 'gpt-5.4'),

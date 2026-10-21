@@ -39,6 +39,10 @@ class SearchProgressAgent implements Agent, HasStructuredOutput
             keep returning the same candidate set (rounds_with_same_frames) add nothing, however large it is.
             In fallback_discovery, several empty rounds in a row (empty_discovery_rounds_in_a_row) mean the web
             has nothing new for this exact code; more rounds rarely change that and each one costs money.
+            kind stalled_step comes from outside the search: one step has shown no progress for silent_minutes
+            and the search cannot be steered until it returns, so leave_current_page is not available.
+            deliver_now shows the operator what is already saved (only when found_result_can_be_shown) and
+            stops the rest; continue keeps waiting and the operator is told the search is slow.
             reason: one short sentence in Russian for the operator, naming what you observed.
             PROMPT;
     }

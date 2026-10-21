@@ -150,7 +150,7 @@ class TelegramAssistantReplyDelivery
                 return 'sent';
             }
 
-            return 'skipped_stale';
+            return $this->sayInstead($telegram, $chat, $data);
         }
         if (! empty($payload['deletion_id'])) {
             $deletion = AiOperation::whereKey($payload['deletion_id'])->where('telegram_update_id', $update->id)
@@ -165,7 +165,10 @@ class TelegramAssistantReplyDelivery
                 return 'sent';
             }
 
-            return 'skipped_stale';
+            // Its buttons are gone; repeating "confirm below" would point at nothing.
+            $telegram->sendMessage($chat, 'Подтверждение удаления устарело. Чтобы удалить товар, повторите команду /delete с его номером.');
+
+            return 'sent_text_for_stale';
         }
         if (! empty($payload['failed_draft_id'])) {
             $draft = ProductDraft::find($payload['failed_draft_id']);
@@ -177,7 +180,7 @@ class TelegramAssistantReplyDelivery
                 return 'sent';
             }
 
-            return 'skipped_stale';
+            return $this->sayInstead($telegram, $chat, $data);
         }
         $this->sendText($telegram, $chat, (string) ($data['message'] ?? '').$footnote);
         if (($data['response_type'] ?? '') === 'catalog_results' && ! empty($data['product_ids'])) {
@@ -185,6 +188,21 @@ class TelegramAssistantReplyDelivery
         }
 
         return 'sent';
+    }
+
+    /**
+     * The draft, deletion or failed card this reply pointed at changed before it
+     * could be shown (approved, replaced, expired). Saying nothing left the
+     * request without any answer; the assistant's own text still is one.
+     */
+    private function sayInstead(TelegramClient $telegram, string $chat, array $data): string
+    {
+        if (trim((string) ($data['message'] ?? '')) === '') {
+            return 'skipped_stale';
+        }
+        $this->sendText($telegram, $chat, (string) $data['message']);
+
+        return 'sent_text_for_stale';
     }
 
     /** Telegram cuts a message at 4096 characters; a long answer goes out in parts, split at line breaks. */
