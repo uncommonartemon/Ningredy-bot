@@ -36,8 +36,10 @@ class SearchProgressSupervisorTest extends TestCase
         $this->budget->shouldReceive('limit')->andReturn(1.0);
     }
 
-    public function test_a_young_search_is_never_reviewed(): void
+    public function test_a_young_search_waits_while_an_age_gate_is_configured(): void
     {
+        // The default is no gate: the watcher may look from the first checkpoint.
+        config(['services.search_progress_supervisor.after_seconds' => 480]);
         $draft = $this->draft(minutesAgo: 2);
         SearchProgressAgent::fake()->preventStrayPrompts();
 

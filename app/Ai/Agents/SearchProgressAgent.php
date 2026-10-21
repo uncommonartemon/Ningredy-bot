@@ -43,13 +43,15 @@ class SearchProgressAgent implements Agent, HasStructuredOutput
             keep returning the same candidate set (rounds_with_same_frames) add nothing, however large it is.
             In fallback_discovery, several empty rounds in a row (empty_discovery_rounds_in_a_row) mean the web
             has nothing new for this exact code; more rounds rarely change that and each one costs money.
-            kind no_photos_yet comes from outside the search: it has saved no verified photo for
-            minutes_without_any_photo. deliver_now stops it and shows the operator the card as it is, with a
-            button to continue the photo search later; continue lets it go on (you are asked again later).
-            kind stalled_step comes from outside the search: one step has shown no progress for silent_minutes
-            and the search cannot be steered until it returns, so leave_current_page is not available.
-            deliver_now shows the operator what is already saved (only when found_result_can_be_shown) and
-            stops the rest; continue keeps waiting and the operator is told the search is slow.
+            kind outside_check: you are woken from outside the search, every few minutes while it runs, by the
+            request guardian; the search may be inside a step that has not returned (minutes_since_last_step).
+            Everything else you read from the journal yourself. There: continue lets it run (you are asked
+            again later); deliver_now has it end the photo search at its next step and assemble the card from
+            what it has; show_now stops it now and shows the operator what exists - for a step that is not
+            coming back, since deliver_now waits for the next step; leave_current_page is not available.
+            Inside the search show_now is never needed.
+            operator_note: one short Russian sentence the operator should read now (a step that runs unusually
+            long, what you are waiting for), otherwise null. When operator_already_told is true, null.
             reason: one short sentence in Russian for the operator, naming what you observed.
             PROMPT;
     }
@@ -57,8 +59,9 @@ class SearchProgressAgent implements Agent, HasStructuredOutput
     public function schema(JsonSchema $schema): array
     {
         return [
-            'decision' => $schema->string()->enum(['continue', 'leave_current_page', 'deliver_now'])->required(),
+            'decision' => $schema->string()->enum(['continue', 'leave_current_page', 'deliver_now', 'show_now'])->required(),
             'reason' => $schema->string()->max(400)->required(),
+            'operator_note' => $schema->string()->max(400)->nullable()->required(),
         ];
     }
 }

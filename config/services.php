@@ -124,7 +124,7 @@ return [
         'model' => env('AI_SEARCH_PROGRESS_SUPERVISOR_MODEL', 'gpt-5.4-mini'),
         'timeout' => (int) env('AI_SEARCH_PROGRESS_SUPERVISOR_TIMEOUT', 45),
         'enabled' => (bool) env('AI_SEARCH_PROGRESS_SUPERVISOR_ENABLED', true),
-        'after_seconds' => (int) env('AI_SEARCH_PROGRESS_SUPERVISOR_AFTER_SECONDS', 480),
+        'after_seconds' => (int) env('AI_SEARCH_PROGRESS_SUPERVISOR_AFTER_SECONDS', 0),
         'after_spent_fraction' => (float) env('AI_SEARCH_PROGRESS_SUPERVISOR_AFTER_SPENT_FRACTION', 0.4),
         'interval_seconds' => (int) env('AI_SEARCH_PROGRESS_SUPERVISOR_INTERVAL_SECONDS', 240),
     ],
@@ -133,10 +133,8 @@ return [
     'request_guardian' => [
         'enabled' => (bool) env('REQUEST_GUARDIAN_ENABLED', true),
         'queue_notice_after_seconds' => (int) env('REQUEST_GUARDIAN_QUEUE_NOTICE_AFTER', 60),
-        'stall_after_seconds' => (int) env('REQUEST_GUARDIAN_STALL_AFTER', 360),
-        'hard_stall_after_seconds' => (int) env('REQUEST_GUARDIAN_HARD_STALL_AFTER', 720),
+        'review_interval_seconds' => (int) env('REQUEST_GUARDIAN_REVIEW_INTERVAL', 180),
         'abandoned_after_seconds' => (int) env('REQUEST_GUARDIAN_ABANDONED_AFTER', 180),
-        'no_photo_after_seconds' => (int) env('REQUEST_GUARDIAN_NO_PHOTO_AFTER', 600),
         'outside_review_timeout' => (int) env('REQUEST_GUARDIAN_REVIEW_TIMEOUT', 30),
     ],
 

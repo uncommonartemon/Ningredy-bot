@@ -20,17 +20,17 @@ use Throwable;
 /**
  * Looks at the operator's open requests from outside the search process, once a
  * minute. The watcher, the failure saver and the card repair all run inside the
- * search: when one step hangs they hang with it, and a second request waiting
- * behind a long search is invisible to all of them. The guardian is told nothing
- * by the search; it reads what the search left behind.
+ * search and are called by it between steps: when one step hangs, nobody calls
+ * them, and a request waiting behind a long search is invisible to all of them.
  *
- * - a request waiting behind another search gets one "queued" notice;
- * - a step with no progress for a while is judged by the same watcher agent,
- *   which may show what is already found; otherwise the operator hears that the
- *   search is slow, with buttons, and a long stall shows the saved draft anyway;
- * - a request whose process vanished gets its prepared reply or saved draft, or
- *   a plain "send it again";
- * - a reply that could not be delivered is delivered again later.
+ * Judgement belongs to the watcher agent (operator rule, 2026-10-21). It reads
+ * the search journal itself; the guardian only wakes it every few minutes while
+ * a search runs and adds the one fact the journal cannot show - how long since
+ * the last step. The agent lets the search run, has it wrap up into a card, or
+ * shows what exists right now, and decides whether the operator hears anything.
+ * The app keeps only the operator's own time budget (two minutes before the
+ * limit the operator gets what exists) and facts that need no judgement: a
+ * request queued behind another search, a vanished process, an undelivered reply.
  *
  * Nothing here raises a budget or starts a paid search, and no message carries
  * a technical error. Every action is recorded in the search journal (phase
@@ -44,29 +44,6 @@ final class RequestGuardian
     private const OWN_PHASES = ['search_supervision', 'guardian', 'delivery_guard'];
 
     private const OWN_STAGES = ['search_progress_supervisor'];
-
-    private const STEP_LABELS = [
-        'research' => 'поиск карточки товара',
-        'research_repair' => 'поиск карточки товара',
-        'image_discovery' => 'поиск страниц с фото',
-        'gallery_preflight' => 'проверка страницы магазина',
-        'gallery_training' => 'обучение сбору галереи на сайте магазина',
-        'active_recipe' => 'сбор галереи на сайте магазина',
-        'source_resolution' => 'чтение страницы магазина',
-        'source_selection' => 'выбор источника',
-        'image_download' => 'загрузка фото',
-        'fallback_image_download' => 'загрузка фото',
-        'image_verification' => 'проверка фото',
-        'vision' => 'проверка фото',
-        'photo_applicability' => 'проверка фото',
-        'source_identity' => 'проверка, тот ли это товар',
-        'card_assembly' => 'сборка характеристик',
-        'card_repair' => 'исправление характеристик',
-        'card_recovery' => 'исправление характеристик',
-        'card_recovery_supervisor' => 'исправление характеристик',
-        'text_evidence' => 'поиск характеристик в тексте',
-        'assistant' => 'подготовка ответа',
-    ];
 
     public function __construct(
         private readonly TelegramClient $telegram,
@@ -191,44 +168,77 @@ final class RequestGuardian
         if ($job['reserved_at'] === null) {
             return null;
         }
-        // A search past its limit is an acceptance failure (PROJECT_STRATEGY.md):
-        // two minutes before it, the operator gets what exists. Live #598 and #611
-        // kept searching for photos into the 33rd minute through continuation slices.
+        // The operator's own time budget is the one hard limit: two minutes before
+        // it, the operator gets what exists. Live #598 and #611 kept searching for
+        // photos into the 33rd minute through continuation slices.
         if ($this->elapsedSeconds($update) > $this->settings->searchMaxSeconds() - 120) {
             return $this->handleOvertime($update);
         }
-        // Busy is not progress: live #611 opened page after page for 33 minutes and
-        // saved nothing, and the in-search watcher is reached only at checkpoints.
-        // Past the minute by which nearly every successful search had its first
-        // photo, the watcher is asked from outside; the decision stays its own.
-        if ($this->elapsedSeconds($update) > (int) config('services.request_guardian.no_photo_after_seconds', 600)
-            && ($draft = $this->draftFor($update)) !== null && $draft->verifiedPhotoPaths() === []
-            // Already told to wrap up: the search delivers its own card.
-            && $this->supervisor->deliverNowReason($update->id) === null
-            && Cache::add('request-guard:no-photo-review:'.$update->id, true, now()->addMinutes(5))) {
-            return $this->askAboutNoPhotos($update, $draft);
+        // The watcher told the search to wrap up; card assembly gets the minutes it
+        // takes before the guardian shows what exists instead.
+        $wrapUp = (int) Cache::get('request-guard:wrap-up:'.$update->id, 0);
+        if ($wrapUp > 0 && now()->timestamp - $wrapUp > 300 && $this->draftFor($update) !== null && $this->claim('deliver', $update)) {
+            $this->showFound($update, '⏳ Поиск остановлен, но не успел собрать карточку. Показываю, что уже найдено.');
+
+            return 'wrap_up_overdue_shown_found';
         }
-        if ($silent < (int) config('services.request_guardian.stall_after_seconds', 360)
-            || (int) Cache::get('request-guard:wait:'.$update->id, 0) > now()->timestamp) {
+        if ($wrapUp > 0 || (int) Cache::get('request-guard:wait:'.$update->id, 0) > now()->timestamp
+            // A search reaching its own checkpoints already calls the watcher itself.
+            || ProductSourceAttempt::query()->where('telegram_update_id', $update->id)->where('phase', 'search_supervision')
+                ->where('created_at', '>', now()->subSeconds($this->reviewInterval()))->exists()
+            || ! Cache::add('request-guard:review:'.$update->id, true, now()->addSeconds($this->reviewInterval()))) {
             return null;
         }
 
-        return $this->handleStall($update, $silent);
+        return $this->wakeTheWatcher($update, $silent);
     }
 
-    private function askAboutNoPhotos(TelegramUpdate $update, ProductDraft $draft): ?string
+    private function reviewInterval(): int
     {
-        $verdict = $this->supervisor->review($update->id, $draft, [
-            'kind' => 'no_photos_yet', 'step' => $this->currentStep($update),
-            'minutes_without_any_photo' => intdiv($this->elapsedSeconds($update), 60),
-        ], fromOutside: true);
-        if ($verdict['decision'] !== 'deliver_now' || ! $this->claim('deliver', $update)) {
+        return max(60, (int) config('services.request_guardian.review_interval_seconds', 180));
+    }
+
+    /** The watcher reads the journal and decides; the guardian only carries the decision out. */
+    private function wakeTheWatcher(TelegramUpdate $update, int $silent): ?string
+    {
+        // The watcher's journal starts with the draft; before it, only the budget applies.
+        $draft = $this->draftFor($update);
+        if ($draft === null) {
             return null;
         }
-        $this->showFound($update, '⏳ Подходящих фото за '.intdiv($this->elapsedSeconds($update), 60).' мин не найдено, поиск остановлен.'
-            .(filled($verdict['reason']) ? "\n".$verdict['reason'] : ''));
+        $verdict = $this->supervisor->review($update->id, $draft, [
+            'kind' => 'outside_check', 'minutes_since_last_step' => intdiv($silent, 60),
+            'operator_already_told' => Cache::has('request-guard:note:'.$update->id),
+        ], fromOutside: true);
 
-        return 'no_photo_shown_found';
+        if ($verdict['decision'] === 'show_now' && $this->claim('deliver', $update)) {
+            $this->showFound($update, '⏳ '.($verdict['reason'] ?: 'Поиск остановлен.'));
+
+            return 'watcher_shown_found';
+        }
+        if ($verdict['decision'] === 'deliver_now') {
+            // review() keeps the verdict standing: at its next step the search ends
+            // the photo search and assembles the card itself. Cutting it here showed
+            // live #621 an unassembled card.
+            Cache::put('request-guard:wrap-up:'.$update->id, now()->timestamp, now()->addHour());
+            $this->record($update, $draft, 'wrap_up', 'completed', 'Наблюдатель велел поиску свернуться и собрать карточку из найденного.',
+                ['reason' => $verdict['reason']]);
+
+            return 'watcher_wrap_up';
+        }
+        $note = trim((string) ($verdict['operator_note'] ?? ''));
+        if ($note === '' || ! Cache::add('request-guard:note:'.$update->id, true, now()->addMinutes(10))) {
+            return null;
+        }
+        $buttons = [[['text' => '⏳ Ждать дальше', 'callback_data' => "guard:wait:{$update->id}"],
+            ['text' => '✖ Отменить поиск', 'callback_data' => "search:cancel:{$update->id}"]]];
+        if ($draft->verifiedPhotoPaths() !== [] || ! $draft->reconciliationPending()) {
+            array_unshift($buttons, [['text' => '📦 Показать найденное', 'callback_data' => "guard:show:{$update->id}"]]);
+        }
+        $this->telegram->sendMessage((string) $update->chat_id, '⏳ '.$note, ['inline_keyboard' => $buttons]);
+        $this->record($update, $draft, 'watcher_note', 'completed', $note, ['silent_minutes' => intdiv($silent, 60)]);
+
+        return 'watcher_note';
     }
 
     private function handleOvertime(TelegramUpdate $update): ?string
@@ -249,60 +259,6 @@ final class RequestGuardian
         $this->record($update, null, 'overtime_notice', 'completed', "Поиск идёт {$minutes} мин без карточки; оператор предупреждён.", ['elapsed_minutes' => $minutes]);
 
         return 'overtime_notice';
-    }
-
-    private function handleStall(TelegramUpdate $update, int $silent): ?string
-    {
-        $draft = $this->draftFor($update);
-        // Stopping a search early is worth it only for something to show.
-        $showable = $draft !== null && ($draft->verifiedPhotoPaths() !== [] || ! $draft->reconciliationPending());
-        $step = $this->currentStep($update);
-        $minutes = max(1, intdiv($silent, 60));
-
-        if (! Cache::has($this->key('stall_notice', $update))) {
-            $verdict = $draft === null ? ['decision' => 'continue', 'reason' => null]
-                : $this->supervisor->review($update->id, $draft, [
-                    'kind' => 'stalled_step', 'step' => $step, 'silent_minutes' => $minutes,
-                    'found_result_can_be_shown' => $showable,
-                ], fromOutside: true);
-            if ($verdict['decision'] === 'deliver_now' && $showable && $this->claim('deliver', $update)) {
-                $this->showFound($update, "⚠️ Поиск застрял на шаге «{$step}». Показываю, что уже найдено."
-                    .(filled($verdict['reason']) ? "\n".$verdict['reason'] : ''));
-
-                return 'stall_shown_found';
-            }
-            if (! $this->claim('stall_notice', $update)) {
-                return null;
-            }
-            $buttons = [[['text' => '⏳ Ждать дальше', 'callback_data' => "guard:wait:{$update->id}"],
-                ['text' => '✖ Отменить поиск', 'callback_data' => "search:cancel:{$update->id}"]]];
-            if ($showable) {
-                array_unshift($buttons, [['text' => '📦 Показать найденное', 'callback_data' => "guard:show:{$update->id}"]]);
-            }
-            $this->telegram->sendMessage((string) $update->chat_id,
-                "⏳ Поиск идёт дольше обычного: шаг «{$step}» уже {$minutes} мин без продвижения."
-                .($draft !== null && $draft->verifiedPhotoPaths() !== [] ? ' Сохранено фото: '.count($draft->verifiedPhotoPaths()).'.' : ''), ['inline_keyboard' => $buttons]);
-            $this->record($update, $draft, 'stall_notice', 'completed', "Шаг «{$step}» молчит {$minutes} мин; оператор предупреждён.",
-                ['silent_minutes' => $minutes, 'showable' => $showable, 'watcher' => $verdict]);
-
-            return 'stall_notice';
-        }
-
-        if ($silent < (int) config('services.request_guardian.hard_stall_after_seconds', 720)
-            || ! $this->claim('hard_stall', $update)) {
-            return null;
-        }
-        if ($showable && $this->claim('deliver', $update)) {
-            $this->showFound($update, "⚠️ Поиск завис на шаге «{$step}» ({$minutes} мин без продвижения). Показываю, что уже найдено.");
-
-            return 'hard_stall_shown_found';
-        }
-        $this->telegram->sendMessage((string) $update->chat_id,
-            "⚠️ Поиск, похоже, завис на шаге «{$step}» ({$minutes} мин без продвижения). Показать пока нечего. Можно отменить и отправить запрос заново.",
-            ['inline_keyboard' => [[['text' => '✖ Отменить поиск', 'callback_data' => "search:cancel:{$update->id}"]]]]);
-        $this->record($update, $draft, 'hard_stall_notice', 'completed', "Шаг «{$step}» молчит {$minutes} мин, показать нечего.", ['silent_minutes' => $minutes]);
-
-        return 'hard_stall_notice';
     }
 
     /** The process is gone: no job holds the request and nothing has moved for minutes. */
@@ -401,18 +357,6 @@ final class RequestGuardian
             ?? $update->created_at?->getTimestamp() ?? now()->timestamp;
 
         return max(0, now()->timestamp - $started);
-    }
-
-    /** The step that is open now: a specific running call first, then the newest journal row. */
-    private function currentStep(TelegramUpdate $update): string
-    {
-        $running = AiRun::query()->where('telegram_update_id', $update->id)->where('status', 'running')
-            ->latest('id')->get(['activity'])->map(fn (AiRun $run): ?string => data_get($run->activity, 'stage'))
-            ->first(fn (?string $stage): bool => $stage !== null && $stage !== 'assistant' && ! in_array($stage, self::OWN_STAGES, true));
-        $stage = $running ?? ProductSourceAttempt::query()->where('telegram_update_id', $update->id)
-            ->whereNotIn('phase', self::OWN_PHASES)->latest('id')->value('phase') ?? 'assistant';
-
-        return self::STEP_LABELS[$stage] ?? 'обработка запроса';
     }
 
     private function timestamp(mixed $value): ?int

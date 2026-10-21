@@ -27,7 +27,7 @@ use Throwable;
  */
 final class SearchProgressSupervisor
 {
-    public const DECISIONS = ['continue', 'leave_current_page', 'deliver_now'];
+    public const DECISIONS = ['continue', 'leave_current_page', 'deliver_now', 'show_now'];
 
     private const REVIEW_KEY = 'search-progress-review:';
 
@@ -112,15 +112,17 @@ final class SearchProgressSupervisor
         return $verdict;
     }
 
-    /** @return array{decision: string, reason: string} */
+    /** @return array{decision: string, reason: string, operator_note: ?string} */
     public function validate(array $response): array
     {
         $data = Validator::make($response, [
             'decision' => ['required', Rule::in(self::DECISIONS)],
             'reason' => ['required', 'string', 'max:400'],
+            'operator_note' => ['sometimes', 'nullable', 'string', 'max:400'],
         ])->validate();
 
-        return ['decision' => $data['decision'], 'reason' => trim($data['reason'])];
+        return ['decision' => $data['decision'], 'reason' => trim($data['reason']),
+            'operator_note' => filled($data['operator_note'] ?? null) ? trim($data['operator_note']) : null];
     }
 
     private function ask(ProductDraft $draft, int $updateId, array $payload, bool $fromOutside = false): ?array
