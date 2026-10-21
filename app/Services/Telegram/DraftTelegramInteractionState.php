@@ -16,7 +16,9 @@ class DraftTelegramInteractionState
         $until = now()->addMinutes($kind === 'processing' ? 20 : 10);
         $state['expires_at'] = $until->getTimestamp();
         Cache::put($this->key($chat, $user), $state, $until);
-        Cache::put($this->key($chat, $user).':last', $state, now()->addDay());
+        // The expiry notice guards the hour after the prompt lapses; a message
+        // sent much later is an ordinary request, not the forgotten input.
+        Cache::put($this->key($chat, $user).':last', $state, $until->copy()->addHour());
 
         return $state;
     }

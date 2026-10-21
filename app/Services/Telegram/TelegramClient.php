@@ -3,7 +3,9 @@
 namespace App\Services\Telegram;
 
 use App\Models\AiOperation;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\PendingRequest;
+use Illuminate\Http\Client\RequestException;
 use Illuminate\Support\Facades\Http;
 use RuntimeException;
 use Throwable;
@@ -282,7 +284,7 @@ class TelegramClient
         }
 
         try {
-            return Http::timeout(30)->connectTimeout(5)->retry(2, 1200)
+            return Http::timeout(30)->connectTimeout(5)->retry(2, $this->retryDelay(...), $this->retryable(...))
                 ->get("https://api.telegram.org/file/bot{$token}/{$filePath}")->throw()->body();
         } catch (Throwable $exception) {
             throw new RuntimeException(str_replace($token, '[redacted]', $exception->getMessage()), (int) $exception->getCode());
@@ -322,11 +324,15 @@ class TelegramClient
             'commands' => [
                 ['command' => 'start', 'description' => 'Открыть панель'],
                 ['command' => 'find', 'description' => 'Найти товар'],
+                ['command' => 'catalog', 'description' => 'Каталог и поиск в нём'],
+                ['command' => 'add', 'description' => 'Загрузить свой товар'],
                 ['command' => 'drafts', 'description' => 'Показать черновики'],
+                ['command' => 'cancel', 'description' => 'Отменить ожидаемый ввод'],
                 ['command' => 'status', 'description' => 'Статус сервера'],
                 ['command' => 'url', 'description' => 'Текущий адрес сайта'],
                 ['command' => 'errors', 'description' => 'Последние ошибки'],
                 ['command' => 'new', 'description' => 'Очистить контекст'],
+                ['command' => 'reset', 'description' => 'Отменить зависшие запросы'],
                 ['command' => 'help', 'description' => 'Помощь'],
             ],
         ]);
@@ -388,6 +394,28 @@ class TelegramClient
         }
     }
 
+    /**
+     * Only a dropped connection, a Telegram-side failure or flood control can
+     * succeed on a second try. A 400 such as "message is not modified" or "query
+     * is too old" never will, and retrying it held every button press for another 1.2 s.
+     */
+    private function retryable(Throwable $exception): bool
+    {
+        return $exception instanceof ConnectionException
+            || ($exception instanceof RequestException
+                && ($exception->response->serverError() || $exception->response->status() === 429));
+    }
+
+    /** Flood control names its own wait; a short one is honoured, a long one fails fast. */
+    private function retryDelay(int $attempt, Throwable $exception): int
+    {
+        $wait = $exception instanceof RequestException
+            ? (int) $exception->response->json('parameters.retry_after', 0)
+            : 0;
+
+        return $wait > 0 ? min($wait, 5) * 1000 : 1200;
+    }
+
     private function request(): PendingRequest
     {
         $token = (string) config('services.telegram.bot_token');
@@ -395,7 +423,7 @@ class TelegramClient
             throw new RuntimeException('TELEGRAM_BOT_TOKEN is not configured.');
         }
         $request = Http::baseUrl("https://api.telegram.org/bot{$token}")
-            ->asJson()->acceptJson()->timeout(15)->connectTimeout(5)->retry(2, 1200);
+            ->asJson()->acceptJson()->timeout(15)->connectTimeout(5)->retry(2, $this->retryDelay(...), $this->retryable(...));
         if (PHP_OS_FAMILY === 'Windows' && defined('CURLSSLOPT_NATIVE_CA')) {
             $request->withOptions(['curl' => [CURLOPT_SSL_OPTIONS => CURLSSLOPT_NATIVE_CA]]);
         }
@@ -412,7 +440,7 @@ class TelegramClient
         }
 
         $request = Http::baseUrl('https://api.telegram.org/bot'.$token)
-            ->acceptJson()->timeout(30)->connectTimeout(5)->retry(2, 1200);
+            ->acceptJson()->timeout(30)->connectTimeout(5)->retry(2, $this->retryDelay(...), $this->retryable(...));
 
         if (PHP_OS_FAMILY === 'Windows' && defined('CURLSSLOPT_NATIVE_CA')) {
             $request->withOptions(['curl' => [CURLOPT_SSL_OPTIONS => CURLSSLOPT_NATIVE_CA]]);

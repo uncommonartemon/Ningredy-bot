@@ -129,11 +129,22 @@ class TelegramAssistantReplyDelivery
 
             return $sent ? 'sent' : 'skipped_stale';
         }
+        $data = (array) ($payload['response'] ?? []);
         if (! empty($payload['draft_id'])) {
             $draft = ProductDraft::find($payload['draft_id']);
             if ($draft && $draft->status === 'pending_review'
                 && (int) $draft->telegram_update_id === (int) ($payload['draft_generation'] ?? 0)
                 && app(DraftAccess::class)->belongsToContext($draft, $update)) {
+                // The card speaks for a plain research result. Any other reply
+                // carries what the card cannot show: the answer to a question
+                // asked with the search, or a catalog product it resembles.
+                if (($data['response_type'] ?? 'research_result') !== 'research_result'
+                    && trim((string) ($data['message'] ?? '')) !== '') {
+                    $this->sendText($telegram, $chat, (string) $data['message']);
+                    if (($data['response_type'] ?? '') === 'catalog_results' && ! empty($data['product_ids'])) {
+                        $cards->sendMany($telegram, $chat, $data['product_ids'], telegramUserId: $update->telegram_user_id);
+                    }
+                }
                 $presenter->sendReview($telegram, $chat, $draft, $footnote);
 
                 return 'sent';
@@ -168,12 +179,24 @@ class TelegramAssistantReplyDelivery
 
             return 'skipped_stale';
         }
-        $data = (array) ($payload['response'] ?? []);
-        $telegram->sendMessage($chat, (string) ($data['message'] ?? '').$footnote);
+        $this->sendText($telegram, $chat, (string) ($data['message'] ?? '').$footnote);
         if (($data['response_type'] ?? '') === 'catalog_results' && ! empty($data['product_ids'])) {
             $cards->sendMany($telegram, $chat, $data['product_ids'], telegramUserId: $update->telegram_user_id);
         }
 
         return 'sent';
+    }
+
+    /** Telegram cuts a message at 4096 characters; a long answer goes out in parts, split at line breaks. */
+    private function sendText(TelegramClient $telegram, string $chat, string $text): void
+    {
+        $text = trim($text) === '' ? 'Готово.' : $text;
+        while (mb_strlen($text) > 4000) {
+            $cut = mb_strrpos(mb_substr($text, 0, 4000), "\n");
+            $cut = $cut === false || $cut < 2000 ? 4000 : $cut;
+            $telegram->sendMessage($chat, mb_substr($text, 0, $cut));
+            $text = ltrim(mb_substr($text, $cut));
+        }
+        $telegram->sendMessage($chat, $text);
     }
 }
