@@ -136,6 +136,12 @@ final class RequestGuardian
         return true;
     }
 
+    /** The guardian already showed what this request found: its late end is not a cancellation. */
+    public static function delivered(int $updateId): bool
+    {
+        return filled(data_get(TelegramUpdate::query()->find($updateId)?->payload, '_guard_delivered_at'));
+    }
+
     public function draftFor(TelegramUpdate $update): ?ProductDraft
     {
         // An operator's continuation works on a draft of an earlier request.
@@ -217,8 +223,11 @@ final class RequestGuardian
             if ($showable) {
                 array_unshift($buttons, [['text' => '📦 Показать найденное', 'callback_data' => "guard:show:{$update->id}"]]);
             }
-            $this->telegram->sendMessage((string) $update->chat_id,
-                "⏳ Поиск идёт дольше обычного: шаг «{$step}» уже {$minutes} мин без продвижения."
+            // Past the time limit the step may be moving; the honest number is the total.
+            $slow = $silent < (int) config('services.request_guardian.stall_after_seconds', 360) && $overtime
+                ? '⏳ Поиск идёт уже '.intdiv($this->elapsedSeconds($update), 60)." мин — дольше обычного. Сейчас шаг «{$step}»."
+                : "⏳ Поиск идёт дольше обычного: шаг «{$step}» уже {$minutes} мин без продвижения.";
+            $this->telegram->sendMessage((string) $update->chat_id, $slow
                 .($showable ? ' Найденное сохранено.' : ''), ['inline_keyboard' => $buttons]);
             $this->record($update, $draft, 'stall_notice', 'completed', "Шаг «{$step}» молчит {$minutes} мин; оператор предупреждён.",
                 ['silent_minutes' => $minutes, 'over_time_limit' => $overtime, 'showable' => $showable, 'watcher' => $verdict]);
@@ -231,7 +240,9 @@ final class RequestGuardian
             return null;
         }
         if ($showable && $this->claim('deliver', $update)) {
-            $this->showFound($update, "⚠️ Поиск завис на шаге «{$step}» ({$minutes} мин без продвижения). Показываю, что уже найдено.");
+            $this->showFound($update, $silent < (int) config('services.request_guardian.hard_stall_after_seconds', 720)
+                ? '⏳ Поиск вышел за лимит времени ('.intdiv($this->elapsedSeconds($update), 60).' мин). Показываю, что уже найдено.'
+                : "⚠️ Поиск завис на шаге «{$step}» ({$minutes} мин без продвижения). Показываю, что уже найдено.");
 
             return 'hard_stall_shown_found';
         }

@@ -9,6 +9,7 @@ use App\Services\Ai\ProductSearchCancellation;
 use App\Services\Ai\ProductSearchCostBudget;
 use App\Services\Ai\ProductSearchTimeBudget;
 use App\Services\Products\ProductImageStorage;
+use App\Services\ProductSearch\Recovery\RequestGuardian;
 use App\Services\Telegram\DraftTelegramPresenter;
 use App\Services\Telegram\TelegramAssistantReplyDelivery;
 use App\Services\Telegram\TelegramClient;
@@ -212,7 +213,9 @@ class ContinueDraftGallerySearch implements ShouldBeUniqueUntilProcessing, Shoul
                     if ($terminalStatus !== 'cancelled') {
                         $updates->whereNull('cancel_requested_at')->where('status', '!=', 'cancelled');
                     }
-                    $updates->update(['status' => $terminalStatus, 'processed_at' => now()]);
+                    // A request the guardian already answered ended as shown (live #598).
+                    $updates->update(['status' => $terminalStatus === 'cancelled' && RequestGuardian::delivered($this->telegramUpdateId)
+                        ? 'completed' : $terminalStatus, 'processed_at' => now()]);
                 }
             }
         }

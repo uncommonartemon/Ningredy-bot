@@ -14,6 +14,7 @@ use App\Services\Ai\AiSettings;
 use App\Services\Ai\AiUsageReporter;
 use App\Services\Ai\ProductSearchCancellation;
 use App\Services\Ai\ProductSearchTimeBudget;
+use App\Services\ProductSearch\Recovery\RequestGuardian;
 use App\Services\ProductSearch\Recovery\SearchFailureSaver;
 use App\Services\Telegram\DraftAccess;
 use App\Services\Telegram\DraftTelegramPresenter;
@@ -443,10 +444,9 @@ class ProcessTelegramMessage implements ShouldQueue
             ->update(['status' => $this->guardianDelivered($update) ? 'completed' : 'cancelled', 'processed_at' => now()]);
     }
 
-    /** The request guardian already showed what this request found; its late end is not a cancellation. */
     private function guardianDelivered(TelegramUpdate $update): bool
     {
-        return filled(data_get(TelegramUpdate::query()->find($update->id)?->payload, '_guard_delivered_at'));
+        return RequestGuardian::delivered($update->id);
     }
 
     private function usageFootnote(int $telegramUpdateId, bool $includeSearchDuration = false): string

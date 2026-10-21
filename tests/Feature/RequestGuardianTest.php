@@ -192,6 +192,21 @@ class RequestGuardianTest extends TestCase
         $this->assertSentText('Показываю, что уже найдено, остальной поиск остановлен');
     }
 
+    public function test_past_the_time_limit_the_notice_names_the_total_and_the_saved_draft_follows(): void
+    {
+        // Live #598: one photo moving slowly 33 minutes in; "1 мин без продвижения" misread it.
+        [$update] = $this->stalledSearch(silentMinutes: 1, withDraft: true);
+        DB::table('ai_runs')->where('telegram_update_id', $update->id)->update(['created_at' => now()->subMinutes(33)]);
+        SearchProgressAgent::fake([['decision' => 'continue', 'reason' => 'Впереди источники.']])->preventStrayPrompts();
+
+        $this->sweep();
+        $this->assertSentText('Поиск идёт уже 33 мин');
+        $this->sweep();
+
+        $this->assertSentText('Поиск вышел за лимит времени (33 мин)');
+        $this->assertSame('completed', $update->fresh()->status);
+    }
+
     public function test_the_late_end_of_a_request_the_guardian_answered_is_not_reported_as_a_cancellation(): void
     {
         $update = $this->update('completed', 20);
