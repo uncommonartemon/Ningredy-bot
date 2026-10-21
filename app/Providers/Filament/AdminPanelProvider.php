@@ -33,9 +33,11 @@ class AdminPanelProvider extends PanelProvider
 {
     public function boot(): void
     {
+        // Operator decision 2026-10-21: 50 rows by default. "All" crashed the AI
+        // runs list (4,431 rows, 72 MB of HTML) and cannot scale with the catalog.
         Table::configureUsing(fn (Table $table): Table => $table
             ->paginationPageOptions([25, 50, 100, 'all'])
-            ->defaultPaginationPageOption('all')
+            ->defaultPaginationPageOption(50)
             ->persistRecordsPerPageInSession(false));
         // The product page's compact sections, everywhere in the panel.
         Section::configureUsing(fn (Section $section): Section => $section->compact());

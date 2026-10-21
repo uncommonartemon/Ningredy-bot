@@ -143,14 +143,14 @@ class AdminDatabaseBrowserTest extends TestCase
         $this->assertFalse(str_contains($html, 'known-private-token-123'));
     }
 
-    public function test_native_table_defaults_to_all_and_supports_real_filter_and_pagination(): void
+    public function test_native_table_opens_fifty_rows_and_supports_real_filter_and_pagination(): void
     {
         $this->admin();
         for ($i = 0; $i < 31; $i++) {
             DB::table('product_source_stats')->insert(['domain' => "fixture-$i.example", 'attempt_count' => 0]);
         }
         $page = Livewire::withQueryParams(['table' => 'product_source_stats'])->test(BrowserPage::class);
-        $this->assertSame('all', $page->instance()->getTableRecordsPerPage());
+        $this->assertSame(50, $page->instance()->getTableRecordsPerPage());
         $this->assertCount(31, $page->instance()->getTableRecords());
         $page->filterTable('field', ['column' => 'domain', 'value' => 'fixture-30.example']);
         $this->assertCount(1, $page->instance()->getTableRecords());

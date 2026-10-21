@@ -20,6 +20,8 @@ class TelegramUpdatesTable
     public static function configure(Table $table): Table
     {
         return $table
+            // A journal grows without bound: "all" rows no longer fit in memory.
+            ->paginationPageOptions([25, 50, 100])
             ->modifyQueryUsing(fn (Builder $query) => $query->withCount('productDrafts'))
             ->defaultSort('created_at', 'desc')
             ->columns([

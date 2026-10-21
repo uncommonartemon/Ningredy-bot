@@ -2,10 +2,14 @@
 
 namespace Tests\Feature;
 
+use App\Filament\Resources\AiOperations\AiOperationResource;
+use App\Filament\Resources\AiRuns\AiRunResource;
 use App\Filament\Resources\AttributeGroups\AttributeGroupResource;
 use App\Filament\Resources\Products\Pages\EditProduct;
 use App\Filament\Resources\Products\Pages\ListProducts;
 use App\Filament\Resources\Products\RelationManagers\MediaRelationManager;
+use App\Filament\Resources\ProductSourceAttempts\ProductSourceAttemptResource;
+use App\Filament\Resources\TelegramUpdates\TelegramUpdateResource;
 use App\Filament\Widgets\RecentSearchesWidget;
 use App\Models\AiRun;
 use App\Models\Category;
@@ -32,8 +36,10 @@ class AdminTablePaginationTest extends TestCase
         Filament::bootCurrentPanel();
     }
 
-    public function test_every_resource_list_uses_native_all_records_and_groups_stay_unpaginated(): void
+    public function test_every_resource_list_opens_fifty_rows_and_journals_offer_no_all_option(): void
     {
+        // Operator decision 2026-10-21: "all" crashed the AI runs list (4,431 rows).
+        $journals = [AiRunResource::class, ProductSourceAttemptResource::class, AiOperationResource::class, TelegramUpdateResource::class];
         $lists = 0;
 
         foreach (Filament::getPanel('admin')->getResources() as $resource) {
@@ -46,8 +52,8 @@ class AdminTablePaginationTest extends TestCase
 
                 $page = Livewire::test($pageClass)->assertSuccessful();
                 $table = $page->instance()->getTable();
-                $this->assertSame('all', $table->getDefaultPaginationPageOption(), $pageClass);
-                $this->assertSame([25, 50, 100, 'all'], $table->getPaginationPageOptions(), $pageClass);
+                $this->assertSame(50, $table->getDefaultPaginationPageOption(), $pageClass);
+                $this->assertSame(in_array($resource, $journals, true) ? [25, 50, 100] : [25, 50, 100, 'all'], $table->getPaginationPageOptions(), $pageClass);
                 $this->assertSame($resource !== AttributeGroupResource::class, $table->isPaginated(), $pageClass);
                 $lists++;
             }
@@ -56,7 +62,7 @@ class AdminTablePaginationTest extends TestCase
         $this->assertGreaterThan(10, $lists);
     }
 
-    public function test_all_products_show_despite_old_page_size_while_saved_filters_keep_working(): void
+    public function test_fifty_products_show_despite_an_old_page_size_while_saved_filters_keep_working(): void
     {
         $products = collect();
         $category = Category::where('slug', 'laptops')->sole();
@@ -72,17 +78,16 @@ class AdminTablePaginationTest extends TestCase
         session()->put($key, 15);
 
         $page = Livewire::test(ListProducts::class)
-            ->assertSet('tableRecordsPerPage', 'all')
+            ->assertSet('tableRecordsPerPage', 50)
             ->assertSet('tableFilters.status.value', 'draft')
-            ->assertCanSeeTableRecords($products)
             ->assertCanNotSeeTableRecords([$published]);
-        $this->assertCount(61, $page->instance()->getTableRecords());
-        $this->assertSame(1, $page->instance()->getTableRecords()->lastPage());
+        $this->assertCount(50, $page->instance()->getTableRecords());
+        $this->assertSame(2, $page->instance()->getTableRecords()->lastPage());
 
         $page->set('tableRecordsPerPage', 25);
         $this->assertCount(25, $page->instance()->getTableRecords());
 
-        Livewire::test(ListProducts::class)->assertSet('tableRecordsPerPage', 'all')
+        Livewire::test(ListProducts::class)->assertSet('tableRecordsPerPage', 50)
             ->assertSet('tableFilters.status.value', 'draft');
         $this->assertSame(['status' => ['value' => 'draft']], auth()->user()->fresh()->product_table_filters);
     }
@@ -100,7 +105,7 @@ class AdminTablePaginationTest extends TestCase
                 'specifications' => [], 'sources' => [], 'image_urls' => []]);
         }
 
-        $widget = Livewire::test(RecentSearchesWidget::class)->assertSet('tableRecordsPerPage', 'all');
+        $widget = Livewire::test(RecentSearchesWidget::class)->assertSet('tableRecordsPerPage', 50);
         $this->assertCount(31, $widget->instance()->getTableRecords());
 
         $product = Product::create(['title' => 'Media owner', 'category_id' => Category::where('slug', 'laptops')->sole()->id,
@@ -110,7 +115,7 @@ class AdminTablePaginationTest extends TestCase
         }
 
         $relation = Livewire::test(MediaRelationManager::class, ['ownerRecord' => $product, 'pageClass' => EditProduct::class])
-            ->assertSet('tableRecordsPerPage', 'all');
+            ->assertSet('tableRecordsPerPage', 50);
         $this->assertCount(31, $relation->instance()->getTableRecords());
     }
 }

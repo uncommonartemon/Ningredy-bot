@@ -123,7 +123,7 @@ class DatabaseBrowser extends LocalizedPage implements HasForms, HasTable
                     TextInput::make('value')->label(__('Значение')),
                 ])])
             ->persistFiltersInSession()
-            ->paginationPageOptions([25, 50, 100, 'all'])->defaultPaginationPageOption('all')
+            ->paginationPageOptions([25, 50, 100])->defaultPaginationPageOption(50)
             ->recordAction('inspect')
             ->recordActions([Action::make('inspect')->label(__('Открыть'))->icon(Heroicon::OutlinedEye)
                 ->slideOver()->modalWidth('7xl')->modalSubmitAction(false)->modalCancelActionLabel(__('Закрыть'))

@@ -15,6 +15,8 @@ class AiOperationsTable
     public static function configure(Table $table): Table
     {
         return $table
+            // A journal grows without bound: "all" rows no longer fit in memory.
+            ->paginationPageOptions([25, 50, 100])
             ->defaultSort('executed_at', 'desc')
             ->columns([
                 TextColumn::make('id')->label('#')->sortable(),

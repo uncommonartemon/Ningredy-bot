@@ -19,6 +19,8 @@ class AiRunsTable
     public static function configure(Table $table): Table
     {
         return $table
+            // A journal grows without bound: "all" rows no longer fit in memory.
+            ->paginationPageOptions([25, 50, 100])
             ->defaultSort('started_at', 'desc')
             ->poll(fn (): ?string => AiRun::query()->where('status', 'running')->exists() ? '15s' : null)
             ->columns([
