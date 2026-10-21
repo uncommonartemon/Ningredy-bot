@@ -121,8 +121,10 @@ class RequestGuardianTest extends TestCase
         // decision to stop is the agent's; the card is still the search's to assemble.
         [$update, $draft] = $this->runningSearch(silentMinutes: 1, withPhotos: false);
         $draft->update(['specifications_reconciled_source_url' => null]);
-        SearchProgressAgent::fake([['decision' => 'deliver_now', 'reason' => 'Ни одного фото, оставшиеся магазины такие же.', 'operator_note' => null]])
-            ->preventStrayPrompts();
+        SearchProgressAgent::fake([
+            ['decision' => 'deliver_now', 'reason' => 'Ни одного фото, оставшиеся магазины такие же.', 'operator_note' => null],
+            ['decision' => 'show_now', 'reason' => 'Карточка так и не собралась за шесть минут.', 'operator_note' => null],
+        ])->preventStrayPrompts();
 
         $this->sweep();
 
@@ -135,7 +137,8 @@ class RequestGuardianTest extends TestCase
         $this->sweep();
 
         $this->assertSame('completed', $update->fresh()->status);
-        $this->assertSentText('Поиск остановлен, но не успел собрать карточку');
+        // Still running minutes later: the watcher decides again (live #650 was cut mid-assembly).
+        $this->assertSentText('Карточка так и не собралась за шесть минут');
         $this->assertSentText('Фото не найдены, характеристики сохранены');
     }
 

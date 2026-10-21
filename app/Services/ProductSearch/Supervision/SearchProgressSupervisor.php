@@ -71,7 +71,8 @@ final class SearchProgressSupervisor
         if (! $updateId || $draft === null) {
             return $continue;
         }
-        if (($deliver = $this->deliverNowReason($updateId)) !== null) {
+        // The search obeys a standing verdict; a look from outside is always a fresh decision.
+        if (! $fromOutside && ($deliver = $this->deliverNowReason($updateId)) !== null) {
             return ['decision' => 'deliver_now', 'reason' => $deliver];
         }
         try {

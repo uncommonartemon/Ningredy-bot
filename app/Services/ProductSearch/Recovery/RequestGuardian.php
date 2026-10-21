@@ -174,13 +174,14 @@ final class RequestGuardian
         if ($this->elapsedSeconds($update) > $this->settings->searchMaxSeconds() - 120) {
             return $this->handleOvertime($update);
         }
-        // The watcher told the search to wrap up; card assembly gets the minutes it
-        // takes before the guardian shows what exists instead.
+        // The watcher told the search to wrap up. If it is still running minutes
+        // later, the watcher decides again whether to show what exists now or let
+        // the card finish: live #650 was cut while its card was being assembled.
         $wrapUp = (int) Cache::get('request-guard:wrap-up:'.$update->id, 0);
-        if ($wrapUp > 0 && now()->timestamp - $wrapUp > 300 && $this->draftFor($update) !== null && $this->claim('deliver', $update)) {
-            $this->showFound($update, '⏳ Поиск остановлен, но не успел собрать карточку. Показываю, что уже найдено.');
-
-            return 'wrap_up_overdue_shown_found';
+        if ($wrapUp > 0 && now()->timestamp - $wrapUp > 300) {
+            return Cache::add('request-guard:review:'.$update->id, true, now()->addSeconds($this->reviewInterval()))
+                ? $this->wakeTheWatcher($update, $silent, ['wrap_up_requested_minutes_ago' => intdiv(now()->timestamp - $wrapUp, 60)])
+                : null;
         }
         if ($wrapUp > 0 || (int) Cache::get('request-guard:wait:'.$update->id, 0) > now()->timestamp
             // A search reaching its own checkpoints already calls the watcher itself.
@@ -199,7 +200,7 @@ final class RequestGuardian
     }
 
     /** The watcher reads the journal and decides; the guardian only carries the decision out. */
-    private function wakeTheWatcher(TelegramUpdate $update, int $silent): ?string
+    private function wakeTheWatcher(TelegramUpdate $update, int $silent, array $extra = []): ?string
     {
         // The watcher's journal starts with the draft; before it, only the budget applies.
         $draft = $this->draftFor($update);
@@ -208,7 +209,7 @@ final class RequestGuardian
         }
         $verdict = $this->supervisor->review($update->id, $draft, [
             'kind' => 'outside_check', 'minutes_since_last_step' => intdiv($silent, 60),
-            'operator_already_told' => Cache::has('request-guard:note:'.$update->id),
+            'operator_already_told' => Cache::has('request-guard:note:'.$update->id), ...$extra,
         ], fromOutside: true);
 
         if ($verdict['decision'] === 'show_now' && $this->claim('deliver', $update)) {
