@@ -67,7 +67,44 @@ class ProductSpecificationEvidenceGuard
             }
         }
 
+        $result = $this->listSourcesNamedInReason($input, $result, $observedFacts);
         $this->validate($input, $result, $observedFacts, $observedPages, $inputEvidence, $operatorRequest);
+
+        return $result;
+    }
+
+    /**
+     * A disagreement is reviewed when the reason speaks of the other source - its
+     * site or the value it gave. Then its URL is copied into considered_source_urls
+     * for the agent: in 79 of 124 rejected assemblies over 30 days the reason was
+     * written and only that list was short. A source the reason never mentions
+     * stays unreviewed, and validate() refuses it as before.
+     */
+    private function listSourcesNamedInReason(array $input, array $result, array $observedFacts): array
+    {
+        $facts = collect([...$input, ...$observedFacts])->filter(fn ($fact) => $this->isCitedFact($fact));
+        foreach ($result as $index => $item) {
+            $reason = $this->text((string) ($item['reason'] ?? ''));
+            if (! is_array($item) || $reason === '') {
+                continue;
+            }
+            $named = $facts->where('key', $item['key'] ?? null)
+                ->filter(function (array $fact) use ($reason): bool {
+                    $host = ProductSourcePriority::host((string) $fact['source_url']);
+                    $value = $this->text((string) ($fact['value'] ?? ''));
+
+                    // A whole value, not a fragment: "no" must not be found in "not".
+                    return ($host !== '' && str_contains($reason, $this->text($host)))
+                        || (mb_strlen($value) >= 3
+                            && preg_match('/(?<![\p{L}\p{N}])'.preg_quote($value, '/').'(?![\p{L}\p{N}])/u', $reason) === 1);
+                })
+                ->pluck('source_url')->all();
+            if ($named !== []) {
+                $result[$index]['considered_source_urls'] = array_values(array_unique([
+                    ...(array) ($item['considered_source_urls'] ?? []), ...$named,
+                ]));
+            }
+        }
 
         return $result;
     }

@@ -308,6 +308,32 @@ class ProductSpecificationEvidenceGuardTest extends TestCase
             'reason' => 'The original value is retained.']], [$other], []);
     }
 
+    public function test_a_reason_that_names_the_other_source_or_its_value_counts_as_its_review(): void
+    {
+        // 79 of 124 rejected assemblies in 30 days had a written reason and only a short URL list.
+        $fact = $this->fact();
+        $other = $this->fact(['value' => '48 GB', 'source_url' => 'https://shop.example/product', 'source_excerpt' => 'RAM: 48 GB']);
+        $guard = new ProductSpecificationEvidenceGuard;
+
+        foreach (['shop.example lists 48 GB for a different bundle; the maker page is kept.',
+            'The other offer says 48 GB, which is the upgraded bundle; the original value is retained.'] as $reason) {
+            $card = $guard->normalizeAndValidate([$fact], [[...$fact, 'evidence' => 'corrected', 'reason' => $reason]], [$other], []);
+            $this->assertContains('https://shop.example/product', $card[0]['considered_source_urls']);
+        }
+    }
+
+    public function test_a_value_is_named_only_as_a_whole_word(): void
+    {
+        $fact = $this->fact(['key' => 'webcam_present', 'name' => 'Webcam', 'value' => 'Yes', 'source_excerpt' => 'Webcam: Yes']);
+        $other = $this->fact(['key' => 'webcam_present', 'name' => 'Webcam', 'value' => 'Non',
+            'source_url' => 'https://shop.example/product', 'source_excerpt' => 'Webcam: Non']);
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('Missing source URLs: https://shop.example/product.');
+
+        (new ProductSpecificationEvidenceGuard)->normalizeAndValidate([$fact], [[...$fact, 'evidence' => 'corrected',
+            'reason' => 'Nonetheless the maker page is kept.']], [$other], []);
+    }
+
     public function test_even_an_old_cited_value_needs_its_full_literal_value_in_the_quote_for_status_repair(): void
     {
         $fact = $this->fact(['value' => 'Wi-Fi 6E', 'source_excerpt' => 'Wireless: Wi-Fi']);
