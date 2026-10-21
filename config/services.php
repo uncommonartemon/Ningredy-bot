@@ -136,6 +136,7 @@ return [
         'stall_after_seconds' => (int) env('REQUEST_GUARDIAN_STALL_AFTER', 360),
         'hard_stall_after_seconds' => (int) env('REQUEST_GUARDIAN_HARD_STALL_AFTER', 720),
         'abandoned_after_seconds' => (int) env('REQUEST_GUARDIAN_ABANDONED_AFTER', 180),
+        'no_photo_after_seconds' => (int) env('REQUEST_GUARDIAN_NO_PHOTO_AFTER', 600),
         'outside_review_timeout' => (int) env('REQUEST_GUARDIAN_REVIEW_TIMEOUT', 30),
     ],
 

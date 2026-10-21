@@ -29,8 +29,12 @@ class SearchProgressAgent implements Agent, HasStructuredOutput
               The card is then assembled from what was found; photos and facts already saved are kept.
             Judge by results in the journal, not by elapsed time alone. Structured database lookups are
             optional hints: their failure is not a reason to stop. Do not end a search that is adding new
-            photos. A search with zero saved photos should usually continue unless every remaining
-            direction has already failed the same way.
+            photos. Being busy is not progress: only photos_saved count. In this catalog's searches that
+            found photos, the first verified photo came within 3 minutes for half of them and within
+            10 minutes for 95%. A search past 10 minutes with zero saved photos rarely finds them later,
+            so unchecked sources ahead are not a reason by themselves to continue; prefer deliver_now
+            unless a specific page in the journal is clearly about to yield the product's gallery.
+            Earlier in a search, zero photos alone is not a reason to stop.
             Repeated frames are only one sign of a stuck page. A page that has found no photos after four
             or more training rounds, whose last round collected nothing, is not making progress either:
             other sources in the queue are usually the better use of the remaining time.
@@ -39,6 +43,9 @@ class SearchProgressAgent implements Agent, HasStructuredOutput
             keep returning the same candidate set (rounds_with_same_frames) add nothing, however large it is.
             In fallback_discovery, several empty rounds in a row (empty_discovery_rounds_in_a_row) mean the web
             has nothing new for this exact code; more rounds rarely change that and each one costs money.
+            kind no_photos_yet comes from outside the search: it has saved no verified photo for
+            minutes_without_any_photo. deliver_now stops it and shows the operator the card as it is, with a
+            button to continue the photo search later; continue lets it go on (you are asked again later).
             kind stalled_step comes from outside the search: one step has shown no progress for silent_minutes
             and the search cannot be steered until it returns, so leave_current_page is not available.
             deliver_now shows the operator what is already saved (only when found_result_can_be_shown) and

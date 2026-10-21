@@ -192,19 +192,62 @@ class RequestGuardianTest extends TestCase
         $this->assertSentText('Показываю, что уже найдено, остальной поиск остановлен');
     }
 
-    public function test_past_the_time_limit_the_notice_names_the_total_and_the_saved_draft_follows(): void
+    public function test_near_the_time_limit_the_operator_gets_what_exists_and_what_it_allows(): void
     {
-        // Live #598: one photo moving slowly 33 minutes in; "1 мин без продвижения" misread it.
+        // Live #598 and #611 searched into the 33rd minute; an answer belongs inside 30.
         [$update] = $this->stalledSearch(silentMinutes: 1, withDraft: true);
-        DB::table('ai_runs')->where('telegram_update_id', $update->id)->update(['created_at' => now()->subMinutes(33)]);
-        SearchProgressAgent::fake([['decision' => 'continue', 'reason' => 'Впереди источники.']])->preventStrayPrompts();
+        DB::table('ai_runs')->where('telegram_update_id', $update->id)->update(['created_at' => now()->subMinutes(29)]);
+        SearchProgressAgent::fake()->preventStrayPrompts();
 
         $this->sweep();
-        $this->assertSentText('Поиск идёт уже 33 мин');
-        $this->sweep();
 
-        $this->assertSentText('Поиск вышел за лимит времени (33 мин)');
+        $this->assertSentText('Поиск подходит к лимиту времени (29 мин)');
+        $this->assertSentText('Сохранено фото: 1. Можно добавить в каталог');
         $this->assertSame('completed', $update->fresh()->status);
+    }
+
+    public function test_near_the_time_limit_without_a_card_the_operator_is_told_once_and_can_cancel(): void
+    {
+        [$update] = $this->stalledSearch(silentMinutes: 1, withDraft: false);
+        DB::table('ai_runs')->where('telegram_update_id', $update->id)->update(['created_at' => now()->subMinutes(29)]);
+        SearchProgressAgent::fake()->preventStrayPrompts();
+
+        $this->sweep();
+        $this->sweep();
+
+        $this->assertCount(1, Http::recorded(fn (Request $request): bool => str_contains((string) ($request['text'] ?? ''), 'карточка товара ещё не найдена')));
+        $this->assertNull($update->fresh()->processed_at);
+    }
+
+    public function test_a_busy_search_without_any_photo_is_judged_by_the_watcher_not_by_a_timer(): void
+    {
+        // Live #611: new pages every minute, no photo in 33 minutes, never "silent".
+        [$update, $draft] = $this->stalledSearch(silentMinutes: 1, withDraft: true, withPhotos: false);
+        $draft->update(['specifications_reconciled_source_url' => null]);
+        $prompts = [];
+        SearchProgressAgent::fake(function (string $prompt) use (&$prompts): array {
+            $prompts[] = json_decode($prompt, true);
+
+            return count($prompts) === 1
+                ? ['decision' => 'continue', 'reason' => 'Следующий магазин похож на нужную галерею.']
+                : ['decision' => 'deliver_now', 'reason' => 'Ни одного фото, а оставшиеся магазины такие же.'];
+        })->preventStrayPrompts();
+
+        $this->sweep();
+        $this->sweep();
+
+        $this->assertCount(1, $prompts);
+        $this->assertSame('no_photos_yet', $prompts[0]['current_activity']['kind']);
+        $this->assertNull($update->fresh()->processed_at);
+
+        $this->travel(6)->minutes();
+        DB::table('telegram_updates')->where('id', $update->id)->update(['updated_at' => now()->subMinute()]);
+        $this->sweep();
+
+        $this->assertCount(2, $prompts);
+        $this->assertSame('completed', $update->fresh()->status);
+        $this->assertSentText('Подходящих фото за');
+        $this->assertSentText('Фото не найдены, характеристики сохранены');
     }
 
     public function test_the_late_end_of_a_request_the_guardian_answered_is_not_reported_as_a_cancellation(): void
@@ -230,7 +273,7 @@ class RequestGuardianTest extends TestCase
     }
 
     /** @return array{TelegramUpdate, ?ProductDraft} */
-    private function stalledSearch(int $silentMinutes, bool $withDraft): array
+    private function stalledSearch(int $silentMinutes, bool $withDraft, bool $withPhotos = true): array
     {
         $update = $this->update('processing', 12, activityMinutesAgo: $silentMinutes);
         $this->job($update, reservedMinutesAgo: 12, createdMinutesAgo: 12);
@@ -245,7 +288,7 @@ class RequestGuardianTest extends TestCase
                 'specifications' => [], 'sources' => [], 'image_urls' => []]);
             $path = "drafts/{$draft->id}/1.jpg";
             Storage::disk('public')->put($path, 'photo');
-            $draft->media()->create(['disk' => 'public', 'path' => $path, 'checksum' => hash('sha256', 'photo'),
+            $withPhotos && $draft->media()->create(['disk' => 'public', 'path' => $path, 'checksum' => hash('sha256', 'photo'),
                 'width' => 1200, 'height' => 900, 'verification_status' => 'verified', 'is_primary' => true, 'sort_order' => 1]);
         }
 

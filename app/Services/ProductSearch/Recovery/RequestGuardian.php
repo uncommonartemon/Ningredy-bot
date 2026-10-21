@@ -128,7 +128,12 @@ final class RequestGuardian
             $draft->forceFill(['gallery_search_stop_reason' => 'stalled'])->save();
         }
         $chat = (string) $update->chat_id;
-        $this->telegram->sendMessage($chat, $intro.' Можно добавить в каталог, продолжить поиск или исправить.');
+        $photos = count($draft->verifiedPhotoPaths());
+        $this->telegram->sendMessage($chat, $intro.' '.match (true) {
+            $photos === 0 => 'Фото не найдены, характеристики сохранены. Продолжить поиск фото можно кнопкой под карточкой.',
+            $draft->reconciliationPending() => "Сохранено фото: {$photos}, характеристики не сверены. Можно принять как есть, продолжить поиск или исправить.",
+            default => "Сохранено фото: {$photos}. Можно добавить в каталог, продолжить поиск или исправить.",
+        });
         $this->presenter->sendReview($this->telegram, $chat, $draft->fresh('media'));
         TelegramUpdate::query()->whereKey($update->id)->update(['status' => 'completed', 'processed_at' => now()]);
         $this->record($update, $draft, 'show_found', 'completed', $intro, ['photos' => $draft->media()->count()]);
@@ -186,16 +191,67 @@ final class RequestGuardian
         if ($job['reserved_at'] === null) {
             return null;
         }
-        $overtime = $this->elapsedSeconds($update) > $this->settings->searchMaxSeconds() + 120;
-        if (($silent < (int) config('services.request_guardian.stall_after_seconds', 360) && ! $overtime)
+        // A search past its limit is an acceptance failure (PROJECT_STRATEGY.md):
+        // two minutes before it, the operator gets what exists. Live #598 and #611
+        // kept searching for photos into the 33rd minute through continuation slices.
+        if ($this->elapsedSeconds($update) > $this->settings->searchMaxSeconds() - 120) {
+            return $this->handleOvertime($update);
+        }
+        // Busy is not progress: live #611 opened page after page for 33 minutes and
+        // saved nothing, and the in-search watcher is reached only at checkpoints.
+        // Past the minute by which nearly every successful search had its first
+        // photo, the watcher is asked from outside; the decision stays its own.
+        if ($this->elapsedSeconds($update) > (int) config('services.request_guardian.no_photo_after_seconds', 600)
+            && ($draft = $this->draftFor($update)) !== null && $draft->verifiedPhotoPaths() === []
+            // Already told to wrap up: the search delivers its own card.
+            && $this->supervisor->deliverNowReason($update->id) === null
+            && Cache::add('request-guard:no-photo-review:'.$update->id, true, now()->addMinutes(5))) {
+            return $this->askAboutNoPhotos($update, $draft);
+        }
+        if ($silent < (int) config('services.request_guardian.stall_after_seconds', 360)
             || (int) Cache::get('request-guard:wait:'.$update->id, 0) > now()->timestamp) {
             return null;
         }
 
-        return $this->handleStall($update, $silent, $overtime);
+        return $this->handleStall($update, $silent);
     }
 
-    private function handleStall(TelegramUpdate $update, int $silent, bool $overtime): ?string
+    private function askAboutNoPhotos(TelegramUpdate $update, ProductDraft $draft): ?string
+    {
+        $verdict = $this->supervisor->review($update->id, $draft, [
+            'kind' => 'no_photos_yet', 'step' => $this->currentStep($update),
+            'minutes_without_any_photo' => intdiv($this->elapsedSeconds($update), 60),
+        ], fromOutside: true);
+        if ($verdict['decision'] !== 'deliver_now' || ! $this->claim('deliver', $update)) {
+            return null;
+        }
+        $this->showFound($update, '⏳ Подходящих фото за '.intdiv($this->elapsedSeconds($update), 60).' мин не найдено, поиск остановлен.'
+            .(filled($verdict['reason']) ? "\n".$verdict['reason'] : ''));
+
+        return 'no_photo_shown_found';
+    }
+
+    private function handleOvertime(TelegramUpdate $update): ?string
+    {
+        $minutes = intdiv($this->elapsedSeconds($update), 60);
+        // Even a card without photos is an answer with a "continue" button; silence is not.
+        if ($this->draftFor($update) !== null && $this->claim('deliver', $update)) {
+            $this->showFound($update, "⏳ Поиск подходит к лимиту времени ({$minutes} мин). Показываю, что уже найдено.");
+
+            return 'overtime_shown_found';
+        }
+        if ($this->draftFor($update) !== null || ! $this->claim('overtime_notice', $update)) {
+            return null;
+        }
+        $this->telegram->sendMessage((string) $update->chat_id,
+            "⏳ Поиск идёт уже {$minutes} мин, а карточка товара ещё не найдена. Можно подождать или отменить.",
+            ['inline_keyboard' => [[['text' => '✖ Отменить поиск', 'callback_data' => "search:cancel:{$update->id}"]]]]);
+        $this->record($update, null, 'overtime_notice', 'completed', "Поиск идёт {$minutes} мин без карточки; оператор предупреждён.", ['elapsed_minutes' => $minutes]);
+
+        return 'overtime_notice';
+    }
+
+    private function handleStall(TelegramUpdate $update, int $silent): ?string
     {
         $draft = $this->draftFor($update);
         // Stopping a search early is worth it only for something to show.
@@ -207,7 +263,7 @@ final class RequestGuardian
             $verdict = $draft === null ? ['decision' => 'continue', 'reason' => null]
                 : $this->supervisor->review($update->id, $draft, [
                     'kind' => 'stalled_step', 'step' => $step, 'silent_minutes' => $minutes,
-                    'over_time_limit' => $overtime, 'found_result_can_be_shown' => $showable,
+                    'found_result_can_be_shown' => $showable,
                 ], fromOutside: true);
             if ($verdict['decision'] === 'deliver_now' && $showable && $this->claim('deliver', $update)) {
                 $this->showFound($update, "⚠️ Поиск застрял на шаге «{$step}». Показываю, что уже найдено."
@@ -223,26 +279,21 @@ final class RequestGuardian
             if ($showable) {
                 array_unshift($buttons, [['text' => '📦 Показать найденное', 'callback_data' => "guard:show:{$update->id}"]]);
             }
-            // Past the time limit the step may be moving; the honest number is the total.
-            $slow = $silent < (int) config('services.request_guardian.stall_after_seconds', 360) && $overtime
-                ? '⏳ Поиск идёт уже '.intdiv($this->elapsedSeconds($update), 60)." мин — дольше обычного. Сейчас шаг «{$step}»."
-                : "⏳ Поиск идёт дольше обычного: шаг «{$step}» уже {$minutes} мин без продвижения.";
-            $this->telegram->sendMessage((string) $update->chat_id, $slow
-                .($showable ? ' Найденное сохранено.' : ''), ['inline_keyboard' => $buttons]);
+            $this->telegram->sendMessage((string) $update->chat_id,
+                "⏳ Поиск идёт дольше обычного: шаг «{$step}» уже {$minutes} мин без продвижения."
+                .($draft !== null && $draft->verifiedPhotoPaths() !== [] ? ' Сохранено фото: '.count($draft->verifiedPhotoPaths()).'.' : ''), ['inline_keyboard' => $buttons]);
             $this->record($update, $draft, 'stall_notice', 'completed', "Шаг «{$step}» молчит {$minutes} мин; оператор предупреждён.",
-                ['silent_minutes' => $minutes, 'over_time_limit' => $overtime, 'showable' => $showable, 'watcher' => $verdict]);
+                ['silent_minutes' => $minutes, 'showable' => $showable, 'watcher' => $verdict]);
 
             return 'stall_notice';
         }
 
-        if (($silent < (int) config('services.request_guardian.hard_stall_after_seconds', 720) && ! $overtime)
+        if ($silent < (int) config('services.request_guardian.hard_stall_after_seconds', 720)
             || ! $this->claim('hard_stall', $update)) {
             return null;
         }
         if ($showable && $this->claim('deliver', $update)) {
-            $this->showFound($update, $silent < (int) config('services.request_guardian.hard_stall_after_seconds', 720)
-                ? '⏳ Поиск вышел за лимит времени ('.intdiv($this->elapsedSeconds($update), 60).' мин). Показываю, что уже найдено.'
-                : "⚠️ Поиск завис на шаге «{$step}» ({$minutes} мин без продвижения). Показываю, что уже найдено.");
+            $this->showFound($update, "⚠️ Поиск завис на шаге «{$step}» ({$minutes} мин без продвижения). Показываю, что уже найдено.");
 
             return 'hard_stall_shown_found';
         }
