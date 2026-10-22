@@ -49,9 +49,10 @@ return [
         // Bounds a whole download pass only when it runs outside any search;
         // inside one, the search's own time budget does.
         'download_wall_clock_cap_seconds' => 90,
-        // Photos fetched side by side. Each one is held in memory until it is
-        // checked, so this times image_max_bytes is the worst case at once.
-        'download_concurrency' => (int) env('PRODUCT_IMAGE_DOWNLOAD_CONCURRENCY', 4),
+        // Photos fetched side by side. 0 works it out from the worker's free
+        // memory (see ProductImageResolver::concurrentDownloads()); a number
+        // here overrides that.
+        'download_concurrency' => (int) env('PRODUCT_IMAGE_DOWNLOAD_CONCURRENCY', 0),
     ],
 
     // How many source pages one resolve pass may open, how many image URLs a

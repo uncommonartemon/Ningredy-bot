@@ -3478,7 +3478,6 @@ class ProductImageStorage
         $downloadDeadline = microtime(true) + ($searchSecondsLeft !== null
             ? max((int) config('product-images.http.image_timeout', 25), $searchSecondsLeft)
             : (float) config('product-images.http.download_wall_clock_cap_seconds', 90));
-        $concurrency = max(1, (int) config('product-images.http.download_concurrency', 4));
         $downloaded = [];
 
         foreach ($urls as $originalUrl) {
@@ -3551,6 +3550,8 @@ class ProductImageStorage
         // retained pixels turns that into a partial gallery instead.
         $decodedPixelBudget = max(1_000_000, (int) config('product-images.decoded_pixel_budget', 60_000_000));
         $decodedPixels = 0;
+        // Room left beside the decoded frames this pass may keep, four bytes a pixel.
+        $concurrency = ProductImageResolver::concurrentDownloads($decodedPixelBudget * 4);
 
         foreach ($urls as $position => $url) {
             if (count($candidates) >= $effectiveLimit) {

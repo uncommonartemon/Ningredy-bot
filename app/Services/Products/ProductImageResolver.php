@@ -831,6 +831,29 @@ class ProductImageResolver
         return $results;
     }
 
+    /**
+     * How many photos one downloadMany() call may take. Bandwidth is not what
+     * limits it - ten Icecat originals side by side took about as long as four
+     * - memory is: each photo is held whole until it is checked, so this is
+     * what the worker's free memory holds at the largest allowed photo, after
+     * the $reservedBytes the caller still needs for itself.
+     */
+    public static function concurrentDownloads(int $reservedBytes = 0): int
+    {
+        if (($configured = (int) config('product-images.http.download_concurrency', 0)) > 0) {
+            return $configured;
+        }
+        $raw = strtolower(trim((string) ini_get('memory_limit')));
+        $limit = (int) $raw * match (substr($raw, -1)) {
+            'g' => 1024 ** 3, 'm' => 1024 ** 2, 'k' => 1024, default => 1,
+        };
+        $perPhoto = max(1, (int) config('product-images.http.image_max_bytes', 26_214_400));
+        $fits = $limit <= 0 ? PHP_INT_MAX : intdiv(max(0, $limit - memory_get_usage(true) - $reservedBytes), $perPhoto);
+
+        // A pass never needs more at once than the candidates it takes.
+        return max(1, min((int) config('product-images.download_candidates', 10), $fits));
+    }
+
     private function alreadyDownloaded(string $url, ?string $refererUrl, int $maxBytes): ?array
     {
         if ($download = $this->galleryDownloads->get($url, $refererUrl, $maxBytes)) {

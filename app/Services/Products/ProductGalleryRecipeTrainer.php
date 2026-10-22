@@ -228,7 +228,7 @@ class ProductGalleryRecipeTrainer
                 if (microtime(true) >= $deadline || ! $this->timeBudget->canStart($telegramUpdateId, 1)) {
                     break;
                 }
-                $batch = $sample->slice($position, max(1, (int) config('product-images.http.download_concurrency', 4)))->all();
+                $batch = $sample->slice($position, ProductImageResolver::concurrentDownloads())->all();
                 $downloads = $this->resolver->downloadMany($batch, array_fill_keys($batch, $pageUrl));
             }
             $measured++;
