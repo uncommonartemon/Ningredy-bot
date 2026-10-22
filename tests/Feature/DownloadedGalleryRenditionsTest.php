@@ -34,6 +34,7 @@ class DownloadedGalleryRenditionsTest extends TestCase
                 'width' => imagesx($image), 'height' => imagesy($image), 'confirmed_gallery' => true];
         }
         $resolver = $this->mock(ProductImageResolver::class);
+        $this->downloadManyThroughDownload($resolver);
         $resolver->shouldReceive('download')->twice()->andReturnUsing(fn (string $url) => $downloads[$url]);
         $resolver->shouldReceive('isConfirmedGalleryImage')->andReturn(true);
         $resolver->shouldReceive('isPartialGalleryImage')->andReturn(false);

@@ -46,12 +46,12 @@ return [
         // photos to the page limits and searched twenty minutes for others.
         'image_timeout' => (int) env('PRODUCT_IMAGE_DOWNLOAD_TIMEOUT', 25),
         'image_max_bytes' => (int) env('PRODUCT_IMAGE_DOWNLOAD_MAX_BYTES', 26_214_400),
-        // Bounds the WHOLE download_candidates loop for one source, not a
-        // single request - each request above is already capped, but many
-        // slow-but-not-instantly-failing URLs in sequence can still add up
-        // past any reasonable per-source budget with no single request ever
-        // failing outright to point to.
+        // Bounds a whole download pass only when it runs outside any search;
+        // inside one, the search's own time budget does.
         'download_wall_clock_cap_seconds' => 90,
+        // Photos fetched side by side. Each one is held in memory until it is
+        // checked, so this times image_max_bytes is the worst case at once.
+        'download_concurrency' => (int) env('PRODUCT_IMAGE_DOWNLOAD_CONCURRENCY', 4),
     ],
 
     // How many source pages one resolve pass may open, how many image URLs a

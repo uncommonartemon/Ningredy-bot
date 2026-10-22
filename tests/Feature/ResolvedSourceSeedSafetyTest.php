@@ -152,6 +152,7 @@ class ResolvedSourceSeedSafetyTest extends TestCase
         // Returning null keeps this a candidate-admission test, not a fake
         // proof of image quality or publication of an uncertain product.
         // Top-up visits its gallery once; stage also considers the draft seed.
+        $this->downloadManyThroughDownload($resolver);
         $resolver->shouldReceive('download')->times($entryPoint === 'stage' ? 2 : 1)
             ->andReturnUsing(function (string $url) use (&$downloaded): ?array {
                 $downloaded[] = $url;

@@ -702,7 +702,7 @@ class ProductImageStorage
             ]);
 
             try {
-                $allCandidates = $this->downloadCandidates($urls, $draft);
+                $allCandidates = $this->downloadCandidates($urls, $draft, $telegramUpdateId);
             } catch (Throwable $exception) {
                 $this->attempts->record([
                     'telegram_update_id' => $telegramUpdateId,
@@ -2956,7 +2956,7 @@ class ProductImageStorage
                 ...($source['image_urls'] ?? []),
                 ...$resolvedUrls,
             ]), $existingUrls));
-            $candidates = $this->downloadCandidates($urls, $draft);
+            $candidates = $this->downloadCandidates($urls, $draft, $telegramUpdateId);
 
             if ($candidates === []) {
                 continue;
@@ -3140,7 +3140,7 @@ class ProductImageStorage
                 ...($source['image_urls'] ?? []),
                 ...$resolvedUrls,
             ]), $knownUrls));
-            $candidates = $this->downloadCandidates($urls, $draft);
+            $candidates = $this->downloadCandidates($urls, $draft, $telegramUpdateId);
 
             if ($candidates === []) {
                 continue;
@@ -3457,7 +3457,7 @@ class ProductImageStorage
         return $this->imageGeometry->downscaleForWork($image);
     }
 
-    private function downloadCandidates(array $urls, ProductDraft $draft): array
+    private function downloadCandidates(array $urls, ProductDraft $draft, ?int $telegramUpdateId = null): array
     {
         $candidates = [];
         $checksums = [];
@@ -3467,11 +3467,19 @@ class ProductImageStorage
         $this->lastDownloadRejections = [];
         // Each request below already has its own connect/read timeout, but a
         // long run of slow-yet-not-instantly-failing URLs from one source can
-        // still add up past any reasonable budget with no single failure to
-        // point to - observed live on 2026-09-01 (Dell XPS 13 search): a
-        // worker held this loop open for 9+ minutes downloading one source's
-        // confirmed frames. This bounds the whole loop, not one request.
-        $downloadDeadline = microtime(true) + (float) config('product-images.http.download_wall_clock_cap_seconds', 90);
+        // still add up with no single failure to point to - observed live on
+        // 2026-09-01 (Dell XPS 13 search): a worker held this loop open for 9+
+        // minutes. Inside a search its own time budget bounds the loop, and the
+        // request guardian and the search watcher look at it from outside; a
+        // fixed 90 s cut whole galleries short instead (live #661: Icecat's
+        // 10 MB originals, four of ten frames kept). Only a download outside
+        // any search keeps the fixed cap.
+        $searchSecondsLeft = $this->timeBudget->remainingWorkingSeconds($telegramUpdateId);
+        $downloadDeadline = microtime(true) + ($searchSecondsLeft !== null
+            ? max((int) config('product-images.http.image_timeout', 25), $searchSecondsLeft)
+            : (float) config('product-images.http.download_wall_clock_cap_seconds', 90));
+        $concurrency = max(1, (int) config('product-images.http.download_concurrency', 4));
+        $downloaded = [];
 
         foreach ($urls as $originalUrl) {
             if (! is_string($originalUrl)) {
@@ -3517,6 +3525,7 @@ class ProductImageStorage
                 ?: ($left['index'] <=> $right['index'])
             )
             ->pluck('url')
+            ->values()
             ->all();
 
         // download_candidates bounds unverified scraping work; it must never
@@ -3543,27 +3552,41 @@ class ProductImageStorage
         $decodedPixelBudget = max(1_000_000, (int) config('product-images.decoded_pixel_budget', 60_000_000));
         $decodedPixels = 0;
 
-        foreach ($urls as $url) {
+        foreach ($urls as $position => $url) {
             if (count($candidates) >= $effectiveLimit) {
                 break;
             }
 
-            if (
-                ! $this->resolver->isConfirmedGalleryImage($url)
-                && $confirmedDownloads >= $confirmedStopThreshold
-            ) {
+            $confirmed = $this->resolver->isConfirmedGalleryImage($url);
+            if (! $confirmed && $confirmedDownloads >= $confirmedStopThreshold) {
                 break;
             }
 
-            if (microtime(true) >= $downloadDeadline) {
-                $this->lastDownloadRejections[] = ['url' => $url, 'reason' => 'download_wall_clock_budget_exceeded'];
+            if (! array_key_exists($url, $downloaded)) {
+                if (microtime(true) >= $downloadDeadline) {
+                    $this->lastDownloadRejections[] = ['url' => $url, 'reason' => 'download_wall_clock_budget_exceeded'];
 
-                break;
+                    break;
+                }
+                // The next few URLs go side by side - only ones this loop would try
+                // anyway if they all succeed: no more than the candidates still
+                // missing, and no unconfirmed frame in a run of confirmed ones,
+                // since enough confirmed frames end the loop before it.
+                $batch = [];
+                foreach (array_slice($urls, $position) as $next) {
+                    if (count($batch) >= min($concurrency, $effectiveLimit - count($candidates))
+                        || $this->resolver->isConfirmedGalleryImage($next) !== $confirmed) {
+                        break;
+                    }
+                    $batch[] = $next;
+                }
+                $downloaded = $this->resolver->downloadMany($batch,
+                    array_intersect_key($sourcePagesByUrl, array_flip($batch)));
             }
 
-            $failureReason = null;
-            $refererUrl = $sourcePagesByUrl[$url] ?? null;
-            $download = $this->resolver->download($url, failureReason: $failureReason, refererUrl: $refererUrl);
+            ['download' => $download, 'failure' => $failureReason] = $downloaded[$url]
+                ?? ['download' => null, 'failure' => null];
+            unset($downloaded[$url]);
 
             if (! $download) {
                 $this->lastDownloadRejections[] = ['url' => $url, 'reason' => $failureReason ?? 'unknown'];
@@ -3840,7 +3863,7 @@ class ProductImageStorage
             }
             $groupCandidates = array_map(fn (array $candidate): array => [
                 ...$candidate, 'page_source_context' => $groupContext ?? ($candidate['page_source_context'] ?? null),
-            ], $this->downloadCandidates($groupUrls, $draft));
+            ], $this->downloadCandidates($groupUrls, $draft, $telegramUpdateId));
             $downloadRejections = [...$downloadRejections, ...$this->lastDownloadRejections];
             $candidates = [...$candidates, ...$groupCandidates];
         }

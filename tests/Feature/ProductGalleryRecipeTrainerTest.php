@@ -337,6 +337,7 @@ class ProductGalleryRecipeTrainerTest extends TestCase
         );
         $fixtureResolver = \Mockery::mock(ProductImageResolver::class, $dependencies)->makePartial();
         $fixtureBytes = $this->publishableJpeg();
+        $this->downloadManyThroughDownload($fixtureResolver);
         $fixtureResolver->shouldReceive('download')->andReturnUsing(
             function (string $url, int $maxBytes = 8388608, ?string &$failureReason = null, ?string $refererUrl = null) use ($resolver, $fixtureBytes): ?array {
                 if (str_ends_with((string) parse_url($url, PHP_URL_HOST), '.example')) {
@@ -1696,7 +1697,7 @@ class ProductGalleryRecipeTrainerTest extends TestCase
     {
         Http::fake();
         $this->mock(ProductSearchTimeBudget::class, function (MockInterface $mock): void {
-            $mock->shouldReceive('timeoutFor')->once()->andReturn(1);
+            $mock->shouldReceive('remainingWorkingSeconds')->once()->with(123)->andReturn(60);
             $mock->shouldReceive('canStart')->once()->with(123, 1)->andReturn(false);
         });
         $trainer = app(ProductGalleryRecipeTrainer::class);
@@ -4497,6 +4498,7 @@ class ProductGalleryRecipeTrainerTest extends TestCase
             (new \ReflectionClass(ProductImageResolver::class))->getConstructor()->getParameters(),
         );
         $sizedResolver = \Mockery::mock(ProductImageResolver::class, $dependencies)->makePartial();
+        $this->downloadManyThroughDownload($sizedResolver);
         $sizedResolver->shouldReceive('download')->andReturnUsing(
             function (string $url, int $maxBytes = 8388608, ?string &$failureReason = null, ?string $refererUrl = null) use ($bigJpeg, $smallJpeg): ?array {
                 $bytes = str_contains($url, 'small-') ? $smallJpeg : $bigJpeg;

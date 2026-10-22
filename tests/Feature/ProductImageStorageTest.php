@@ -2218,6 +2218,7 @@ class ProductImageStorageTest extends TestCase
         $resolver->shouldReceive('sourceContextForImage')->andReturn($source);
         $resolver->shouldReceive('isConfirmedGalleryImage')->andReturn(false);
         $resolver->shouldReceive('isPartialGalleryImage')->andReturnUsing(fn (string $url): bool => ! $withStaticTail || ! str_ends_with($url, '6.jpg'));
+        $this->downloadManyThroughDownload($resolver);
         $resolver->shouldReceive('download')->times(6)->andReturnUsing(function (string $url) use ($withStaticTail): array {
             preg_match('/partial-(\d+)/', $url, $match);
 
@@ -4007,6 +4008,7 @@ class ProductImageStorageTest extends TestCase
             fn (string $url): bool => str_contains($url, 'confirmed-'),
         );
         $resolver->shouldReceive('isPartialGalleryImage')->andReturn(false);
+        $this->downloadManyThroughDownload($resolver);
         $resolver->shouldReceive('download')->andReturnUsing(
             function (string $url) use (&$downloaded): array {
                 $downloaded[] = $url;
@@ -5067,6 +5069,7 @@ class ProductImageStorageTest extends TestCase
         $resolver->shouldReceive('sourceContextForImage')->andReturn(null)->byDefault();
         $resolver->shouldReceive('isConfirmedGalleryImage')->andReturn(false)->byDefault();
         $resolver->shouldReceive('isPartialGalleryImage')->andReturn(false)->byDefault();
+        $this->downloadManyThroughDownload($resolver);
         $resolver->shouldReceive('download')->andReturn(null)->byDefault();
 
         [, , $draft] = $this->records();
@@ -5356,6 +5359,7 @@ class ProductImageStorageTest extends TestCase
         $resolver->shouldReceive('sourceContextForImage')->andReturn(null)->byDefault();
         $resolver->shouldReceive('isConfirmedGalleryImage')->andReturn(true);
         $resolver->shouldReceive('isPartialGalleryImage')->andReturn(false)->byDefault();
+        $this->downloadManyThroughDownload($resolver);
         $resolver->shouldReceive('download')->andReturnUsing(function (string $url) use (&$downloaded): array {
             $downloaded[] = $url;
             preg_match('/gallery-(\d+)\.jpg$/', $url, $match);
@@ -5379,6 +5383,50 @@ class ProductImageStorageTest extends TestCase
         $this->assertCount(11, $downloaded);
         $this->assertCount(11, $candidates);
 
+        foreach ($candidates as $candidate) {
+            imagedestroy($candidate['image']);
+        }
+    }
+
+    public function test_a_search_downloads_the_whole_gallery_side_by_side_within_its_own_budget(): void
+    {
+        // Live #661: Icecat's ten official frames were 10 MB originals, 17 s
+        // each one by one, and a fixed 90 s for the pass kept four of them.
+        config()->set('product-images.download_candidates', 10);
+        config()->set('product-images.http.download_wall_clock_cap_seconds', 0);
+        config()->set('product-images.http.download_concurrency', 4);
+        $this->partialMock(ProductSearchTimeBudget::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('remainingWorkingSeconds')->andReturnUsing(fn (?int $id): ?int => $id === 77 ? 600 : null);
+        });
+        $urls = collect(range(1, 10))->map(fn (int $index): string => 'https://images.example/gallery-'.$index.'.jpg')->all();
+        $batches = [];
+
+        $resolver = $this->mockResolver();
+        $resolver->shouldReceive('sourceContextForImage')->andReturn(null)->byDefault();
+        $resolver->shouldReceive('isConfirmedGalleryImage')->andReturn(false);
+        $resolver->shouldReceive('isPartialGalleryImage')->andReturn(false)->byDefault();
+        $resolver->shouldReceive('downloadMany')->andReturnUsing(function (array $batch) use (&$batches): array {
+            $batches[] = count($batch);
+
+            return collect($batch)->mapWithKeys(function (string $url): array {
+                preg_match('/gallery-(\d+)\.jpg$/', $url, $match);
+
+                return [$url => ['download' => [
+                    'bytes' => $this->jpeg(500 + (int) $match[1]), 'source_url' => $url, 'mime_type' => 'image/jpeg',
+                    'width' => 720, 'height' => 600, 'confirmed_gallery' => false, 'partial_gallery' => false,
+                ], 'failure' => null]];
+            })->all();
+        });
+
+        [, , $draft] = $this->records();
+        $method = new \ReflectionMethod(ProductImageStorage::class, 'downloadCandidates');
+        $storage = app(ProductImageStorage::class);
+
+        $this->assertSame([], $method->invoke($storage, $urls, $draft), 'Outside a search the fixed cap still bounds the pass.');
+        $candidates = $method->invoke($storage, $urls, $draft, 77);
+
+        $this->assertCount(10, $candidates);
+        $this->assertSame([4, 4, 2], $batches);
         foreach ($candidates as $candidate) {
             imagedestroy($candidate['image']);
         }
@@ -5750,6 +5798,7 @@ class ProductImageStorageTest extends TestCase
             fn (string $url): bool => str_contains($url, 'exact-cdn'),
         );
         $resolver->shouldReceive('isPartialGalleryImage')->andReturn(false)->byDefault();
+        $this->downloadManyThroughDownload($resolver);
         $resolver->shouldReceive('download')->andReturnUsing(function (string $url) use (&$downloaded): array {
             $this->assertStringContainsString('exact-cdn.example/ah0097nr/', $url);
             $downloaded[] = $url;

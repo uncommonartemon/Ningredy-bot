@@ -13,6 +13,7 @@ const server = http.createServer((req, res) => {
         return res.writeHead(200, { 'Content-Encoding': 'gzip', 'Transfer-Encoding': 'chunked' })
             .end(Buffer.concat([header, length, Buffer.alloc(6000), compressed.subarray(10)]));
     }
+    if (req.url.startsWith('/slow/')) return setTimeout(() => res.end(JSON.stringify({ path: req.url })), 1000);
     if (req.url === '/chunked') {
         res.writeHead(200, { 'Transfer-Encoding': 'chunked' });
         res.write(Buffer.alloc(600));

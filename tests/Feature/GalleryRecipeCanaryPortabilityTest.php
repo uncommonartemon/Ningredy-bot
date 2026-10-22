@@ -40,6 +40,7 @@ class GalleryRecipeCanaryPortabilityTest extends TestCase
         imagejpeg($pixels);
         $bytes = (string) ob_get_clean();
         imagedestroy($pixels);
+        $this->downloadManyThroughDownload($resolver);
         $resolver->shouldReceive('download')->andReturnUsing(fn (string $url): array => [
             'bytes' => $bytes, 'source_url' => $url, 'mime_type' => 'image/jpeg',
             'width' => 1200, 'height' => 800, 'confirmed_gallery' => false, 'partial_gallery' => false,

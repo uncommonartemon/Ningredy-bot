@@ -217,17 +217,23 @@ class ProductGalleryRecipeTrainer
         $samples = [];
         $frames = [];
         $measured = 0;
-        $seconds = $this->timeBudget->timeoutFor($telegramUpdateId,
-            max(1, (int) config('product-images.http.download_wall_clock_cap_seconds', 90)));
-        $deadline = microtime(true) + $seconds;
+        // The search's own time budget bounds this, as it does the candidate
+        // download pass; frames are fetched a few at a time, side by side.
+        $deadline = microtime(true) + ($this->timeBudget->remainingWorkingSeconds($telegramUpdateId)
+            ?? max(1, (int) config('product-images.http.download_wall_clock_cap_seconds', 90)));
+        $downloads = [];
 
-        foreach ($sample as $url) {
-            if (microtime(true) >= $deadline || ! $this->timeBudget->canStart($telegramUpdateId, 1)) {
-                break;
+        foreach ($sample as $position => $url) {
+            if (! array_key_exists($url, $downloads)) {
+                if (microtime(true) >= $deadline || ! $this->timeBudget->canStart($telegramUpdateId, 1)) {
+                    break;
+                }
+                $batch = $sample->slice($position, max(1, (int) config('product-images.http.download_concurrency', 4)))->all();
+                $downloads = $this->resolver->downloadMany($batch, array_fill_keys($batch, $pageUrl));
             }
             $measured++;
-            $failure = null;
-            $download = $this->resolver->download($url, failureReason: $failure, refererUrl: $pageUrl);
+            ['download' => $download, 'failure' => $failure] = $downloads[$url] ?? ['download' => null, 'failure' => null];
+            unset($downloads[$url]);
 
             if ($download === null) {
                 $rejected[$failure ?: 'download_failed'] = ($rejected[$failure ?: 'download_failed'] ?? 0) + 1;

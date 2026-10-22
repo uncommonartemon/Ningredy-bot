@@ -770,6 +770,69 @@ class ProductImageResolver
             return null;
         }
 
+        if ($download = $this->alreadyDownloaded($url, $refererUrl, $maxBytes)) {
+            return $download;
+        }
+
+        try {
+            [$response, $finalUrl] = $this->fetch($url, $refererUrl, asDocument: false, maxBytes: $maxBytes,
+                timeout: (int) config('product-images.http.image_timeout', 25));
+
+            return $this->imageFromBody($response->body(), $url, $finalUrl, $maxBytes, $failureReason);
+        } catch (Throwable $exception) {
+            $failureReason = $this->unavailable($url, $exception);
+
+            return null;
+        }
+    }
+
+    /**
+     * download() for several URLs at once - same guards, with the transfers
+     * running side by side. One by one, a ten-frame Icecat gallery of 10 MB
+     * originals took 17 seconds a frame and live #661 kept four of them.
+     *
+     * @param  array<int, string>  $urls
+     * @param  array<string, ?string>  $refererUrls  page each image was seen on, by URL
+     * @return array<string, array{download: ?array, failure: ?string}>
+     */
+    public function downloadMany(array $urls, array $refererUrls = [], int $maxBytes = 0): array
+    {
+        $maxBytes = $maxBytes > 0 ? $maxBytes : (int) config('product-images.http.image_max_bytes', 26_214_400);
+        $results = [];
+        $requests = [];
+        foreach (array_unique($urls) as $url) {
+            $refererUrl = $refererUrls[$url] ?? null;
+            if (! $this->isPublicUrl($url)) {
+                $results[$url] = ['download' => null, 'failure' => 'not_public_url'];
+            } elseif ($download = $this->alreadyDownloaded($url, $refererUrl, $maxBytes)) {
+                $results[$url] = ['download' => $download, 'failure' => null];
+            } else {
+                $requests[$url] = ['url' => $url, 'headers' => $this->requestHeaders($url, $refererUrl, asDocument: false)];
+            }
+        }
+        $responses = $requests === [] ? []
+            : $this->http->getMany($requests, $maxBytes, (int) config('product-images.http.image_timeout', 25));
+
+        foreach (array_keys($requests) as $url) {
+            $failure = null;
+            $response = $responses[$url] ?? null;
+            if ($response instanceof Response && $response->redirect()) {
+                // Each hop of a redirect is checked on its own, so chains go one by one.
+                $download = $this->download($url, $maxBytes, $failure, $refererUrls[$url] ?? null);
+            } elseif ($response instanceof Response) {
+                $download = $this->imageFromBody($response->body(), $url, $url, $maxBytes, $failure);
+            } else {
+                $download = null;
+                $failure = $this->unavailable($url, $response ?? new \RuntimeException('Product source download failed.'));
+            }
+            $results[$url] = ['download' => $download, 'failure' => $failure];
+        }
+
+        return $results;
+    }
+
+    private function alreadyDownloaded(string $url, ?string $refererUrl, int $maxBytes): ?array
+    {
         if ($download = $this->galleryDownloads->get($url, $refererUrl, $maxBytes)) {
             return [...$download,
                 'confirmed_gallery' => $this->browser->isConfirmedGalleryImage($url),
@@ -787,51 +850,52 @@ class ProductImageResolver
             ];
         }
 
-        try {
-            [$response, $finalUrl] = $this->fetch($url, $refererUrl, asDocument: false, maxBytes: $maxBytes,
-                timeout: (int) config('product-images.http.image_timeout', 25));
-            $bytes = $response->body();
+        return null;
+    }
 
-            if ($bytes === '') {
-                $failureReason = 'empty_response';
-
-                return null;
-            }
-
-            if (strlen($bytes) > $maxBytes) {
-                $failureReason = 'exceeds_max_bytes';
-
-                return null;
-            }
-
-            $dimensions = @getimagesizefromstring($bytes);
-
-            if (! is_array($dimensions) || ! isset($dimensions[0], $dimensions[1])) {
-                $failureReason = 'not_a_decodable_image';
-
-                return null;
-            }
-
-            return [
-                'bytes' => $bytes,
-                'source_url' => $finalUrl,
-                'mime_type' => $dimensions['mime'] ?? 'application/octet-stream',
-                'width' => (int) $dimensions[0],
-                'height' => (int) $dimensions[1],
-                'confirmed_gallery' => $this->browser->isConfirmedGalleryImage($url)
-                    || $this->browser->isConfirmedGalleryImage($finalUrl),
-                'partial_gallery' => $this->browser->isPartialGalleryImage($url)
-                    || $this->browser->isPartialGalleryImage($finalUrl),
-            ];
-        } catch (Throwable $exception) {
-            $failureReason = mb_substr($exception->getMessage(), 0, 200);
-            Log::notice('Product image candidate was unavailable.', [
-                'host' => parse_url($url, PHP_URL_HOST),
-                'error' => $exception->getMessage(),
-            ]);
+    private function imageFromBody(string $bytes, string $url, string $finalUrl, int $maxBytes, ?string &$failureReason): ?array
+    {
+        if ($bytes === '') {
+            $failureReason = 'empty_response';
 
             return null;
         }
+
+        if (strlen($bytes) > $maxBytes) {
+            $failureReason = 'exceeds_max_bytes';
+
+            return null;
+        }
+
+        $dimensions = @getimagesizefromstring($bytes);
+
+        if (! is_array($dimensions) || ! isset($dimensions[0], $dimensions[1])) {
+            $failureReason = 'not_a_decodable_image';
+
+            return null;
+        }
+
+        return [
+            'bytes' => $bytes,
+            'source_url' => $finalUrl,
+            'mime_type' => $dimensions['mime'] ?? 'application/octet-stream',
+            'width' => (int) $dimensions[0],
+            'height' => (int) $dimensions[1],
+            'confirmed_gallery' => $this->browser->isConfirmedGalleryImage($url)
+                || $this->browser->isConfirmedGalleryImage($finalUrl),
+            'partial_gallery' => $this->browser->isPartialGalleryImage($url)
+                || $this->browser->isPartialGalleryImage($finalUrl),
+        ];
+    }
+
+    private function unavailable(string $url, Throwable $exception): string
+    {
+        Log::notice('Product image candidate was unavailable.', [
+            'host' => parse_url($url, PHP_URL_HOST),
+            'error' => $exception->getMessage(),
+        ]);
+
+        return mb_substr($exception->getMessage(), 0, 200);
     }
 
     public function isConfirmedGalleryImage(string $url): bool
@@ -923,11 +987,7 @@ class ProductImageResolver
             // the page's own URL as Referer, never the image origin. Falling
             // back to the image's own origin when no page URL is known keeps
             // prior behavior for callers that never had one to pass.
-            $response = $this->http->get($url, [
-                ...$this->browserHeaders($asDocument),
-                'Referer' => $refererUrl !== null && $refererUrl !== '' ? $refererUrl : $this->origin($url).'/',
-                'Cache-Control' => 'no-cache',
-            ], $maxBytes, $timeout);
+            $response = $this->http->get($url, $this->requestHeaders($url, $refererUrl, $asDocument), $maxBytes, $timeout);
 
             if ($response->redirect()) {
                 $location = $response->header('Location');
@@ -947,6 +1007,16 @@ class ProductImageResolver
         }
 
         throw new \RuntimeException('Too many redirects while resolving product image.');
+    }
+
+    /** @return array<string, string> */
+    private function requestHeaders(string $url, ?string $refererUrl, bool $asDocument): array
+    {
+        return [
+            ...$this->browserHeaders($asDocument),
+            'Referer' => $refererUrl !== null && $refererUrl !== '' ? $refererUrl : $this->origin($url).'/',
+            'Cache-Control' => 'no-cache',
+        ];
     }
 
     private function origin(string $url): string

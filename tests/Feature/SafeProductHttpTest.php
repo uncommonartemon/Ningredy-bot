@@ -102,6 +102,27 @@ class SafeProductHttpTest extends TestCase
         });
     }
 
+    public function test_real_curl_fetches_many_side_by_side_and_bounds_each_one_alone(): void
+    {
+        $this->withCanary(function (SafeProductHttp $client, string $origin): void {
+            $started = microtime(true);
+            $slow = $client->getMany(array_map(fn (int $n): array => ['url' => $origin.'/slow/'.$n, 'headers' => []], range(1, 4)), 1024);
+            $this->assertLessThan(3.0, microtime(true) - $started, 'Four one-second responses must overlap.');
+            foreach ($slow as $index => $response) {
+                $this->assertSame('/slow/'.($index + 1), $response->json('path'));
+            }
+
+            // One oversized answer stops only its own transfer.
+            $paths = ['small', 'oversized-header', 'chunked', 'gzip', 'gzip-wire'];
+            $mixed = $client->getMany(array_combine($paths, array_map(fn (string $path): array => ['url' => $origin.'/'.$path, 'headers' => []], $paths)), 1024);
+            $this->assertSame('/small', $mixed['small']->json('path'));
+            foreach (array_slice($paths, 1) as $path) {
+                $this->assertInstanceOf(RuntimeException::class, $mixed[$path], $path);
+                $this->assertStringContainsString('exceeds_max_bytes', $mixed[$path]->getMessage(), $path);
+            }
+        });
+    }
+
     private function withCanary(callable $check): void
     {
         $process = new Process(['node', base_path('tests/Fixtures/public-http-canary.mjs')]);

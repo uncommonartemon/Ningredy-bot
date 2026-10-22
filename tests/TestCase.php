@@ -9,6 +9,7 @@ use App\Ai\Agents\ProductPhotoApplicabilityAgent;
 use App\Ai\Agents\ProductSourceIdentityAgent;
 use Illuminate\Foundation\Testing\TestCase as BaseTestCase;
 use Illuminate\Support\Facades\Http;
+use Mockery\MockInterface;
 use Tests\Support\IsolatedEnvironment;
 
 abstract class TestCase extends BaseTestCase
@@ -88,5 +89,24 @@ abstract class TestCase extends BaseTestCase
         return ['basis' => 'full_model', 'model_scope' => 'single_product', 'observed_model' => $model,
             'source_url' => $url, 'source_excerpt' => "Buy {$model} - specifications and price",
             'reason' => 'The page title names this one complete model, not a family.'];
+    }
+
+    /**
+     * Lets a resolver mock that answers download() also serve the batched
+     * downloadMany() the download passes use, one download() per URL - so a
+     * test's download() count still says how many photos a pass fetched.
+     */
+    protected function downloadManyThroughDownload(MockInterface $resolver): void
+    {
+        $resolver->shouldReceive('downloadMany')->andReturnUsing(function (array $urls, array $refererUrls = [], int $maxBytes = 0) use ($resolver): array {
+            $results = [];
+            foreach (array_unique($urls) as $url) {
+                $failure = null;
+                $download = $resolver->download($url, $maxBytes, $failure, $refererUrls[$url] ?? null);
+                $results[$url] = ['download' => $download, 'failure' => $failure];
+            }
+
+            return $results;
+        })->byDefault();
     }
 }
