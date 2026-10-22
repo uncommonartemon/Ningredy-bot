@@ -14,7 +14,9 @@ class ImageUrls
      */
     public static function normalizeCandidateUrl(string $url): string
     {
-        return trim(html_entity_decode($url, ENT_QUOTES | ENT_HTML5));
+        // A URL lifted out of inline JSON keeps its escaped slashes: live #1
+        // dropped sixteen product photos as https://www.esseshop.it\/getimage/...
+        return trim(str_replace(['\\/', '\\u002F', '\\u002f'], '/', html_entity_decode($url, ENT_QUOTES | ENT_HTML5)));
     }
 
     /**

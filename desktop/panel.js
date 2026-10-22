@@ -82,6 +82,7 @@ $('stop').addEventListener('click', () => {
     api.stop();
 });
 document.querySelectorAll('[data-open]').forEach((link) => link.addEventListener('click', () => api.open(link.dataset.open)));
+$('tables').addEventListener('click', () => api.tables());
 
 api.on('state', renderState);
 api.on('status', renderStatus);

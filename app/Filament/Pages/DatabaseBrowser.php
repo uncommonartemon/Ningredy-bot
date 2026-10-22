@@ -3,6 +3,7 @@
 namespace App\Filament\Pages;
 
 use App\Services\Admin\DatabaseBrowser as Browser;
+use App\Services\Admin\DatabaseTableEditor;
 use BackedEnum;
 use Filament\Actions\Action;
 use Filament\Forms\Components\Select;
@@ -10,6 +11,7 @@ use Filament\Forms\Components\TextInput;
 use Filament\Forms\Concerns\InteractsWithForms;
 use Filament\Forms\Contracts\HasForms;
 use Filament\Infolists\Components\TextEntry;
+use Filament\Notifications\Notification;
 use Filament\Schemas\Components\Section;
 use Filament\Schemas\Schema;
 use Filament\Support\Icons\Heroicon;
@@ -99,10 +101,33 @@ class DatabaseBrowser extends LocalizedPage implements HasForms, HasTable
 
     protected function getHeaderActions(): array
     {
-        return [Action::make('resource')->label(__('Открыть раздел'))
-            ->icon(Heroicon::OutlinedArrowTopRightOnSquare)
-            ->visible(fn (): bool => $this->browser()->resourceUrl($this->databaseTable) !== null)
-            ->url(fn (): ?string => $this->browser()->resourceUrl($this->databaseTable))];
+        return [
+            Action::make('resource')->label(__('Открыть раздел'))
+                ->icon(Heroicon::OutlinedArrowTopRightOnSquare)
+                ->visible(fn (): bool => $this->browser()->resourceUrl($this->databaseTable) !== null)
+                ->url(fn (): ?string => $this->browser()->resourceUrl($this->databaseTable)),
+            // It opens a program on the computer the bot runs on, so only for
+            // someone sitting at it - never through the public tunnel address.
+            Action::make('tables')->label(__('Открыть в DB Browser'))
+                ->icon(Heroicon::OutlinedTableCells)
+                ->color('gray')
+                ->visible(fn (): bool => self::requestedFromThisComputer())
+                ->action(function (): void {
+                    $outcome = app(DatabaseTableEditor::class)->open();
+                    Notification::make()->title(__($outcome['message']))
+                        ->status($outcome['opened'] ? ($outcome['read_only'] ? 'info' : 'success') : 'warning')
+                        ->send();
+                }),
+        ];
+    }
+
+    private static function requestedFromThisComputer(): bool
+    {
+        $request = request();
+
+        return in_array($request->server('REMOTE_ADDR'), ['127.0.0.1', '::1'], true)
+            && ! $request->headers->has('X-Forwarded-For')
+            && ! $request->headers->has('X-Forwarded-Host');
     }
 
     public function table(Table $table): Table

@@ -22,6 +22,14 @@ class ExtensionlessImageIdentityTest extends TestCase
         }
     }
 
+    public function test_a_url_lifted_out_of_inline_json_loses_its_escaped_slashes(): void
+    {
+        // Live #1: sixteen product photos arrived as https://shop.example\/getimage/... and were dropped as not public.
+        $this->assertSame('https://shop.example/getimage/421x421/products/9Y6X8AT_0.jpg',
+            ImageUrls::normalizeCandidateUrl('https://shop.example\/getimage\/421x421\/products\/9Y6X8AT_0.jpg'));
+        $this->assertSame('https://shop.example/a/b.jpg', ImageUrls::normalizeCandidateUrl('https://shop.example/a/b.jpg'));
+    }
+
     public function test_digest_does_not_erase_frame_selecting_query_parameters_or_host(): void
     {
         foreach (['', '.jpg'] as $extension) {
