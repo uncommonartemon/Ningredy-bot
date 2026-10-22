@@ -291,6 +291,10 @@ class RequestGuardianTest extends TestCase
     {
         // Live #11: the bot was restarted under its research step; every worker now running is younger than the reservation.
         [$update] = $this->runningSearch(silentMinutes: 5, withDraft: false);
+        // The killed attempt's overlap lock is still held; the retry would be dropped as a duplicate.
+        $stand = new ProcessTelegramMessage($update->id);
+        $lockKey = $stand->middleware()[0]->getLockKey($stand);
+        Cache::lock($lockKey, 3600)->get();
         Process::fake(['*' => Process::result(now()->subMinutes(2)->getTimestamp().' php artisan queue:work --queue=assistant,default --sleep=2')]);
 
         $this->sweep();
@@ -300,6 +304,7 @@ class RequestGuardianTest extends TestCase
         $this->assertSentText('Запускаю запрос заново');
         $this->assertSame(0, AiRun::query()->where('telegram_update_id', $update->id)->where('status', 'running')->count());
         $this->assertSame('processing', $update->fresh()->status);
+        $this->assertTrue(Cache::lock($lockKey, 10)->get(), 'The dead attempt lock was released.');
 
         // The released job is a fresh attempt now, not a second rescue.
         Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => ['message_id' => 701]])]);
@@ -378,7 +383,7 @@ class RequestGuardianTest extends TestCase
     private function job(TelegramUpdate $update, ?int $reservedMinutesAgo, int $createdMinutesAgo, string $queue = 'assistant'): void
     {
         $command = 'O:31:"App\Jobs\ProcessTelegramMessage":2:{s:16:"telegramUpdateId";i:'.$update->id.';s:17:"freshConversation";b:0;}';
-        DB::table('jobs')->insert(['queue' => $queue, 'payload' => json_encode(['maxTries' => 2, 'data' => ['command' => $command]]), 'attempts' => 1,
+        DB::table('jobs')->insert(['queue' => $queue, 'payload' => json_encode(['displayName' => ProcessTelegramMessage::class, 'maxTries' => 2, 'data' => ['command' => $command]]), 'attempts' => 1,
             'reserved_at' => $reservedMinutesAgo === null ? null : now()->subMinutes($reservedMinutesAgo)->getTimestamp(),
             'available_at' => now()->subMinutes($createdMinutesAgo)->getTimestamp(), 'created_at' => now()->subMinutes($createdMinutesAgo)->getTimestamp()]);
     }

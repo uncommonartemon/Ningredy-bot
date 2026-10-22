@@ -3,6 +3,7 @@
 namespace App\Services\ProductSearch\Recovery;
 
 use App\Jobs\DeliverTelegramAssistantReply;
+use App\Jobs\ProcessTelegramMessage;
 use App\Models\AiOperation;
 use App\Models\AiRun;
 use App\Models\ProductDraft;
@@ -13,6 +14,7 @@ use App\Services\Products\ProductSourceAttemptRecorder;
 use App\Services\ProductSearch\Supervision\SearchProgressSupervisor;
 use App\Services\Telegram\DraftTelegramPresenter;
 use App\Services\Telegram\TelegramClient;
+use Illuminate\Queue\Middleware\WithoutOverlapping;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Process;
@@ -334,6 +336,16 @@ final class RequestGuardian
         AiRun::query()->where('telegram_update_id', $update->id)->where('status', 'running')
             ->update(['status' => 'failed', 'error' => 'Обработчик остановился во время работы.', 'completed_at' => now()]);
         if ($job['attempts'] < $job['max_tries']) {
+            // The dead attempt's overlap lock outlives it, and the message job drops
+            // a delivery that finds the lock taken (live #11's retry vanished so).
+            if ($job['class'] === ProcessTelegramMessage::class) {
+                $stand = new ProcessTelegramMessage($update->id);
+                foreach ($stand->middleware() as $middleware) {
+                    if ($middleware instanceof WithoutOverlapping) {
+                        Cache::lock($middleware->getLockKey($stand))->forceRelease();
+                    }
+                }
+            }
             DB::table('jobs')->where('id', $job['id'])->update(['reserved_at' => null, 'available_at' => now()->timestamp]);
             $this->telegram->sendMessage((string) $update->chat_id,
                 '⚠️ Обработка запроса прервалась: обработчик остановился. Запускаю запрос заново — отправлять его ещё раз не нужно.');
@@ -387,7 +399,7 @@ final class RequestGuardian
                     $jobs[(int) $id] = ['id' => (int) $row->id, 'queue' => $queue,
                         'reserved_at' => $row->reserved_at === null ? null : (int) $row->reserved_at,
                         'created_at' => (int) $row->created_at, 'attempts' => (int) $row->attempts,
-                        'max_tries' => (int) data_get($payload, 'maxTries', 1)];
+                        'max_tries' => (int) data_get($payload, 'maxTries', 1), 'class' => (string) data_get($payload, 'displayName')];
                 }
             }
         }
