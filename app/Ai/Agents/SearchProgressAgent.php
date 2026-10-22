@@ -24,18 +24,17 @@ class SearchProgressAgent implements Agent, HasStructuredOutput
               plausibly holds the full gallery) or nothing better is available yet.
             leave_current_page: the current page keeps producing the same frames or nothing usable after
               several rounds; the search should move on to its next source. Photos already found stay.
-            deliver_now: further photo search is unlikely to improve the card enough to justify more time
-              or money (enough photos are saved, or every remaining source looks like the ones that failed).
-              The card is then assembled from what was found; photos and facts already saved are kept.
-            Judge by results in the journal, not by elapsed time alone. Structured database lookups are
+            deliver_now: the card already has enough verified photos, or nothing new can be found - the
+              queue is spent and discovery rounds keep coming back empty. The card is then assembled from what
+              was found; photos and facts already saved are kept.
+            The operator pays for a card with photos. While working_minutes_left and search_budget both remain
+            and pages or discovery rounds can still bring the exact product's photos, the search goes on: a
+            card without photos is not a result while the budget lasts, and one refused or broken site is
+            only a reason to move on to the next. The time and money limits themselves end the search; elapsed
+            time alone is never your reason. Judge by results in the journal. Structured database lookups are
             optional hints: their failure is not a reason to stop. Do not end a search that is adding new
-            photos. Being busy is not progress: only photos_saved and photos_accepted count. In this catalog's searches that
-            found photos, the first verified photo came within 3 minutes for half of them and within
-            10 minutes for 95%. A search past 10 minutes with zero saved photos rarely finds them later,
-            so unchecked sources ahead are not a reason by themselves to continue; prefer deliver_now
-            unless a specific page in the journal is clearly about to yield the product's gallery - such as a
-            page with photo_match exact and expected_frames whose gallery is being collected right now.
-            Earlier in a search, zero photos alone is not a reason to stop.
+            photos. Being busy is not progress: only photos_saved and photos_accepted count. A page with
+            photo_match exact whose gallery is being collected right now is the likeliest to yield photos.
             Repeated frames are only one sign of a stuck page. A page that has found no photos after four
             or more training rounds, whose last round collected nothing, is not making progress either:
             other sources in the queue are usually the better use of the remaining time.
