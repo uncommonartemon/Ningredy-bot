@@ -69,7 +69,7 @@ class ProductDraftsTable
                     ->label(__('Причина остановки'))
                     ->formatStateUsing(fn (?string $state): string => match ($state) {
                         'cost_budget' => __('Денежный лимит'),
-                        'stalled' => __('Шаг завис'),
+                        'stalled' => __('Остановлен досрочно'),
                         'time_budget' => __('Временной лимит'),
                         'exhausted' => __('Источники исчерпаны'),
                         'specifications_unreconciled' => __('Характеристики не сверены'),

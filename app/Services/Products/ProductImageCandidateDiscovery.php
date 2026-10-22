@@ -23,6 +23,7 @@ use App\Services\ProductSearch\Recovery\RecoveryContext;
 use App\Services\ProductSearch\Research\InvalidResearchResponse;
 use App\Services\ProductSearch\Research\ResearchSourceRoles;
 use App\Services\ProductSearch\SearchJournal;
+use App\Services\ProductSearch\Supervision\SearchProgressSupervisor;
 use Illuminate\Support\Facades\Log;
 use Laravel\Ai\Streaming\Events\ProviderToolEvent;
 use Throwable;
@@ -724,6 +725,11 @@ class ProductImageCandidateDiscovery
 
             if (! $pageUrl) {
                 continue;
+            }
+            // A standing "wrap up" from the watcher ends the photo search here
+            // too: live #7 was told at minute ten and opened three more shops.
+            if (app(SearchProgressSupervisor::class)->deliverNowReason($telegramUpdateId) !== null) {
+                break;
             }
             $source['_minimum_verified_images'] = $minimumVerifiedImages;
             $source['_category_slug'] = trim((string) $draft->category) !== '' ? trim((string) $draft->category) : null;

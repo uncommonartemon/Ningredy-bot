@@ -64,7 +64,7 @@ class DraftTelegramPresenter
             $reason = match ($draft->gallery_search_stop_reason) {
                 'cost_budget' => 'Денежный лимит поиска достигнут.',
                 'time_budget' => 'Время поиска закончилось.',
-                'stalled' => 'Поиск остановлен: один из шагов завис.',
+                'stalled' => 'Поиск фото остановлен до завершения.',
                 default => 'Не удалось завершить проверку карточки по выбранному источнику после автоматического восстановления.',
             };
             if (! $budgetStopped && ! app(AiSettings::class)->specificationReconciliationEnabled()) {
@@ -631,7 +631,7 @@ class DraftTelegramPresenter
             $usageFootnote = "\n".match ($draft->gallery_search_stop_reason) {
                 'cost_budget' => 'Денежный лимит поиска достигнут. Продолжить поиск фото можно новым бюджетным циклом.',
                 'time_budget' => 'Время поиска закончилось. Продолжить поиск фото можно новым бюджетным циклом.',
-                'stalled' => 'Поиск остановлен: один из шагов завис. Продолжить поиск фото можно новым бюджетным циклом.',
+                'stalled' => 'Поиск фото остановлен до завершения. Продолжить поиск фото можно новым бюджетным циклом.',
                 default => 'Подходящие фотографии не найдены. Поиск фото можно продолжить.',
             }.' Без фото добавление в каталог недоступно.'.$usageFootnote;
         } elseif (! $draft->isManualUpload() && ($searchPaused || $searchInterrupted) && $galleryCount === 0) {

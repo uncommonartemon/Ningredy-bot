@@ -806,6 +806,18 @@ class ProductGalleryRecipeTrainer
                     break;
                 }
 
+                // A standing "wrap up" ends training at any round (live #7 ran two
+                // more rounds after it); what was found stays.
+                if ($attempt > 1 && $telegramUpdateId
+                    && ($wrapUp = app(SearchProgressSupervisor::class)->deliverNowReason($telegramUpdateId)) !== null) {
+                    $agentAbandoned = true;
+                    $agentAbandonReason = 'Наблюдатель поиска: '.$wrapUp;
+                    $failureKind = 'agent_abandoned';
+                    $attempts[] = ['attempt' => $attempt, 'error' => 'agent_abandoned: '.$agentAbandonReason];
+
+                    break;
+                }
+
                 // From the third round on, the search watcher may tell a page that keeps
                 // collecting the same frames to step aside. Its answer ends this page the
                 // way the trainer's own abandonment does; found photos stay.
