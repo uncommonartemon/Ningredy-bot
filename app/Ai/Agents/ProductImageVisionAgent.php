@@ -31,6 +31,7 @@ class ProductImageVisionAgent implements Agent, HasStructuredOutput
             way an online store's gallery does: feature slides with overlaid graphics or callouts, illustrations
             of internal components, infographics, banners and collages are not catalog photos, even inside a
             complete official gallery. The primary image shows the whole product.
+            score is the frame's worth as a catalog photo on a 0-100 scale (not 0-10).
             When the trusted source context explicitly establishes compatible-body applicability, its known regional
             SKU suffix or permitted keyboard difference alone is not a wrong-body verdict; keep the factual notice.
             A shared family name or resemblance alone does not establish that compatibility.
