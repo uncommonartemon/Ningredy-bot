@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const script = (name) => path.join(root, 'scripts', name);
-const links = { site: 'http://127.0.0.1:8000', admin: 'http://127.0.0.1:8000/admin' };
+const links = { site: 'http://127.0.0.1:8000', admin: 'http://127.0.0.1:8000/admin', tables: 'http://127.0.0.1:8000/admin/adminer' };
 const STATUS_EVERY_MS = 15_000;
 
 let window = null;
@@ -90,42 +90,6 @@ ipcMain.handle('stop', () => stop());
 ipcMain.handle('state', () => state());
 ipcMain.handle('refresh', () => refreshStatus());
 ipcMain.handle('open', (_event, target) => links[target] && shell.openExternal(links[target]));
-ipcMain.handle('tables', () => openTables());
-
-// The database in DB Browser for SQLite, a spreadsheet-like editor. The admin
-// opens it the same way: bot:tables finds the editor and opens the database
-// read-only while the bot runs (see App\Services\Admin\DatabaseTableEditor).
-function openTables() {
-    execFile('php', ['artisan', 'bot:tables'], { cwd: root, windowsHide: true, timeout: 60_000 }, async (error, stdout) => {
-        let outcome;
-        try {
-            outcome = JSON.parse(stdout);
-        } catch {
-            send('log', `— таблицы не открылись: ${(error?.message || stdout || '').trim().split('\n')[0]}`);
-
-            return;
-        }
-        if (outcome.installed) {
-            send('log', `— ${outcome.message}`);
-
-            return;
-        }
-        const { response } = await dialog.showMessageBox(window, {
-            type: 'question',
-            title: 'Ningredy',
-            message: 'Нужна программа DB Browser for SQLite',
-            detail: 'Бесплатная программа для таблиц базы, похожая на Excel. Установить её сейчас?',
-            buttons: ['Установить', 'Отмена'],
-            defaultId: 0,
-            cancelId: 1,
-        });
-        if (response === 0) {
-            send('log', '— устанавливаю DB Browser for SQLite… Когда закончится, нажмите «Таблицы» ещё раз.');
-            spawn('winget', ['install', '--exact', '--id', 'DBBrowserForSQLite.DBBrowserForSQLite',
-                '--accept-package-agreements', '--accept-source-agreements'], { detached: true, stdio: 'ignore', windowsHide: false }).unref();
-        }
-    });
-}
 
 app.whenReady().then(() => {
     window = new BrowserWindow({

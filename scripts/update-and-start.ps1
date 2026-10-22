@@ -44,14 +44,12 @@ function Assert-BotStopped {
             ($_.Name -match '^(powershell|pwsh)\.exe$' -and $_.CommandLine -match '[\\/]start-ningredy\.ps1') -or
             ($_.Name -eq 'node.exe' -and $_.CommandLine -match '(browser-server\.mjs|[\\/]vite[\\/])') -or
             # The desktop panel runs from node_modules, which npm ci replaces.
-            ($_.Name -eq 'electron.exe' -and $_.ExecutablePath -like (Join-Path $root 'node_modules\*')) -or
-            # An open table editor can hold the database locked against the migrations.
-            ($_.Name -eq 'DB Browser for SQLite.exe')
+            ($_.Name -eq 'electron.exe' -and $_.ExecutablePath -like (Join-Path $root 'node_modules\*'))
         )
     })
     if ($processes.Count -gt 0) {
         $ids = ($processes | ForEach-Object { $_.ProcessId }) -join ', '
-        throw "Обнаружен работающий бот, панель Ningredy, DB Browser, Laravel или Vite (PID: $ids). Дождитесь окончания задач и закройте окно запуска, панель и DB Browser. Если они уже закрыты, перезагрузите Windows и повторите обновление."
+        throw "Обнаружен работающий бот, панель Ningredy, Laravel или Vite (PID: $ids). Дождитесь окончания задач и закройте окно запуска или панель. Если они уже закрыты, перезагрузите Windows и повторите обновление."
     }
 }
 
