@@ -62,3 +62,4 @@ storage/app/browser-profiles/
 /storage/framework/product-gallery-browser/
 # Local database snapshots taken before migrations - production data, never code.
 /storage/backups/
+/Ningredy.lnk
