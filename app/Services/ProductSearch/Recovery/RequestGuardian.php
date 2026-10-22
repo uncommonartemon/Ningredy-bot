@@ -15,6 +15,7 @@ use App\Services\Telegram\DraftTelegramPresenter;
 use App\Services\Telegram\TelegramClient;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Process;
 use Throwable;
 
 /**
@@ -168,6 +169,14 @@ final class RequestGuardian
         if ($job['reserved_at'] === null) {
             return null;
         }
+        // A worker holds its job for as long as it lives, and a live worker started
+        // before the job it took. A reservation older than every running worker of
+        // that queue belongs to one that is gone: live #11 sat silent for twenty
+        // minutes after the bot was restarted under its research step.
+        if ($silent >= (int) config('services.request_guardian.abandoned_after_seconds', 180)
+            && $this->reservationOutlivedItsWorker($job)) {
+            return $this->recoverOrphanedJob($update, $job);
+        }
         // The operator's own time budget is the one hard limit: two minutes before
         // it, the operator gets what exists. Live #598 and #611 kept searching for
         // photos into the 33rd minute through continuation slices.
@@ -292,6 +301,51 @@ final class RequestGuardian
         return 'abandoned_notice';
     }
 
+    /** No answer about the workers is no evidence: then nothing is done here. */
+    private function reservationOutlivedItsWorker(array $job): bool
+    {
+        $result = Process::timeout(20)->run(['powershell.exe', '-NoProfile', '-Command',
+            "Get-CimInstance Win32_Process -Filter \"Name='php.exe'\" | Where-Object { \$_.CommandLine -match 'artisan\\s+queue:work' } | "
+            .'ForEach-Object { ([DateTimeOffset]$_.CreationDate).ToUnixTimeSeconds().ToString() + \' \' + $_.CommandLine }']);
+        if (! $result->successful()) {
+            return false;
+        }
+        $starts = [];
+        foreach (preg_split('/\R/', trim($result->output())) ?: [] as $line) {
+            if (preg_match('/^(\d+) .*--queue=(\S+)/', trim($line), $match)
+                && in_array($job['queue'], explode(',', trim($match[2], '"\'')), true)) {
+                $starts[] = (int) $match[1];
+            }
+        }
+
+        return $starts !== [] && min($starts) > $job['reserved_at'];
+    }
+
+    /**
+     * The request goes back to the queue while it has attempts left - the
+     * operator need not send it again; otherwise it is ended the way a vanished
+     * process is. Its old job is never left to replay on its own later.
+     */
+    private function recoverOrphanedJob(TelegramUpdate $update, array $job): ?string
+    {
+        if (! $this->claim('orphaned:'.$job['id'], $update)) {
+            return null;
+        }
+        AiRun::query()->where('telegram_update_id', $update->id)->where('status', 'running')
+            ->update(['status' => 'failed', 'error' => 'Обработчик остановился во время работы.', 'completed_at' => now()]);
+        if ($job['attempts'] < $job['max_tries']) {
+            DB::table('jobs')->where('id', $job['id'])->update(['reserved_at' => null, 'available_at' => now()->timestamp]);
+            $this->telegram->sendMessage((string) $update->chat_id,
+                '⚠️ Обработка запроса прервалась: обработчик остановился. Запускаю запрос заново — отправлять его ещё раз не нужно.');
+            $this->record($update, null, 'retry_orphaned_job', 'completed', 'Задачу держал остановленный обработчик; она возвращена в очередь.', $job);
+
+            return 'retry_orphaned_job';
+        }
+        DB::table('jobs')->where('id', $job['id'])->delete();
+
+        return $this->rescueAbandoned($update);
+    }
+
     /** @return list<string> */
     private function redeliverStuckReplies(): array
     {
@@ -318,19 +372,22 @@ final class RequestGuardian
     {
         $jobs = [];
         $busy = [];
-        foreach (DB::table('jobs')->orderBy('id')->get(['queue', 'payload', 'reserved_at', 'created_at']) as $row) {
+        foreach (DB::table('jobs')->orderBy('id')->get(['id', 'queue', 'payload', 'attempts', 'reserved_at', 'created_at']) as $row) {
             $queue = (string) $row->queue;
             if ($row->reserved_at !== null) {
                 $busy[$queue] = min($busy[$queue] ?? PHP_INT_MAX, (int) $row->reserved_at);
             }
             // Read from the serialized command, never unserialized: written by another process.
-            $command = (string) data_get(json_decode((string) $row->payload, true), 'data.command');
+            $payload = json_decode((string) $row->payload, true);
+            $command = (string) data_get($payload, 'data.command');
             preg_match_all('/"(?:telegramUpdateId|updateId)";i:(\d+);/', $command, $matches);
             foreach ($matches[1] as $id) {
                 $current = $jobs[(int) $id] ?? null;
                 if ($current === null || ($current['reserved_at'] === null && $row->reserved_at !== null)) {
-                    $jobs[(int) $id] = ['queue' => $queue, 'reserved_at' => $row->reserved_at === null ? null : (int) $row->reserved_at,
-                        'created_at' => (int) $row->created_at];
+                    $jobs[(int) $id] = ['id' => (int) $row->id, 'queue' => $queue,
+                        'reserved_at' => $row->reserved_at === null ? null : (int) $row->reserved_at,
+                        'created_at' => (int) $row->created_at, 'attempts' => (int) $row->attempts,
+                        'max_tries' => (int) data_get($payload, 'maxTries', 1)];
                 }
             }
         }

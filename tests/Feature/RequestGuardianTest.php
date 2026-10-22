@@ -17,6 +17,7 @@ use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Storage;
 use RuntimeException;
@@ -38,6 +39,9 @@ class RequestGuardianTest extends TestCase
         config(['services.telegram.bot_token' => 'test-token', 'services.telegram.webhook_secret' => 'test-secret',
             'services.telegram.allowed_user_ids' => ['123']]);
         Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => ['message_id' => 700]])]);
+        // Never this computer's real queue workers: by default none are reported.
+        Process::preventStrayProcesses();
+        Process::fake();
     }
 
     public function test_a_request_waiting_behind_another_search_hears_once_that_it_is_queued(): void
@@ -283,6 +287,37 @@ class RequestGuardianTest extends TestCase
         Http::assertNothingSent();
     }
 
+    public function test_a_job_held_by_a_worker_that_is_gone_goes_back_to_the_queue_and_the_operator_is_told(): void
+    {
+        // Live #11: the bot was restarted under its research step; every worker now running is younger than the reservation.
+        [$update] = $this->runningSearch(silentMinutes: 5, withDraft: false);
+        Process::fake(['*' => Process::result(now()->subMinutes(2)->getTimestamp().' php artisan queue:work --queue=assistant,default --sleep=2')]);
+
+        $this->sweep();
+
+        $job = DB::table('jobs')->first();
+        $this->assertNull($job->reserved_at);
+        $this->assertSentText('Запускаю запрос заново');
+        $this->assertSame(0, AiRun::query()->where('telegram_update_id', $update->id)->where('status', 'running')->count());
+        $this->assertSame('processing', $update->fresh()->status);
+
+        // The released job is a fresh attempt now, not a second rescue.
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => ['message_id' => 701]])]);
+        $this->sweep();
+        Http::assertNothingSent();
+    }
+
+    public function test_a_job_held_by_a_worker_that_was_already_running_is_left_alone(): void
+    {
+        $this->runningSearch(silentMinutes: 5, withDraft: false);
+        Process::fake(['*' => Process::result(now()->subHour()->getTimestamp().' php artisan queue:work --queue=assistant,default --sleep=2')]);
+
+        $this->sweep();
+
+        $this->assertNotNull(DB::table('jobs')->value('reserved_at'));
+        Http::assertNotSent(fn (Request $request): bool => str_contains((string) ($request['text'] ?? ''), 'заново'));
+    }
+
     private function sweep(): void
     {
         app(RequestGuardian::class)->sweep();
@@ -343,7 +378,7 @@ class RequestGuardianTest extends TestCase
     private function job(TelegramUpdate $update, ?int $reservedMinutesAgo, int $createdMinutesAgo, string $queue = 'assistant'): void
     {
         $command = 'O:31:"App\Jobs\ProcessTelegramMessage":2:{s:16:"telegramUpdateId";i:'.$update->id.';s:17:"freshConversation";b:0;}';
-        DB::table('jobs')->insert(['queue' => $queue, 'payload' => json_encode(['data' => ['command' => $command]]), 'attempts' => 0,
+        DB::table('jobs')->insert(['queue' => $queue, 'payload' => json_encode(['maxTries' => 2, 'data' => ['command' => $command]]), 'attempts' => 1,
             'reserved_at' => $reservedMinutesAgo === null ? null : now()->subMinutes($reservedMinutesAgo)->getTimestamp(),
             'available_at' => now()->subMinutes($createdMinutesAgo)->getTimestamp(), 'created_at' => now()->subMinutes($createdMinutesAgo)->getTimestamp()]);
     }
