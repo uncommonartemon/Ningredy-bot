@@ -103,7 +103,7 @@ class DiscoveryResponseRecoveryTest extends TestCase
 
         $prompt = AiRun::latest('id')->firstOrFail()->prompt;
         $this->assertStringContainsString('"pages_opened_this_search"', $prompt);
-        $this->assertStringContainsString('"host":"a.campusnet.example","site_name":"campusnet","training_rounds":2,"photos_saved":0,"ended_by_agent":"Frames 02-04 return HTTP 400 on the shared media CDN."', $prompt);
+        $this->assertStringContainsString('"host":"a.campusnet.example","site_name":"campusnet","training_rounds":2,"images_downloaded":0,"photos_accepted":0,"photos_saved":0,"last_step":"propose_recipe: execute_candidate","ended_by_agent":"Frames 02-04 return HTTP 400 on the shared media CDN."', $prompt);
         $this->assertStringContainsString('"failed_site_networks":{"campusnet":{"hosts":["a.campusnet.example","b.campusnet.example"]', $prompt);
     }
 

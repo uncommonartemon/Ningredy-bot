@@ -26,14 +26,22 @@ final class SearchJournal
         $photosByHost = $draft === null ? collect() : $draft->media()->get(['photo_source_context'])
             ->countBy(fn ($media): string => (string) parse_url((string) data_get($media->photo_source_context, 'url'), PHP_URL_HOST));
 
+        // What each page gave, not only that it was visited: with nothing but
+        // rounds and saved photos, live #1's watcher read five refused or
+        // thin pages as "no pages checked yet" and missed a verified photo
+        // that was held, not yet saved.
         return ProductSourceAttempt::query()->where('telegram_update_id', $runId)
-            ->whereIn('phase', ['gallery_preflight', 'gallery_training', 'source_resolution', 'image_download', 'image_verification'])
-            ->orderBy('id')->get(['product_url', 'action'])
+            ->whereIn('phase', ['gallery_preflight', 'gallery_training', 'source_resolution', 'image_download', 'fallback_image_download', 'image_verification'])
+            ->orderBy('id')->get(['product_url', 'phase', 'action', 'decision', 'output'])
             ->groupBy(fn (ProductSourceAttempt $attempt): string => (string) parse_url((string) $attempt->product_url, PHP_URL_HOST))
             ->filter(fn ($rows, string $host): bool => $host !== '')
             ->map(fn ($rows, string $host): array => ['host' => $host, 'site_name' => ProductImageCandidateDiscovery::siteName('https://'.$host),
                 'training_rounds' => $rows->where('action', 'propose_recipe')->count(),
+                'images_downloaded' => (int) $rows->sum(fn (ProductSourceAttempt $row): int => (int) data_get($row->output, 'downloaded_images', 0)),
+                'photos_accepted' => (int) $rows->where('phase', 'image_verification')
+                    ->sum(fn (ProductSourceAttempt $row): int => (int) data_get($row->output, 'accepted_images', 0)),
                 'photos_saved' => (int) ($photosByHost[$host] ?? 0),
+                'last_step' => $rows->last()->action.': '.($rows->last()->decision ?? '-'),
                 'ended_by_agent' => $endedByAgent[$host] ?? null])
             ->values()->slice(-$limit)->values()->all();
     }
