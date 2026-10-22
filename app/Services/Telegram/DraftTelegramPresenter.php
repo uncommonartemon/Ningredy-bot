@@ -32,6 +32,9 @@ class DraftTelegramPresenter
         string $usageFootnote = '',
     ): void {
         $draft->load('media');
+        if ($usageFootnote === '' && $draft->telegram_update_id) {
+            $usageFootnote = app(RequestUsageFootnote::class)->for((int) $draft->telegram_update_id, includeSearchDuration: true);
+        }
         if ($draft->status === 'pending_review'
             && $draft->gallery_status !== 'complete'
             && ! $draft->hasReadyVerifiedPartial()
@@ -645,11 +648,29 @@ class DraftTelegramPresenter
         $fixed = $header."\n\n".$footer.$usageFootnote;
         $available = max(0, 1024 - mb_strlen($fixed) - 8);
         $body = implode("\n\n", array_filter([
-            mb_substr((string) $draft->description, 0, (int) floor($available * 0.55)),
+            $this->clip((string) $draft->description, (int) floor($available * 0.55)),
             $specifications !== '' ? "⚙️ Характеристики:\n".$specifications : null,
         ]));
 
-        return mb_substr($header."\n\n".mb_substr($body, 0, $available)."\n\n".$footer.$usageFootnote, 0, 1024);
+        return mb_substr($header."\n\n".$this->clip($body, $available, wholeLines: true)."\n\n".$footer.$usageFootnote, 0, 1024);
+    }
+
+    /**
+     * Cuts at the last word (or whole line) that fits, so a caption never
+     * ends mid-word - live #1's card read "…support c" and "▸ Displ".
+     */
+    private function clip(string $text, int $limit, bool $wholeLines = false): string
+    {
+        if (mb_strlen($text) <= $limit) {
+            return $text;
+        }
+        $cut = mb_substr($text, 0, max(0, $limit - 1));
+        $break = $wholeLines ? mb_strrpos($cut, "\n") : max((int) mb_strrpos($cut, ' '), (int) mb_strrpos($cut, "\n"));
+        $kept = rtrim($break ? mb_substr($cut, 0, $break) : $cut);
+        // A group heading left without any of its lines says nothing.
+        $kept = (string) preg_replace('/\n+▸[^\n]*$/u', '', $kept);
+
+        return $wholeLines ? $kept."\n…" : $kept.'…';
     }
 
     private function numberEmoji(int $number): string

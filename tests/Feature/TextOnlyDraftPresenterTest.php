@@ -126,4 +126,27 @@ class TextOnlyDraftPresenterTest extends TestCase
         $this->assertTrue(Cache::has("draft-gallery-continue:{$draft->id}:queued"));
         $this->assertSame('processing', $draft->telegramUpdate->fresh()->status);
     }
+
+    public function test_a_card_sent_without_a_footnote_still_says_what_the_request_cost_and_took(): void
+    {
+        // Live #1's card came through the request guardian, which passed none.
+        $draft = $this->draft('cost_budget');
+        $draft->aiRun->update(['usage' => ['prompt_tokens' => 1000, 'completion_tokens' => 200, 'total_tokens' => 1200]]);
+        $draft->telegramUpdate->forceFill(['created_at' => now()->subSeconds(138), 'processed_at' => now()])->save();
+        $this->budget(false);
+
+        app(DraftTelegramPresenter::class)->sendReview(app(TelegramClient::class), '456', $draft);
+
+        Http::assertSent(fn (Request $request): bool => str_contains((string) $request['text'], 'Примерно токенов потрачено: 1 200')
+            && str_contains((string) $request['text'], '(2 мин 18 сек)'));
+    }
+
+    public function test_a_caption_is_cut_at_a_word_or_line_never_inside_one(): void
+    {
+        $clip = new \ReflectionMethod(DraftTelegramPresenter::class, 'clip');
+        $presenter = app(DraftTelegramPresenter::class);
+
+        $this->assertSame('The HP 255 G10 is a practical…', $clip->invoke($presenter, 'The HP 255 G10 is a practical laptop', 32));
+        $this->assertSame("▸ Memory\nRAM: 16 GB\n…", $clip->invoke($presenter, "▸ Memory\nRAM: 16 GB\n▸ Display\nSize: 15.6 inch", 30, true));
+    }
 }

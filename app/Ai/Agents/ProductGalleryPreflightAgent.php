@@ -40,7 +40,9 @@ class ProductGalleryPreflightAgent implements Agent, HasStructuredOutput
 
             Decide whether browser interaction is likely to expose distinct product photographs that
             are not already available as usable full-resolution static URLs. Return exactly one decision:
-            - static_sufficient: at least two distinct likely full-size product photos are already exposed;
+            - static_sufficient: the full-size product photos already exposed cover the whole gallery. The card
+              then gets only those, with no browser traversal, so two exposed photos are not enough when the
+              page shows more frames than that (x-of-N, further thumbnails at small renditions, next controls);
             - train_playwright: there is concrete evidence of a hidden/incomplete gallery, slider, zoom,
               modal, thumbnails, next controls, x-of-N media, lazy-loaded images, or layered interaction;
             - no_gallery: no credible multi-image product gallery evidence exists;

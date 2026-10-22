@@ -11,7 +11,6 @@ use App\Models\TelegramUpdate;
 use App\Models\User;
 use App\Services\Ai\AiErrorPresenter;
 use App\Services\Ai\AiSettings;
-use App\Services\Ai\AiUsageReporter;
 use App\Services\Ai\ProductSearchCancellation;
 use App\Services\Ai\ProductSearchTimeBudget;
 use App\Services\ProductSearch\Recovery\RequestGuardian;
@@ -19,6 +18,7 @@ use App\Services\ProductSearch\Recovery\SearchFailureSaver;
 use App\Services\Telegram\DraftAccess;
 use App\Services\Telegram\DraftTelegramPresenter;
 use App\Services\Telegram\ProductCardPresenter;
+use App\Services\Telegram\RequestUsageFootnote;
 use App\Services\Telegram\TelegramAssistantReplyDelivery;
 use App\Services\Telegram\TelegramClient;
 use App\Services\Telegram\TelegramConversationScope;
@@ -451,38 +451,7 @@ class ProcessTelegramMessage implements ShouldQueue
 
     private function usageFootnote(int $telegramUpdateId, bool $includeSearchDuration = false): string
     {
-        $usage = app(AiUsageReporter::class)->forTelegramUpdate($telegramUpdateId);
-        $tokens = (int) ($usage['tokens']['total'] ?? 0);
-
-        if ($tokens <= 0) {
-            return '';
-        }
-
-        $line = "\n\n🔢 Примерно токенов потрачено: ".number_format($tokens, 0, '.', ' ');
-
-        if ($usage['estimated_cost_usd'] !== null) {
-            $line .= sprintf(' (~$%s)', number_format((float) $usage['estimated_cost_usd'], 4));
-        }
-
-        if ($includeSearchDuration) {
-            // Whole request-to-review wall time, including queue waits and
-            // automatic repairs, not the sum of overlapping AI call times.
-            $receivedAt = TelegramUpdate::find($telegramUpdateId)?->created_at;
-            if ($receivedAt !== null) {
-                $seconds = max(0, (int) $receivedAt->diffInSeconds(now()));
-                $duration = ($seconds >= 60 ? intdiv($seconds, 60).' мин ' : '').($seconds % 60).' сек';
-                $line .= ' ('.$duration.')';
-            }
-        }
-
-        if (($usage['usage_unknown_failures'] ?? 0) > 0) {
-            $line .= sprintf(
-                ' · %d попытка(и) без usage: итоговая стоимость может быть выше',
-                $usage['usage_unknown_failures'],
-            );
-        }
-
-        return $line;
+        return app(RequestUsageFootnote::class)->for($telegramUpdateId, $includeSearchDuration);
     }
 
     private function sendDraftApproval(
