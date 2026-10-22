@@ -1,0 +1,143 @@
+/* The storefront's tokens (resources/css/app.css), plus the two states a
+   control panel needs and a shop does not. */
+:root {
+    color-scheme: dark;
+    --bg: #080a10;
+    --panel-solid: #12151f;
+    --panel-soft: #191d2a;
+    --line: rgba(151, 164, 196, .16);
+    --line-bright: rgba(82, 246, 218, .42);
+    --text: #f4f7fb;
+    --muted: #8c93a7;
+    --accent: #52f6da;
+    --violet: #9277ff;
+    --blue: #50a8ff;
+    --danger: #ff6b81;
+    --warn: #ffc163;
+    --display: 'Space Grotesk Variable', sans-serif;
+    --mono: 'Cascadia Mono', Consolas, ui-monospace, monospace;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+    display: flex;
+    flex-direction: column;
+    font: 14px/1.45 'Manrope Variable', system-ui, sans-serif;
+    color: var(--text);
+    background:
+        radial-gradient(circle at 10% 0%, rgba(28, 220, 196, .07), transparent 26rem),
+        radial-gradient(circle at 92% 10%, rgba(120, 83, 255, .08), transparent 28rem),
+        var(--bg);
+}
+button { font: inherit; color: inherit; }
+.muted { color: var(--muted); }
+
+.bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    height: 36px;
+    padding: 0 150px 0 18px;
+    border-bottom: 1px solid var(--line);
+    -webkit-app-region: drag;
+    user-select: none;
+}
+.brand { font: 600 13px var(--display); letter-spacing: .32em; }
+.bar .muted { font-size: 13px; }
+
+main {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    gap: 18px;
+    min-height: 0;
+    padding: 20px 18px 18px;
+}
+
+.power { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 14px; }
+.state { display: flex; align-items: baseline; gap: 10px; }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); align-self: center; }
+.state-label { font: 600 20px var(--display); letter-spacing: .04em; text-transform: uppercase; }
+.clock { font: 500 15px var(--display); font-variant-numeric: tabular-nums; color: var(--muted); }
+.state.on .dot { background: var(--accent); box-shadow: 0 0 10px var(--accent); }
+.state.on .state-label { color: var(--accent); }
+
+.actions { display: flex; gap: 10px; }
+button:not(.link) {
+    padding: 9px 16px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--panel-solid);
+    cursor: pointer;
+    transition: border-color .18s, background .18s;
+}
+button:not(.link):hover { background: var(--panel-soft); }
+button:focus-visible { outline: 1px solid var(--line-bright); outline-offset: 2px; }
+button.primary { border-color: var(--line-bright); color: var(--accent); }
+button.danger:hover { border-color: var(--danger); color: var(--danger); }
+button:disabled { opacity: .5; cursor: default; }
+
+.checks { margin: 0; border-top: 1px solid var(--line); }
+.check {
+    display: grid;
+    grid-template-columns: 170px 1fr;
+    gap: 14px;
+    padding: 9px 0;
+    border-bottom: 1px solid var(--line);
+}
+.check dt, .label {
+    font: 600 11px var(--display);
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding-top: 2px;
+}
+.check dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.check dd::before { content: '●'; margin-right: 8px; font-size: 10px; vertical-align: 1px; color: var(--muted); }
+.check.up dd::before { color: var(--accent); }
+.check.down dd::before { color: var(--danger); }
+.check .hint { display: block; margin-top: 2px; color: var(--warn); font-size: 13px; }
+
+.journal { display: flex; flex: 1; flex-direction: column; gap: 8px; min-height: 0; }
+.journal-head { display: flex; align-items: center; justify-content: space-between; }
+.links { display: flex; gap: 16px; }
+.link { padding: 0; border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 13px; }
+.link:hover { color: var(--accent); }
+
+/* A little terminal: hairline frame, faint scanlines, a cursor while running. */
+.log {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    margin: 0;
+    padding: 12px 14px;
+    overflow: auto;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background:
+        repeating-linear-gradient(0deg, rgba(255, 255, 255, .018) 0 1px, transparent 1px 3px),
+        #05070b;
+    font: 12.5px/1.55 var(--mono);
+    color: #c9d1e0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+.log:empty::before { content: 'Здесь будет вывод бота.'; color: var(--muted); }
+.log .name { color: var(--muted); }
+.log .web { color: var(--blue); }
+.log .assistant, .log .admin-ai { color: var(--accent); }
+.log .voice, .log .media { color: var(--violet); }
+.log .ngrok, .log .webhook { color: var(--warn); }
+.log .problem { color: var(--danger); }
+.log .note { color: var(--muted); }
+body.running .log::after {
+    content: '▍';
+    color: var(--accent);
+    animation: blink 1.1s steps(1) infinite;
+}
+@keyframes blink { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+    body.running .log::after { animation: none; }
+    button:not(.link) { transition: none; }
+}

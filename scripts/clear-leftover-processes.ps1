@@ -18,8 +18,12 @@
 # was refused by exactly the leftovers it was about to clean up. A launcher
 # window is directly observable, so it is counted instead - and this window is
 # one of them.
-$windows = @(Get-CimInstance Win32_Process -Filter "Name='cmd.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -like '*start-ningredy*' })
+#
+# Counted as the PowerShell running start-ningredy.ps1, not as its cmd window:
+# the desktop panel (desktop/main.mjs) starts that script without one, and a
+# .bat window and the panel have to see each other.
+$windows = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe' OR Name='pwsh.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -like '*start-ningredy.ps1*' })
 
 if ($windows.Count -gt 1) {
     Write-Host 'Ningredy is already running in another window.'

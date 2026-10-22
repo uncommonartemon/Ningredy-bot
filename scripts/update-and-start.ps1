@@ -42,12 +42,14 @@ function Assert-BotStopped {
         $_.ProcessId -ne $PID -and (
             ($_.Name -match '^php(?:-cgi)?\.exe$' -and $_.CommandLine -match 'artisan["'']?\s+(serve|queue:work|queue:listen|schedule:work|schedule:run|telegram:sync-ngrok)\b') -or
             ($_.Name -match '^(powershell|pwsh)\.exe$' -and $_.CommandLine -match '[\\/]start-ningredy\.ps1') -or
-            ($_.Name -eq 'node.exe' -and $_.CommandLine -match '(browser-server\.mjs|[\\/]vite[\\/])')
+            ($_.Name -eq 'node.exe' -and $_.CommandLine -match '(browser-server\.mjs|[\\/]vite[\\/])') -or
+            # The desktop panel runs from node_modules, which npm ci replaces.
+            ($_.Name -eq 'electron.exe' -and $_.ExecutablePath -like (Join-Path $root 'node_modules\*'))
         )
     })
     if ($processes.Count -gt 0) {
         $ids = ($processes | ForEach-Object { $_.ProcessId }) -join ', '
-        throw "Обнаружен работающий бот, Laravel или Vite (PID: $ids). Дождитесь окончания задач и закройте окно запуска. Если оно уже закрыто, перезагрузите Windows и повторите обновление."
+        throw "Обнаружен работающий бот, панель Ningredy, Laravel или Vite (PID: $ids). Дождитесь окончания задач и закройте окно запуска или панель. Если оно уже закрыто, перезагрузите Windows и повторите обновление."
     }
 }
 

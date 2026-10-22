@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'">
+    <title>Ningredy</title>
+    <link rel="stylesheet" href="../node_modules/@fontsource-variable/space-grotesk/index.css">
+    <link rel="stylesheet" href="../node_modules/@fontsource-variable/manrope/index.css">
+    <link rel="stylesheet" href="panel.css">
+</head>
+<body>
+    <header class="bar">
+        <span class="brand">NINGREDY</span>
+        <span class="muted">панель</span>
+    </header>
+
+    <main>
+        <section class="power">
+            <div class="state" id="state">
+                <span class="dot"></span>
+                <span class="state-label" id="state-label">Остановлен</span>
+                <span class="clock" id="clock"></span>
+            </div>
+            <div class="actions">
+                <button class="primary" id="start-bot">Запустить бота</button>
+                <button id="start-site">Только сайт</button>
+                <button class="danger" id="stop" hidden>Остановить</button>
+            </div>
+        </section>
+
+        <dl class="checks" id="checks">
+            <div class="check"><dt>Состояние</dt><dd class="muted">Проверяю…</dd></div>
+        </dl>
+
+        <section class="journal">
+            <div class="journal-head">
+                <span class="label">Журнал</span>
+                <span class="links">
+                    <button class="link" data-open="site">Сайт ↗</button>
+                    <button class="link" data-open="admin">Админка ↗</button>
+                </span>
+            </div>
+            <pre class="log" id="log"></pre>
+        </section>
+    </main>
+
+    <script src="panel.js"></script>
+</body>
+</html>
