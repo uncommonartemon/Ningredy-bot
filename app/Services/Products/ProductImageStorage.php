@@ -308,6 +308,12 @@ class ProductImageStorage
 
                     return $result;
                 }
+                // The watcher already ended the photo search: another cycle is what it
+                // ruled out (live #8 ran two more over sources that were all finished).
+                // The card goes to the operator with its reason and "accept as is".
+                if (app(SearchProgressSupervisor::class)->deliverNowReason($updateId) !== null) {
+                    return $result;
+                }
                 // Unpriced/budgetless runs retain bounded local recovery;
                 // they cannot authorize an open-ended paid search loop.
                 if (! $updateId || $this->settings->maxSearchCostUsd() <= 0
