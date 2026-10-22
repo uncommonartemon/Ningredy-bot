@@ -12,7 +12,10 @@ return [
         'desktop' => 10,
     ],
     'download_limit' => 20,
-    'download_candidates' => 10,
+    // As many as the URL list holds: the card's max_images cuts the finished,
+    // checked set, never the downloads before duplicates and Vision thin them
+    // (139 of 579 past passes stopped at exactly ten and kept seven or eight).
+    'download_candidates' => 20,
     // Total decoded pixels one download pass may hold in memory at once. A
     // decoded truecolor bitmap costs ~4 bytes per pixel, so this is roughly a
     // 240MB ceiling on retained images - the loop stops with a partial gallery

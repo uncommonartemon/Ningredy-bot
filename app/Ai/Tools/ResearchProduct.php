@@ -881,7 +881,7 @@ class ResearchProduct implements Tool
         }
         $sameCode = $matches($match);
         $images = collect($match['images'])->filter(fn (array $image): bool => $image['width'] >= 700 || $image['width'] === 0)
-            ->pluck('url')->take(10)->values()->all();
+            ->pluck('url')->values()->all();
         app(ProductSourceAttemptRecorder::class)->record(['telegram_update_id' => $this->update->id,
             'product_url' => $match['page_url'], 'actor' => 'server', 'phase' => 'code_lookup', 'action' => 'offer_official_gallery',
             'status' => $sameCode && $images !== [] ? 'completed' : 'skipped',
