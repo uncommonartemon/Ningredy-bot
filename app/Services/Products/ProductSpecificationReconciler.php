@@ -486,10 +486,14 @@ class ProductSpecificationReconciler
             if ($exception instanceof ProductSearchCancelled) {
                 throw $exception;
             }
-            report($exception);
-
             $invalidResponse = $exception instanceof ValidationException
                 || $exception instanceof InvalidSpecificationEvidence;
+            // A rejected answer is the evidence check doing its job, recorded in the
+            // run and the journal and answered by another attempt - not an error
+            // in the log (live #15 flagged one in a run that then succeeded).
+            if (! $invalidResponse) {
+                report($exception);
+            }
             // Another worker held the OpenAI queue longer than this call was
             // willing to wait, or OpenAI rate-limited the account (request
             // #53: both models refused for a minute). The card is not wrong;
