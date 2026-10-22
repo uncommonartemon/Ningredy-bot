@@ -196,7 +196,8 @@ class ProductSpecificationReconciliationAgent implements Agent, HasStructuredOut
                 'source_url' => $schema->string()->max(2048)->required(),
                 'source_excerpt' => $schema->string()->max(800)->required(),
             ])->withoutAdditionalProperties()->nullable()->required(),
-            'summary' => $schema->string()->max(500)->required(),
+            'summary' => $schema->string()->max(500)->required()
+                ->description('For the operator, in Russian only, whatever language the sources or translations use.'),
             'title' => $schema->string()->max(255)->required(),
             'model' => $schema->string()->max(255)->required(),
             'color' => $schema->string()->max(255)->nullable()->required(),
