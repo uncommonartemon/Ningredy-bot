@@ -893,7 +893,12 @@ class ResearchProduct implements Tool
 
         return ['source' => ['title' => 'Icecat datasheet: '.$match['title'], 'url' => $match['page_url'], 'type' => 'web',
             'image_urls' => $images, 'roles' => ['facts', 'exact_photo'], '_official_gallery' => true,
-            'applicability_reason' => 'Official datasheet (Icecat) for the same part number/GTIN as the selected product.'],
+            'applicability_reason' => 'Official datasheet (Icecat) for the same part number/GTIN as the selected product.',
+            // The database record matched by the exact code is this source's identity.
+            // Its page may sit behind a bot check: live #14's showed only one, the page
+            // look replaced this evidence, and the official gallery lost to 800px shop photos.
+            '_preflight_identity_evidence' => trim($match['title'].' Part number: '.$match['part_number']
+                .' GTIN: '.implode(' ', $match['gtins']))],
             'specification_text' => implode("\n", [$match['title'], ...$match['specifications']])];
     }
 
