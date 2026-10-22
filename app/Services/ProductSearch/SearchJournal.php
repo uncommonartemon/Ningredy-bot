@@ -30,19 +30,30 @@ final class SearchJournal
         // rounds and saved photos, live #1's watcher read five refused or
         // thin pages as "no pages checked yet" and missed a verified photo
         // that was held, not yet saved.
+        $verdicts = ['assess_photo_applicability', 'validate_scout_product_identity'];
+
         return ProductSourceAttempt::query()->where('telegram_update_id', $runId)
-            ->whereIn('phase', ['gallery_preflight', 'gallery_training', 'source_resolution', 'image_download', 'fallback_image_download', 'image_verification'])
+            ->whereIn('phase', ['source_selection', 'gallery_preflight', 'gallery_training', 'source_resolution', 'image_download', 'fallback_image_download', 'image_verification'])
             ->orderBy('id')->get(['product_url', 'phase', 'action', 'decision', 'output'])
             ->groupBy(fn (ProductSourceAttempt $attempt): string => (string) parse_url((string) $attempt->product_url, PHP_URL_HOST))
-            ->filter(fn ($rows, string $host): bool => $host !== '')
-            ->map(fn ($rows, string $host): array => ['host' => $host, 'site_name' => ProductImageCandidateDiscovery::siteName('https://'.$host),
-                'training_rounds' => $rows->where('action', 'propose_recipe')->count(),
-                'images_downloaded' => (int) $rows->sum(fn (ProductSourceAttempt $row): int => (int) data_get($row->output, 'downloaded_images', 0)),
-                'photos_accepted' => (int) $rows->where('phase', 'image_verification')
-                    ->sum(fn (ProductSourceAttempt $row): int => (int) data_get($row->output, 'accepted_images', 0)),
-                'photos_saved' => (int) ($photosByHost[$host] ?? 0),
-                'last_step' => $rows->last()->action.': '.($rows->last()->decision ?? '-'),
-                'ended_by_agent' => $endedByAgent[$host] ?? null])
+            ->filter(fn ($rows, string $host): bool => $host !== '' && $rows->contains(fn (ProductSourceAttempt $row): bool => $row->phase !== 'source_selection'))
+            ->map(function ($rows, string $host) use ($photosByHost, $endedByAgent, $verdicts): array {
+                $steps = $rows->where('phase', '!=', 'source_selection');
+
+                return ['host' => $host, 'site_name' => ProductImageCandidateDiscovery::siteName('https://'.$host),
+                    'training_rounds' => $rows->where('action', 'propose_recipe')->count(),
+                    'images_downloaded' => (int) $rows->sum(fn (ProductSourceAttempt $row): int => (int) data_get($row->output, 'downloaded_images', 0)),
+                    'photos_accepted' => (int) $rows->where('phase', 'image_verification')
+                        ->sum(fn (ProductSourceAttempt $row): int => (int) data_get($row->output, 'accepted_images', 0)),
+                    'photos_saved' => (int) ($photosByHost[$host] ?? 0),
+                    'last_step' => $steps->last()->action.': '.($steps->last()->decision ?? '-'),
+                    'ended_by_agent' => $endedByAgent[$host] ?? null,
+                    // Live #7: an exact-SKU page with a seven-frame gallery whose
+                    // collection had just begun looked like any other empty page.
+                    'photo_match' => $rows->whereIn('action', $verdicts)->last()?->decision,
+                    'expected_frames' => $rows->where('action', 'classify_gallery')
+                        ->map(fn (ProductSourceAttempt $row): ?int => data_get($row->output, 'expected_image_count'))->filter()->max()];
+            })
             ->values()->slice(-$limit)->values()->all();
     }
 

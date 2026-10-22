@@ -33,7 +33,8 @@ class SearchProgressAgent implements Agent, HasStructuredOutput
             found photos, the first verified photo came within 3 minutes for half of them and within
             10 minutes for 95%. A search past 10 minutes with zero saved photos rarely finds them later,
             so unchecked sources ahead are not a reason by themselves to continue; prefer deliver_now
-            unless a specific page in the journal is clearly about to yield the product's gallery.
+            unless a specific page in the journal is clearly about to yield the product's gallery - such as a
+            page with photo_match exact and expected_frames whose gallery is being collected right now.
             Earlier in a search, zero photos alone is not a reason to stop.
             Repeated frames are only one sign of a stuck page. A page that has found no photos after four
             or more training rounds, whose last round collected nothing, is not making progress either:
