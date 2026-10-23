@@ -126,13 +126,18 @@ return [
         'enabled' => (bool) env('AI_SEARCH_PROGRESS_SUPERVISOR_ENABLED', true),
         'after_seconds' => (int) env('AI_SEARCH_PROGRESS_SUPERVISOR_AFTER_SECONDS', 0),
         'after_spent_fraction' => (float) env('AI_SEARCH_PROGRESS_SUPERVISOR_AFTER_SPENT_FRACTION', 0.4),
-        'interval_seconds' => (int) env('AI_SEARCH_PROGRESS_SUPERVISOR_INTERVAL_SECONDS', 240),
+        // The search's own checkpoints look only when nobody has looked for this long
+        // and something happened since; the guardian's minute is the usual look.
+        'interval_seconds' => (int) env('AI_SEARCH_PROGRESS_SUPERVISOR_INTERVAL_SECONDS', 90),
     ],
 
     // Watches open requests from outside the search process (bot:guard).
     'request_guardian' => [
         'enabled' => (bool) env('REQUEST_GUARDIAN_ENABLED', true),
         'queue_notice_after_seconds' => (int) env('REQUEST_GUARDIAN_QUEUE_NOTICE_AFTER', 60),
+        // The watcher looks when the search did something since its last look, at most this often...
+        'look_after_activity_seconds' => (int) env('REQUEST_GUARDIAN_LOOK_AFTER_ACTIVITY', 60),
+        // ...and this often while the search is silent.
         'review_interval_seconds' => (int) env('REQUEST_GUARDIAN_REVIEW_INTERVAL', 180),
         'abandoned_after_seconds' => (int) env('REQUEST_GUARDIAN_ABANDONED_AFTER', 180),
         'outside_review_timeout' => (int) env('REQUEST_GUARDIAN_REVIEW_TIMEOUT', 30),

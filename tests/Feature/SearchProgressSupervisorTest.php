@@ -9,6 +9,7 @@ use App\Models\ProductDraft;
 use App\Models\ProductSourceAttempt;
 use App\Models\TelegramUpdate;
 use App\Services\Ai\ProductSearchCostBudget;
+use App\Services\Products\ProductSourceAttemptRecorder;
 use App\Services\ProductSearch\Supervision\SearchProgressSupervisor;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Cache;
@@ -115,17 +116,119 @@ class SearchProgressSupervisorTest extends TestCase
         $draft = $this->draft(minutesAgo: 9);
         SearchProgressAgent::fake([
             ['decision' => 'leave_current_page', 'reason' => 'Те же пять кадров восемь раундов подряд.'],
-            ['decision' => 'leave_current_page', 'reason' => 'Изнутри: страница стоит.'],
         ])->preventStrayPrompts();
         $supervisor = app(SearchProgressSupervisor::class);
 
-        $supervisor->review($draft->telegram_update_id, $draft, ['kind' => 'outside_check', 'minutes_since_last_step' => 0], fromOutside: true);
-        $this->assertSame('Те же пять кадров восемь раундов подряд.', $supervisor->takeLeaveVerdict($draft->telegram_update_id));
-        $this->assertNull($supervisor->takeLeaveVerdict($draft->telegram_update_id));
+        $supervisor->review($draft->telegram_update_id, $draft, ['kind' => 'outside_check', 'minutes_since_last_step' => 0,
+            'url' => self::PAGE, 'host' => 'shop.example'], fromOutside: true);
+        // Said about one page, it never ends another that started meanwhile.
+        $this->assertNull($supervisor->takeLeaveVerdict($draft->telegram_update_id, 'https://shop.example/products/other'));
+        $this->assertSame('Те же пять кадров восемь раундов подряд.', $supervisor->takeLeaveVerdict($draft->telegram_update_id, self::PAGE.'/'));
+        $this->assertNull($supervisor->takeLeaveVerdict($draft->telegram_update_id, self::PAGE));
 
         // Inside the search its caller acts on the spot; nothing is left over for the next page.
         $this->review($draft);
-        $this->assertNull($supervisor->takeLeaveVerdict($draft->telegram_update_id));
+        $this->assertNull($supervisor->takeLeaveVerdict($draft->telegram_update_id, self::PAGE));
+    }
+
+    public function test_the_watcher_reads_the_whole_story_and_drops_a_site_whose_pages_repeat_the_same_frames(): void
+    {
+        // Live #58: page two of de.msi.com read "the same frames two rounds" -
+        // the same five frames page one had shown for seven rounds.
+        $draft = $this->draft(minutesAgo: 14);
+        foreach (['/vector/shopnow', '/vector/shopnow', '/vector/', '/vector/'] as $path) {
+            $this->round($draft, 'https://de.msi.com'.$path, ['https://cdn.msi.com/a.webp', 'https://cdn.msi.com/b.webp']);
+        }
+        $prompts = [];
+        SearchProgressAgent::fake(function (string $prompt) use (&$prompts): array {
+            $prompts[] = json_decode($prompt, true);
+
+            return ['decision' => 'skip_site', 'reason' => 'Те же два кадра на двух страницах MSI.', 'operator_note' => null, 'site' => 'msi.com'];
+        })->preventStrayPrompts();
+        $messages = [];
+
+        $verdict = $this->review($draft, function (string $message) use (&$messages): void {
+            $messages[] = $message;
+        });
+
+        $this->assertCount(4, $prompts[0]['timeline']);
+        $this->assertStringContainsString('de.msi.com gallery_training.propose_recipe: execute_candidate · 2 frames [', $prompts[0]['timeline'][3]);
+        $this->assertSame(['site' => 'de.msi.com', 'step' => 'gallery_training.propose_recipe', 'times' => 4, 'pages' => 2, 'photos_accepted_on_site' => 0],
+            array_intersect_key($prompts[0]['repeats'][0], array_flip(['site', 'step', 'times', 'pages', 'photos_accepted_on_site'])));
+        // "msi.com" for the one MSI host this search opened is that host.
+        $this->assertSame(['skip_site', 'de.msi.com'], [$verdict['decision'], $verdict['site']]);
+        $supervisor = app(SearchProgressSupervisor::class);
+        $this->assertSame('Те же два кадра на двух страницах MSI.', $supervisor->siteDropReason($draft->telegram_update_id, 'https://www.de.msi.com/other-page'));
+        $this->assertNull($supervisor->siteDropReason($draft->telegram_update_id, self::PAGE));
+        $this->assertStringContainsString('больше не открываю страницы сайта de.msi.com', $messages[0]);
+        $this->assertSame(['de.msi.com' => 'Те же два кадра на двух страницах MSI.'], $supervisor->droppedSites($draft->telegram_update_id));
+    }
+
+    public function test_a_site_the_search_never_opened_is_not_dropped_and_without_a_name_the_page_in_work_is_meant(): void
+    {
+        $draft = $this->draft(minutesAgo: 9);
+        SearchProgressAgent::fake([
+            ['decision' => 'skip_site', 'reason' => 'Этот магазин не отвечает.', 'operator_note' => null, 'site' => 'never-opened.example'],
+            ['decision' => 'skip_site', 'reason' => 'Сайт отказывает в доступе.', 'operator_note' => null, 'site' => null],
+        ])->preventStrayPrompts();
+        $supervisor = app(SearchProgressSupervisor::class);
+
+        $this->assertSame('leave_current_page', $this->review($draft)['decision']);
+        $this->assertSame([], $supervisor->droppedSites($draft->telegram_update_id));
+
+        $this->round($draft, self::PAGE, []);
+        $this->travel(2)->minutes();
+        $this->assertSame('skip_site', $this->review($draft)['decision']);
+        $this->assertSame(['shop.example' => 'Сайт отказывает в доступе.'], $supervisor->droppedSites($draft->telegram_update_id));
+    }
+
+    public function test_inside_the_search_it_looks_again_only_after_a_new_step_and_a_pause(): void
+    {
+        $draft = $this->draft(minutesAgo: 9);
+        $looks = 0;
+        SearchProgressAgent::fake(function () use (&$looks): array {
+            $looks++;
+
+            return ['decision' => 'continue', 'reason' => 'Кадры собираются.', 'operator_note' => null, 'site' => null];
+        })->preventStrayPrompts();
+
+        $this->review($draft);
+        $this->round($draft, self::PAGE, ['https://shop.example/1.jpg']);
+        // Something new, but a moment ago.
+        $this->review($draft);
+        $this->travel(2)->minutes();
+        $this->review($draft);
+        // Nothing new since: the same picture is never paid for twice.
+        $this->travel(2)->minutes();
+        $this->review($draft);
+
+        $this->assertSame(2, $looks);
+    }
+
+    public function test_from_outside_it_looks_each_minute_the_search_moved_and_after_minutes_of_silence(): void
+    {
+        $draft = $this->draft(minutesAgo: 9);
+        $looks = 0;
+        SearchProgressAgent::fake(function () use (&$looks): array {
+            $looks++;
+
+            return ['decision' => 'continue', 'reason' => 'Ждём.', 'operator_note' => null, 'site' => null];
+        })->preventStrayPrompts();
+        $outside = fn () => app(SearchProgressSupervisor::class)->review($draft->telegram_update_id, $draft,
+            ['kind' => 'outside_check', 'minutes_since_last_step' => 0], fromOutside: true);
+
+        $outside();
+        $this->travel(61)->seconds();
+        $outside();
+        $this->round($draft, self::PAGE, ['https://shop.example/1.jpg']);
+        $outside();
+        $this->travel(2)->minutes();
+        $outside();
+        // Three minutes without a step are news of their own.
+        $this->travel(61)->seconds();
+        $outside();
+
+        $this->assertSame(3, $looks);
     }
 
     public function test_frames_a_page_was_ended_on_stay_ruled_out_on_that_site_only(): void
@@ -164,6 +267,13 @@ class SearchProgressSupervisorTest extends TestCase
             'kind' => 'gallery_training', 'url' => self::PAGE, 'host' => 'shop.example', 'round' => 4,
             'rounds_with_same_frames' => 3, 'rounds_without_progress' => 2, 'candidate_frames_on_this_page' => 4,
         ], $progress);
+    }
+
+    private function round(ProductDraft $draft, string $page, array $images): void
+    {
+        app(ProductSourceAttemptRecorder::class)->record(['telegram_update_id' => $draft->telegram_update_id,
+            'product_draft_id' => $draft->id, 'product_url' => $page, 'actor' => 'ai', 'phase' => 'gallery_training',
+            'action' => 'propose_recipe', 'status' => 'completed', 'decision' => 'execute_candidate', 'output' => ['images' => $images]]);
     }
 
     private function draft(int $minutesAgo): ProductDraft

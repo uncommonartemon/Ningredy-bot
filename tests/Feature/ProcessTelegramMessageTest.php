@@ -8,6 +8,7 @@ use App\Ai\Tools\ResearchProduct;
 use App\Jobs\ContinueDraftGallerySearch;
 use App\Jobs\ProcessTelegramMessage;
 use App\Models\AiRun;
+use App\Models\AppSetting;
 use App\Models\AttributeDefinition;
 use App\Models\Brand;
 use App\Models\Category;
@@ -18,6 +19,7 @@ use App\Models\TelegramChatState;
 use App\Models\TelegramUpdate;
 use App\Services\Ai\AiErrorPresenter;
 use App\Services\Ai\AiSettings;
+use App\Services\Ai\ProductSearchCostBudget;
 use App\Services\Ai\ProductSearchTimeBudget;
 use App\Services\Products\ProductIdentityKey;
 use App\Services\Products\ProductImageResolver;
@@ -674,6 +676,81 @@ class ProcessTelegramMessageTest extends TestCase
         $budget->shouldReceive('restartSession')->once()->with($update->id);
 
         $this->runDelivery($update, attempts: 2);
+    }
+
+    public function test_a_second_delivery_after_the_worker_stopped_goes_on_from_the_saved_draft(): void
+    {
+        // Searching again from nothing paid for research twice and left a second draft.
+        [$update, $run, $draft] = $this->interruptedSearch(finished: false);
+
+        $this->deliverAgain($update);
+
+        Queue::assertPushed(ContinueDraftGallerySearch::class, fn (ContinueDraftGallerySearch $job): bool => $job->draftId === $draft->id
+            && $job->telegramUpdateId === $update->id);
+        Http::assertSent(fn (HttpRequest $request): bool => str_contains((string) ($request['text'] ?? ''),
+            'Обработчик остановился во время поиска. Найденное сохранено: фото — 0. Продолжаю с места остановки'));
+        $this->assertSame('failed', $run->fresh()->status);
+        $this->assertSame('processing', $update->fresh()->status);
+        $this->assertSame(1, ProductDraft::query()->where('telegram_update_id', $update->id)->count());
+    }
+
+    public function test_a_second_delivery_after_a_caught_failure_names_the_failure_not_a_stopped_worker(): void
+    {
+        [$update] = $this->interruptedSearch(finished: false);
+        // The guardian finalises a gone worker's runs before requeueing; the error an attempt records is the tell.
+        $update->update(['status' => 'failed', 'error' => 'Request timed out.']);
+        AiRun::query()->where('telegram_update_id', $update->id)->update(['status' => 'failed']);
+
+        $this->deliverAgain($update);
+
+        Queue::assertPushed(ContinueDraftGallerySearch::class);
+        Http::assertSent(fn (HttpRequest $request): bool => str_contains((string) ($request['text'] ?? ''), 'Поиск прервался сбоем. Найденное сохранено'));
+        Http::assertNotSent(fn (HttpRequest $request): bool => str_contains((string) ($request['text'] ?? ''), 'Обработчик остановился'));
+    }
+
+    public function test_a_second_delivery_of_a_finished_card_delivers_it_instead_of_searching_again(): void
+    {
+        [$update] = $this->interruptedSearch(finished: true);
+
+        $this->deliverAgain($update);
+
+        Queue::assertNotPushed(ContinueDraftGallerySearch::class);
+        Http::assertSent(fn (HttpRequest $request): bool => str_contains((string) ($request['text'] ?? ''), 'Найденное сохранено — отправляю черновик'));
+        $this->assertSame(['completed', true], [$update->fresh()->status, $update->fresh()->processed_at !== null]);
+    }
+
+    /** @return array{TelegramUpdate, AiRun, ProductDraft} a request whose worker stopped after its draft was saved */
+    private function interruptedSearch(bool $finished): array
+    {
+        Queue::fake();
+        AppSetting::put('ai.max_search_cost_usd', '1');
+        $budget = $this->mock(ProductSearchCostBudget::class);
+        $budget->shouldReceive('unmeasurable')->andReturn(false);
+        $budget->shouldReceive('hasRemaining')->andReturn(true);
+        $update = $this->update();
+        $update->update(['status' => 'processing', 'text' => 'Lenovo Legion 5']);
+        $run = AiRun::query()->create(['telegram_update_id' => $update->id, 'provider' => 'openai', 'model' => 'gpt-test',
+            'status' => 'running', 'prompt' => 'the attempt whose process is gone', 'started_at' => now()->subMinutes(9),
+            'activity' => ['stage' => 'research']]);
+        $draft = ProductDraft::query()->create(['telegram_update_id' => $update->id, 'ai_run_id' => $run->id,
+            'requested_by_telegram_user_id' => '12345', 'title' => 'Lenovo Legion 5', 'status' => 'pending_review',
+            'product_type' => 'laptop', 'primary_source_url' => 'https://shop.example/legion', 'description' => 'Verified.',
+            'specifications' => [], 'sources' => [], 'image_urls' => [],
+            ...($finished ? ['images_staged_at' => now(), 'gallery_status' => 'complete',
+                'specifications_reconciled_source_url' => 'https://shop.example/legion'] : [])]);
+
+        return [$update, $run, $draft];
+    }
+
+    private function deliverAgain(TelegramUpdate $update): void
+    {
+        config(['services.telegram.bot_token' => 'test-token']);
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => ['message_id' => 1]])]);
+        ServerAssistantAgent::fake()->preventStrayPrompts();
+        $job = (new ProcessTelegramMessage($update->id))->withFakeQueueInteractions();
+        $job->job->attempts = 2;
+
+        $job->handle(app(TelegramClient::class), app(AiErrorPresenter::class));
     }
 
     public function test_a_first_delivery_never_restarts_the_clock(): void

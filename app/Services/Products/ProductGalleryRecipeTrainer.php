@@ -817,9 +817,20 @@ class ProductGalleryRecipeTrainer
 
                     break;
                 }
-                // "Leave this page" said from outside, carried out here.
+                // A site the watcher dropped ends any page of it at its next round.
                 if ($attempt > 1 && $telegramUpdateId
-                    && ($leave = app(SearchProgressSupervisor::class)->takeLeaveVerdict($telegramUpdateId)) !== null) {
+                    && ($dropped = app(SearchProgressSupervisor::class)->siteDropReason($telegramUpdateId, $host)) !== null) {
+                    $agentAbandoned = true;
+                    $agentAbandonReason = 'Наблюдатель поиска исключил этот сайт: '.$dropped;
+                    $failureKind = 'agent_abandoned';
+                    $attempts[] = ['attempt' => $attempt, 'error' => 'agent_abandoned: '.$agentAbandonReason];
+                    $debug?->__invoke('warning', $agentAbandonReason.' Найденное сохраняю; рецепт домена не отключаю.');
+
+                    break;
+                }
+                // "Leave this page" said from outside, carried out here - for this page only.
+                if ($attempt > 1 && $telegramUpdateId
+                    && ($leave = app(SearchProgressSupervisor::class)->takeLeaveVerdict($telegramUpdateId, $url)) !== null) {
                     $agentAbandoned = true;
                     $agentAbandonReason = 'Наблюдатель поиска: '.$leave;
                     $failureKind = 'agent_abandoned';

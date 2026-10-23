@@ -38,6 +38,7 @@ use App\Services\Products\ProductSpecificationReconciler;
 use App\Services\Products\SpecificationReconciliationOutcome;
 use App\Services\Products\WikimediaImageSearch;
 use App\Services\ProductSearch\SourceQueueBuilder;
+use App\Services\ProductSearch\Supervision\SearchProgressSupervisor;
 use GdImage;
 use Illuminate\Filesystem\FilesystemAdapter;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -1643,6 +1644,36 @@ class ProductImageStorageTest extends TestCase
             'https://93.184.216.34/complete-card-photo.jpg',
             $draft->media()->firstOrFail()->source_url,
         );
+    }
+
+    public function test_a_site_the_watcher_dropped_is_not_opened_again_in_that_search(): void
+    {
+        Storage::fake('public');
+        config()->set('product-images.max_images_by_type.laptop', 3);
+        ProductImageVisionAgent::fake(fn (string $prompt, $attachments): array => ['images' => $attachments->keys()->map(fn (int $index): array => [
+            'index' => $index + 1, 'exact_match' => true, 'color_match' => true, 'publishable' => true, 'kind' => 'product',
+            'view' => 'front', 'gallery_rank' => 1, 'score' => 98, 'reason' => 'Exact product and selected color.',
+        ])->all()])->preventStrayPrompts();
+        Http::fake(fn (Request $request) => $request->url() === 'https://93.184.216.35/complete-card'
+            ? Http::response('<html></html>', 200, ['Content-Type' => 'text/html'])
+            : Http::response($this->jpeg(2), 200, ['Content-Type' => 'image/jpeg']));
+        [, , $draft] = $this->records();
+        $draft->update(['product_type' => 'laptop', 'brand' => 'Lenovo', 'model' => 'Test', 'color' => 'Black',
+            'primary_source_url' => 'https://93.184.216.34/dropped-card', 'image_urls' => [], 'sources' => [
+                ['title' => 'A store the watcher ended', 'url' => 'https://93.184.216.34/dropped-card', 'type' => 'retailer',
+                    'image_urls' => ['https://93.184.216.34/dropped-photo.jpg']],
+                ['title' => 'Second complete product card', 'url' => 'https://93.184.216.35/complete-card', 'type' => 'retailer',
+                    'image_urls' => ['https://93.184.216.35/complete-card-photo.jpg']],
+            ]]);
+        app(SearchProgressSupervisor::class)->dropSite($draft->telegram_update_id, '93.184.216.34', 'Те же пять кадров на двух страницах.');
+
+        $stored = app(ProductImageStorage::class)->stage($draft->fresh());
+
+        $this->assertSame(1, $stored);
+        $this->assertSame('https://93.184.216.35/complete-card', $draft->fresh()->primary_source_url);
+        Http::assertNotSent(fn (Request $request): bool => str_contains($request->url(), '93.184.216.34'));
+        $this->assertDatabaseHas('product_source_attempts', ['product_url' => 'https://93.184.216.34/dropped-card',
+            'action' => 'filter_candidate', 'decision' => 'site_dropped_by_watcher']);
     }
 
     public function test_staging_never_opens_a_foreign_card_when_an_exact_sku_was_requested(): void

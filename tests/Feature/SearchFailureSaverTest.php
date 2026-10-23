@@ -9,9 +9,11 @@ use App\Models\AppSetting;
 use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
 use App\Services\Ai\ProductSearchCostBudget;
+use App\Services\ProductSearch\Recovery\SearchFailureSaver;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request as HttpRequest;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
 use RuntimeException;
@@ -81,6 +83,32 @@ class SearchFailureSaverTest extends TestCase
         Queue::assertNotPushed(ContinueDraftGallerySearch::class);
         $this->assertSentText('закончилась квота');
         $this->assertSentText('отправляю черновик');
+    }
+
+    public function test_a_continuation_already_queued_for_the_draft_owns_it_and_no_second_card_is_sent(): void
+    {
+        [$update, $draft] = $this->failedSearch();
+        Cache::put("draft-gallery-continue:{$draft->id}:queued", true, 2100);
+        DB::table('jobs')->insert(['queue' => 'media', 'attempts' => 0, 'reserved_at' => null,
+            'available_at' => now()->timestamp, 'created_at' => now()->timestamp,
+            'payload' => json_encode(['displayName' => ContinueDraftGallerySearch::class, 'data' => ['commandName' => ContinueDraftGallerySearch::class,
+                'command' => serialize(new ContinueDraftGallerySearch($draft->id, '98765', $update->id, $update->id))]])]);
+
+        $this->assertSame('resumed', app(SearchFailureSaver::class)->save($update, ['kind' => 'worker_stopped']));
+
+        Queue::assertNotPushed(ContinueDraftGallerySearch::class);
+        Http::assertNothingSent();
+    }
+
+    public function test_a_stale_continuation_mark_without_its_job_does_not_stop_the_resume(): void
+    {
+        [$update, $draft] = $this->failedSearch();
+        Cache::put("draft-gallery-continue:{$draft->id}:queued", true, 2100);
+
+        $this->assertSame('resumed', app(SearchFailureSaver::class)->save($update, ['kind' => 'worker_stopped']));
+
+        Queue::assertPushed(ContinueDraftGallerySearch::class, fn (ContinueDraftGallerySearch $job): bool => $job->draftId === $draft->id);
+        $this->assertSentText('Обработчик остановился во время поиска. Найденное сохранено: фото — 0.');
     }
 
     public function test_without_a_saved_draft_the_operator_gets_the_ordinary_error(): void

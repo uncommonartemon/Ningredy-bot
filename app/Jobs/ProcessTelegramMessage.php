@@ -104,6 +104,10 @@ class ProcessTelegramMessage implements ShouldQueue
             return;
         }
 
+        if ($this->attempts() > 1 && $this->continueSavedDraft($update)) {
+            return;
+        }
+
         // A second delivery means the first attempt entered this method and
         // never came back out - a dead worker, or a retryable failure that
         // starts the whole search again from nothing. Either way the new
@@ -424,6 +428,31 @@ class ProcessTelegramMessage implements ShouldQueue
         } catch (Throwable $notificationError) {
             report($notificationError);
         }
+    }
+
+    /**
+     * A second delivery of a request that already saved a draft goes on from
+     * that draft, or delivers it: searching again from nothing paid for the
+     * research twice and left a second draft beside the first (PROJECT_STRATEGY:
+     * a continuation resumes the unfinished step, it never starts over).
+     */
+    private function continueSavedDraft(TelegramUpdate $update): bool
+    {
+        // An attempt that ended inside handle() recorded its error; a worker that stopped recorded none.
+        $presented = filled($update->error)
+            ? app(AiErrorPresenter::class)->present($update->error)
+            : ['kind' => 'worker_stopped'];
+        $saved = app(SearchFailureSaver::class)->save($update, $presented);
+        if ($saved === null) {
+            return false;
+        }
+        $update->aiRuns()->where('status', 'running')->update(['status' => 'failed',
+            'error' => 'Обработчик остановился во время работы.', 'completed_at' => now()]);
+        $update->update($saved === 'delivered'
+            ? ['status' => 'completed', 'processed_at' => now()]
+            : ['status' => 'processing', 'error' => null]);
+
+        return true;
     }
 
     private function isCancelled(TelegramUpdate $update): bool

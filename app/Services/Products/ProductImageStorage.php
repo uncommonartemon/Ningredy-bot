@@ -530,6 +530,12 @@ class ProductImageStorage
                 break;
             }
 
+            // A site the watcher dropped is not opened again in this search.
+            if (($dropped = app(SearchProgressSupervisor::class)->siteDropReason($telegramUpdateId, (string) $source['url'])) !== null) {
+                $this->skipDroppedSite($draft, $telegramUpdateId, (string) $source['url'], $dropped, $progress);
+
+                continue;
+            }
             // The search watcher may skip this source or end the photo search; what
             // was already found goes on to verification and card assembly as usual.
             $watch = app(SearchProgressSupervisor::class)->review($telegramUpdateId, $draft, [
@@ -540,7 +546,7 @@ class ProductImageStorage
             if ($watch['decision'] === 'deliver_now') {
                 break;
             }
-            if ($watch['decision'] === 'leave_current_page') {
+            if (in_array($watch['decision'], ['leave_current_page', 'skip_site'], true)) {
                 continue;
             }
 
@@ -1246,6 +1252,12 @@ class ProductImageStorage
                     $groupPageUrl = str_starts_with((string) $groupKey, 'page:')
                         ? substr((string) $groupKey, 5)
                         : null;
+                    if ($groupPageUrl !== null
+                        && ($dropped = app(SearchProgressSupervisor::class)->siteDropReason($telegramUpdateId, $groupPageUrl)) !== null) {
+                        $this->skipDroppedSite($draft, $telegramUpdateId, $groupPageUrl, $dropped, $progress);
+
+                        continue;
+                    }
                     $groupCandidates = $group->values()->all();
                     $host = $groupPageUrl ?: (string) ($groupCandidates[0]['source_url'] ?? $groupKey);
                     if ($progress) {
@@ -2864,6 +2876,17 @@ class ProductImageStorage
             $cycleSources,
             $attemptedUrls,
         );
+    }
+
+    /** Recorded so the watcher's timeline shows its "drop this site" carried out. */
+    private function skipDroppedSite(ProductDraft $draft, ?int $telegramUpdateId, string $url, string $reason, ?callable $progress): void
+    {
+        $this->attempts->record([
+            'telegram_update_id' => $telegramUpdateId ?? $draft->telegram_update_id, 'product_draft_id' => $draft->id,
+            'product_url' => $url, 'actor' => 'server', 'phase' => 'source_selection', 'action' => 'skip_dropped_site',
+            'status' => 'skipped', 'decision' => 'site_dropped_by_watcher', 'message' => mb_substr($reason, 0, 1000),
+        ]);
+        $progress?->__invoke("Пропускаю {$url}: наблюдатель поиска исключил этот сайт.");
     }
 
     /** @return array<int, string> */

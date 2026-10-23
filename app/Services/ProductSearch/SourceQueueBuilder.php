@@ -13,6 +13,7 @@ use App\Services\Products\ProductSourceAttemptRecorder;
 use App\Services\Products\ProductSourcePageMetadata;
 use App\Services\Products\ProductSourcePriority;
 use App\Services\ProductSearch\Research\ResearchSourceRoles;
+use App\Services\ProductSearch\Supervision\SearchProgressSupervisor;
 use Illuminate\Support\Collection;
 
 /** Builds and journals the source queue; never trains recipes or publishes a draft. */
@@ -124,6 +125,8 @@ class SourceQueueBuilder
                     $this->recipeRouter->domainIsBlocked($url) => 'blocked_by_recipe_router',
                     $this->sourceExcludedForDraft($url, $draft) => 'excluded_for_draft',
                     $this->sourceExcludedByUrls($url, $cycleExcludedSourceUrls) => 'already_finished_in_cycle',
+                    // Its verdicts outlive the cycle: a resumed search keeps off those sites too.
+                    app(SearchProgressSupervisor::class)->siteDropReason($telegramUpdateId, $url) !== null => 'site_dropped_by_watcher',
                     default => null,
                 };
                 if ($reason !== null) {

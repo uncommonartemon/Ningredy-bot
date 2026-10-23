@@ -20,20 +20,25 @@ use Illuminate\Validation\Rule;
 use Throwable;
 
 /**
- * Every few minutes of a long photo search an agent reads what the search has
- * done so far and may end the current page or the photo search early. Its
- * answer is advice the search follows; when the agent cannot answer, the
- * search continues exactly as it would have without it.
+ * While a photo search runs, an agent reads its whole story - every step in
+ * order, what keeps repeating, its own earlier answers - and may end the
+ * current page, drop a site or end the photo search. It looks whenever the
+ * search has done something new, at most about once a minute, and every few
+ * minutes while the search is silent; never twice at the same picture. Its
+ * answers go to one mailbox every loop of the search reads. When the agent
+ * cannot answer, the search continues exactly as it would have without it.
  */
 final class SearchProgressSupervisor
 {
-    public const DECISIONS = ['continue', 'leave_current_page', 'deliver_now', 'show_now'];
+    public const DECISIONS = ['continue', 'leave_current_page', 'skip_site', 'deliver_now', 'show_now'];
 
-    private const REVIEW_KEY = 'search-progress-review:';
+    private const LOOK_KEY = 'search-progress-look:';
 
     private const DELIVER_KEY = 'search-progress-deliver:';
 
     private const LEAVE_KEY = 'search-progress-leave:';
+
+    private const DROPPED_KEY = 'search-progress-dropped:';
 
     private const RULED_OUT_KEY = 'search-progress-ruled-out:';
 
@@ -49,7 +54,6 @@ final class SearchProgressSupervisor
     {
         if ($updateId) {
             Cache::forget(self::DELIVER_KEY.$updateId);
-            Cache::forget(self::REVIEW_KEY.$updateId);
         }
     }
 
@@ -61,12 +65,55 @@ final class SearchProgressSupervisor
         return is_string($reason) ? $reason : null;
     }
 
-    /** A "leave the current page" not yet carried out; taking it marks it done. */
-    public function takeLeaveVerdict(?int $updateId): ?string
+    /**
+     * A "leave the current page" not yet carried out, for the page it was said
+     * about; taking it marks it done. A page that ended before it could act
+     * leaves the verdict to expire, so it never ends the next page instead.
+     */
+    public function takeLeaveVerdict(?int $updateId, ?string $url = null): ?string
     {
-        $reason = $updateId ? Cache::pull(self::LEAVE_KEY.$updateId) : null;
+        $verdict = $updateId ? Cache::get(self::LEAVE_KEY.$updateId) : null;
+        if (! is_array($verdict) || ! is_string($verdict['reason'] ?? null)
+            || (filled($verdict['url'] ?? null) && filled($url) && rtrim((string) $verdict['url'], '/') !== rtrim((string) $url, '/'))) {
+            return null;
+        }
+        Cache::forget(self::LEAVE_KEY.$updateId);
+
+        return $verdict['reason'];
+    }
+
+    /** No page of a site the agent dropped is opened again in this search. */
+    public function dropSite(?int $updateId, string $site, string $reason): void
+    {
+        $site = self::site($site);
+        if (! $updateId || $site === '') {
+            return;
+        }
+        Cache::put(self::DROPPED_KEY.$updateId, [...$this->droppedSites($updateId), $site => $reason], now()->addHours(2));
+    }
+
+    /** Why the agent dropped the site of this page or host, while that stands. */
+    public function siteDropReason(?int $updateId, ?string $urlOrHost): ?string
+    {
+        $reason = $updateId && filled($urlOrHost) ? ($this->droppedSites($updateId)[self::site((string) $urlOrHost)] ?? null) : null;
 
         return is_string($reason) ? $reason : null;
+    }
+
+    /** @return array<string, string> host => the agent's reason */
+    public function droppedSites(?int $updateId): array
+    {
+        $dropped = $updateId ? Cache::get(self::DROPPED_KEY.$updateId, []) : [];
+
+        return is_array($dropped) ? $dropped : [];
+    }
+
+    /** One spelling per site: a page address or a host, without case or "www.". */
+    public static function site(string $urlOrHost): string
+    {
+        $host = str_contains($urlOrHost, '://') ? (string) parse_url($urlOrHost, PHP_URL_HOST) : $urlOrHost;
+
+        return (string) preg_replace('/^www\./', '', strtolower(trim($host)));
     }
 
     /**
@@ -95,9 +142,9 @@ final class SearchProgressSupervisor
     /**
      * @param  array<string, mixed>  $current  what the search is doing right now
      * @param  null|callable(string): void  $progress
-     * @param  bool  $fromOutside  asked by the request guardian about a stalled step: the
-     *                             search itself cannot reach its checkpoints, so the age,
-     *                             budget and interval gates that pace in-search reviews do not apply
+     * @param  bool  $fromOutside  asked by the request guardian on its minute: the search may be
+     *                             inside a step that has not returned, so the age and budget
+     *                             gates that pace in-search looks do not apply
      * @return array{decision: string, reason: ?string}
      */
     public function review(?int $updateId, ?ProductDraft $draft, array $current, ?callable $progress = null, bool $fromOutside = false): array
@@ -111,14 +158,14 @@ final class SearchProgressSupervisor
             return ['decision' => 'deliver_now', 'reason' => $deliver];
         }
         try {
+            $mark = SearchJournal::mark($updateId);
             if (! config('services.search_progress_supervisor.enabled', true)
                 || (! $fromOutside && (($this->timeBudget->elapsedSeconds($updateId) ?? 0) < (int) config('services.search_progress_supervisor.after_seconds', 480)
                     // Money can go faster than time: live #566 spent a dollar in four minutes.
                     && ($this->costBudget->spentFraction($updateId) ?? 0) < (float) config('services.search_progress_supervisor.after_spent_fraction', 0.4)))
                 || (! $fromOutside && ($this->costBudget->limit() <= 0 || $this->costBudget->unmeasurable($updateId)
-                    || $this->costBudget->exceeded($updateId) || ! $this->timeBudget->canStart($updateId, 30)
-                    || ! Cache::add(self::REVIEW_KEY.$updateId, now()->toIso8601String(),
-                        max(60, (int) config('services.search_progress_supervisor.interval_seconds', 240)))))) {
+                    || $this->costBudget->exceeded($updateId) || ! $this->timeBudget->canStart($updateId, 30)))
+                || ! $this->due($updateId, $mark, $fromOutside)) {
                 return $continue;
             }
 
@@ -132,22 +179,31 @@ final class SearchProgressSupervisor
 
         if ($verdict === null) {
             $this->record($draft, $updateId, $current, 'failed', 'supervisor_unavailable',
-                'Наблюдатель поиска не ответил; поиск продолжается как обычно.', null);
+                'Наблюдатель поиска не ответил; поиск продолжается как обычно.', null, $mark ?? 0);
 
             return $continue;
         }
+        if ($verdict['decision'] === 'skip_site'
+            && ($verdict['site'] = $this->siteToDrop($updateId, $verdict['site'], $current)) === null) {
+            // A site nobody can name cannot be dropped; the page in work can still be left.
+            $verdict['decision'] = 'leave_current_page';
+        }
 
-        $this->record($draft, $updateId, $current, 'completed', $verdict['decision'], $verdict['reason'], $verdict);
-        if ($verdict['decision'] === 'leave_current_page' && $fromOutside) {
+        $this->record($draft, $updateId, $current, 'completed', $verdict['decision'], $verdict['reason'], $verdict, $mark);
+        if ($verdict['decision'] === 'skip_site') {
+            $this->dropSite($updateId, $verdict['site'], $verdict['reason']);
+        } elseif ($verdict['decision'] === 'leave_current_page' && $fromOutside) {
             // A look from outside cannot reach the page itself, so the page in
             // training carries it out at its next round: the guardian's look said
             // "leave" twice for live #58 and nothing acted on it. A verdict given
             // inside the search is carried out by its caller on the spot.
-            Cache::put(self::LEAVE_KEY.$updateId, $verdict['reason'], now()->addMinutes(10));
+            Cache::put(self::LEAVE_KEY.$updateId, ['reason' => $verdict['reason'], 'url' => $current['url'] ?? null], now()->addMinutes(10));
         }
         if ($verdict['decision'] === 'deliver_now') {
             Cache::put(self::DELIVER_KEY.$updateId, $verdict['reason'], now()->addHours(2));
             $progress?->__invoke('Наблюдатель поиска: заканчиваю поиск фото и собираю карточку из найденного. '.$verdict['reason']);
+        } elseif ($verdict['decision'] === 'skip_site') {
+            $progress?->__invoke("Наблюдатель поиска: больше не открываю страницы сайта {$verdict['site']}. ".$verdict['reason']);
         } elseif ($verdict['decision'] === 'leave_current_page') {
             $progress?->__invoke('Наблюдатель поиска: ухожу с этой страницы к следующему источнику. '.$verdict['reason']);
         }
@@ -155,17 +211,66 @@ final class SearchProgressSupervisor
         return $verdict;
     }
 
-    /** @return array{decision: string, reason: string, operator_note: ?string} */
+    /** @return array{decision: string, reason: string, operator_note: ?string, site: ?string} */
     public function validate(array $response): array
     {
         $data = Validator::make($response, [
             'decision' => ['required', Rule::in(self::DECISIONS)],
             'reason' => ['required', 'string', 'max:400'],
             'operator_note' => ['sometimes', 'nullable', 'string', 'max:400'],
+            'site' => ['sometimes', 'nullable', 'string', 'max:255'],
         ])->validate();
 
         return ['decision' => $data['decision'], 'reason' => trim($data['reason']),
-            'operator_note' => filled($data['operator_note'] ?? null) ? trim($data['operator_note']) : null];
+            'operator_note' => filled($data['operator_note'] ?? null) ? trim($data['operator_note']) : null,
+            'site' => filled($data['site'] ?? null) ? trim($data['site']) : null];
+    }
+
+    /**
+     * One look at a time, and never twice at the same picture. From outside -
+     * the guardian's minute - a look when the search did something since the
+     * last one, and every few minutes while it is silent: the silence is then
+     * the news. The search's own checkpoints look only when nobody has for a
+     * while, so a lagging guardian is covered and no look is paid for twice.
+     */
+    private function due(int $updateId, int $mark, bool $fromOutside): bool
+    {
+        $last = ProductSourceAttempt::query()->where('telegram_update_id', $updateId)
+            ->where('phase', 'search_supervision')->latest('id')->first(['created_at', 'output']);
+        if ($last !== null) {
+            $since = now()->getTimestamp() - $last->created_at->getTimestamp();
+            $changed = $mark > (int) data_get($last->output, 'journal_mark', 0);
+            $due = $fromOutside
+                ? ($changed && $since >= (int) config('services.request_guardian.look_after_activity_seconds', 60))
+                    || $since >= (int) config('services.request_guardian.review_interval_seconds', 180)
+                : $changed && $since >= (int) config('services.search_progress_supervisor.interval_seconds', 90);
+            if (! $due) {
+                return false;
+            }
+        }
+
+        // The guardian and the search may reach the same moment: one of them looks.
+        return Cache::add(self::LOOK_KEY.$updateId, true, now()->addSeconds(30));
+    }
+
+    /**
+     * The site the agent named when this search has been there (or it is the
+     * page in work), else the page in work's own site; null when neither is known.
+     */
+    private function siteToDrop(int $updateId, ?string $named, array $current): ?string
+    {
+        $here = self::site((string) ($current['host'] ?? $current['url'] ?? ''));
+        $named = self::site((string) $named);
+        if ($named === '' || $named === $here) {
+            return $here !== '' ? $here : null;
+        }
+        $seen = ProductSourceAttempt::query()->where('telegram_update_id', $updateId)->whereNotIn('phase', SearchJournal::OWN_PHASES)
+            ->where('product_url', '!=', '')->distinct()->pluck('product_url')
+            ->map(fn (string $url): string => self::site($url))->filter()->unique()->values();
+        // "msi.com" for the one MSI host this search opened is still that host.
+        $matches = $seen->contains($named) ? collect([$named]) : $seen->filter(fn (string $site): bool => str_ends_with($site, '.'.$named));
+
+        return $matches->count() === 1 ? $matches->first() : null;
     }
 
     private function ask(ProductDraft $draft, int $updateId, array $payload, bool $fromOutside = false): ?array
@@ -202,15 +307,20 @@ final class SearchProgressSupervisor
 
     private function payload(ProductDraft $draft, int $updateId, array $current): array
     {
+        // What only grows comes first: the provider discounts a prompt's repeated beginning.
         return [
             ...ProductRequestContext::forDraft($draft)->forAgent(),
+            'timeline' => SearchJournal::timeline($updateId),
+            'repeats' => SearchJournal::repeats($updateId),
+            'pages_opened' => SearchJournal::pagesOpened($updateId, $draft),
+            'structured_database_lookups' => SearchJournal::codeLookups($updateId),
             'elapsed_minutes' => round(($this->timeBudget->elapsedSeconds($updateId) ?? 0) / 60, 1),
             'working_minutes_left' => round(($this->timeBudget->remainingWorkingSeconds($updateId) ?? 0) / 60, 1),
             'search_budget' => ['spent_usd' => $this->costBudget->spent($updateId), 'limit_usd' => $this->costBudget->limit()],
             'photos_saved_for_card' => $draft->media()->count(),
             'current_activity' => $current,
-            'pages_opened' => SearchJournal::pagesOpened($updateId, $draft),
-            'structured_database_lookups' => SearchJournal::codeLookups($updateId),
+            'open_calls' => SearchJournal::openCalls($updateId),
+            'sites_dropped' => $this->droppedSites($updateId),
             'earlier_supervisor_decisions' => ProductSourceAttempt::query()->where('telegram_update_id', $updateId)
                 ->where('phase', 'search_supervision')->orderBy('id')->get(['decision', 'message'])
                 ->map(fn (ProductSourceAttempt $row): array => ['decision' => $row->decision, 'reason' => $row->message])
@@ -218,14 +328,15 @@ final class SearchProgressSupervisor
         ];
     }
 
-    private function record(ProductDraft $draft, int $updateId, array $current, string $status, string $decision, string $message, ?array $verdict): void
+    /** @param int $mark the journal as this look saw it: the next look waits for something newer */
+    private function record(ProductDraft $draft, int $updateId, array $current, string $status, string $decision, string $message, ?array $verdict, int $mark): void
     {
         $this->attempts->record([
             'telegram_update_id' => $updateId, 'product_draft_id' => $draft->id,
             'product_url' => (string) ($current['url'] ?? $draft->primary_source_url ?? ''),
             'actor' => 'ai', 'phase' => 'search_supervision', 'action' => 'review_progress',
             'status' => $status, 'decision' => $decision, 'message' => mb_substr($message, 0, 1000),
-            'input' => $current, 'output' => ['verdict' => $verdict],
+            'input' => $current, 'output' => ['verdict' => $verdict, 'journal_mark' => $mark],
         ]);
     }
 }

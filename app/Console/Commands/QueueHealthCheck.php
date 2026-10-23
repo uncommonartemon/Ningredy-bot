@@ -3,6 +3,7 @@
 namespace App\Console\Commands;
 
 use App\Models\TelegramUpdate;
+use App\Services\ProductSearch\SearchJournal;
 use App\Services\Telegram\TelegramClient;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Cache;
@@ -210,13 +211,17 @@ class QueueHealthCheck extends Command
     {
         $silentSince = now()->subSeconds(self::SILENT_AFTER_SECONDS);
 
+        // The watcher keeps looking at a search whose worker is gone; its own rows
+        // and calls are no sign the search itself is alive.
         if (
             DB::table('product_source_attempts')
                 ->where('telegram_update_id', $telegramUpdateId)
+                ->whereNotIn('phase', SearchJournal::OWN_PHASES)
                 ->where('created_at', '>', $silentSince)
                 ->exists()
             || DB::table('ai_runs')
                 ->where('telegram_update_id', $telegramUpdateId)
+                ->where(fn ($query) => $query->whereNull('activity->stage')->orWhere('activity->stage', '!=', 'search_progress_supervisor'))
                 ->where('updated_at', '>', $silentSince)
                 ->exists()
         ) {
@@ -232,6 +237,7 @@ class QueueHealthCheck extends Command
         // this is a real marker rather than an inference from silence.
         return DB::table('ai_runs')
             ->where('telegram_update_id', $telegramUpdateId)
+            ->where(fn ($query) => $query->whereNull('activity->stage')->orWhere('activity->stage', '!=', 'search_progress_supervisor'))
             ->where('status', 'running')
             ->where('created_at', '>', now()->subSeconds(self::AI_CALL_CEILING_SECONDS))
             ->exists();

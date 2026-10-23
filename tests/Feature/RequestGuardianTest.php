@@ -3,13 +3,17 @@
 namespace Tests\Feature;
 
 use App\Ai\Agents\SearchProgressAgent;
+use App\Jobs\ContinueDraftGallerySearch;
 use App\Jobs\DeliverTelegramAssistantReply;
 use App\Jobs\ProcessTelegramMessage;
 use App\Models\AiOperation;
 use App\Models\AiRun;
+use App\Models\AppSetting;
 use App\Models\ProductDraft;
 use App\Models\ProductSourceAttempt;
 use App\Models\TelegramUpdate;
+use App\Services\Ai\ProductSearchCostBudget;
+use App\Services\Products\ProductSourceAttemptRecorder;
 use App\Services\ProductSearch\Recovery\RequestGuardian;
 use App\Services\ProductSearch\Supervision\SearchProgressSupervisor;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -310,6 +314,66 @@ class RequestGuardianTest extends TestCase
         Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => ['message_id' => 701]])]);
         $this->sweep();
         Http::assertNothingSent();
+    }
+
+    public function test_an_orphaned_request_with_a_saved_draft_is_requeued_without_promising_a_fresh_start(): void
+    {
+        // Its retry goes on from the draft and says so itself: "searching again" would not be true.
+        [$update] = $this->runningSearch(silentMinutes: 5);
+        Process::fake(['*' => Process::result(now()->subMinutes(2)->getTimestamp().' php artisan queue:work --queue=assistant,default --sleep=2')]);
+
+        $this->sweep();
+
+        $this->assertNull(DB::table('jobs')->value('reserved_at'));
+        Http::assertNotSent(fn (Request $request): bool => str_contains((string) ($request['text'] ?? ''), 'заново'));
+        $this->assertDatabaseHas('product_source_attempts', ['telegram_update_id' => $update->id, 'phase' => 'guardian',
+            'action' => 'retry_orphaned_job', 'message' => 'Задачу держал остановленный обработчик; она возвращена в очередь и продолжит поиск с сохранённого черновика.']);
+    }
+
+    public function test_a_vanished_search_with_a_saved_draft_and_money_left_goes_on_from_where_it_stopped(): void
+    {
+        AppSetting::put('ai.max_search_cost_usd', '1');
+        $budget = $this->mock(ProductSearchCostBudget::class);
+        $budget->shouldReceive('unmeasurable')->andReturn(false);
+        $budget->shouldReceive('hasRemaining')->andReturn(true);
+        $update = $this->update('processing', 12, activityMinutesAgo: 5);
+        $run = $this->aiRun($update, 'research', 'running', 11, 5);
+        $draft = ProductDraft::query()->create(['telegram_update_id' => $update->id, 'ai_run_id' => $run->id, 'requested_by_telegram_user_id' => '123',
+            'title' => 'Lenovo Legion 5', 'status' => 'pending_review', 'product_type' => 'laptop', 'primary_source_url' => 'https://shop.example/legion',
+            'specifications' => [], 'sources' => [], 'image_urls' => []]);
+
+        $this->sweep();
+
+        Queue::assertPushed(ContinueDraftGallerySearch::class, fn (ContinueDraftGallerySearch $job): bool => $job->draftId === $draft->id
+            && $job->telegramUpdateId === $update->id);
+        $this->assertSentText('Обработчик остановился во время поиска. Найденное сохранено: фото — 0. Продолжаю с места остановки');
+        $this->assertSame(['processing', null], [$update->fresh()->status, $update->fresh()->processed_at]);
+        $this->assertSame('failed', $run->fresh()->status);
+        $this->assertDatabaseHas('product_source_attempts', ['telegram_update_id' => $update->id, 'phase' => 'guardian', 'action' => 'resume_abandoned']);
+        Http::assertNotSent(fn (Request $request): bool => str_ends_with($request->url(), '/sendPhoto'));
+    }
+
+    public function test_the_page_in_work_reaches_the_watcher_and_its_leave_is_kept_for_that_page(): void
+    {
+        [$update, $draft] = $this->runningSearch(silentMinutes: 1);
+        app(ProductSourceAttemptRecorder::class)->record(['telegram_update_id' => $update->id, 'product_draft_id' => $draft->id,
+            'product_url' => 'https://shop.example/legion', 'actor' => 'ai', 'phase' => 'gallery_training', 'action' => 'propose_recipe',
+            'status' => 'completed', 'decision' => 'execute_candidate', 'output' => ['images' => ['https://shop.example/1.jpg']]]);
+        $prompts = [];
+        SearchProgressAgent::fake(function (string $prompt) use (&$prompts): array {
+            $prompts[] = json_decode($prompt, true);
+
+            return ['decision' => 'leave_current_page', 'reason' => 'Пятый раунд те же кадры.', 'operator_note' => null, 'site' => null];
+        })->preventStrayPrompts();
+
+        $this->sweep();
+
+        $this->assertSame(['https://shop.example/legion', 'shop.example'],
+            [$prompts[0]['current_activity']['url'], $prompts[0]['current_activity']['host']]);
+        $this->assertCount(1, $prompts[0]['timeline']);
+        $supervisor = app(SearchProgressSupervisor::class);
+        $this->assertNull($supervisor->takeLeaveVerdict($update->id, 'https://shop.example/another-page'));
+        $this->assertSame('Пятый раунд те же кадры.', $supervisor->takeLeaveVerdict($update->id, 'https://shop.example/legion'));
     }
 
     public function test_a_job_held_by_a_worker_that_was_already_running_is_left_alone(): void

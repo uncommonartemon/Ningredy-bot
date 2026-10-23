@@ -11,6 +11,7 @@ use App\Models\ProductSourceAttempt;
 use App\Models\TelegramUpdate;
 use App\Services\Ai\AiSettings;
 use App\Services\Products\ProductSourceAttemptRecorder;
+use App\Services\ProductSearch\SearchJournal;
 use App\Services\ProductSearch\Supervision\SearchProgressSupervisor;
 use App\Services\Telegram\DraftTelegramPresenter;
 use App\Services\Telegram\TelegramClient;
@@ -27,13 +28,15 @@ use Throwable;
  * them, and a request waiting behind a long search is invisible to all of them.
  *
  * Judgement belongs to the watcher agent (operator rule, 2026-10-21). It reads
- * the search journal itself; the guardian only wakes it every few minutes while
- * a search runs and adds the one fact the journal cannot show - how long since
- * the last step. The agent lets the search run, has it wrap up into a card, or
- * shows what exists right now, and decides whether the operator hears anything.
- * The app keeps only the operator's own time budget (two minutes before the
- * limit the operator gets what exists) and facts that need no judgement: a
- * request queued behind another search, a vanished process, an undelivered reply.
+ * the search's whole story itself; the guardian wakes it on its minute - when
+ * the search did something new since the last look, and every few minutes while
+ * it is silent - and adds what the journal cannot show: how long since the last
+ * step and which page was in work. The agent lets the search run, ends a page or
+ * a site, has it wrap up into a card, or shows what exists right now, and decides
+ * whether the operator hears anything. The app keeps only the operator's own
+ * time budget (two minutes before the limit the operator gets what exists) and
+ * facts that need no judgement: a request queued behind another search, a
+ * vanished process (its search goes on from its saved draft), an undelivered reply.
  *
  * Nothing here raises a budget or starts a paid search, and no message carries
  * a technical error. Every action is recorded in the search journal (phase
@@ -44,7 +47,7 @@ final class RequestGuardian
     private const OPEN_STATUSES = ['received', 'transcribed', 'processing', 'delivering'];
 
     /** Rows the guardian and the watcher write themselves never prove a search alive. */
-    private const OWN_PHASES = ['search_supervision', 'guardian', 'delivery_guard'];
+    private const OWN_PHASES = SearchJournal::OWN_PHASES;
 
     private const OWN_STAGES = ['search_progress_supervisor'];
 
@@ -54,6 +57,7 @@ final class RequestGuardian
         private readonly DraftTelegramPresenter $presenter,
         private readonly ProductSourceAttemptRecorder $attempts,
         private readonly AiSettings $settings,
+        private readonly SearchFailureSaver $saver,
     ) {}
 
     /** @return list<string> one line per action taken */
@@ -190,24 +194,15 @@ final class RequestGuardian
         // the card finish: live #650 was cut while its card was being assembled.
         $wrapUp = (int) Cache::get('request-guard:wrap-up:'.$update->id, 0);
         if ($wrapUp > 0 && now()->timestamp - $wrapUp > 300) {
-            return Cache::add('request-guard:review:'.$update->id, true, now()->addSeconds($this->reviewInterval()))
-                ? $this->wakeTheWatcher($update, $silent, ['wrap_up_requested_minutes_ago' => intdiv(now()->timestamp - $wrapUp, 60)])
-                : null;
+            return $this->wakeTheWatcher($update, $silent, ['wrap_up_requested_minutes_ago' => intdiv(now()->timestamp - $wrapUp, 60)]);
         }
-        if ($wrapUp > 0 || (int) Cache::get('request-guard:wait:'.$update->id, 0) > now()->timestamp
-            // A search reaching its own checkpoints already calls the watcher itself.
-            || ProductSourceAttempt::query()->where('telegram_update_id', $update->id)->where('phase', 'search_supervision')
-                ->where('created_at', '>', now()->subSeconds($this->reviewInterval()))->exists()
-            || ! Cache::add('request-guard:review:'.$update->id, true, now()->addSeconds($this->reviewInterval()))) {
+        if ($wrapUp > 0 || (int) Cache::get('request-guard:wait:'.$update->id, 0) > now()->timestamp) {
             return null;
         }
 
+        // Whether a look is due - something new since the last one, or minutes of
+        // silence - the watcher's own pace decides, shared with the search's checkpoints.
         return $this->wakeTheWatcher($update, $silent);
-    }
-
-    private function reviewInterval(): int
-    {
-        return max(60, (int) config('services.request_guardian.review_interval_seconds', 180));
     }
 
     /** The watcher reads the journal and decides; the guardian only carries the decision out. */
@@ -218,10 +213,15 @@ final class RequestGuardian
         if ($draft === null) {
             return null;
         }
-        $verdict = $this->supervisor->review($update->id, $draft, [
-            'kind' => 'outside_check', 'minutes_since_last_step' => intdiv($silent, 60),
-            'operator_already_told' => Cache::has('request-guard:note:'.$update->id), ...$extra,
-        ], fromOutside: true);
+        $current = ['kind' => 'outside_check', 'minutes_since_last_step' => intdiv($silent, 60),
+            'operator_already_told' => Cache::has('request-guard:note:'.$update->id), ...$extra];
+        // The page the search last worked on: a "leave" from here is for that page alone.
+        $page = ProductSourceAttempt::query()->where('telegram_update_id', $update->id)->whereNotIn('phase', self::OWN_PHASES)
+            ->where('product_url', '!=', '')->latest('id')->value('product_url');
+        if (is_string($page) && $page !== '') {
+            $current += ['url' => $page, 'host' => strtolower((string) parse_url($page, PHP_URL_HOST))];
+        }
+        $verdict = $this->supervisor->review($update->id, $draft, $current, fromOutside: true);
 
         if ($verdict['decision'] === 'show_now' && $this->claim('deliver', $update)) {
             $this->showFound($update, '⏳ '.($verdict['reason'] ?: 'Поиск остановлен.'));
@@ -288,7 +288,17 @@ final class RequestGuardian
 
             return 'redeliver_abandoned_reply';
         }
-        if ($this->draftFor($update) !== null) {
+        if (($draft = $this->draftFor($update)) !== null) {
+            // With time and money left the search goes on from where it stopped,
+            // once per draft; otherwise the operator gets what it found.
+            if ((int) $draft->telegram_update_id === $update->id
+                && $this->saver->resume($update, $draft, ['kind' => 'worker_stopped'])) {
+                AiRun::query()->where('telegram_update_id', $update->id)->where('status', 'running')
+                    ->update(['status' => 'failed', 'error' => 'Процесс обработки исчез без ответа.', 'completed_at' => now()]);
+                $this->record($update, $draft, 'resume_abandoned', 'completed', 'Процесс исчез с сохранённым черновиком; поиск продолжен с места остановки.', []);
+
+                return 'abandoned_resumed';
+            }
             $this->showFound($update, '⚠️ Обработка поиска прервалась. Показываю, что уже найдено.');
 
             return 'abandoned_shown_found';
@@ -347,9 +357,16 @@ final class RequestGuardian
                 }
             }
             DB::table('jobs')->where('id', $job['id'])->update(['reserved_at' => null, 'available_at' => now()->timestamp]);
-            $this->telegram->sendMessage((string) $update->chat_id,
-                '⚠️ Обработка запроса прервалась: обработчик остановился. Запускаю запрос заново — отправлять его ещё раз не нужно.');
-            $this->record($update, null, 'retry_orphaned_job', 'completed', 'Задачу держал остановленный обработчик; она возвращена в очередь.', $job);
+            // A request with a saved draft goes on from it, and says so itself when it does.
+            $saved = $job['class'] === ProcessTelegramMessage::class
+                && ProductDraft::query()->where('telegram_update_id', $update->id)->where('status', 'pending_review')->exists();
+            if (! $saved) {
+                $this->telegram->sendMessage((string) $update->chat_id,
+                    '⚠️ Обработка запроса прервалась: обработчик остановился. Запускаю запрос заново — отправлять его ещё раз не нужно.');
+            }
+            $this->record($update, null, 'retry_orphaned_job', 'completed', $saved
+                ? 'Задачу держал остановленный обработчик; она возвращена в очередь и продолжит поиск с сохранённого черновика.'
+                : 'Задачу держал остановленный обработчик; она возвращена в очередь.', $job);
 
             return 'retry_orphaned_job';
         }

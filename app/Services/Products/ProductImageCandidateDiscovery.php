@@ -731,6 +731,16 @@ class ProductImageCandidateDiscovery
             if (app(SearchProgressSupervisor::class)->deliverNowReason($telegramUpdateId) !== null) {
                 break;
             }
+            // Nor is a site the watcher dropped opened again.
+            if (($dropped = app(SearchProgressSupervisor::class)->siteDropReason($telegramUpdateId, $pageUrl)) !== null) {
+                $this->attempts->record([
+                    'telegram_update_id' => $telegramUpdateId, 'product_draft_id' => $draft->id, 'product_url' => $pageUrl,
+                    'actor' => 'server', 'phase' => 'source_selection', 'action' => 'skip_dropped_site',
+                    'status' => 'skipped', 'decision' => 'site_dropped_by_watcher', 'message' => mb_substr($dropped, 0, 1000),
+                ]);
+
+                continue;
+            }
             $source['_minimum_verified_images'] = $minimumVerifiedImages;
             $source['_category_slug'] = trim((string) $draft->category) !== '' ? trim((string) $draft->category) : null;
             $source[ProductRequestContext::SOURCE_KEY] = $draft->id;

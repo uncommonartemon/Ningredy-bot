@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Models\AiRun;
 use App\Models\ProductSourceAttempt;
 use App\Models\TelegramUpdate;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -49,6 +50,23 @@ class QueueHealthCheckReleasesAbandonedJobsTest extends TestCase
         $this->artisan('queue:health-check')->assertSuccessful();
 
         $this->assertNotNull(DB::table('jobs')->where('id', $jobId)->value('reserved_at'));
+    }
+
+    public function test_the_watchers_own_looks_at_a_dead_search_do_not_keep_its_job_held(): void
+    {
+        // The guardian wakes the watcher every few minutes of silence; those rows
+        // and calls are the watcher's, not the search's, and prove nothing alive.
+        Http::fake();
+        $update = $this->update(904);
+        $jobId = $this->reservedJob($update->id, reservedMinutesAgo: 20);
+        ProductSourceAttempt::query()->create(['telegram_update_id' => $update->id, 'domain' => '', 'product_url' => '',
+            'actor' => 'ai', 'phase' => 'search_supervision', 'action' => 'review_progress', 'status' => 'completed']);
+        AiRun::query()->create(['telegram_update_id' => $update->id, 'provider' => 'openai', 'model' => 'mini', 'status' => 'completed',
+            'prompt' => 'watch', 'started_at' => now(), 'activity' => ['stage' => 'search_progress_supervisor']]);
+
+        $this->artisan('queue:health-check')->assertSuccessful();
+
+        $this->assertNull(DB::table('jobs')->where('id', $jobId)->value('reserved_at'));
     }
 
     public function test_a_job_queued_behind_a_busy_worker_is_not_reported_as_an_unattended_queue(): void

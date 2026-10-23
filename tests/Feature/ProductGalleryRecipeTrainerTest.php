@@ -25,6 +25,7 @@ use App\Services\Products\ProductGalleryRecipeRouter;
 use App\Services\Products\ProductGalleryRecipeTrainer;
 use App\Services\Products\ProductImageResolver;
 use App\Services\Products\ProductSourcePriority;
+use App\Services\ProductSearch\Supervision\SearchProgressSupervisor;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\JsonSchema\JsonSchemaTypeFactory;
 use Illuminate\Support\Carbon;
@@ -594,6 +595,32 @@ class ProductGalleryRecipeTrainerTest extends TestCase
         $this->assertNull($prompts[1]['previous_attempt_feedback']['same_frames_note']);
         $this->assertSame(2, $prompts[2]['previous_attempt_feedback']['rounds_with_same_frames']);
         $this->assertStringContainsString('not progress', $prompts[2]['previous_attempt_feedback']['same_frames_note']);
+    }
+
+    public function test_a_site_the_watcher_dropped_ends_its_page_at_the_next_round(): void
+    {
+        $update = TelegramUpdate::create(['update_id' => 883931, 'chat_id' => '1', 'telegram_user_id' => '1',
+            'payload' => [], 'status' => 'processing', 'text' => 'Find laptop']);
+        $calls = 0;
+        ProductGalleryRecipeTrainerAgent::fake(function () use (&$calls): array {
+            $calls++;
+
+            return $this->validRecipeResponse(['collect_selectors' => ['.gallery-'.$calls.' img'], 'expected_image_count' => 19]);
+        })->preventStrayPrompts();
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock) use ($update): void {
+            $mock->shouldReceive('scout')->once()->andReturn(['scout' => ['title' => 'Product', 'fragments' => ['<div>Gallery</div>']]]);
+            $mock->shouldReceive('executeRecipe')->once()->andReturnUsing(function () use ($update): array {
+                // Said from outside while the first round ran.
+                app(SearchProgressSupervisor::class)->dropSite($update->id, 'dropped-site.example', 'Те же кадры на всех страницах сайта.');
+
+                return ['images' => ['https://cdn.example/a.jpg', 'https://cdn.example/b.jpg'], 'diagnostics' => ['observed_gallery_count' => 19]];
+            });
+        });
+
+        app(ProductGalleryRecipeTrainer::class)->train('https://www.dropped-site.example/product', force: true, telegramUpdateId: $update->id);
+
+        $this->assertSame(1, $calls);
+        $this->assertSame('agent_abandoned', ProductGalleryRecipeVersion::latest('id')->firstOrFail()->result['failure_kind'] ?? null);
     }
 
     public function test_a_refusing_host_ends_page_training_without_another_paid_round(): void
