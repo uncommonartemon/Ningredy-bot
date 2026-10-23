@@ -817,6 +817,18 @@ class ProductGalleryRecipeTrainer
 
                     break;
                 }
+                // "Leave this page" said from outside, carried out here.
+                if ($attempt > 1 && $telegramUpdateId
+                    && ($leave = app(SearchProgressSupervisor::class)->takeLeaveVerdict($telegramUpdateId)) !== null) {
+                    $agentAbandoned = true;
+                    $agentAbandonReason = 'Наблюдатель поиска: '.$leave;
+                    $failureKind = 'agent_abandoned';
+                    $attempts[] = ['attempt' => $attempt, 'error' => 'agent_abandoned: '.$agentAbandonReason];
+                    app(SearchProgressSupervisor::class)->ruleOutFrames($telegramUpdateId, $host, (string) $previousFrameSet, $agentAbandonReason);
+                    $debug?->__invoke('warning', $agentAbandonReason.' Найденное сохраняю; рецепт домена не отключаю.');
+
+                    break;
+                }
 
                 // From the third round on, the search watcher may tell a page that keeps
                 // collecting the same frames to step aside. Its answer ends this page the
@@ -836,6 +848,7 @@ class ProductGalleryRecipeTrainer
                         $agentAbandonReason = 'Наблюдатель поиска: '.$watch['reason'];
                         $failureKind = 'agent_abandoned';
                         $attempts[] = ['attempt' => $attempt, 'error' => 'agent_abandoned: '.$agentAbandonReason];
+                        app(SearchProgressSupervisor::class)->ruleOutFrames($telegramUpdateId, $host, (string) $previousFrameSet, $agentAbandonReason);
                         $debug?->__invoke('warning', $agentAbandonReason.' Найденное сохраняю; рецепт домена не отключаю.');
 
                         break;
@@ -1458,6 +1471,18 @@ class ProductGalleryRecipeTrainer
                     ->map(fn (string $url): string => ImageUrls::imageAssetKey($url))->unique()->sort()->values()->all()));
                 $sameFrameRounds = $candidateImages !== [] && $frameSet === $previousFrameSet ? $sameFrameRounds + 1 : 0;
                 $previousFrameSet = $frameSet;
+                // Exactly the frames the watcher already ended a page of this site on:
+                // its verdict stands for them here too.
+                if ($candidateImages !== [] && $telegramUpdateId
+                    && ($ruledOut = app(SearchProgressSupervisor::class)->ruledOutReason($telegramUpdateId, $host, $frameSet)) !== null) {
+                    $agentAbandoned = true;
+                    $agentAbandonReason = 'Те же кадры, на которых наблюдатель уже закончил другую страницу этого сайта. '.$ruledOut;
+                    $failureKind = 'agent_abandoned';
+                    $attempts[] = ['attempt' => $attempt, 'error' => 'agent_abandoned: '.$agentAbandonReason];
+                    $debug?->__invoke('warning', $agentAbandonReason.' Найденное сохраняю; рецепт домена не отключаю.');
+
+                    break;
+                }
 
                 // Repeated outcomes are evidence for the agent, not a verdict
                 // that this page cannot work. The operator permits returning to

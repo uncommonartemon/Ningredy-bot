@@ -50,8 +50,10 @@ class SearchProgressAgent implements Agent, HasStructuredOutput
             Everything else you read from the journal yourself. There: continue lets it run (you are asked
             again later); deliver_now has it end the photo search at its next step and assemble the card from
             what it has; show_now stops it now and shows the operator what exists - for a step that is not
-            coming back, since deliver_now waits for the next step; leave_current_page is not available.
-            Inside the search show_now is never needed.
+            coming back, since deliver_now waits for the next step; leave_current_page has the page being
+            trained end at its next round and the search move on.
+            Inside the search show_now is never needed. A page you end is remembered by the frames it showed:
+            another page of the same site that collects exactly those frames is ended the same way.
             wrap_up_requested_minutes_ago: you already told this search to wrap up that long ago and it is still
             running - card assembly can take a few minutes. show_now shows what exists now; continue lets it finish.
             operator_note: one short Russian sentence the operator should read now (a step that runs unusually

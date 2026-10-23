@@ -33,6 +33,10 @@ final class SearchProgressSupervisor
 
     private const DELIVER_KEY = 'search-progress-deliver:';
 
+    private const LEAVE_KEY = 'search-progress-leave:';
+
+    private const RULED_OUT_KEY = 'search-progress-ruled-out:';
+
     public function __construct(
         private readonly AiSettings $settings,
         private readonly ProductSearchTimeBudget $timeBudget,
@@ -53,6 +57,37 @@ final class SearchProgressSupervisor
     public function deliverNowReason(?int $updateId): ?string
     {
         $reason = $updateId ? Cache::get(self::DELIVER_KEY.$updateId) : null;
+
+        return is_string($reason) ? $reason : null;
+    }
+
+    /** A "leave the current page" not yet carried out; taking it marks it done. */
+    public function takeLeaveVerdict(?int $updateId): ?string
+    {
+        $reason = $updateId ? Cache::pull(self::LEAVE_KEY.$updateId) : null;
+
+        return is_string($reason) ? $reason : null;
+    }
+
+    /**
+     * The frames a page was showing when the agent ended it. The same frames
+     * on another page of that site are the same dead end (live #58: the
+     * watcher left de.msi.com/…/shopnow after eight rounds of five frames, and
+     * …/ without /shopnow then trained eight more rounds on those five).
+     */
+    public function ruleOutFrames(?int $updateId, string $host, string $frameSet, string $reason): void
+    {
+        if (! $updateId || $host === '' || $frameSet === '') {
+            return;
+        }
+        $ruledOut = Cache::get(self::RULED_OUT_KEY.$updateId, []);
+        $ruledOut[strtolower($host)][$frameSet] = $reason;
+        Cache::put(self::RULED_OUT_KEY.$updateId, $ruledOut, now()->addHours(2));
+    }
+
+    public function ruledOutReason(?int $updateId, string $host, string $frameSet): ?string
+    {
+        $reason = $updateId ? (Cache::get(self::RULED_OUT_KEY.$updateId, [])[strtolower($host)][$frameSet] ?? null) : null;
 
         return is_string($reason) ? $reason : null;
     }
@@ -103,6 +138,13 @@ final class SearchProgressSupervisor
         }
 
         $this->record($draft, $updateId, $current, 'completed', $verdict['decision'], $verdict['reason'], $verdict);
+        if ($verdict['decision'] === 'leave_current_page' && $fromOutside) {
+            // A look from outside cannot reach the page itself, so the page in
+            // training carries it out at its next round: the guardian's look said
+            // "leave" twice for live #58 and nothing acted on it. A verdict given
+            // inside the search is carried out by its caller on the spot.
+            Cache::put(self::LEAVE_KEY.$updateId, $verdict['reason'], now()->addMinutes(10));
+        }
         if ($verdict['decision'] === 'deliver_now') {
             Cache::put(self::DELIVER_KEY.$updateId, $verdict['reason'], now()->addHours(2));
             $progress?->__invoke('Наблюдатель поиска: заканчиваю поиск фото и собираю карточку из найденного. '.$verdict['reason']);

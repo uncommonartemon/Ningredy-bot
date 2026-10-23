@@ -109,6 +109,37 @@ class SearchProgressSupervisorTest extends TestCase
         $this->assertNull($supervisor->deliverNowReason($draft->telegram_update_id));
     }
 
+    public function test_leave_said_from_outside_waits_for_the_page_in_training_and_is_carried_out_once(): void
+    {
+        // Live #58: the guardian's look said "leave" twice and the page trained on.
+        $draft = $this->draft(minutesAgo: 9);
+        SearchProgressAgent::fake([
+            ['decision' => 'leave_current_page', 'reason' => 'Те же пять кадров восемь раундов подряд.'],
+            ['decision' => 'leave_current_page', 'reason' => 'Изнутри: страница стоит.'],
+        ])->preventStrayPrompts();
+        $supervisor = app(SearchProgressSupervisor::class);
+
+        $supervisor->review($draft->telegram_update_id, $draft, ['kind' => 'outside_check', 'minutes_since_last_step' => 0], fromOutside: true);
+        $this->assertSame('Те же пять кадров восемь раундов подряд.', $supervisor->takeLeaveVerdict($draft->telegram_update_id));
+        $this->assertNull($supervisor->takeLeaveVerdict($draft->telegram_update_id));
+
+        // Inside the search its caller acts on the spot; nothing is left over for the next page.
+        $this->review($draft);
+        $this->assertNull($supervisor->takeLeaveVerdict($draft->telegram_update_id));
+    }
+
+    public function test_frames_a_page_was_ended_on_stay_ruled_out_on_that_site_only(): void
+    {
+        $draft = $this->draft(minutesAgo: 9);
+        $supervisor = app(SearchProgressSupervisor::class);
+
+        $supervisor->ruleOutFrames($draft->telegram_update_id, 'de.msi.com', 'frames-abc', 'Наблюдатель поиска: те же пять кадров.');
+
+        $this->assertSame('Наблюдатель поиска: те же пять кадров.', $supervisor->ruledOutReason($draft->telegram_update_id, 'DE.msi.com', 'frames-abc'));
+        $this->assertNull($supervisor->ruledOutReason($draft->telegram_update_id, 'de.msi.com', 'other-frames'));
+        $this->assertNull($supervisor->ruledOutReason($draft->telegram_update_id, 'shop.example', 'frames-abc'));
+    }
+
     public function test_an_unavailable_agent_means_the_search_simply_continues(): void
     {
         $draft = $this->draft(minutesAgo: 10);
