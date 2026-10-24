@@ -318,6 +318,7 @@ final class SearchProgressSupervisor
             'working_minutes_left' => round(($this->timeBudget->remainingWorkingSeconds($updateId) ?? 0) / 60, 1),
             'search_budget' => ['spent_usd' => $this->costBudget->spent($updateId), 'limit_usd' => $this->costBudget->limit()],
             'photos_saved_for_card' => $draft->media()->count(),
+            'frames_held_unchecked' => array_intersect_key($this->timeBudget->heldForCheck($updateId), array_flip(['sets', 'frames'])),
             'current_activity' => $current,
             'open_calls' => SearchJournal::openCalls($updateId),
             'sites_dropped' => $this->droppedSites($updateId),

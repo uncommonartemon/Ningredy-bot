@@ -346,6 +346,8 @@ class ProductImageStorage
             $failure = $exception;
             throw $exception;
         } finally {
+            // Frames held for a check end with the cycle that held them.
+            $this->timeBudget->holdForCheck($updateId, 0, 0);
             // Observability must never replace an original error or invalidate saved photos.
             try {
                 $state = $draft->fresh() ?? $draft;
@@ -387,6 +389,78 @@ class ProductImageStorage
         }
     }
 
+    /**
+     * Checks held sets one by one, biggest first, until one is complete; the
+     * sets after a complete one are destroyed, and what falls short is reserve.
+     *
+     * @param  list<array{candidates: array, source: array}>  $sets
+     * @param  null|callable(string): void  $progress
+     * @return array{0: ?GallerySourceResult, 1: ?GallerySourceResult} the complete set, if one was, and the reserve
+     */
+    private function verifyDeferredSets(array $sets, ProductDraft $draft, int $target, int $minimumCompleteGallerySize,
+        array $excludedHashes, ?int $telegramUpdateId, ?GallerySourceResult $reserve, ?callable $progress): array
+    {
+        foreach (array_values($sets) as $setIndex => $set) {
+            app(ProductSearchCancellation::class)->throwIfCancelled($telegramUpdateId);
+            $candidates = $set['candidates'];
+            $source = $set['source'];
+            $candidateCount = count($candidates);
+            $verificationInterrupted = false;
+
+            try {
+                // Recipe metadata is not a review of the current pixels.
+                $verified = $this->selectFromCandidates($draft, $candidates, $target, $telegramUpdateId);
+                $verified = $this->removeNearDuplicates($verified, $excludedHashes);
+                $this->destroyUnselected($candidates, $verified);
+            } catch (ProductSearchCancelled $exception) {
+                $this->destroy($candidates);
+                throw $exception;
+            } catch (Throwable $exception) {
+                report($exception);
+                $this->destroy($candidates);
+                $verified = [];
+                $verificationInterrupted = true;
+                $progress?->__invoke('Один набор Vision временно недоступен; пробую следующую страницу.');
+            }
+
+            $this->attempts->record([
+                'telegram_update_id' => $telegramUpdateId,
+                'product_draft_id' => $draft->id,
+                'product_url' => $source['url'] ?? null,
+                'actor' => 'vision',
+                'phase' => 'image_verification',
+                'action' => 'verify_deferred_source',
+                'status' => $verificationInterrupted
+                    ? 'interrupted'
+                    : ($verified !== [] ? 'completed' : 'failed'),
+                'decision' => $verificationInterrupted
+                    ? 'retry_source_on_continuation'
+                    : (count($verified) >= $minimumCompleteGallerySize
+                        ? 'accept_images'
+                        : 'try_next_independent_source'),
+                'input' => ['downloaded_images' => $candidateCount],
+                'output' => [
+                    'accepted_images' => count($verified),
+                    'accepted_urls' => collect($verified)->pluck('source_url')->values()->all(),
+                ],
+            ]);
+
+            $result = GallerySourceResult::fromVerifiedFrames($verified, $minimumCompleteGallerySize, $target, $source, 'static');
+
+            if ($result->isComplete()) {
+                foreach (array_slice(array_values($sets), $setIndex + 1) as $unusedSet) {
+                    $this->destroy($unusedSet['candidates']);
+                }
+
+                return [$result, $reserve];
+            }
+
+            $reserve = $this->keepBestReserve($reserve, $result);
+        }
+
+        return [null, $reserve];
+    }
+
     /** @param null|callable(string): void $progress */
     private function stageCycle(
         ProductDraft $draft,
@@ -402,6 +476,8 @@ class ProductImageStorage
         // ProductSearchTimeBudget measure elapsed time since that original,
         // already-finished search and report zero time left immediately.
         $telegramUpdateId ??= $draft->telegram_update_id;
+        // Sets held by an earlier cycle or a stopped process are gone with it.
+        $this->timeBudget->holdForCheck($telegramUpdateId, 0, 0);
         $this->lastDegradedDomains = [];
         $draftGeneration = $draft->telegram_update_id;
         $draftStatus = $draft->status ?? 'pending_review';
@@ -871,6 +947,25 @@ class ProductImageStorage
                         'output' => ['accepted_images' => count($verified)],
                     ]);
                     $result = GallerySourceResult::fromVerifiedFrames($verified, $minimumCompleteGallerySize, $target, $source, 'static');
+                    // A card that only reaches the minimum while a bigger set waits
+                    // unchecked: that set is checked first, and whichever has more
+                    // verified photos wins (live #70: one shop photo destroyed seven
+                    // official Icecat frames nobody had looked at). Sources never mix.
+                    $heldSetWon = false;
+                    if ($result->isComplete() && count($result->candidates) < $target
+                        && collect($deferredVisionSets)->contains(fn (array $set): bool => count($set['candidates']) > count($result->candidates))) {
+                        $this->timeBudget->holdForCheck($telegramUpdateId, 0, 0);
+                        [$held, $reserve] = $this->verifyDeferredSets($deferredVisionSets, $draft, $target,
+                            $minimumCompleteGallerySize, $excludedHashes, $telegramUpdateId, $reserve, $progress);
+                        $deferredVisionSets = [];
+                        if ($held !== null && count($held->candidates) > count($result->candidates)) {
+                            $this->destroy($result->candidates);
+                            $result = $held;
+                            $heldSetWon = true;
+                        } elseif ($held !== null) {
+                            $this->destroy($held->candidates);
+                        }
+                    }
                     // Target is a preferred upper count, not another minimum.
                     // These exact-source frames already passed Vision and the
                     // category minimum; do not withhold a usable card merely
@@ -881,9 +976,10 @@ class ProductImageStorage
                             $this->destroy($set['candidates']);
                         }
                         $deferredVisionSets = [];
+                        $this->timeBudget->holdForCheck($telegramUpdateId, 0, 0);
                         $reserve = null;
                         $selected = $result->candidates;
-                        $outcome = $partialTraversal
+                        $outcome = $partialTraversal && ! $heldSetWon
                             ? GalleryOutcome::Partial : $result->outcome;
                         $chosenSource = $result->source;
                         $chosenMethod = $result->method;
@@ -938,6 +1034,10 @@ class ProductImageStorage
                 foreach ($discardedSets as $discardedSet) {
                     $this->destroy($discardedSet['candidates']);
                 }
+                // The held sets keep the time their check needs: the search stops
+                // opening pages early enough to check them before the limit.
+                $this->timeBudget->holdForCheck($telegramUpdateId, count($deferredVisionSets),
+                    collect($deferredVisionSets)->sum(fn (array $set): int => count($set['candidates'])));
 
                 $this->attempts->record([
                     'telegram_update_id' => $telegramUpdateId,
@@ -1032,80 +1132,23 @@ class ProductImageStorage
 
         if ($selected === [] && $deferredVisionSets !== []) {
             $progress?->__invoke('Подтверждённого слайдера нет; последовательно проверяю Vision независимые наборы лучших страниц.');
-
-            foreach ($deferredVisionSets as $setIndex => $set) {
-                app(ProductSearchCancellation::class)->throwIfCancelled($telegramUpdateId);
-                $candidates = $set['candidates'];
-                $source = $set['source'];
-                $candidateCount = count($candidates);
-                $verificationInterrupted = false;
-
-                try {
-                    // Recipe metadata is not a review of the current pixels.
-                    $verified = $this->selectFromCandidates($draft, $candidates, $target, $telegramUpdateId);
-                    $verified = $this->removeNearDuplicates($verified, $excludedHashes);
-                    $this->destroyUnselected($candidates, $verified);
-                } catch (ProductSearchCancelled $exception) {
-                    $this->destroy($candidates);
-                    throw $exception;
-                } catch (Throwable $exception) {
-                    report($exception);
-                    $this->destroy($candidates);
-                    $verified = [];
-                    $verificationInterrupted = true;
-                    $progress?->__invoke('Один набор Vision временно недоступен; пробую следующую страницу.');
-                }
-
-                $this->attempts->record([
-                    'telegram_update_id' => $telegramUpdateId,
-                    'product_draft_id' => $draft->id,
-                    'product_url' => $source['url'] ?? null,
-                    'actor' => 'vision',
-                    'phase' => 'image_verification',
-                    'action' => 'verify_deferred_source',
-                    'status' => $verificationInterrupted
-                        ? 'interrupted'
-                        : ($verified !== [] ? 'completed' : 'failed'),
-                    'decision' => $verificationInterrupted
-                        ? 'retry_source_on_continuation'
-                        : (count($verified) >= $minimumCompleteGallerySize
-                            ? 'accept_images'
-                            : 'try_next_independent_source'),
-                    'input' => ['downloaded_images' => $candidateCount],
-                    'output' => [
-                        'accepted_images' => count($verified),
-                        'accepted_urls' => collect($verified)->pluck('source_url')->values()->all(),
-                    ],
-                ]);
-
-                $result = GallerySourceResult::fromVerifiedFrames(
-                    $verified,
-                    $minimumCompleteGallerySize,
-                    $target,
-                    $source,
-                    'static',
-                );
-
-                if ($result->isComplete()) {
-                    $this->destroy($reserve?->candidates ?? []);
-                    $reserve = null;
-                    $selected = $result->candidates;
-                    $outcome = $result->outcome;
-                    $chosenSource = $result->source;
-                    $chosenMethod = $result->method;
-
-                    foreach (array_slice($deferredVisionSets, $setIndex + 1) as $unusedSet) {
-                        $this->destroy($unusedSet['candidates']);
-                    }
-
-                    break;
-                }
-
-                $reserve = $this->keepBestReserve($reserve, $result);
+            // The time held for this check is the check's own now.
+            $this->timeBudget->holdForCheck($telegramUpdateId, 0, 0);
+            [$held, $reserve] = $this->verifyDeferredSets($deferredVisionSets, $draft, $target,
+                $minimumCompleteGallerySize, $excludedHashes, $telegramUpdateId, $reserve, $progress);
+            if ($held !== null) {
+                $this->destroy($reserve?->candidates ?? []);
+                $reserve = null;
+                $selected = $held->candidates;
+                $outcome = $held->outcome;
+                $chosenSource = $held->source;
+                $chosenMethod = $held->method;
             }
 
             $deferredVisionSets = [];
         }
+        // However the loop ended, nothing is held past this point.
+        $this->timeBudget->holdForCheck($telegramUpdateId, 0, 0);
 
         if (
             $selected === []

@@ -55,6 +55,10 @@ class SearchProgressAgent implements Agent, HasStructuredOutput
             product until Vision checks them. In pages_opened, photos_accepted passed that check (the search may
             hold them while it looks for a fuller source; the card is assembled with them) and photos_saved are
             already on the card; last_step says how the page ended (http_403, too few images, rejected).
+            frames_held_unchecked are downloaded frames the search set aside to check later (verify_gallery
+            try_next_source_before_vision on the timeline): they are no photos until checked. working_minutes_left
+            already keeps the time their check needs; deliver_now has them checked right away and the card assembled.
+            Collecting more unchecked frames on new pages is not progress either.
             In fallback_discovery, several empty rounds in a row (empty_discovery_rounds_in_a_row) mean the web
             has nothing new for this exact code; more rounds rarely change that and each one costs money.
             kind outside_check: you are woken from outside the search by the request guardian; the search may be

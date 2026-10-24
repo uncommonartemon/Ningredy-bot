@@ -2322,6 +2322,41 @@ class ProductImageStorageTest extends TestCase
             'action' => 'verify_deferred_source', 'output->accepted_images' => 0]);
     }
 
+    public function test_held_frames_keep_the_time_their_check_needs_and_are_checked_before_another_page(): void
+    {
+        // Live #67: 38 frames held for a later check while page after page was
+        // opened; the time limit cut the search with none of them checked.
+        $draft = $this->confirmedGalleryDraft(frameCount: 3);
+        $source = [...$draft->sources[0], '_preflight_index' => 0];
+        $this->partialMock(SourceQueueBuilder::class)->shouldReceive('buildSourceQueue')->once()
+            ->andReturn([collect([$source, [...$source, 'url' => 'https://93.184.216.37/second-source']]), collect([$source])]);
+        $this->mock(ConfirmedProductGalleryVerifier::class)->shouldReceive('verify')->once()
+            ->andReturnUsing(fn (string $url, $candidates): array => ['mode' => 'ambiguous', 'candidates' => $candidates->take(2), 'cached' => true]);
+        // A hundred working seconds left: enough for another page, not for that and the held check (90 s).
+        $settings = app(AiSettings::class);
+        $draft->telegramUpdate->update(['payload' => ['_product_search_started_at' => now()
+            ->subSeconds($settings->searchMaxSeconds() - $settings->searchReserveSeconds() - 100)->toIso8601String()]]);
+        $this->assertSame(90, $settings->imageVisionTimeoutSeconds());
+        $checked = 0;
+        ProductImageVisionAgent::fake(function (string $prompt, $attachments) use (&$checked): array {
+            $checked += $attachments->count();
+
+            return ['images' => $attachments->keys()->map(fn (int $i): array => [
+                'index' => $i + 1, 'exact_match' => true, 'color_match' => true, 'publishable' => true, 'catalog_photo' => true,
+                'kind' => 'product', 'view' => 'front', 'gallery_rank' => $i + 1, 'score' => 95, 'reason' => 'Current product photo.',
+            ])->all()];
+        })->preventStrayPrompts();
+
+        app(ProductImageStorage::class)->stage($draft->fresh());
+
+        $this->assertSame(2, $checked);
+        Http::assertNotSent(fn (Request $request): bool => str_contains($request->url(), '93.184.216.37'));
+        $this->assertDatabaseHas('product_source_attempts', ['product_draft_id' => $draft->id,
+            'action' => 'verify_deferred_source', 'output->accepted_images' => 2]);
+        $this->assertSame(2, $draft->media()->where('verification_status', 'verified')->count());
+        $this->assertSame(0, app(ProductSearchTimeBudget::class)->heldForCheck($draft->telegram_update_id)['sets']);
+    }
+
     public function test_staging_reviews_all_ten_current_photos_even_from_a_preverified_exact_slider(): void
     {
         Storage::fake('public');

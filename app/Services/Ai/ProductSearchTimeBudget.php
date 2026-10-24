@@ -15,11 +15,19 @@ class ProductSearchTimeBudget
 
     private const START_PAYLOAD_KEY = '_product_search_started_at';
 
+    /** Where frames set aside for a later photo check keep the time that check needs. */
+    private const HELD_KEY = 'product-search-held-for-check:';
+
     /** @var array<int, CarbonImmutable> */
     private array $startedAt = [];
 
     public function __construct(private readonly AiSettings $settings) {}
 
+    /**
+     * Working time left, less what frames already set aside need for their
+     * photo check: every loop of the search - next page, training round,
+     * discovery - then stops early enough for that check to run.
+     */
     public function remainingWorkingSeconds(?int $telegramUpdateId): ?int
     {
         if (! $telegramUpdateId) {
@@ -30,7 +38,34 @@ class ProductSearchTimeBudget
         $reserveSeconds = min($this->settings->searchReserveSeconds(), max(0, $maxSeconds - 1));
         $elapsed = $this->startedAt($telegramUpdateId)->diffInSeconds(now());
 
-        return max(0, $maxSeconds - $reserveSeconds - $elapsed);
+        return max(0, $maxSeconds - $reserveSeconds - $elapsed - $this->heldForCheck($telegramUpdateId)['seconds']);
+    }
+
+    /**
+     * Downloaded frames set aside unchecked are photos only once checked: live
+     * #67 held 38 of them while it opened page after page, and the time limit
+     * cut it with none checked. Each held set keeps one photo check's time.
+     */
+    public function holdForCheck(?int $telegramUpdateId, int $sets, int $frames): void
+    {
+        if (! $telegramUpdateId) {
+            return;
+        }
+        if ($sets <= 0) {
+            Cache::forget(self::HELD_KEY.$telegramUpdateId);
+
+            return;
+        }
+        Cache::put(self::HELD_KEY.$telegramUpdateId, ['sets' => $sets, 'frames' => $frames,
+            'seconds' => $sets * $this->settings->imageVisionTimeoutSeconds()], now()->addHours(2));
+    }
+
+    /** @return array{sets: int, frames: int, seconds: int} */
+    public function heldForCheck(?int $telegramUpdateId): array
+    {
+        $held = $telegramUpdateId ? Cache::get(self::HELD_KEY.$telegramUpdateId) : null;
+
+        return [...['sets' => 0, 'frames' => 0, 'seconds' => 0], ...(is_array($held) ? $held : [])];
     }
 
     public function elapsedSeconds(?int $telegramUpdateId): ?int
