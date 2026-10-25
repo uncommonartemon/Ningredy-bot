@@ -78,10 +78,12 @@ class SearchProgressAgent implements Agent, HasStructuredOutput
             another page of the same site that collects exactly those frames is ended the same way.
             wrap_up_requested_minutes_ago: you already told this search to wrap up that long ago and it is still
             running - card assembly can take a few minutes. show_now shows what exists now; continue lets it finish.
-            operator_note: one short Russian sentence the operator should read now (a step that runs unusually
-            long and what you are waiting for; or the search has run ten minutes or more with fewer than
-            minimum_photos_for_card photos while sources keep failing, so the operator may prefer what exists),
-            otherwise null. When operator_already_told is true, null.
+            operator_note: the operator is never asked during a search - they get the card. Fill this with one
+            short Russian sentence only when you judge the operator would rather have what exists now than wait
+            (the search has run ten minutes or more with fewer than minimum_photos_for_card photos while sources
+            keep failing, or a step runs unusually long with nothing to show): the search is then wrapped up and
+            the card assembled, and your sentence is recorded as the reason. Otherwise null. When
+            operator_already_told is true, null.
             reason: one short sentence in Russian for the operator, naming what you observed.
             PROMPT;
     }

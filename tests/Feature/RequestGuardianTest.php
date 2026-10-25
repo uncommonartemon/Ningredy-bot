@@ -100,26 +100,27 @@ class RequestGuardianTest extends TestCase
         $this->assertDatabaseHas('product_source_attempts', ['telegram_update_id' => $update->id, 'phase' => 'guardian', 'action' => 'show_found']);
     }
 
-    public function test_the_watchers_note_reaches_the_operator_once_and_it_is_not_woken_again_before_its_pace(): void
+    public function test_a_note_the_watcher_would_send_the_operator_wraps_the_search_up_instead(): void
     {
-        [$update] = $this->runningSearch(silentMinutes: 2);
+        // Operator, 2026-10-25 (#187): no messages or questions during a search - the
+        // card is the answer. What the watcher would have asked is the decision itself.
+        [$update] = $this->runningSearch(silentMinutes: 2, withPhotos: false);
         $prompts = 0;
         SearchProgressAgent::fake(function () use (&$prompts): array {
             $prompts++;
 
-            return ['decision' => 'continue', 'reason' => 'Магазин отвечает медленно.', 'operator_note' => 'Магазин отвечает медленно, жду его галерею.'];
+            return ['decision' => 'continue', 'reason' => 'Магазины дают только миниатюры.',
+                'operator_note' => 'Десять минут без фото; оператор, возможно, предпочтёт имеющийся результат.'];
         })->preventStrayPrompts();
 
         $this->sweep();
         $this->sweep();
 
         $this->assertSame(1, $prompts);
-        $notes = Http::recorded(fn (Request $request): bool => str_contains((string) ($request['text'] ?? ''), 'жду его галерею'));
-        $this->assertCount(1, $notes);
-        $buttons = json_encode(data_get($notes->first()[0]->data(), 'reply_markup.inline_keyboard'));
-        foreach (["guard:show:{$update->id}", "guard:wait:{$update->id}", "search:cancel:{$update->id}"] as $button) {
-            $this->assertStringContainsString($button, $buttons);
-        }
+        Http::assertNotSent(fn (Request $request): bool => str_contains((string) ($request['text'] ?? ''), 'предпочтёт'));
+        $this->assertSame('Десять минут без фото; оператор, возможно, предпочтёт имеющийся результат.',
+            app(SearchProgressSupervisor::class)->deliverNowReason($update->id));
+        $this->assertDatabaseHas('product_source_attempts', ['telegram_update_id' => $update->id, 'phase' => 'guardian', 'action' => 'wrap_up']);
         $this->assertNull($update->fresh()->processed_at);
     }
 
@@ -400,32 +401,6 @@ class RequestGuardianTest extends TestCase
         SearchProgressAgent::assertNeverPrompted();
     }
 
-    public function test_a_note_without_an_answer_shows_what_exists_after_three_minutes_while_there_is_still_no_photo(): void
-    {
-        // Live #181: the watcher's note went out at the 15th minute and the search ran on
-        // to the 27th with no photo. Silence from the operator is not "keep paying".
-        [$update] = $this->runningSearch(silentMinutes: 1, withPhotos: false);
-        SearchProgressAgent::fake(fn (): array => ['decision' => 'continue', 'reason' => 'Магазины дают только миниатюры.',
-            'operator_note' => 'Десять минут без фото: магазины дают только миниатюры.', 'site' => null])->preventStrayPrompts();
-        app(ProductSourceAttemptRecorder::class)->record(['telegram_update_id' => $update->id, 'product_url' => 'https://pcx.example/nitro-16',
-            'actor' => 'downloader', 'phase' => 'image_download', 'action' => 'download_candidates', 'status' => 'completed',
-            'decision' => 'skip_source', 'output' => ['downloaded_images' => 0, 'rejection_summary' => ['too_small' => 18]]]);
-
-        $this->sweep();
-
-        $this->assertSentText('Десять минут без фото');
-        $this->assertNull($update->fresh()->cancel_requested_at);
-
-        $this->travel(4)->minutes();
-        DB::table('telegram_updates')->where('id', $update->id)->update(['updated_at' => now()]);
-        $this->sweep();
-
-        $this->assertNotNull($update->fresh()->cancel_requested_at);
-        $this->assertSentText('ответа на вопрос не было');
-        $this->assertSentText('только миниатюры (18)');
-        $this->assertDatabaseHas('product_source_attempts', ['telegram_update_id' => $update->id, 'phase' => 'guardian', 'action' => 'note_unanswered_shown_found']);
-    }
-
     public function test_at_the_time_limit_the_photo_search_is_wrapped_up_and_the_card_is_cut_only_after_the_assembly_overrun(): void
     {
         // Live #151: the card was cut while being assembled at the 29th minute; #161: cut
@@ -438,7 +413,6 @@ class RequestGuardianTest extends TestCase
         $this->assertSame('Время поиска фото вышло (29 мин); карточка собирается из найденного.',
             app(SearchProgressSupervisor::class)->deliverNowReason($update->id));
         $this->assertNull($update->fresh()->cancel_requested_at);
-        $this->assertSentText('Время поиска фото вышло (29 мин)');
         $this->assertDatabaseHas('product_source_attempts', ['telegram_update_id' => $update->id, 'phase' => 'guardian', 'action' => 'overtime_wrap_up']);
 
         // Within the assembly's overrun the guardian waits for the card.
