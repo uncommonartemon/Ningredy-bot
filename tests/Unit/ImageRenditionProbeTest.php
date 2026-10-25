@@ -45,6 +45,9 @@ class ImageRenditionProbeTest extends TestCase
                 'https://www.kns.ru/linkpics/hp-envy-x360-14-fc0006ci_kod_895687.jpg'],
             'size directory with prefix (itarena)' => ['https://www.itarena.ro/images/products/2024-07-04/300x300/443940_jpg.webp',
                 'https://www.itarena.ro/images/products/2024-07-04/1600x1600/443940_jpg.webp'],
+            'width directory without an extension (#181 asus)' => ['https://dlcdnwebimgs.asus.com/gain/419bcbb5-b469-4805-b50a-56f41dab768c/w80/fwebp',
+                'https://dlcdnwebimgs.asus.com/gain/419bcbb5-b469-4805-b50a-56f41dab768c/w1600/fwebp',
+                ['https://dlcdnwebimgs.asus.com/gain/419bcbb5-b469-4805-b50a-56f41dab768c/fwebp']],
         ];
     }
 
