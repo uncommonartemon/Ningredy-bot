@@ -19,6 +19,7 @@ use App\Services\Photos\CandidateUrlOrdering;
 use App\Services\Photos\GallerySourceContext;
 use App\Services\Photos\ImageGeometry;
 use App\Services\Photos\ImageRenditionDeduplicator;
+use App\Services\Photos\ImageRenditionProbe;
 use App\Services\Photos\ImageUrls;
 use App\Services\ProductSearch\Recovery\ProductCardRecoverySupervisor;
 use App\Services\ProductSearch\Research\ResearchSourceRoles;
@@ -3739,6 +3740,8 @@ class ProductImageStorage
                 $this->lastDownloadRejections[] = [
                     'url' => $url,
                     'reason' => $dimensionRejection,
+                    'width' => $download['width'],
+                    'height' => $download['height'],
                 ];
 
                 continue;
@@ -3809,24 +3812,18 @@ class ProductImageStorage
             // draft's own dedicated SKU, used to let every photo through
             // topUpDraftMedia() on this alone even after Vision itself found
             // no exact match.
-            $pageContext = $sourceContextsByUrl[$url] ?? null;
-            $pageIdentityConfirmed = is_array($pageContext) && (
-                ProductPhotoApplicability::isAccepted($draft, $pageContext, $pageContext['_photo_applicability'] ?? [])
-                || (! $this->identityMatcher->conflictsSource($draft, $pageContext)
-                    && $this->identityMatcher->confirmsExactIdentifier($draft, $pageContext))
-            );
-            $candidates[] = [
-                ...$download,
-                'page_source_url' => $sourcePagesByUrl[$url]
-                    ?? $this->candidateDiscovery->sourcePageForImage($url),
-                'page_source_context' => $pageContext,
-                'source_identity_confirmed' => $pageIdentityConfirmed,
-                'image' => $image,
-            ];
+            $candidates[] = $this->frameCandidate($draft, $download, $image, $url, $sourcePagesByUrl, $sourceContextsByUrl);
             if ((bool) ($download['confirmed_gallery'] ?? false)) {
                 $confirmedDownloads++;
             }
             $checksums[$checksum] = true;
+        }
+
+        // A source whose frames all fell under the minimum may only have shown
+        // its thumbnails: the same frames are asked for at a larger rendition.
+        if (count($candidates) < $this->minimumVerifiedImages($draft)) {
+            $this->probeLargerRenditions($draft, $urls, $candidates, $checksums, $decodedPixels, $decodedPixelBudget,
+                $sourcePagesByUrl, $sourceContextsByUrl, $telegramUpdateId);
         }
 
         $this->degradeRecipesAfterTechnicalFailure($urls, $candidates, $sourcePagesByUrl);
@@ -3842,6 +3839,133 @@ class ProductImageStorage
         $this->recordGalleryImageKeys = [];
 
         return $unique;
+    }
+
+    /**
+     * A downloaded, decoded frame as the selection and Vision steps see it. Exact
+     * tier only for the identity flag, same as ProductImageVisionVerifier's own
+     * local fallback - a shared family/chassis fragment is a plausible match, not
+     * a confirmed one (see ProductIdentityMatcher::confirmsExactIdentifier()).
+     * This flag survives unmodified into Vision's source_supported OR-gate
+     * whenever the caller never overwrites it with its own judge-backed decision
+     * (topUpDraftMedia() and replaceDraftMedia() do not, unlike stage()'s main
+     * per-source loop): real production case 2026-09-10, a page naming only
+     * "LOQ 15IRX10" let every photo through topUpDraftMedia() on this alone.
+     *
+     * @param  array<string, mixed>  $download
+     * @param  array<string, string>  $sourcePagesByUrl
+     * @param  array<string, array<string, mixed>>  $sourceContextsByUrl
+     * @return array<string, mixed>
+     */
+    private function frameCandidate(ProductDraft $draft, array $download, GdImage $image, string $url, array $sourcePagesByUrl, array $sourceContextsByUrl): array
+    {
+        $pageContext = $sourceContextsByUrl[$url] ?? null;
+        $pageIdentityConfirmed = is_array($pageContext) && (
+            ProductPhotoApplicability::isAccepted($draft, $pageContext, $pageContext['_photo_applicability'] ?? [])
+            || (! $this->identityMatcher->conflictsSource($draft, $pageContext)
+                && $this->identityMatcher->confirmsExactIdentifier($draft, $pageContext))
+        );
+
+        return [
+            ...$download,
+            'page_source_url' => $sourcePagesByUrl[$url]
+                ?? $this->candidateDiscovery->sourcePageForImage($url),
+            'page_source_context' => $pageContext,
+            'source_identity_confirmed' => $pageIdentityConfirmed,
+            'image' => $image,
+        ];
+    }
+
+    /**
+     * The frames a source dropped as too small, asked for again at the larger
+     * rendition their addresses suggest (ImageRenditionProbe). Live #87: 38
+     * product-sized thumbnails on two shops and no photo; #161: 34 on five.
+     * Each guess is downloaded and judged exactly like the frame it stands for;
+     * what it finds joins the candidates under the original frame's page.
+     *
+     * @param  array<int, string>  $urls
+     * @param  array<int, array<string, mixed>>  $candidates
+     * @param  array<string, true>  $checksums
+     * @param  array<string, string>  $sourcePagesByUrl
+     * @param  array<string, array<string, mixed>>  $sourceContextsByUrl
+     */
+    private function probeLargerRenditions(ProductDraft $draft, array $urls, array &$candidates, array &$checksums, int &$decodedPixels,
+        int $decodedPixelBudget, array $sourcePagesByUrl, array $sourceContextsByUrl, ?int $telegramUpdateId): void
+    {
+        $settings = (array) config('product-images.rendition_probe', []);
+        if (! ($settings['enabled'] ?? true)) {
+            return;
+        }
+        $thumbnails = collect($this->lastDownloadRejections)
+            ->filter(fn (array $rejection): bool => str_starts_with((string) $rejection['reason'], 'too_small')
+                && (int) ($rejection['width'] ?? 0) >= (int) ($settings['min_width'] ?? 250)
+                && ! str_ends_with(strtolower((string) parse_url((string) $rejection['url'], PHP_URL_PATH)), '.gif'))
+            ->sortByDesc(fn (array $rejection): int => (int) $rejection['width'])
+            ->take(max(1, (int) ($settings['max_frames'] ?? 8)))
+            ->values();
+        if ($thumbnails->isEmpty()) {
+            return;
+        }
+        // By address, not by asset key: a guess is the same asset at another rendition.
+        $known = array_fill_keys(array_map([ImageUrls::class, 'normalizeCandidateUrl'], $urls), true);
+        $guesses = [];
+        foreach ($thumbnails as $thumbnail) {
+            foreach (ImageRenditionProbe::largerRenditions((string) $thumbnail['url']) as $guess) {
+                $key = ImageUrls::normalizeCandidateUrl($guess);
+                if (! isset($known[$key])) {
+                    $known[$key] = true;
+                    $guesses[$guess] = (string) $thumbnail['url'];
+                }
+            }
+        }
+        if ($guesses === []) {
+            return;
+        }
+        $referers = [];
+        foreach ($guesses as $guess => $original) {
+            $referers[$guess] = $sourcePagesByUrl[$original] ?? null;
+        }
+        $found = [];
+        $downloads = $this->resolver->downloadMany(array_keys($guesses), array_filter($referers));
+        foreach ($guesses as $guess => $original) {
+            $download = $downloads[$guess]['download'] ?? null;
+            if (! is_array($download)) {
+                continue;
+            }
+            $download['confirmed_gallery'] = (bool) ($download['confirmed_gallery'] ?? false) || $this->isRecordGalleryImage($original);
+            if ($this->dimensionRejectionReason($download['width'], $download['height'], $this->requiredImageWidth($draft),
+                $this->requiredImageHeight($draft), allowExtremeAspectRatio: $this->trustedGalleryImage($original)) !== null
+                || ! $this->encoder->isSafeToDecode($download['width'], $download['height'])) {
+                continue;
+            }
+            $checksum = hash('sha256', $download['bytes']);
+            if (isset($checksums[$checksum])) {
+                continue;
+            }
+            $imagePixels = max(1, $download['width'] * $download['height']);
+            if ($decodedPixels > 0 && $decodedPixels + $imagePixels > $decodedPixelBudget) {
+                break;
+            }
+            $image = @imagecreatefromstring($download['bytes']);
+            if (! $image instanceof GdImage) {
+                continue;
+            }
+            $image = $this->downscaleForWork($image);
+            $decodedPixels += imagesx($image) * imagesy($image);
+            // Judged and attributed as the frame it enlarges: same page, same context.
+            $candidates[] = [...$this->frameCandidate($draft, $download, $image, $original, $sourcePagesByUrl, $sourceContextsByUrl),
+                'rendition_of' => $original];
+            $checksums[$checksum] = true;
+            $found[$original] = $guess;
+        }
+        $this->attempts->record([
+            'telegram_update_id' => $telegramUpdateId, 'product_draft_id' => $draft->id,
+            'product_url' => (string) ($sourcePagesByUrl[(string) $thumbnails->first()['url']] ?? ''),
+            'actor' => 'downloader', 'phase' => 'image_download', 'action' => 'probe_larger_renditions',
+            'status' => $found === [] ? 'failed' : 'completed', 'decision' => $found === [] ? 'none_larger' : 'larger_renditions_found',
+            'input' => ['thumbnails' => $thumbnails->count(), 'guesses' => count($guesses)],
+            'output' => ['found' => count($found), 'examples' => array_slice($found, 0, 3, true)],
+        ]);
     }
 
     /** A frame the browser confirmed as part of the slider, or one a code-matched record lists as its gallery. */

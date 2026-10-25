@@ -2300,6 +2300,51 @@ class ProductImageStorageTest extends TestCase
         return ['recipe frames' => [false], 'recipe frames and static tail' => [true]];
     }
 
+    public function test_a_source_of_thumbnails_is_asked_for_the_larger_renditions_its_addresses_name(): void
+    {
+        // Live #87: 38 product-sized frames under 700 px on two shops and no photo at all;
+        // #161: 34 on five shops. Their addresses said how small (_300x.jpg); the same frames
+        // without that name are the photographs.
+        Storage::fake('public');
+        config()->set('product-images.max_images_by_type.laptop', 10);
+        $page = 'https://93.184.216.36/products/g533qs-ds76';
+        $thumbnails = collect(range(1, 4))->map(fn (int $index): string => "https://93.184.216.36/cdn/shop/files/gallery-{$index}_300x.jpg")->all();
+        Http::fake(function (Request $request) {
+            if (! str_contains($request->url(), '/gallery-')) {
+                return Http::response('<html><h1>ASUS ROG Strix Scar 15 G533QS-DS76</h1></html>', 200, ['Content-Type' => 'text/html']);
+            }
+            preg_match('/gallery-(\d+)/', $request->url(), $matches);
+            $seed = (int) ($matches[1] ?? 1);
+
+            return str_contains($request->url(), '_300x.jpg')
+                ? Http::response($this->thumbnailJpeg($seed), 200, ['Content-Type' => 'image/jpeg'])
+                : Http::response($this->jpeg($seed), 200, ['Content-Type' => 'image/jpeg']);
+        });
+        $browser = $this->mockBrowser();
+        $browser->shouldReceive('extract')->andReturn([]);
+        $browser->shouldReceive('isConfirmedGalleryImage')->andReturn(false);
+        $browser->shouldReceive('isPartialGalleryImage')->andReturn(false);
+        ProductPhotoApplicabilityAgent::fake()->preventStrayPrompts();
+        ProductImageVisionAgent::fake(fn ($prompt, $attachments): array => ['images' => $attachments->keys()->map(fn (int $index): array => [
+            'index' => $index + 1, 'exact_match' => true, 'color_match' => true, 'publishable' => true, 'kind' => 'product',
+            'view' => 'front', 'gallery_rank' => 1, 'score' => 95, 'reason' => 'Product photo.'])->all()]);
+        [, , $draft] = $this->records();
+        $source = ['title' => 'ASUS ROG Strix Scar 15 G533QS-DS76', 'url' => $page, 'type' => 'retailer', 'image_urls' => $thumbnails,
+            '_preflight_identity_evidence' => 'ASUS ROG Strix Scar 15 G533QS-DS76', '_preflight_index' => 0];
+        $draft->update(['title' => 'ASUS ROG Strix Scar 15 G533QS-DS76', 'brand' => 'ASUS', 'model' => 'G533QS-DS76',
+            'product_type' => 'laptop', 'primary_source_url' => $page, 'image_urls' => [], 'sources' => [$source]]);
+        $this->partialMock(SourceQueueBuilder::class)->shouldReceive('buildSourceQueue')->once()
+            ->andReturn([collect([$source]), collect([$source])]);
+
+        $this->assertSame(4, app(ProductImageStorage::class)->stage($draft->fresh()));
+
+        $media = $draft->fresh()->media;
+        $this->assertCount(4, $media);
+        $this->assertSame('https://93.184.216.36/cdn/shop/files/gallery-1.jpg', $media->sortBy('sort_order')->first()->source_url);
+        $this->assertDatabaseHas('product_source_attempts', ['product_draft_id' => $draft->id,
+            'action' => 'probe_larger_renditions', 'decision' => 'larger_renditions_found', 'output->found' => 4]);
+    }
+
     public function test_a_record_gallery_matched_by_code_is_a_confirmed_gallery_without_a_site_recipe(): void
     {
         // Live #157: the record's page answered with a bot check, the page look replaced
@@ -7006,6 +7051,20 @@ class ProductImageStorageTest extends TestCase
         ]);
 
         return [$product, $variant, $draft];
+    }
+
+    /** A product-sized thumbnail: under the minimum, but large enough to be a picture of the product. */
+    private function thumbnailJpeg(int $seed): string
+    {
+        $image = imagecreatefromstring($this->jpeg($seed));
+        $thumbnail = imagescale($image, 300, 250);
+        ob_start();
+        imagejpeg($thumbnail, null, 85);
+        $jpeg = ob_get_clean();
+        imagedestroy($image);
+        imagedestroy($thumbnail);
+
+        return $jpeg;
     }
 
     /** Below this suite's explicit 500×500 threshold to exercise the too_small rejection path. */
