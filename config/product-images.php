@@ -16,6 +16,10 @@ return [
     // checked set, never the downloads before duplicates and Vision thin them
     // (139 of 579 past passes stopped at exactly ten and kept seven or eight).
     'download_candidates' => 20,
+    // Thumbnails only: when a source's frames all fell under the minimum, the
+    // same frames are asked for again at the rendition their CDN address names
+    // as larger - up to this many of the largest frames, a few guesses each.
+    'rendition_probe' => ['enabled' => true, 'max_frames' => 8, 'min_width' => 250],
     // Total decoded pixels one download pass may hold in memory at once. A
     // decoded truecolor bitmap costs ~4 bytes per pixel, so this is roughly a
     // 240MB ceiling on retained images - the loop stops with a partial gallery
