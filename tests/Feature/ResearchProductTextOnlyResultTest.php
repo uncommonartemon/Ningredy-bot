@@ -14,6 +14,7 @@ use App\Models\TelegramUpdate;
 use App\Services\Ai\ProductSearchCostBudget;
 use App\Services\Products\ProductImageResolver;
 use App\Services\Products\ProductImageStorage;
+use App\Services\Products\SourceIdentityProvenance;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
@@ -305,6 +306,9 @@ class ResearchProductTextOnlyResultTest extends TestCase
 
             if ($matches) {
                 $this->assertSame(['https://images.icecat.biz/img/gallery/one.jpg'], $official['image_urls']);
+                // The code match is the source's identity; every later page look keeps it.
+                $this->assertSame('code_match', $official[SourceIdentityProvenance::KEY]['kind']);
+                $this->assertContains('EXACT-123', $official[SourceIdentityProvenance::KEY]['codes']);
                 $this->assertTrue(ProductSourcePageEvidence::query()->where('product_draft_id', $draft->id)->where('captured_via', 'icecat')->exists());
             } else {
                 $this->assertNull($official);

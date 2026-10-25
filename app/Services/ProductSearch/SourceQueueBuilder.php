@@ -12,6 +12,7 @@ use App\Services\Products\ProductImageResolver;
 use App\Services\Products\ProductSourceAttemptRecorder;
 use App\Services\Products\ProductSourcePageMetadata;
 use App\Services\Products\ProductSourcePriority;
+use App\Services\Products\SourceIdentityProvenance;
 use App\Services\ProductSearch\Research\ResearchSourceRoles;
 use App\Services\ProductSearch\Supervision\SearchProgressSupervisor;
 use Illuminate\Support\Collection;
@@ -191,8 +192,12 @@ class SourceQueueBuilder
 
                     return [
                         ...$source,
-                        'title' => trim((string) ($preflight['identity_evidence'] ?? '')) !== ''
-                            ? null : ($source['title'] ?? null),
+                        // A record matched by its code keeps its own title, address and
+                        // evidence; the page look adds to them, never replaces them (live
+                        // #157: a bot check replaced the part number and the gallery was lost).
+                        'title' => SourceIdentityProvenance::confirmedByCode($source)
+                            || trim((string) ($preflight['identity_evidence'] ?? '')) === ''
+                            ? ($source['title'] ?? null) : null,
                         // An official gallery's own frames come before whatever the page
                         // scrape adds (live #454: 48 thumbnails and logos pushed eight
                         // 2000px datasheet photos out of the download window).
@@ -218,8 +223,8 @@ class SourceQueueBuilder
                         // tell them apart once ranked below a worse source
                         // that merely fetched without erroring.
                         '_preflight_browser_probe_required' => (bool) ($preflight['browser_probe_required'] ?? false),
-                        '_preflight_final_url' => (string) ($preflight['final_url'] ?? $source['url']),
-                        '_preflight_identity_evidence' => (string) ($preflight['identity_evidence'] ?? ''),
+                        '_preflight_final_url' => SourceIdentityProvenance::pageUrl($source, (string) ($preflight['final_url'] ?? $source['url'])),
+                        '_preflight_identity_evidence' => SourceIdentityProvenance::mergeEvidence($source, $preflight['identity_evidence'] ?? null),
                         '_preflight_specification_text' => (string) ($preflight['specification_text'] ?? ''),
                         '_preflight_page_identity' => $preflight['page_identity'] ?? [],
                         '_preflight_is_primary' => rtrim((string) ($source['url'] ?? ''), '/')

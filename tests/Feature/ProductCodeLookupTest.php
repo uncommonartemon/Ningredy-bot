@@ -43,6 +43,19 @@ class ProductCodeLookupTest extends TestCase
         $this->assertSame(2, ProductSourceAttempt::query()->where('action', 'lookup_icecat')->where('decision', 'found')->count());
     }
 
+    public function test_the_whole_public_gallery_is_offered_however_long_it_is(): void
+    {
+        // 35 live searches, 2026-10-25: a cap of twelve left 49 official frames never downloaded.
+        $gallery = collect(range(1, 14))->map(fn (int $no): array => ['Pic' => "https://images.icecat.biz/img/gallery/{$no}.jpg",
+            'PicWidth' => '2000', 'PicHeight' => '2000', 'No' => (string) $no, 'IsPrivate' => '0'])->all();
+        Http::fake(['https://live.icecat.biz/*' => Http::response(['data' => [...$this->datasheet(), 'Gallery' => $gallery]])]);
+
+        $result = app(ProductCodeLookup::class)->icecat(null, 'Lenovo', '83F500NKUS', null, 'test');
+
+        $this->assertCount(14, $result['images']);
+        $this->assertSame('https://images.icecat.biz/img/gallery/14.jpg', $result['images'][13]['url']);
+    }
+
     public function test_a_restricted_brand_or_a_network_failure_never_breaks_the_search(): void
     {
         Http::fake(['https://live.icecat.biz/*' => Http::sequence()

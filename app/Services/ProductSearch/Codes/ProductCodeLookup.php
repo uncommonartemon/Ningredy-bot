@@ -202,7 +202,10 @@ final class ProductCodeLookup
             ->sortBy(fn (array $image): int => (int) ($image['No'] ?? 0))
             ->map(fn (array $image): array => ['url' => (string) $image['Pic'], 'width' => (int) ($image['PicWidth'] ?? 0),
                 'height' => (int) ($image['PicHeight'] ?? 0)])
-            ->values()->take(12)->all();
+            // The whole public gallery: a cap of twelve here left 49 official frames
+            // never downloaded over 35 live searches, while the card wanted ten after
+            // the size, duplicate and Vision checks had thinned the first twelve.
+            ->values()->all();
         $specifications = [];
         foreach ((array) ($data['FeaturesGroups'] ?? []) as $group) {
             $groupName = (string) data_get($group, 'FeatureGroup.Name.Value', '');

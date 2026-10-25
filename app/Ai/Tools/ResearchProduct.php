@@ -30,6 +30,7 @@ use App\Services\Products\ProductResearchResponseNormalizer;
 use App\Services\Products\ProductSourceAttemptRecorder;
 use App\Services\Products\ProductSourcePriority;
 use App\Services\Products\ProductTextEvidenceContract;
+use App\Services\Products\SourceIdentityProvenance;
 use App\Services\ProductSearch\Codes\ProductCodeLookup;
 use App\Services\ProductSearch\Research\InvalidResearchResponse;
 use App\Services\ProductSearch\Research\RecoverableProductResearch;
@@ -897,6 +898,9 @@ class ResearchProduct implements Tool
             // The database record matched by the exact code is this source's identity.
             // Its page may sit behind a bot check: live #14's showed only one, the page
             // look replaced this evidence, and the official gallery lost to 800px shop photos.
+            // The provenance mark is what keeps every later page look from doing that again.
+            SourceIdentityProvenance::KEY => SourceIdentityProvenance::codeMatch(
+                'icecat', [(string) $match['part_number'], ...array_map('strval', (array) $match['gtins'])]),
             '_preflight_identity_evidence' => trim($match['title'].' Part number: '.$match['part_number']
                 .' GTIN: '.implode(' ', $match['gtins']))],
             'specification_text' => implode("\n", [$match['title'], ...$match['specifications']])];
