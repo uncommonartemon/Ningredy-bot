@@ -37,8 +37,16 @@ class ProductSpecificationEvidenceGuard
             // every correction requirement in validate() still applies to it.
             if (($item['evidence'] ?? null) === 'confirmed' && $old !== null
                 && $this->text((string) ($old['value'] ?? '')) !== $this->text((string) ($item['value'] ?? ''))
-                && trim((string) ($item['reason'] ?? '')) !== '' && $this->quoteHoldsValue($item)) {
+                && $this->quoteHoldsValue($item)) {
                 $result[$index]['evidence'] = 'corrected';
+                // The cited quote holds the new value: that is the account of the
+                // correction when the model gave none in words (live #168: "wireless:
+                // confirmed but changed" cost the card two more passes over the label).
+                // Every other correction requirement in validate() still applies.
+                if (trim((string) ($item['reason'] ?? '')) === '') {
+                    $result[$index]['reason'] = 'Значение исправлено по цитате выбранного источника: «'
+                        .mb_substr($this->literalText((string) ($item['source_excerpt'] ?? '')), 0, 160).'».';
+                }
 
                 continue;
             }
