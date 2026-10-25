@@ -39,6 +39,7 @@ if (mode === 'invalid') {
             scout: process.env.PRODUCT_GALLERY_SCOUT_ONLY,
             width: process.env.PRODUCT_GALLERY_MINIMUM_WIDTH,
             height: process.env.PRODUCT_GALLERY_MINIMUM_HEIGHT,
+            color: process.env.PRODUCT_GALLERY_REQUESTED_COLOR,
             http11: process.env.PRODUCT_IMAGE_DISABLE_HTTP2,
         },
     }));

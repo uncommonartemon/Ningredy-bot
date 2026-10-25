@@ -875,7 +875,32 @@ const SAFE_RECIPE_ACTION_KINDS = new Set([
     'scroll_each',
     'click_each',
     'click_until_no_change',
+    'select_variant',
 ]);
+
+// The option of a colour/variant picker that names the requested colour. The
+// recipe names the picker's options with one generic selector; which option to
+// press is decided here, per product, from the colour the operator asked for -
+// so a recipe never carries a colour and stays one recipe for the site (live
+// #140: ASUS opened on silver, Ponder Blue was one swatch away, every frame of
+// the open gallery was rejected for its colour). Every word of the requested
+// colour has to appear in the option's text; "Blue" alone must not pick
+// "Jade Blue" over "Ponder Blue", so a single-word colour needs an option that
+// says just that word.
+export const pickVariantOption = (options, requestedColor) => {
+    const words = (value) => String(value || '').toLowerCase().normalize('NFKC')
+        .replace(/[^\p{L}\p{N}]+/gu, ' ').trim().split(/\s+/).filter((word) => word.length >= 2);
+    const wanted = words(requestedColor);
+    if (wanted.length === 0) return null;
+    let match = null;
+    for (const [index, option] of options.entries()) {
+        const have = new Set(words(option));
+        if (!wanted.every((word) => have.has(word))) continue;
+        if (wanted.length === 1 && have.size > 1) continue;
+        if (match === null || words(options[match]).length > have.size) match = index;
+    }
+    return match;
+};
 
 const safeRecipeSelector = (selector) => typeof selector === 'string'
     && selector.trim() !== ''

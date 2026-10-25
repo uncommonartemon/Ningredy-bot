@@ -550,6 +550,7 @@ class ProductImageResolver
                         : []),
                     'minimum_image_width' => $source['_minimum_image_width'] ?? null,
                     'minimum_image_height' => $source['_minimum_image_height'] ?? null,
+                    'requested_color' => $source['_requested_color'] ?? null,
                     ...array_intersect_key($source, array_flip(['_photo_applicability', '_observed_identity'])),
                 ];
                 $browserResult = $activeRecipeOnly

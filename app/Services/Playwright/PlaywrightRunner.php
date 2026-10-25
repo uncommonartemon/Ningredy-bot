@@ -91,6 +91,7 @@ class PlaywrightRunner implements BrowserRunner
             'PRODUCT_GALLERY_RECIPE' => json_encode($request->recipe, JSON_UNESCAPED_SLASHES),
             'PRODUCT_GALLERY_SCOUT_ONLY' => $request->scoutOnly ? '1' : '0',
             'PRODUCT_GALLERY_OBSERVATION_FOCUS' => (string) ($request->context['observation_focus_selector'] ?? ''),
+            'PRODUCT_GALLERY_REQUESTED_COLOR' => mb_substr((string) ($request->context['requested_color'] ?? ''), 0, 80),
             'PRODUCT_GALLERY_CONFINE_HOST' => $request->confineNavigationToHost ?? '',
             'PRODUCT_GALLERY_DOM_WAIT_MS' => (string) config('product-images.browser_fallback.dom_wait_ms', 12000),
             'PRODUCT_GALLERY_PROBE_TIMEOUT_MS' => (string) config('product-images.browser_fallback.image_probe_timeout_ms', 5000),

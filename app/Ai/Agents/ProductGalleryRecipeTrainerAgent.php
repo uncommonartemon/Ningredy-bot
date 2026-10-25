@@ -381,7 +381,10 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
             the page adds to the selected group, or the container the visible hero image lives in. Scope
             the collect_selectors to that group's container so the selection follows whichever variant the
             page opens with, on every product. If you cannot find such a marking, say so in reason and
-            collect the whole block rather than inventing a name-based filter.
+            collect the whole block rather than inventing a name-based filter. When the page opens on a
+            variant other than the requested colour, a select_variant action on the picker's option
+            controls comes first (the runner chooses the option by the requested colour at run time),
+            and the collection then follows the newly selected group.
 
             actions is the preferred control mechanism for a layered or non-standard gallery. It is executed
             strictly in array order and may contain only:
@@ -391,6 +394,12 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
             - click_until_no_change: repeatedly press one control until the current gallery ends.
             - hover: reveal hover-dependent media without clicking;
             - scroll_into_view: reveal a lazy element or its container without clicking.
+            - select_variant: selector names the page's colour/variant option controls (all of them, a
+              generic selector); at run time the runner clicks the one whose label, title, alt, value or
+              data attribute names the colour the operator asked for, and reports variant_not_found when
+              none does. Use it first whenever the page shows variant pickers and the displayed variant may
+              not be the requested colour; then scope collection to the selected group's marking as usual.
+              The recipe never contains the colour itself, so it stays one recipe for the whole site.
             - scroll_each: scroll through the CURRENT page's matched elements without clicking, collecting
               after each element and its optional after_each follow-up. It always uses element traversal;
               iteration_mode and limit do not fix the number of elements. A safety ceiling is not completion.
@@ -505,7 +514,7 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
             ->items($schema->string()->max(300))->required();
         $actions = $schema->array()->items($schema->object([
             'kind' => $schema->string()->enum([
-                'click', 'click_each', 'click_until_no_change', 'hover', 'scroll_into_view', 'scroll_each',
+                'click', 'click_each', 'click_until_no_change', 'hover', 'scroll_into_view', 'scroll_each', 'select_variant',
             ])->required(),
             'when' => $schema->string()->enum(['always', 'if_present'])->required(),
             'iteration_mode' => $schema->string()->enum(['elements', 'repeat'])->required(),

@@ -26,6 +26,7 @@ import {
     recipeActionPlanStatus,
     recipeActionRequestedIndex,
     recipeActionIteratesElements,
+    pickVariantOption,
     readProductIdentityInPage,
     recipeActionTraversesGallery,
     resolveRecipeActionTargetIndex,
@@ -40,6 +41,8 @@ const sourceUrl = process.argv[2];
 const limit = Math.max(1, Math.min(60, Number.parseInt(process.argv[3] || '20', 10)));
 const scoutOnly = process.env.PRODUCT_GALLERY_SCOUT_ONLY === '1';
 const observationFocusSelector = (process.env.PRODUCT_GALLERY_OBSERVATION_FOCUS || '').trim();
+// The colour the operator asked for: a select_variant action picks the picker option that names it.
+const requestedColor = (process.env.PRODUCT_GALLERY_REQUESTED_COLOR || '').trim();
 // Opt-in only (empty by default): confines main-frame document navigation -
 // the page itself moving to a different address, the initial load included
 // - to this one host. Never applied to sub-resource requests (images,
@@ -1877,6 +1880,32 @@ try {
                     optional_absent: optional,
                     selector_match_count: 0,
                 });
+                continue;
+            }
+
+            // A variant picker: the option to press is chosen here, per product, by the
+            // requested colour - the recipe names the picker, never the colour (live #140).
+            if (action.kind === 'select_variant') {
+                const optionTexts = await locator.evaluateAll((elements) => elements.map((element) => [
+                    element.getAttribute('aria-label'), element.getAttribute('title'), element.getAttribute('data-value'),
+                    element.getAttribute('data-color'), element.getAttribute('data-option-value'), element.getAttribute('value'),
+                    element.querySelector('img')?.getAttribute('alt'), element.textContent,
+                ].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim().slice(0, 200))).catch(() => []);
+                const optionIndex = requestedColor === '' ? null : pickVariantOption(optionTexts, requestedColor);
+                const trace = { action: action.kind, phase: 'ai_action', selector: action.selector, action_index: actionIndex,
+                    purpose: action.purpose, requested_color: requestedColor, selector_match_count: matched,
+                    option_texts: optionTexts.slice(0, 12), clicked: false, changed: false };
+                if (optionIndex === null) {
+                    actionTrace.push({ ...trace, variant_not_found: requestedColor !== '', no_requested_color: requestedColor === '' });
+                    continue;
+                }
+                const before = await readTraversalMedia().catch(() => []);
+                const clicked = await locator.nth(optionIndex).click({ timeout: 2000 }).then(() => true).catch(() => false);
+                await page.waitForTimeout(Math.max(50, Math.min(1500, action.wait_after_ms || 300)));
+                const after = await readTraversalMedia().catch(() => []);
+                actionTrace.push({ ...trace, clicked, matched_option: optionTexts[optionIndex] ?? null,
+                    changed: JSON.stringify(before) !== JSON.stringify(after) });
+                await observeGalleryLayer({ action_index: actionIndex, phase: 'variant_selected' });
                 continue;
             }
 

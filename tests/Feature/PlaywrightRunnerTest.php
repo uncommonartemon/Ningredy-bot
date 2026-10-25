@@ -32,7 +32,7 @@ class PlaywrightRunnerTest extends TestCase
         $recipe = ['collect_selectors' => ['.gallery img'], 'actions' => [['kind' => 'click', 'selector' => '.next']]];
         $result = $this->runner->run(new BrowserRunRequest(
             'https://shop.example/normal', $recipe, 2, false, 60,
-            ['observation_focus_selector' => '#viewer', 'minimum_image_width' => 950, 'minimum_image_height' => 300],
+            ['observation_focus_selector' => '#viewer', 'minimum_image_width' => 950, 'minimum_image_height' => 300, 'requested_color' => 'Ponder Blue'],
             true, 'shop.example',
         ));
         $this->assertTrue($result->hasObservation);
@@ -40,6 +40,8 @@ class PlaywrightRunnerTest extends TestCase
         $fixture = $result->payload['fixture'];
         $this->assertSame($recipe, $fixture['recipe']);
         $this->assertSame('#viewer', $fixture['focus']);
+        // The select_variant action picks the picker option by this colour at run time.
+        $this->assertSame('Ponder Blue', $fixture['color']);
         $this->assertSame('shop.example', $fixture['host']);
         $this->assertSame('48000', $fixture['deadline']);
         $this->assertSame('950', $fixture['width']);
