@@ -15,6 +15,7 @@ use App\Services\Ai\ProductSearchCostBudget;
 use App\Services\Products\ProductImageResolver;
 use App\Services\Products\ProductImageStorage;
 use App\Services\Products\SourceIdentityProvenance;
+use App\Services\ProductSearch\Supervision\SearchProgressSupervisor;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
@@ -30,7 +31,7 @@ class ResearchProductTextOnlyResultTest extends TestCase
 
     private const SOURCE = 'https://shop.example/lenovo-exact-123';
 
-    private function research(string $stopReason, bool $assembled, bool $moneyRemains = false, bool $moneyExhausted = false, int $photoCount = 0, string $verificationStatus = 'verified', bool $filesExist = true, string $sourceType = 'retailer', array $responseOverrides = []): array
+    private function research(string $stopReason, bool $assembled, bool $moneyRemains = false, bool $moneyExhausted = false, int $photoCount = 0, string $verificationStatus = 'verified', bool $filesExist = true, string $sourceType = 'retailer', array $responseOverrides = [], ?callable $beforeStage = null): array
     {
         Storage::fake('public');
         Http::preventStrayRequests();
@@ -53,7 +54,8 @@ class ResearchProductTextOnlyResultTest extends TestCase
         $resolver = $this->mock(ProductImageResolver::class);
         $resolver->shouldNotReceive('resolve');
         $storage = $this->mock(ProductImageStorage::class);
-        $storage->shouldReceive('stage')->once()->andReturnUsing(function (ProductDraft $draft) use ($stopReason, $assembled, $photoCount, $verificationStatus, $filesExist): int {
+        $storage->shouldReceive('stage')->once()->andReturnUsing(function (ProductDraft $draft) use ($stopReason, $assembled, $photoCount, $verificationStatus, $filesExist, $beforeStage): int {
+            $beforeStage?->__invoke($draft);
             $draft->update(['images_staged_at' => now(), 'gallery_status' => $photoCount > 0 ? 'partial' : 'missing', 'gallery_search_stop_reason' => $stopReason,
                 ...($assembled ? [
                     'title' => 'Lenovo Exact 123 verified', 'description' => 'Final assembled description.',
@@ -133,6 +135,19 @@ class ResearchProductTextOnlyResultTest extends TestCase
         $result = $this->research('exhausted', assembled: true, moneyRemains: true);
         $this->assertSame('gallery_search_continuing', $result['status']);
         Queue::assertPushed(ContinueDraftGallerySearch::class);
+    }
+
+    public function test_the_watchers_end_of_the_photo_search_stops_the_automatic_continuation_chain(): void
+    {
+        // Live #178: the watcher ended the photo search and the card was assembled, then the
+        // automatic continuation began a new cycle every fifteen seconds, forgetting the verdict.
+        $result = $this->research('exhausted', assembled: true, moneyRemains: true,
+            beforeStage: fn (ProductDraft $draft) => app(SearchProgressSupervisor::class)
+                ->requestWrapUp($draft->telegram_update_id, 'Магазины дали только миниатюры.'));
+
+        $this->assertSame('found', $result['status']);
+        $this->assertTrue($result['text_only_result']);
+        Queue::assertNotPushed(ContinueDraftGallerySearch::class);
     }
 
     public function test_final_assembly_spending_the_remaining_money_delivers_text_instead_of_queueing_another_cycle(): void

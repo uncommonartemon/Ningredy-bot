@@ -96,7 +96,7 @@ class SearchProgressSupervisorTest extends TestCase
         $this->assertCount(1, $prompts);
     }
 
-    public function test_deliver_now_stands_for_the_rest_of_the_search_until_a_new_session(): void
+    public function test_deliver_now_stands_for_the_rest_of_the_request_through_automatic_cycles(): void
     {
         $draft = $this->draft(minutesAgo: 12);
         SearchProgressAgent::fake([['decision' => 'deliver_now', 'reason' => 'Семь фото уже есть; остальные магазины те же.']])
@@ -107,8 +107,10 @@ class SearchProgressSupervisorTest extends TestCase
         $this->assertSame('deliver_now', $this->review($draft)['decision']);
         $this->assertSame('Семь фото уже есть; остальные магазины те же.', $supervisor->deliverNowReason($draft->telegram_update_id));
 
+        // Live #178: an automatic continuation cycle began a new session every fifteen
+        // seconds and forgot the verdict each time. It belongs to the request.
         $supervisor->beginSession($draft->telegram_update_id);
-        $this->assertNull($supervisor->deliverNowReason($draft->telegram_update_id));
+        $this->assertSame('Семь фото уже есть; остальные магазины те же.', $supervisor->deliverNowReason($draft->telegram_update_id));
     }
 
     public function test_leave_said_from_outside_waits_for_the_page_in_training_and_is_carried_out_once(): void

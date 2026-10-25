@@ -53,9 +53,11 @@ final class SearchProgressSupervisor
     /** A new search (or an operator's continuation) starts without an earlier "deliver now". */
     public function beginSession(?int $updateId): void
     {
-        if ($updateId) {
-            Cache::forget(self::DELIVER_KEY.$updateId);
-        }
+        // A standing "end the photo search" belongs to the request - one update id -
+        // for as long as it lives, automatic continuation cycles included: live #178
+        // wrapped up at the watcher's word, assembled its card, and the automatic
+        // continuation then began a new cycle every fifteen seconds with the verdict
+        // forgotten. An operator's continuation is a new request with its own id.
     }
 
     /** The reason the agent gave for ending the photo search, while that decision stands. */
