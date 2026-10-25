@@ -396,9 +396,16 @@ class ProductImageVisionVerifier
             function (array $normalizedResponse) use ($candidateCount, $minimumScore): VisionResponse {
                 $normalizedResponse['images'] = collect($normalizedResponse['images'] ?? [])
                     ->filter(fn (mixed $image): bool => is_array($image))
-                    ->map(function (array $image): array {
+                    ->map(function (array $image) use ($candidateCount): array {
                         if (is_string($image['reason'] ?? null)) {
                             $image['reason'] = mb_substr($image['reason'], 0, 1000);
+                        }
+                        // gallery_rank only orders accepted frames. A rank past the set is a
+                        // slip in that field, not a failed examination - failing the whole
+                        // review over it bought the same review again (live #104, #166, #183:
+                        // "gallery_rank must be between 1 and N", one retry each).
+                        if (is_numeric($image['gallery_rank'] ?? null)) {
+                            $image['gallery_rank'] = max(1, min($candidateCount, (int) $image['gallery_rank']));
                         }
 
                         // The model occasionally free-associates a plausible but
