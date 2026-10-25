@@ -257,7 +257,7 @@ class RecipeContract
             'expected_count_evidence' => ['required', 'string', 'max:500'],
             'content_confirmed_product' => ['required', 'boolean'],
             'actions' => ['present', 'array'],
-            'actions.*.kind' => ['required', 'in:click,click_each,click_until_no_change,hover,scroll_into_view,scroll_each'],
+            'actions.*.kind' => ['required', 'in:click,click_each,click_until_no_change,hover,scroll_into_view,scroll_each,select_variant'],
             'actions.*.selector' => ['required', 'string', 'max:300'],
             // index addresses ONE specific element among a selector's
             // matches, not a repeat count - a page can reasonably have more

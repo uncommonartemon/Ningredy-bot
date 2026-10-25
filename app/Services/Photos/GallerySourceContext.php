@@ -24,6 +24,10 @@ class GallerySourceContext
             '_minimum_verified_images' => $minimumImages ?? $category?->minimumVerifiedImages() ?? 3,
             '_minimum_image_width' => $category?->minimumImageWidth() ?? $this->settings->imageMinimumWidth(),
             '_minimum_image_height' => $category?->minimumImageHeight() ?? $this->settings->imageMinimumHeight(),
+            // The colour the browser's select_variant action picks at run time: the
+            // recipe names the picker, never the colour (live #140: ASUS opened on
+            // silver, Ponder Blue was one swatch away, every frame was rejected).
+            '_requested_color' => trim((string) $draft->color) !== '' ? trim((string) $draft->color) : null,
         ];
     }
 }
