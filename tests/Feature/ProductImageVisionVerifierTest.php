@@ -220,6 +220,29 @@ class ProductImageVisionVerifierTest extends TestCase
         $this->assertCount($allowed ? 1 : 0, $selected);
     }
 
+    public function test_a_rank_past_the_set_is_clamped_instead_of_failing_the_paid_review(): void
+    {
+        // Live #104, #166, #183: "gallery_rank must be between 1 and N" discarded the whole
+        // review and bought it again; the rank only orders accepted frames.
+        $calls = 0;
+        ProductImageVisionAgent::fake(function () use (&$calls): array {
+            $calls++;
+
+            return ['images' => [
+                ['index' => 1, 'exact_match' => true, 'color_match' => true, 'publishable' => true, 'kind' => 'product',
+                    'view' => 'front', 'gallery_rank' => 1, 'score' => 95, 'reason' => 'Clean front shot.'],
+                ['index' => 2, 'exact_match' => true, 'color_match' => true, 'publishable' => true, 'kind' => 'detail',
+                    'view' => 'detail', 'gallery_rank' => 99, 'score' => 80, 'reason' => 'Ports close-up.'],
+            ]];
+        })->preventStrayPrompts();
+        $draft = new ProductDraft(['product_type' => 'laptop', 'category' => 'laptops']);
+
+        $selected = app(ProductImageVisionVerifier::class)->select($draft, $this->languageFrames(2), 2);
+
+        $this->assertCount(2, $selected);
+        $this->assertSame(1, $calls);
+    }
+
     #[DataProvider('logoPolicies')]
     public function test_gallery_review_receives_the_same_component_exception(?string $type, string $category, bool $allowed): void
     {
