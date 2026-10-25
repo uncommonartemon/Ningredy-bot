@@ -29,8 +29,9 @@ class ProductImageVisionAgent implements Agent, HasStructuredOutput
             low aesthetic score, and do not guess an exact SKU from pixels when the source already establishes
             identity. Check current pixels for real contradictions instead. Catalog photos show the product the
             way an online store's gallery does: feature slides with overlaid graphics or callouts, illustrations
-            of internal components, infographics, banners and collages are not catalog photos, even inside a
-            complete official gallery. The primary image shows the whole product.
+            of internal components, infographics and banners are not catalog photos, even inside a complete
+            official gallery. Several views of the same product composed in one frame without advertising text
+            or graphics over them are a product photo, not an advert. The primary image shows the whole product.
             score is the frame's worth as a catalog photo on a 0-100 scale (not 0-10).
             When the trusted source context explicitly establishes compatible-body applicability, its known regional
             SKU suffix or permitted keyboard difference alone is not a wrong-body verdict; keep the factual notice.
@@ -109,8 +110,9 @@ class ProductImageVisionAgent implements Agent, HasStructuredOutput
             evidence is not an exact match.
 
             An image is publishable only when it is clear, relevant, reasonably clean, and useful in a
-            commercial product catalog. Reject heavy watermarks, collages, tiny thumbnails, distorted
-            images, and pages/screenshots. Prefer a clean product hero as primary, then packaging and
+            commercial product catalog. Reject heavy watermarks, advertising compositions, tiny thumbnails,
+            distorted images, and pages/screenshots; several views of the same product in one clean frame
+            are a product photo. Prefer a clean product hero as primary, then packaging and
             meaningful details. Prefer a useful, source-supported close match over returning nothing,
             but never accept a visibly conflicting model or a non-product graphic.
 

@@ -141,7 +141,8 @@ class ProductImageVisionVerifier
     /**
      * Reviews every frame of an ambiguous Playwright carousel in one request.
      * Unusual angles, details and lifestyle shots stay when the product is the
-     * clear subject; feature slides, internal illustrations and collages do not.
+     * clear subject; feature slides and internal illustrations do not. Several
+     * views of one product in a clean frame are a product photo (operator, 2026-10-25).
      *
      * @param  array<int, array<string, mixed>>  $candidates
      * @return array<int, array<string, mixed>>
@@ -619,9 +620,11 @@ class ProductImageVisionVerifier
             POLICY
             : <<<'POLICY'
             Set publishable=false for a thumbnail, blurry or pixelated/upscaled image, watermark or promotional text,
-            badly cropped/truncated product, collage, screenshot, logo, accessory-only shot, or image where the product
-            is too small to be useful. Also reject user-generated used-item and auction photos, worn/damaged units,
-            hands, rooms, or improvised phone shots even when the model matches.
+            badly cropped/truncated product, advertising composition, screenshot, logo, accessory-only shot, or image
+            where the product is too small to be useful. Several views of the same product in one frame without
+            advertising text or graphics over them are a product photo, not a rejection. Also reject user-generated
+            used-item and auction photos, worn/damaged units, hands, rooms, or improvised phone shots even when the
+            model matches.
             POLICY;
         $confirmedFramePolicy = $galleryFramePolicy
             ? <<<'POLICY'

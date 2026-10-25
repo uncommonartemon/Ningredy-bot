@@ -35,7 +35,9 @@ class GalleryFrameReviewAgent implements Agent, HasStructuredOutput
             details, studio renders, and lifestyle photos in which the product is the clear dominant subject.
             Also return as non_product_frames: diagrams or illustrations of internal components (boards,
             chips, cooling, signal paths), infographics, feature slides whose subject is a callout, icon or
-            graphic rather than the product, promotional compositions with overlaid graphics, and collages.
+            graphic rather than the product, and promotional compositions with overlaid graphics. Several
+            views of the same product in one frame without advertising text or graphics over them are a
+            product photo, not a composition to return.
             Do not reject a frame for its angle, background, or because an exact SKU/color cannot be read.
             Exact configuration identity is established by the product page, not guessed from pixels.
             If you genuinely cannot determine whether a product is depicted, use uncertain_content_frames,

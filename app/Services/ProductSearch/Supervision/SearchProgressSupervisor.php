@@ -66,6 +66,16 @@ final class SearchProgressSupervisor
     }
 
     /**
+     * The same standing "end the photo search, assemble the card" verdict, given
+     * from outside the search: the guardian says it at the time limit, and the
+     * search obeys at its next step exactly as it obeys the agent's own.
+     */
+    public function requestWrapUp(int $updateId, string $reason): void
+    {
+        Cache::put(self::DELIVER_KEY.$updateId, $reason, now()->addHours(2));
+    }
+
+    /**
      * A "leave the current page" not yet carried out, for the page it was said
      * about; taking it marks it done. A page that ended before it could act
      * leaves the verdict to expire, so it never ends the next page instead.
