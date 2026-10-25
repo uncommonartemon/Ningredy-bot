@@ -202,6 +202,13 @@ final class SearchJournal
                     'photos_accepted' => (int) $rows->where('phase', 'image_verification')
                         ->sum(fn (ProductSourceAttempt $row): int => (int) data_get($row->output, 'accepted_images', 0)),
                     'photos_saved' => (int) ($photosByHost[$host] ?? 0),
+                    // Why the site's downloads were dropped: a site whose frames are all
+                    // too_small only has thumbnails (live #87: 38 such frames on two shops,
+                    // #161: 34 on five; the watcher read "downloaded, nothing accepted" as work).
+                    'rejections' => $rows->whereIn('phase', ['image_download', 'fallback_image_download'])
+                        ->flatMap(fn (ProductSourceAttempt $row): array => (array) data_get($row->output, 'rejection_summary', []))
+                        ->groupBy(fn (int $count, string $reason): string => Str::before($reason, ' ('))
+                        ->map(fn ($counts): int => (int) $counts->sum())->sortDesc()->take(4)->all(),
                     'last_step' => $steps->last()->action.': '.($steps->last()->decision ?? '-'),
                     'ended_by_agent' => $endedByAgent[$host] ?? null,
                     // Live #7: an exact-SKU page with a seven-frame gallery whose
@@ -211,6 +218,27 @@ final class SearchJournal
                         ->map(fn (ProductSourceAttempt $row): ?int => data_get($row->output, 'expected_image_count'))->filter()->max()];
             })
             ->values()->slice(-$limit)->values()->all();
+    }
+
+    /**
+     * Where the request is: still looking for photos, or already assembling the
+     * card from what it found. A verdict about the photo search means nothing
+     * once assembly has begun (live #168, #173: "deliver_now" during assembly).
+     */
+    public static function phase(int $runId): string
+    {
+        return AiRun::query()->where('telegram_update_id', $runId)->where('status', 'running')
+            ->whereIn('activity->stage', ['card_assembly', 'card_repair', 'text_evidence'])->exists()
+            ? 'card_assembly' : 'photo_search';
+    }
+
+    /** How long the search has been busy without Vision accepting a photo; null before the first. */
+    public static function minutesSinceLastAcceptedPhoto(int $runId): ?float
+    {
+        $accepted = ProductSourceAttempt::query()->where('telegram_update_id', $runId)
+            ->where('phase', 'image_verification')->where('output->accepted_images', '>', 0)->max('created_at');
+
+        return $accepted === null ? null : round(Carbon::parse($accepted)->diffInSeconds(now()) / 60, 1);
     }
 
     /**

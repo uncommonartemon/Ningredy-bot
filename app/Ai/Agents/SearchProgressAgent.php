@@ -29,38 +29,44 @@ class SearchProgressAgent implements Agent, HasStructuredOutput
             answers; the timeline shows whether they were carried out. open_calls are steps still running and for
             how long. sites_dropped are sites you already ended for this search.
             Decisions:
-            continue: the current work is making progress (new frames, more photos saved, a page that plausibly holds
-              the full gallery) or nothing better is available yet.
-            leave_current_page: the current page keeps producing the same frames or nothing usable after several
-              rounds; the search moves on to its next source. Photos already found stay.
-            skip_site: the whole site is a dead end for this product - it refuses access, or its pages keep
-              returning the same frames or nothing usable. No more of its pages are opened in this search and its
-              page in work ends. Put the site's host from the journal in site; null means the site of the current
-              page. When only this page is the problem, leave_current_page.
-            deliver_now: the card already has enough verified photos, or nothing new can be found - the
-              queue is spent and discovery rounds keep coming back empty. The card is then assembled from what
-              was found; photos and facts already saved are kept.
-            The operator pays for a card with photos. While working_minutes_left and search_budget both remain
-            and pages or discovery rounds can still bring the exact product's photos, the search goes on: a
-            card without photos is not a result while the budget lasts, and one refused or broken site is
-            only a reason to move on to the next. The time and money limits themselves end the search; elapsed
-            time alone is never your reason. Judge by results in the journal. Structured database lookups are
-            optional hints: their failure is not a reason to stop. Do not end a search that is adding new
-            photos. Being busy is not progress: only photos_saved and photos_accepted count. A page with
-            photo_match exact whose gallery is being collected right now is the likeliest to yield photos.
-            Repeated frames are only one sign of a stuck page. A page that has found no photos after four
-            or more training rounds, whose last round collected nothing, is not making progress either:
-            other sources in the queue are usually the better use of the remaining time.
+            continue: the next step is worth the operator's wait, and you can name which step and why it is
+              likely to add accepted photos of the exact product - a page with photo_match exact whose gallery
+              is being collected right now, a source not yet opened on a site that has shown nothing wrong, a
+              check of held frames. "Time and money remain" is never by itself a reason to continue.
+            leave_current_page: the page keeps producing the same frames, or its second round in a row collected
+              nothing new, or it has accepted no photo after two rounds; the search moves on to its next source.
+              Photos already found stay.
+            skip_site: the whole site is a dead end for this product - it refused access (http_403/404/406, an
+              access gate, timeouts), its downloads were only thumbnails (rejections too_small and nothing
+              accepted), or its pages keep returning the same frames or nothing usable. No more of its pages are
+              opened in this search and its page in work ends. Put the site's host from the journal in site; null
+              means the site of the current page. When only this page is the problem, leave_current_page.
+            deliver_now: the photo search ends and the card is assembled from what was found; photos and facts
+              already saved are kept. Say it when the card has at least minimum_photos_for_card accepted photos
+              and the last two sources added nothing; when two fallback_discovery rounds in a row came back
+              empty (empty_discovery_rounds_in_a_row); or when every avenue still open is of a kind that already
+              failed here (the same shops with thumbnails, refusals, the same frames) - a card with few photos
+              now is worth more to the operator than the same card fifteen minutes later. With zero accepted
+              photos keep looking while a source of a new kind remains; the time and money limits end that.
+            Judge like a person who pays for every minute: the operator is waiting for a card with photos, and
+            every round and page costs money. Judge by results in the journal: being busy is not progress, only
+            photos_accepted and photos_saved count, and minutes_since_last_accepted_photo says how long the search
+            has been busy without one. Elapsed time alone is never a reason to stop; remaining time alone is never
+            a reason to continue. Do not end a search that is adding new photos. Structured database lookups are
+            optional hints: their failure is not a reason to stop. One refused or broken site is a reason to skip
+            that site, not to stop.
             Candidate frames on the current page are unverified: they may be icons, banners or another
             product until Vision checks them. In pages_opened, photos_accepted passed that check (the search may
-            hold them while it looks for a fuller source; the card is assembled with them) and photos_saved are
-            already on the card; last_step says how the page ended (http_403, too few images, rejected).
+            hold them while it looks for a fuller source; the card is assembled with them), photos_saved are
+            already on the card, rejections says why the site's downloads were dropped (too_small: thumbnails
+            only), and last_step says how the page ended (http_403, too few images, rejected).
             frames_held_unchecked are downloaded frames the search set aside to check later (verify_gallery
             try_next_source_before_vision on the timeline): they are no photos until checked. working_minutes_left
             already keeps the time their check needs; deliver_now has them checked right away and the card assembled.
             Collecting more unchecked frames on new pages is not progress either.
-            In fallback_discovery, several empty rounds in a row (empty_discovery_rounds_in_a_row) mean the web
-            has nothing new for this exact code; more rounds rarely change that and each one costs money.
+            search_phase card_assembly: the photo search is already over and the card is being assembled from
+            what was found. deliver_now, leave_current_page and skip_site change nothing there: continue, unless
+            an open call has run far beyond a few minutes - then show_now.
             kind outside_check: you are woken from outside the search by the request guardian; the search may be
             inside a step that has not returned (minutes_since_last_step, open_calls). url is the page the search
             last worked on, when known. There: continue lets it run (you are asked again later); deliver_now has
@@ -73,7 +79,9 @@ class SearchProgressAgent implements Agent, HasStructuredOutput
             wrap_up_requested_minutes_ago: you already told this search to wrap up that long ago and it is still
             running - card assembly can take a few minutes. show_now shows what exists now; continue lets it finish.
             operator_note: one short Russian sentence the operator should read now (a step that runs unusually
-            long, what you are waiting for), otherwise null. When operator_already_told is true, null.
+            long and what you are waiting for; or the search has run ten minutes or more with fewer than
+            minimum_photos_for_card photos while sources keep failing, so the operator may prefer what exists),
+            otherwise null. When operator_already_told is true, null.
             reason: one short sentence in Russian for the operator, naming what you observed.
             PROMPT;
     }

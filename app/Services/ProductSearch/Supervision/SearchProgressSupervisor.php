@@ -5,6 +5,7 @@ namespace App\Services\ProductSearch\Supervision;
 use App\Ai\Agents\SearchProgressAgent;
 use App\Exceptions\ProductSearchCancelled;
 use App\Models\AiRun;
+use App\Models\Category;
 use App\Models\ProductDraft;
 use App\Models\ProductSourceAttempt;
 use App\Services\Ai\AiSettings;
@@ -198,6 +199,14 @@ final class SearchProgressSupervisor
             // A site nobody can name cannot be dropped; the page in work can still be left.
             $verdict['decision'] = 'leave_current_page';
         }
+        // Once the card is being assembled the photo search is over: a verdict about it
+        // from outside would only leave a standing "wrap up" for a search that has
+        // already wrapped up (live #168, #173). A stuck assembly is still show_now.
+        if ($fromOutside && in_array($verdict['decision'], ['deliver_now', 'leave_current_page', 'skip_site'], true)
+            && SearchJournal::phase($updateId) === 'card_assembly') {
+            $verdict = [...$verdict, 'decision' => 'continue', 'site' => null,
+                'reason' => 'Поиск фото уже завершён, идёт сборка карточки. '.$verdict['reason']];
+        }
 
         $this->record($draft, $updateId, $current, 'completed', $verdict['decision'], $verdict['reason'], $verdict, $mark);
         if ($verdict['decision'] === 'skip_site') {
@@ -328,6 +337,9 @@ final class SearchProgressSupervisor
             'working_minutes_left' => round(($this->timeBudget->remainingWorkingSeconds($updateId) ?? 0) / 60, 1),
             'search_budget' => ['spent_usd' => $this->costBudget->spent($updateId), 'limit_usd' => $this->costBudget->limit()],
             'photos_saved_for_card' => $draft->media()->count(),
+            'minimum_photos_for_card' => Category::query()->where('slug', trim((string) $draft->category))->first()?->minimumVerifiedImages() ?? 3,
+            'minutes_since_last_accepted_photo' => SearchJournal::minutesSinceLastAcceptedPhoto($updateId),
+            'search_phase' => SearchJournal::phase($updateId),
             'frames_held_unchecked' => array_intersect_key($this->timeBudget->heldForCheck($updateId), array_flip(['sets', 'frames'])),
             'current_activity' => $current,
             'open_calls' => SearchJournal::openCalls($updateId),

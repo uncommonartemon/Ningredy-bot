@@ -13,6 +13,7 @@ use App\Services\Products\ProductSourceAttemptRecorder;
 use App\Services\ProductSearch\Supervision\SearchProgressSupervisor;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 use RuntimeException;
 use Tests\TestCase;
 
@@ -267,6 +268,46 @@ class SearchProgressSupervisorTest extends TestCase
             'kind' => 'gallery_training', 'url' => self::PAGE, 'host' => 'shop.example', 'round' => 4,
             'rounds_with_same_frames' => 3, 'rounds_without_progress' => 2, 'candidate_frames_on_this_page' => 4,
         ], $progress);
+    }
+
+    public function test_the_watcher_sees_the_phase_the_minimum_the_time_since_a_photo_and_a_site_of_thumbnails(): void
+    {
+        // Live #87 and #161: shops whose every frame was too small read as work in
+        // progress; #168 and #173: "deliver_now" said from outside while the card
+        // was already being assembled left a standing wrap-up for a finished search.
+        $draft = $this->draft(minutesAgo: 12);
+        $recorder = app(ProductSourceAttemptRecorder::class);
+        $recorder->record(['telegram_update_id' => $draft->telegram_update_id, 'product_draft_id' => $draft->id,
+            'product_url' => 'https://pcx.example/nitro-16', 'actor' => 'downloader', 'phase' => 'image_download',
+            'action' => 'download_candidates', 'status' => 'completed', 'decision' => 'skip_source',
+            'output' => ['downloaded_images' => 0, 'rejection_summary' => ['too_small' => 18, 'bad_aspect_ratio (1:7)' => 2]]]);
+        $accepted = $recorder->record(['telegram_update_id' => $draft->telegram_update_id, 'product_draft_id' => $draft->id,
+            'product_url' => self::PAGE, 'actor' => 'vision', 'phase' => 'image_verification',
+            'action' => 'verify_downloaded_exact_source', 'status' => 'completed', 'output' => ['accepted_images' => 1]]);
+        DB::table('product_source_attempts')->where('id', $accepted->id)->update(['created_at' => now()->subMinutes(6)]);
+        AiRun::create(['telegram_update_id' => $draft->telegram_update_id, 'provider' => 'fake', 'model' => 'fake',
+            'status' => 'running', 'prompt' => 'assemble', 'started_at' => now(), 'activity' => ['stage' => 'card_assembly']]);
+        $prompts = [];
+        SearchProgressAgent::fake(function (string $prompt) use (&$prompts): array {
+            $prompts[] = json_decode($prompt, true);
+
+            return ['decision' => 'deliver_now', 'reason' => 'Одно фото уже есть, этого достаточно.', 'operator_note' => null, 'site' => null];
+        })->preventStrayPrompts();
+
+        $verdict = app(SearchProgressSupervisor::class)->review($draft->telegram_update_id, $draft,
+            ['kind' => 'outside_check', 'minutes_since_last_step' => 1, 'operator_already_told' => false], null, fromOutside: true);
+
+        $this->assertSame('card_assembly', $prompts[0]['search_phase']);
+        $this->assertSame(3, $prompts[0]['minimum_photos_for_card']);
+        $this->assertEqualsWithDelta(6.0, $prompts[0]['minutes_since_last_accepted_photo'], 0.2);
+        $thumbnails = collect($prompts[0]['pages_opened'])->firstWhere('host', 'pcx.example');
+        $this->assertSame(['too_small' => 18, 'bad_aspect_ratio' => 2], $thumbnails['rejections']);
+        // The photo search is over: nothing to wrap up, and no standing verdict is left behind.
+        $this->assertSame('continue', $verdict['decision']);
+        $this->assertStringStartsWith('Поиск фото уже завершён, идёт сборка карточки.', $verdict['reason']);
+        $this->assertNull(app(SearchProgressSupervisor::class)->deliverNowReason($draft->telegram_update_id));
+        $this->assertDatabaseHas('product_source_attempts', ['telegram_update_id' => $draft->telegram_update_id,
+            'phase' => 'search_supervision', 'decision' => 'continue']);
     }
 
     private function round(ProductDraft $draft, string $page, array $images): void
