@@ -59,6 +59,15 @@ class ProductImageStorage
         private readonly ImageRenditionDeduplicator $renditions,
     ) {}
 
+    /**
+     * Asset keys of the frames a code-matched record lists as its gallery, for
+     * the download pass of that source only: they are trusted like a confirmed
+     * slider's frames (whole, any aspect ratio), whatever the record's page shows.
+     *
+     * @var array<string, true>
+     */
+    private array $recordGalleryImageKeys = [];
+
     /** @param array<int, int> $replaceMediaIds */
     public function store(Product $product, ProductVariant $variant, ProductDraft $draft, array $replaceMediaIds = []): int
     {
@@ -644,9 +653,9 @@ class ProductImageStorage
                     report($exception);
                     $preflight = [];
                 }
-                $source = [...$source, 'title' => null,
-                    '_preflight_final_url' => $preflight['final_url'] ?? $source['url'],
-                    '_preflight_identity_evidence' => $preflight['identity_evidence'] ?? '',
+                $source = [...$source, 'title' => SourceIdentityProvenance::confirmedByCode($source) ? ($source['title'] ?? null) : null,
+                    '_preflight_final_url' => SourceIdentityProvenance::pageUrl($source, (string) ($preflight['final_url'] ?? $source['url'])),
+                    '_preflight_identity_evidence' => SourceIdentityProvenance::mergeEvidence($source, $preflight['identity_evidence'] ?? null),
                     '_preflight_specification_text' => $preflight['specification_text'] ?? '',
                     '_preflight_page_identity' => $preflight['page_identity'] ?? null,
                     '_preflight_index' => $sourceIndex];
@@ -777,6 +786,11 @@ class ProductImageStorage
             // An official gallery's own photos stay ahead of what its page adds (live #454).
             $urls = array_values(array_unique(($source['_official_gallery'] ?? false) === true
                 ? [...$urls, ...$resolvedUrls] : [...$resolvedUrls, ...$urls]));
+            // A code-matched record's own frames are its gallery: downloaded whole and
+            // held like a confirmed slider's frames, whatever its page showed.
+            $this->recordGalleryImageKeys = SourceIdentityProvenance::confirmedByCode($source)
+                ? array_fill_keys(array_map([ImageUrls::class, 'imageAssetKey'], $this->cleanUrls($source['image_urls'] ?? [])), true)
+                : [];
             $this->attempts->record([
                 'telegram_update_id' => $telegramUpdateId,
                 'product_draft_id' => $draft->id,
@@ -878,15 +892,22 @@ class ProductImageStorage
             if ($configurationConflict && $confirmedGallery->count() >= $minimumCompleteGallerySize) {
                 $progress?->__invoke('Источник продаёт другую конфигурацию памяти: кадры проверю по одному, не целиком.');
             }
-            $galleryVerification = $structurallyConfirmed
-                ? $this->verifyConfirmedGallerySafely(
+            // A record matched by part number/GTIN is the product: its gallery needs no
+            // site recipe to be trusted, only the final content-and-language check of
+            // the current frames (live #157: eight official frames set aside behind a
+            // bot check; #159: the same frames waited three minutes behind two shops).
+            $recordGallery = $structurallyConfirmed && SourceIdentityProvenance::confirmedByCode($source);
+            $galleryVerification = match (true) {
+                $recordGallery => $this->acceptRecordGallery($productPageUrl, $confirmedGallery, $draft, $telegramUpdateId),
+                $structurallyConfirmed => $this->verifyConfirmedGallerySafely(
                     $productPageUrl,
                     $confirmedGallery,
                     $draft,
                     $minimumCompleteGallerySize,
                     $telegramUpdateId,
-                )
-                : null;
+                ),
+                default => null,
+            };
             $verifiedGallery = $galleryVerification !== null
                 ? $galleryVerification['candidates']
                 : $confirmedGallery;
@@ -1083,8 +1104,10 @@ class ProductImageStorage
                 $minimumCompleteGallerySize,
                 $target,
                 [...$source, 'url' => $productPageUrl],
-                'playwright',
-                'Complete gallery traversal; current frames passed catalog quality, physical appearance, colour, keyboard and language review.',
+                $recordGallery ? 'record_gallery' : 'playwright',
+                $recordGallery
+                    ? 'Official database record matched by part number/GTIN; current frames passed content and language review.'
+                    : 'Complete gallery traversal; current frames passed catalog quality, physical appearance, colour, keyboard and language review.',
                 $progress,
             );
 
@@ -1105,16 +1128,19 @@ class ProductImageStorage
 
             $selected = $result->candidates;
             $outcome = $result->outcome;
-            $progress?->__invoke('Playwright и проверка кадров подтвердили пригодную галерею: принимаю все '.count($selected).' фото и прекращаю обход источников.');
+            $progress?->__invoke(($recordGallery
+                ? 'Официальная галерея записи, совпавшей по коду товара, и проверка кадров подтвердили пригодную галерею: принимаю все '
+                : 'Playwright и проверка кадров подтвердили пригодную галерею: принимаю все ')
+                .count($selected).' фото и прекращаю обход источников.');
             $this->attempts->record([
                 'telegram_update_id' => $telegramUpdateId,
                 'product_draft_id' => $draft->id,
                 'product_url' => $source['url'],
-                'actor' => 'playwright',
+                'actor' => $recordGallery ? 'server' : 'playwright',
                 'phase' => 'image_verification',
                 'action' => 'verify_gallery',
                 'status' => 'completed',
-                'decision' => 'accept_agent_confirmed_atomic_gallery',
+                'decision' => $recordGallery ? 'accept_code_confirmed_record_gallery' : 'accept_agent_confirmed_atomic_gallery',
                 'input' => ['downloaded_images' => count($allCandidates)],
                 'output' => [
                     'accepted_images' => count($selected),
@@ -1126,7 +1152,7 @@ class ProductImageStorage
             $this->destroy($reserve?->candidates ?? []);
             $reserve = null;
             $chosenSource = $result->source ?? [...$source, 'url' => $productPageUrl];
-            $chosenMethod = 'playwright';
+            $chosenMethod = $recordGallery ? 'record_gallery' : 'playwright';
             break;
         }
 
@@ -1946,6 +1972,7 @@ class ProductImageStorage
             if ($stored > 0) {
                 $methodLabel = match ($chosenMethod) {
                     'playwright' => 'через Playwright-рецепт галереи',
+                    'record_gallery' => 'из официальной галереи записи базы, совпавшей по коду товара (кадры проверены)',
                     'playwright_vision' => 'через Playwright-рецепт галереи (кадры проверены Vision)',
                     'fallback_playwright' => 'через Playwright-галерею карточки, найденной резервным поиском',
                     'fallback_playwright_vision' => 'через Playwright-галерею карточки, найденной резервным поиском (неоднозначный слайдер, кадры проверены Vision)',
@@ -2843,6 +2870,33 @@ class ProductImageStorage
         ] : [])];
     }
 
+    /**
+     * The gallery of a record matched by part number/GTIN, accepted for the
+     * final content-and-language check without a site recipe's evidence - the
+     * code established what the frames show; the current pixels still get
+     * checked. Same shape as verifyConfirmedGallerySafely()'s result.
+     *
+     * @param  Collection<int, array<string, mixed>>  $candidates
+     * @return array{mode: string, candidates: Collection<int, array<string, mixed>>, cached: bool}
+     */
+    private function acceptRecordGallery(string $productPageUrl, Collection $candidates, ProductDraft $draft, ?int $telegramUpdateId): array
+    {
+        $this->attempts->record([
+            'telegram_update_id' => $telegramUpdateId,
+            'product_draft_id' => $draft->id,
+            'product_url' => $productPageUrl,
+            'actor' => 'server',
+            'phase' => 'image_verification',
+            'action' => 'accept_record_gallery_evidence',
+            'status' => 'completed',
+            'decision' => 'current_pixels_pending',
+            'input' => ['gallery_images' => $candidates->count()],
+            'output' => ['accepted_images' => $candidates->count()],
+        ]);
+
+        return ['mode' => ConfirmedProductGalleryVerifier::MODE_DEDICATED, 'candidates' => $candidates, 'cached' => false];
+    }
+
     private function verifyConfirmedGallerySafely(
         string $productPageUrl,
         Collection $candidates,
@@ -3605,7 +3659,7 @@ class ProductImageStorage
         // verified frames, the generic limit downloaded only 10, and the
         // category minimum of 10 was then missed after downstream dedupe.
         $confirmedUrlCount = collect($urls)
-            ->filter(fn (string $url): bool => $this->resolver->isConfirmedGalleryImage($url))
+            ->filter(fn (string $url): bool => $this->trustedGalleryImage($url))
             ->count();
         $effectiveLimit = max($limit, $confirmedUrlCount);
 
@@ -3630,7 +3684,7 @@ class ProductImageStorage
                 break;
             }
 
-            $confirmed = $this->resolver->isConfirmedGalleryImage($url);
+            $confirmed = $this->trustedGalleryImage($url);
             if (! $confirmed && $confirmedDownloads >= $confirmedStopThreshold) {
                 break;
             }
@@ -3648,7 +3702,7 @@ class ProductImageStorage
                 $batch = [];
                 foreach (array_slice($urls, $position) as $next) {
                     if (count($batch) >= min($concurrency, $effectiveLimit - count($candidates))
-                        || $this->resolver->isConfirmedGalleryImage($next) !== $confirmed) {
+                        || $this->trustedGalleryImage($next) !== $confirmed) {
                         break;
                     }
                     $batch[] = $next;
@@ -3666,6 +3720,9 @@ class ProductImageStorage
 
                 continue;
             }
+            // The browser marks a confirmed slider's frames; a code-matched record's
+            // own frames are marked here - the resolver only ever saw its page.
+            $download['confirmed_gallery'] = (bool) ($download['confirmed_gallery'] ?? false) || $this->isRecordGalleryImage($url);
 
             $requiredWidth = $this->requiredImageWidth($draft);
             $requiredHeight = $this->requiredImageHeight($draft);
@@ -3675,7 +3732,7 @@ class ProductImageStorage
                 $download['height'],
                 $requiredWidth,
                 $requiredHeight,
-                allowExtremeAspectRatio: $this->resolver->isConfirmedGalleryImage($url),
+                allowExtremeAspectRatio: $this->trustedGalleryImage($url),
             );
 
             if ($dimensionRejection !== null) {
@@ -3782,8 +3839,20 @@ class ProductImageStorage
             }
         }
         $this->destroyUnselected($candidates, $unique);
+        $this->recordGalleryImageKeys = [];
 
         return $unique;
+    }
+
+    /** A frame the browser confirmed as part of the slider, or one a code-matched record lists as its gallery. */
+    private function trustedGalleryImage(string $url): bool
+    {
+        return $this->resolver->isConfirmedGalleryImage($url) || $this->isRecordGalleryImage($url);
+    }
+
+    private function isRecordGalleryImage(string $url): bool
+    {
+        return isset($this->recordGalleryImageKeys[ImageUrls::imageAssetKey($url)]);
     }
 
     /** @return array<string, int> */

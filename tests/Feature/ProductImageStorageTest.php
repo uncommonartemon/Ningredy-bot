@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Ai\Agents\GalleryFrameReviewAgent;
 use App\Ai\Agents\ProductImageDiscoveryAgent;
 use App\Ai\Agents\ProductImageVisionAgent;
+use App\Ai\Agents\ProductPhotoApplicabilityAgent;
 use App\Ai\Agents\ProductSourceIdentityAgent;
 use App\Exceptions\ProductSearchCancelled;
 use App\Jobs\StoreProductImages;
@@ -35,6 +36,7 @@ use App\Services\Products\ProductImageVisionVerifier;
 use App\Services\Products\ProductPhotoApplicability;
 use App\Services\Products\ProductPhotoManager;
 use App\Services\Products\ProductSpecificationReconciler;
+use App\Services\Products\SourceIdentityProvenance;
 use App\Services\Products\SpecificationReconciliationOutcome;
 use App\Services\Products\WikimediaImageSearch;
 use App\Services\ProductSearch\SourceQueueBuilder;
@@ -2296,6 +2298,61 @@ class ProductImageStorageTest extends TestCase
     public static function partialSourceFrames(): array
     {
         return ['recipe frames' => [false], 'recipe frames and static tail' => [true]];
+    }
+
+    public function test_a_record_gallery_matched_by_code_is_a_confirmed_gallery_without_a_site_recipe(): void
+    {
+        // Live #157: the record's page answered with a bot check, the page look replaced
+        // the record's evidence, and its eight official frames were set aside and lost;
+        // #159 held the same frames three minutes behind two shops. A record matched by
+        // part number/GTIN is the product: its frames are a confirmed gallery that needs
+        // no site recipe, and the final check is content and language only.
+        Storage::fake('public');
+        config()->set('product-images.max_images_by_type.laptop', 10);
+        $gallery = collect(range(1, 6))->map(fn (int $index): string => 'https://93.184.216.36/gallery-'.$index.'.jpg')->all();
+        Http::fake(function (Request $request) {
+            if (! str_contains($request->url(), '/gallery-')) {
+                return Http::response("<html><title>Making sure you're not a bot!</title><body><h1>Making sure you're not a bot!</h1></body></html>",
+                    200, ['Content-Type' => 'text/html']);
+            }
+            preg_match('/gallery-(\d+)/', $request->url(), $matches);
+
+            return Http::response($this->jpeg((int) ($matches[1] ?? 1)), 200, ['Content-Type' => 'image/jpeg']);
+        });
+        $browser = $this->mockBrowser();
+        $browser->shouldReceive('extract')->andReturn([]);
+        $browser->shouldReceive('isConfirmedGalleryImage')->andReturn(false);
+        $browser->shouldReceive('isPartialGalleryImage')->andReturn(false);
+        $this->mock(ConfirmedProductGalleryVerifier::class)->shouldNotReceive('verify');
+        ProductPhotoApplicabilityAgent::fake()->preventStrayPrompts();
+        ProductImageVisionAgent::fake(fn ($prompt, $attachments): array => ['images' => $attachments->keys()->map(fn (int $index): array => [
+            'index' => $index + 1, 'exact_match' => true, 'color_match' => true, 'publishable' => true, 'kind' => 'product',
+            'view' => 'front', 'gallery_rank' => 1, 'score' => 95, 'reason' => 'Official product photo.'])->all()]);
+        [, , $draft] = $this->records();
+        $source = ['title' => 'Icecat datasheet: ASUS ROG Strix Scar 15 G533QS-DS76', 'url' => 'https://93.184.216.36/p/asus/g533qs-ds76/rog-1.html',
+            'type' => 'web', 'roles' => ['facts', 'exact_photo'], 'image_urls' => $gallery, '_official_gallery' => true,
+            '_preflight_identity_evidence' => 'ASUS ROG Strix Scar 15 G533QS-DS76 Part number: G533QS-DS76 GTIN: 0195553123456',
+            SourceIdentityProvenance::KEY => SourceIdentityProvenance::codeMatch('icecat', ['G533QS-DS76']),
+            '_preflight_index' => 0];
+        $draft->update(['title' => 'ASUS ROG Strix Scar 15 G533QS-DS76', 'brand' => 'ASUS', 'model' => 'G533QS-DS76',
+            'product_type' => 'laptop', 'primary_source_url' => $source['url'], 'image_urls' => [], 'sources' => [$source]]);
+        $this->partialMock(SourceQueueBuilder::class)->shouldReceive('buildSourceQueue')->once()
+            ->andReturn([collect([$source]), collect([$source])]);
+
+        $this->assertSame(6, app(ProductImageStorage::class)->stage($draft->fresh()));
+
+        $media = $draft->fresh()->media;
+        $this->assertCount(6, $media);
+        // Frames of a confirmed gallery carry the gallery's status, as a slider's do.
+        $this->assertTrue($media->every(fn ($item): bool => $item->verification_status === 'source_verified' && $item->gallery_traversal_complete));
+        $this->assertDatabaseHas('product_source_attempts', ['product_draft_id' => $draft->id,
+            'action' => 'check_frame_content_and_language', 'decision' => 'accept_all_frames']);
+        $this->assertStringStartsWith('ASUS ROG Strix Scar 15 G533QS-DS76 Part number: G533QS-DS76',
+            (string) ($media->first()->photo_source_context['_preflight_identity_evidence'] ?? ''));
+        $this->assertSame($source['url'], $media->first()->photo_source_context['url'] ?? null);
+        $this->assertDatabaseHas('product_source_attempts', ['product_draft_id' => $draft->id,
+            'action' => 'verify_gallery', 'decision' => 'accept_code_confirmed_record_gallery']);
+        ProductPhotoApplicabilityAgent::assertNeverPrompted();
     }
 
     public function test_deferred_recipe_metadata_never_substitutes_for_current_pixel_review(): void

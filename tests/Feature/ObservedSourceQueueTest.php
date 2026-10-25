@@ -6,6 +6,7 @@ use App\Models\ProductDraft;
 use App\Models\ProductSourceAttempt;
 use App\Services\Products\ProductImageResolver;
 use App\Services\Products\ProductSourcePageMetadata;
+use App\Services\Products\SourceIdentityProvenance;
 use App\Services\ProductSearch\SourceQueueBuilder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
@@ -66,6 +67,32 @@ class ObservedSourceQueueTest extends TestCase
         $this->assertContains($shop, $queue->pluck('url')->all());
         // Its own frames lead; the page scrape follows (live #454).
         $this->assertSame('https://93.184.216.42/img/gallery/a.jpg', $queue->first()['image_urls'][0]);
+    }
+
+    public function test_a_record_matched_by_code_keeps_its_evidence_and_address_when_its_page_is_a_bot_check(): void
+    {
+        // Live #157: the datasheet page answered with a bot check; the page look replaced the
+        // record's part number with "Making sure you're not a bot!" and eight official frames were lost.
+        config()->set('product-images.source_preflight', true);
+        $official = 'https://93.184.216.42/p/samsung/mz-v9p2t0bw/990-pro-1.html';
+        Http::fake([$official => Http::response("<html><title>Making sure you're not a bot!</title><body><h1>Making sure you're not a bot!</h1></body></html>",
+            200, ['Content-Type' => 'text/html'])]);
+        $record = 'Samsung 990 PRO 2 TB M.2 PCI Express 4.0 NVMe Part number: MZ-V9P2T0BW GTIN: 8806094215038';
+        $draft = new ProductDraft(['brand' => 'Samsung', 'model' => '990 PRO 2TB MZ-V9P2T0BW', 'sources' => [
+            ['url' => $official, 'title' => 'Icecat datasheet: Samsung 990 PRO 2 TB', 'type' => 'web', 'roles' => ['facts', 'exact_photo'],
+                '_official_gallery' => true, 'image_urls' => ['https://93.184.216.42/img/gallery/a.jpg'],
+                '_preflight_identity_evidence' => $record,
+                SourceIdentityProvenance::KEY => SourceIdentityProvenance::codeMatch('icecat', ['MZ-V9P2T0BW', '8806094215038'])],
+        ]]);
+
+        [$queue] = app(SourceQueueBuilder::class)->buildSourceQueue($draft, [], [], true, 3, null, null);
+
+        $first = $queue->first();
+        $this->assertSame($official, $first['url']);
+        $this->assertSame($official, $first['_preflight_final_url']);
+        $this->assertStringStartsWith($record, $first['_preflight_identity_evidence']);
+        $this->assertSame('Icecat datasheet: Samsung 990 PRO 2 TB', $first['title']);
+        $this->assertSame(['https://93.184.216.42/img/gallery/a.jpg'], $first['image_urls']);
     }
 
     public function test_a_facts_only_page_still_reaches_photo_checks_after_photo_hinted_pages(): void

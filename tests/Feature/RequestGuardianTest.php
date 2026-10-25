@@ -212,20 +212,6 @@ class RequestGuardianTest extends TestCase
         $this->assertSentText('Показываю, что уже найдено, остальной поиск остановлен');
     }
 
-    public function test_near_the_time_limit_the_operator_gets_what_exists_and_what_it_allows(): void
-    {
-        // Live #598 and #611 searched into the 33rd minute; an answer belongs inside 30.
-        [$update] = $this->runningSearch(silentMinutes: 1);
-        DB::table('ai_runs')->where('telegram_update_id', $update->id)->update(['created_at' => now()->subMinutes(29)]);
-        SearchProgressAgent::fake()->preventStrayPrompts();
-
-        $this->sweep();
-
-        $this->assertSentText('Поиск подходит к лимиту времени (29 мин)');
-        $this->assertSentText('Сохранено фото: 1. Можно добавить в каталог');
-        $this->assertSame('completed', $update->fresh()->status);
-    }
-
     public function test_near_the_time_limit_without_a_card_the_operator_is_told_once_and_can_cancel(): void
     {
         [$update] = $this->runningSearch(silentMinutes: 1, withDraft: false);
@@ -397,13 +383,44 @@ class RequestGuardianTest extends TestCase
         Http::assertSent(fn (Request $request): bool => str_contains((string) ($request['text'] ?? $request['caption'] ?? ''), $needle));
     }
 
-    /** @return array{TelegramUpdate, ?ProductDraft} */
-    private function runningSearch(int $silentMinutes, bool $withDraft = true, bool $withPhotos = true): array
+    public function test_at_the_time_limit_the_photo_search_is_wrapped_up_and_the_card_is_cut_only_after_the_assembly_overrun(): void
     {
-        $update = $this->update('processing', 12, activityMinutesAgo: $silentMinutes);
-        $this->job($update, reservedMinutesAgo: 12, createdMinutesAgo: 12);
-        $this->aiRun($update, 'assistant', 'running', 12, $silentMinutes);
-        $research = $this->aiRun($update, 'research', 'running', 11, $silentMinutes);
+        // Live #151: the card was cut while being assembled at the 29th minute; #161: cut
+        // before assembly began. The photo search ends two minutes before the limit;
+        // assembly keeps the overrun PROJECT_STRATEGY gives it (180 s past the limit).
+        [$update] = $this->runningSearch(silentMinutes: 1, startedMinutesAgo: 29);
+
+        $this->sweep();
+
+        $this->assertSame('Время поиска фото вышло (29 мин); карточка собирается из найденного.',
+            app(SearchProgressSupervisor::class)->deliverNowReason($update->id));
+        $this->assertNull($update->fresh()->cancel_requested_at);
+        $this->assertSentText('Время поиска фото вышло (29 мин)');
+        $this->assertDatabaseHas('product_source_attempts', ['telegram_update_id' => $update->id, 'phase' => 'guardian', 'action' => 'overtime_wrap_up']);
+
+        // Within the assembly's overrun the guardian waits for the card.
+        $this->travel(3)->minutes();
+        DB::table('telegram_updates')->where('id', $update->id)->update(['updated_at' => now()]);
+        $this->sweep();
+        $this->assertNull($update->fresh()->cancel_requested_at);
+        $this->assertDatabaseMissing('product_source_attempts', ['telegram_update_id' => $update->id, 'action' => 'show_found']);
+
+        // Past it, what exists is shown as it is.
+        $this->travel(2)->minutes();
+        DB::table('telegram_updates')->where('id', $update->id)->update(['updated_at' => now()]);
+        $this->sweep();
+        $this->assertNotNull($update->fresh()->cancel_requested_at);
+        $this->assertSentText('Лимит времени поиска (34 мин)');
+        $this->assertDatabaseHas('product_source_attempts', ['telegram_update_id' => $update->id, 'phase' => 'guardian', 'action' => 'show_found']);
+    }
+
+    /** @return array{TelegramUpdate, ?ProductDraft} */
+    private function runningSearch(int $silentMinutes, bool $withDraft = true, bool $withPhotos = true, int $startedMinutesAgo = 12): array
+    {
+        $update = $this->update('processing', $startedMinutesAgo, activityMinutesAgo: $silentMinutes);
+        $this->job($update, reservedMinutesAgo: $startedMinutesAgo, createdMinutesAgo: $startedMinutesAgo);
+        $this->aiRun($update, 'assistant', 'running', $startedMinutesAgo, $silentMinutes);
+        $research = $this->aiRun($update, 'research', 'running', $startedMinutesAgo - 1, $silentMinutes);
         $draft = null;
         if ($withDraft) {
             $draft = ProductDraft::query()->create(['telegram_update_id' => $update->id, 'ai_run_id' => $research->id, 'requested_by_telegram_user_id' => '123',

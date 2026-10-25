@@ -10,6 +10,7 @@ use App\Models\ProductDraft;
 use App\Models\ProductSourceAttempt;
 use App\Models\TelegramUpdate;
 use App\Services\Ai\AiSettings;
+use App\Services\Ai\ProductSearchTimeBudget;
 use App\Services\Products\ProductSourceAttemptRecorder;
 use App\Services\ProductSearch\SearchJournal;
 use App\Services\ProductSearch\Supervision\SearchProgressSupervisor;
@@ -255,14 +256,34 @@ final class RequestGuardian
 
     private function handleOvertime(TelegramUpdate $update): ?string
     {
-        $minutes = intdiv($this->elapsedSeconds($update), 60);
+        $elapsed = $this->elapsedSeconds($update);
+        $minutes = intdiv($elapsed, 60);
+        $draft = $this->draftFor($update);
+        // Two minutes before the limit the photo search ends, but the card is still
+        // assembled from what exists: assembly has its own overrun after the limit
+        // (PROJECT_STRATEGY: assembly is not bounded by the search limits). Cutting
+        // here instead gave live #151 a cut mid-assembly and #161 an unassembled
+        // card after a page opened at the 28th minute. Only past the assembly's own
+        // deadline is what exists shown as it is.
+        if ($draft !== null && $elapsed <= $this->settings->searchMaxSeconds() + ProductSearchTimeBudget::ASSEMBLY_OVERRUN_SECONDS) {
+            if (! $this->claim('overtime_wrap_up', $update)) {
+                return null;
+            }
+            $reason = "Время поиска фото вышло ({$minutes} мин); карточка собирается из найденного.";
+            $this->supervisor->requestWrapUp($update->id, $reason);
+            Cache::put('request-guard:wrap-up:'.$update->id, now()->timestamp, now()->addHour());
+            $this->telegram->sendMessage((string) $update->chat_id, '⏳ '.$reason);
+            $this->record($update, $draft, 'overtime_wrap_up', 'completed', $reason, ['elapsed_minutes' => $minutes]);
+
+            return 'overtime_wrap_up';
+        }
         // Even a card without photos is an answer with a "continue" button; silence is not.
-        if ($this->draftFor($update) !== null && $this->claim('deliver', $update)) {
-            $this->showFound($update, "⏳ Поиск подходит к лимиту времени ({$minutes} мин). Показываю, что уже найдено.");
+        if ($draft !== null && $this->claim('deliver', $update)) {
+            $this->showFound($update, "⏳ Лимит времени поиска ({$minutes} мин). Показываю, что уже найдено.");
 
             return 'overtime_shown_found';
         }
-        if ($this->draftFor($update) !== null || ! $this->claim('overtime_notice', $update)) {
+        if ($draft !== null || ! $this->claim('overtime_notice', $update)) {
             return null;
         }
         $this->telegram->sendMessage((string) $update->chat_id,

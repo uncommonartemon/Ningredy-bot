@@ -667,13 +667,17 @@ class ProductImageResolver
                 ->unique(fn (string $url): string => ImageUrls::imageAssetKey($url))
                 ->values()->all();
             $sourceImageCount = max(0, count($images) - $sourceImageStart);
+            // A record matched by its code keeps its address and evidence through
+            // the page look; the page adds observations (SourceIdentityProvenance).
+            $pageUrl = SourceIdentityProvenance::pageUrl($source, $browserUrl);
             $pageContext = [
-                'url' => $browserUrl,
+                'url' => $pageUrl,
                 'original_url' => $sourceUrl,
-                'title' => $sourceTitle,
-                '_preflight_final_url' => $browserUrl,
-                '_preflight_identity_evidence' => $identityEvidence,
+                'title' => $sourceTitle ?? (SourceIdentityProvenance::confirmedByCode($source) ? ($source['title'] ?? null) : null),
+                '_preflight_final_url' => $pageUrl,
+                '_preflight_identity_evidence' => SourceIdentityProvenance::mergeEvidence($source, $identityEvidence),
                 '_preflight_specification_text' => $specificationText,
+                ...SourceIdentityProvenance::carry($source),
                 ...($sourceIdentityAssessment !== null ? ['_observed_identity' => $sourceIdentityAssessment] : []),
                 ...(is_array($sourceIdentityAssessment['_photo_applicability'] ?? null)
                     ? ['_photo_applicability' => $sourceIdentityAssessment['_photo_applicability']] : []),

@@ -17,7 +17,7 @@ final class ProductSourceIdentityGate
         if ($this->knownConflict($draft, $source, $runId)) {
             return 'conflicting';
         }
-        if ($this->matcher->confirmsExactIdentifier($draft, $source)) {
+        if (SourceIdentityProvenance::confirmedByCode($source) || $this->matcher->confirmsExactIdentifier($draft, $source)) {
             return 'confirmed';
         }
 
@@ -40,6 +40,11 @@ final class ProductSourceIdentityGate
             && ($observed['source']['url'] ?? null) === ($source['url'] ?? null)) {
             return true;
         }
+        // A record matched by part number/GTIN names the product; the text its page
+        // shows (a bot check, a related model) is never a conflict with that.
+        if (SourceIdentityProvenance::confirmedByCode($source)) {
+            return false;
+        }
 
         return $this->matcher->conflictsSource($draft, $source);
     }
@@ -60,6 +65,21 @@ final class ProductSourceIdentityGate
         $cached = $source['_photo_applicability'] ?? null;
         if (is_array($cached) && ProductPhotoApplicability::isAccepted($draft, $source, $cached)) {
             return $cached;
+        }
+
+        // The code match is the identity; the page cannot weaken it (live #157: the
+        // page showed a bot check, the judge said "uncertain", eight official frames
+        // were set aside and lost; #159: the same frames waited behind two shops).
+        if (SourceIdentityProvenance::confirmedByCode($source)) {
+            $provenance = $source[SourceIdentityProvenance::KEY];
+
+            return ProductPhotoApplicability::bind($draft, $source, [
+                'verdict' => 'exact', 'may_inspect_gallery' => true,
+                'reason' => 'Database record matched by the selected part number/GTIN; image content still requires verification.',
+                'source_model' => $draft->model, 'differences' => [],
+                'evidence' => [ucfirst((string) ($provenance['database'] ?? 'database')).' record matched by code: '
+                    .implode(', ', (array) ($provenance['codes'] ?? []))],
+            ]);
         }
 
         // Preserve the inexpensive, existing exact-source route. Contradictory codes or
