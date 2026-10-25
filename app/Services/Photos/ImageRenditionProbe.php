@@ -61,6 +61,9 @@ final class ImageRenditionProbe
             ['#[-_](?:xs|s|sm|small|m|md|medium|thumb|thumbnail|mini|preview|tn)(?=\.[a-z0-9]{3,4}$)#i', ''],
             // A size directory (BigCommerce "/stencil/400x400/", "/300x300/") at a large size.
             ['#/(?:[a-z]+[-_]?)?\d{2,4}x\d{2,4}/#i', '/1600x1600/'],
+            // A width directory ("/w80/", "/w_600/": ASUS, imgix-style CDNs) at a large width, or without it.
+            ['#/w_?\d{2,4}/#i', '/w1600/'],
+            ['#/w_?\d{2,4}/#i', '/'],
             ['#(/-/(?:resize|preview)/)[^/]+/#i', '${1}1600x1600/'],
             ['#/r\d{2,5}/#i', '/r1600/'],
             ['#/(?:thumbs?|thumbnails?|small|medium)/(?=[^/]+$)#i', '/large/'],
