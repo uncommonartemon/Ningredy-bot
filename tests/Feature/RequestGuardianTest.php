@@ -400,6 +400,32 @@ class RequestGuardianTest extends TestCase
         SearchProgressAgent::assertNeverPrompted();
     }
 
+    public function test_a_note_without_an_answer_shows_what_exists_after_three_minutes_while_there_is_still_no_photo(): void
+    {
+        // Live #181: the watcher's note went out at the 15th minute and the search ran on
+        // to the 27th with no photo. Silence from the operator is not "keep paying".
+        [$update] = $this->runningSearch(silentMinutes: 1, withPhotos: false);
+        SearchProgressAgent::fake(fn (): array => ['decision' => 'continue', 'reason' => 'Магазины дают только миниатюры.',
+            'operator_note' => 'Десять минут без фото: магазины дают только миниатюры.', 'site' => null])->preventStrayPrompts();
+        app(ProductSourceAttemptRecorder::class)->record(['telegram_update_id' => $update->id, 'product_url' => 'https://pcx.example/nitro-16',
+            'actor' => 'downloader', 'phase' => 'image_download', 'action' => 'download_candidates', 'status' => 'completed',
+            'decision' => 'skip_source', 'output' => ['downloaded_images' => 0, 'rejection_summary' => ['too_small' => 18]]]);
+
+        $this->sweep();
+
+        $this->assertSentText('Десять минут без фото');
+        $this->assertNull($update->fresh()->cancel_requested_at);
+
+        $this->travel(4)->minutes();
+        DB::table('telegram_updates')->where('id', $update->id)->update(['updated_at' => now()]);
+        $this->sweep();
+
+        $this->assertNotNull($update->fresh()->cancel_requested_at);
+        $this->assertSentText('ответа на вопрос не было');
+        $this->assertSentText('только миниатюры (18)');
+        $this->assertDatabaseHas('product_source_attempts', ['telegram_update_id' => $update->id, 'phase' => 'guardian', 'action' => 'note_unanswered_shown_found']);
+    }
+
     public function test_at_the_time_limit_the_photo_search_is_wrapped_up_and_the_card_is_cut_only_after_the_assembly_overrun(): void
     {
         // Live #151: the card was cut while being assembled at the 29th minute; #161: cut

@@ -115,11 +115,14 @@ final class RequestGuardian
         }
         $chat = (string) $update->chat_id;
         $photos = count($draft->verifiedPhotoPaths());
+        // Where the search looked and what it got there, from the journal: a card
+        // without photos names its reasons, so the operator can give a link or let go.
+        $looked = SearchJournal::whereWeLooked($update->id, $draft);
         $this->telegram->sendMessage($chat, $intro.' '.match (true) {
             $photos === 0 => 'Фото не найдены, характеристики сохранены. Продолжить поиск фото можно кнопкой под карточкой.',
             $draft->reconciliationPending() => "Сохранено фото: {$photos}, характеристики не сверены. Можно принять как есть, продолжить поиск или исправить.",
             default => "Сохранено фото: {$photos}. Можно добавить в каталог, продолжить поиск или исправить.",
-        });
+        }.($looked === [] ? '' : "\n\nГде искали:\n• ".implode("\n• ", $looked)));
         $this->presenter->sendReview($this->telegram, $chat, $draft->fresh('media'));
         TelegramUpdate::query()->whereKey($update->id)->update(['status' => 'completed', 'processed_at' => now()]);
         $this->record($update, $draft, 'show_found', 'completed', $intro, ['photos' => $draft->media()->count()]);
@@ -220,6 +223,20 @@ final class RequestGuardian
         if ($wrapUp > 0 || (int) Cache::get('request-guard:wait:'.$update->id, 0) > now()->timestamp) {
             return null;
         }
+        // The watcher asked the operator and nothing came back: silence is not "keep
+        // paying". With still no photo a few minutes later, what exists is shown; the
+        // operator's "wait" defers this, "show" brings it forward (live #181: the note
+        // went out at the 15th minute and the search ran on to the 27th).
+        $noteAt = (int) Cache::get('request-guard:note-at:'.$update->id, 0);
+        if ($noteAt > 0 && now()->timestamp - $noteAt >= (int) config('services.request_guardian.decide_after_note_seconds', 180)
+            && ($draft = $this->draftFor($update)) !== null && $draft->verifiedPhotoPaths() === [] && $this->claim('deliver', $update)) {
+            $minutes = intdiv($this->elapsedSeconds($update), 60);
+            $this->showFound($update, "⏳ Фото не найдены за {$minutes} мин, ответа на вопрос не было — показываю, что есть.");
+            $this->record($update, $draft, 'note_unanswered_shown_found', 'completed',
+                "Заметка наблюдателя осталась без ответа, фото нет на {$minutes}-й минуте; найденное показано.", ['elapsed_minutes' => $minutes]);
+
+            return 'note_unanswered_shown_found';
+        }
 
         // Whether a look is due - something new since the last one, or minutes of
         // silence - the watcher's own pace decides, shared with the search's checkpoints.
@@ -269,6 +286,7 @@ final class RequestGuardian
             array_unshift($buttons, [['text' => '📦 Показать найденное', 'callback_data' => "guard:show:{$update->id}"]]);
         }
         $this->telegram->sendMessage((string) $update->chat_id, '⏳ '.$note, ['inline_keyboard' => $buttons]);
+        Cache::put('request-guard:note-at:'.$update->id, now()->timestamp, now()->addHour());
         $this->record($update, $draft, 'watcher_note', 'completed', $note, ['silent_minutes' => intdiv($silent, 60)]);
 
         return 'watcher_note';
