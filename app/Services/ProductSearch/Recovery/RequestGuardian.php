@@ -223,20 +223,6 @@ final class RequestGuardian
         if ($wrapUp > 0 || (int) Cache::get('request-guard:wait:'.$update->id, 0) > now()->timestamp) {
             return null;
         }
-        // The watcher asked the operator and nothing came back: silence is not "keep
-        // paying". With still no photo a few minutes later, what exists is shown; the
-        // operator's "wait" defers this, "show" brings it forward (live #181: the note
-        // went out at the 15th minute and the search ran on to the 27th).
-        $noteAt = (int) Cache::get('request-guard:note-at:'.$update->id, 0);
-        if ($noteAt > 0 && now()->timestamp - $noteAt >= (int) config('services.request_guardian.decide_after_note_seconds', 180)
-            && ($draft = $this->draftFor($update)) !== null && $draft->verifiedPhotoPaths() === [] && $this->claim('deliver', $update)) {
-            $minutes = intdiv($this->elapsedSeconds($update), 60);
-            $this->showFound($update, "⏳ Фото не найдены за {$minutes} мин, ответа на вопрос не было — показываю, что есть.");
-            $this->record($update, $draft, 'note_unanswered_shown_found', 'completed',
-                "Заметка наблюдателя осталась без ответа, фото нет на {$minutes}-й минуте; найденное показано.", ['elapsed_minutes' => $minutes]);
-
-            return 'note_unanswered_shown_found';
-        }
 
         // Whether a look is due - something new since the last one, or minutes of
         // silence - the watcher's own pace decides, shared with the search's checkpoints.
@@ -276,20 +262,20 @@ final class RequestGuardian
 
             return 'watcher_wrap_up';
         }
+        // The operator sees one thing: the card. A note the watcher would send them
+        // ("the operator may prefer what exists") is the decision itself: the search
+        // wraps up and the card says where it looked (operator, 2026-10-25: no
+        // messages or questions during a search).
         $note = trim((string) ($verdict['operator_note'] ?? ''));
         if ($note === '' || ! Cache::add('request-guard:note:'.$update->id, true, now()->addMinutes(10))) {
             return null;
         }
-        $buttons = [[['text' => '⏳ Ждать дальше', 'callback_data' => "guard:wait:{$update->id}"],
-            ['text' => '✖ Отменить поиск', 'callback_data' => "search:cancel:{$update->id}"]]];
-        if ($draft->verifiedPhotoPaths() !== [] || ! $draft->reconciliationPending()) {
-            array_unshift($buttons, [['text' => '📦 Показать найденное', 'callback_data' => "guard:show:{$update->id}"]]);
-        }
-        $this->telegram->sendMessage((string) $update->chat_id, '⏳ '.$note, ['inline_keyboard' => $buttons]);
-        Cache::put('request-guard:note-at:'.$update->id, now()->timestamp, now()->addHour());
-        $this->record($update, $draft, 'watcher_note', 'completed', $note, ['silent_minutes' => intdiv($silent, 60)]);
+        $this->supervisor->requestWrapUp($update->id, $note);
+        Cache::put('request-guard:wrap-up:'.$update->id, now()->timestamp, now()->addHour());
+        $this->record($update, $draft, 'wrap_up', 'completed',
+            'Наблюдатель хотел спросить оператора — вместо вопроса поиск сворачивается и собирает карточку из найденного.', ['reason' => $note]);
 
-        return 'watcher_note';
+        return 'watcher_wrap_up';
     }
 
     private function handleOvertime(TelegramUpdate $update): ?string
@@ -310,7 +296,6 @@ final class RequestGuardian
             $reason = "Время поиска фото вышло ({$minutes} мин); карточка собирается из найденного.";
             $this->supervisor->requestWrapUp($update->id, $reason);
             Cache::put('request-guard:wrap-up:'.$update->id, now()->timestamp, now()->addHour());
-            $this->telegram->sendMessage((string) $update->chat_id, '⏳ '.$reason);
             $this->record($update, $draft, 'overtime_wrap_up', 'completed', $reason, ['elapsed_minutes' => $minutes]);
 
             return 'overtime_wrap_up';
