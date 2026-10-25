@@ -214,12 +214,18 @@ class ProductCardAssembly
             // New website quotations cannot repair an empty/truncated JSON
             // response. Keep the same failure history when the fallback model
             // takes over: it gets its first attempt, not a fresh identical loop.
+            // Progress is a change in what is wrong (PROJECT_STRATEGY: repairs go on
+            // while each attempt changes the errors). New observations that leave
+            // the very same errors are not progress: live #180 re-read a page four
+            // times and failed four times on the same color_gamut quotation, each
+            // fetch excusing the next identical attempt.
             $relevantProgress = $outcome->madeProgress
                 && ($outcome->repairContext['failure_kind'] ?? null) !== 'response_format'
                 // With explicit blockers, another quote is only useful if
                 // it changes what remains unresolved. Old responses without
                 // that structure retain the evidence-based compatibility path.
-                && $unresolved === [];
+                && $unresolved === []
+                && ! in_array($signature, $seenSignatures, true);
             $repeatWithoutProgress = ! $relevantProgress && in_array($signature, $seenSignatures, true);
             $seenSignatures[] = $signature;
             $source['_previous_assembly_feedback'] = [
