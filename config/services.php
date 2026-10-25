@@ -140,6 +140,7 @@ return [
         // ...and this often while the search is silent.
         'review_interval_seconds' => (int) env('REQUEST_GUARDIAN_REVIEW_INTERVAL', 180),
         'abandoned_after_seconds' => (int) env('REQUEST_GUARDIAN_ABANDONED_AFTER', 180),
+        'hang_after_seconds' => (int) env('REQUEST_GUARDIAN_HANG_AFTER', 600),
         'outside_review_timeout' => (int) env('REQUEST_GUARDIAN_REVIEW_TIMEOUT', 30),
     ],
 

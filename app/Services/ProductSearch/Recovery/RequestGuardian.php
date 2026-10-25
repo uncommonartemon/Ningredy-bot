@@ -19,6 +19,7 @@ use App\Services\Telegram\TelegramClient;
 use Illuminate\Queue\Middleware\WithoutOverlapping;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Process;
 use Throwable;
 
@@ -183,6 +184,25 @@ final class RequestGuardian
         if ($silent >= (int) config('services.request_guardian.abandoned_after_seconds', 180)
             && $this->reservationOutlivedItsWorker($job)) {
             return $this->recoverOrphanedJob($update, $job);
+        }
+        // A step that is not coming back: no journal row and no AI call has moved for
+        // this long. Live #176 sat 14 minutes and #177 42 minutes inside one call with
+        // no look recorded, until the operator restarted the bot. This floor is a rule,
+        // not the watcher's judgement, so it holds whatever else is stuck.
+        $journalSilent = $this->journalSilentSeconds($update);
+        Log::info('Request guardian look.', ['update' => $update->id, 'silent' => $silent, 'journal_silent' => $journalSilent,
+            'elapsed' => $this->elapsedSeconds($update), 'job_reserved' => $job['reserved_at'] !== null]);
+        if ($journalSilent >= (int) config('services.request_guardian.hang_after_seconds', 600)
+            && $this->draftFor($update) !== null && $this->claim('deliver', $update)) {
+            $minutes = intdiv($journalSilent, 60);
+            $this->showFound($update, "⚠️ Шаг поиска не отвечает {$minutes} мин. Показываю, что уже найдено.");
+            // On Windows a job has no timeout: the stuck worker holds its queue until the bot is restarted.
+            $this->telegram->sendMessage((string) $update->chat_id,
+                "⚠️ Процесс поиска завис на запросе #{$update->id}: ни одного шага за {$minutes} мин. Чтобы бот принимал новые запросы, перезапустите его.");
+            $this->record($update, $this->draftFor($update), 'hang_shown_found', 'completed',
+                "Шаг поиска не отвечает {$minutes} мин; найденное показано, оператор попрошен перезапустить бота.", ['journal_silent_seconds' => $journalSilent]);
+
+            return 'hang_shown_found';
         }
         // The operator's own time budget is the one hard limit: two minutes before
         // it, the operator gets what exists. Live #598 and #611 kept searching for
@@ -443,6 +463,21 @@ final class RequestGuardian
         }
 
         return [$jobs, $busy];
+    }
+
+    /** Seconds since the search itself last wrote a journal row or finished an AI call; the request row's own touches do not count. */
+    private function journalSilentSeconds(TelegramUpdate $update): int
+    {
+        $marks = array_filter([
+            $this->timestamp(ProductSourceAttempt::query()->where('telegram_update_id', $update->id)
+                ->whereNotIn('phase', self::OWN_PHASES)->max('created_at')),
+            $this->timestamp(AiRun::query()->where('telegram_update_id', $update->id)
+                ->where(fn ($query) => $query->whereNull('activity->stage')->orWhereNotIn('activity->stage', self::OWN_STAGES))
+                ->max('updated_at')),
+            $update->created_at?->getTimestamp(),
+        ]);
+
+        return max(0, now()->timestamp - max($marks));
     }
 
     private function silentSeconds(TelegramUpdate $update): int

@@ -274,6 +274,24 @@ class ProductSpecificationEvidenceGuardTest extends TestCase
         $this->assertSame('corrected', $result[0]['evidence']);
     }
 
+    public function test_a_changed_value_held_by_its_quote_is_a_correction_whose_reason_is_the_quote_when_none_was_written(): void
+    {
+        // Live #168: "wireless: confirmed but changed" failed the card twice over the
+        // label alone, while the cited quote held the new value all along.
+        $fact = $this->fact(['key' => 'wireless', 'name' => 'Wireless', 'value' => 'Wi-Fi 6',
+            'source_url' => 'https://shop.example/x13', 'source_excerpt' => 'Wireless: Wi-Fi 6']);
+        $datasheet = 'https://icecat.biz/p/lenovo/21lu0066us/thinkpad-x13-gen-5-1.html';
+        $candidate = [...$fact, 'evidence' => 'confirmed', 'value' => 'Wi-Fi 6E', 'source_url' => $datasheet,
+            'source_excerpt' => 'Wi-Fi standard: Wi-Fi 6E (802.11ax)', 'considered_source_urls' => ['https://shop.example/x13']];
+        unset($candidate['reason']);
+        $pages = [['url' => $datasheet, 'specification_text' => 'Networking · Wi-Fi standard: Wi-Fi 6E (802.11ax) · Bluetooth 5.3']];
+
+        $result = (new ProductSpecificationEvidenceGuard)->normalizeAndValidate([$fact], [$candidate], [], $pages);
+
+        $this->assertSame('corrected', $result[0]['evidence']);
+        $this->assertStringStartsWith('Значение исправлено по цитате выбранного источника: «Wi-Fi standard: Wi-Fi 6E', $result[0]['reason']);
+    }
+
     #[DataProvider('unsafeStatusRepairs')]
     public function test_status_repair_never_bypasses_evidence_or_actual_value_checks(array $changes, string $error): void
     {
