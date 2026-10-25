@@ -383,6 +383,23 @@ class RequestGuardianTest extends TestCase
         Http::assertSent(fn (Request $request): bool => str_contains((string) ($request['text'] ?? $request['caption'] ?? ''), $needle));
     }
 
+    public function test_a_step_that_has_not_moved_for_ten_minutes_is_a_hang_and_what_exists_is_shown(): void
+    {
+        // Live #176 (14 min) and #177 (42 min): one call never returned, no look was
+        // recorded, and the operator restarted the bot. Journal silence is the rule here,
+        // whatever the watcher would say.
+        [$update] = $this->runningSearch(silentMinutes: 11);
+        SearchProgressAgent::fake()->preventStrayPrompts();
+
+        $this->sweep();
+
+        $this->assertNotNull($update->fresh()->cancel_requested_at);
+        $this->assertSentText('Шаг поиска не отвечает 11 мин');
+        $this->assertSentText('перезапустите его');
+        $this->assertDatabaseHas('product_source_attempts', ['telegram_update_id' => $update->id, 'phase' => 'guardian', 'action' => 'hang_shown_found']);
+        SearchProgressAgent::assertNeverPrompted();
+    }
+
     public function test_at_the_time_limit_the_photo_search_is_wrapped_up_and_the_card_is_cut_only_after_the_assembly_overrun(): void
     {
         // Live #151: the card was cut while being assembled at the 29th minute; #161: cut
