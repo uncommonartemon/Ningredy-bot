@@ -10,6 +10,7 @@ use App\Services\Ai\ProductSearchCostBudget;
 use App\Services\Ai\ProductSearchTimeBudget;
 use App\Services\Products\ProductImageStorage;
 use App\Services\ProductSearch\Recovery\RequestGuardian;
+use App\Services\ProductSearch\Supervision\SearchProgressSupervisor;
 use App\Services\Telegram\DraftTelegramPresenter;
 use App\Services\Telegram\TelegramAssistantReplyDelivery;
 use App\Services\Telegram\TelegramClient;
@@ -162,8 +163,10 @@ class ContinueDraftGallerySearch implements ShouldBeUniqueUntilProcessing, Shoul
             // The original monetary ledger stays shared across every job.
             // Card assembly already recovered in stage(), before delivery.
             // Do not multiply its bounded retries through another queue chain.
+            // The watcher's standing "end the photo search" ends the automatic chain too.
             if ($fresh->gallery_status !== 'complete'
                 && ! $fresh->hasReadyVerifiedPartial()
+                && app(SearchProgressSupervisor::class)->deliverNowReason($this->telegramUpdateId) === null
                 && (($fresh->gallery_search_stop_reason === 'exhausted'
                         && ! app(ProductSearchCostBudget::class)->exceeded($this->telegramUpdateId))
                     || ($fresh->gallery_search_stop_reason === 'time_budget'

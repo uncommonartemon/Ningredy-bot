@@ -36,6 +36,7 @@ use App\Services\ProductSearch\Research\InvalidResearchResponse;
 use App\Services\ProductSearch\Research\RecoverableProductResearch;
 use App\Services\ProductSearch\Research\ResearchSourceRoles;
 use App\Services\ProductSearch\Research\ResearchWebSearchTrace;
+use App\Services\ProductSearch\Supervision\SearchProgressSupervisor;
 use App\Services\Telegram\ProductCardPresenter;
 use App\Services\Telegram\TelegramClient;
 use App\Services\Telegram\TelegramProgressReporter;
@@ -585,9 +586,12 @@ class ResearchProduct implements Tool
                     $gallerySearchStopReason = 'cost_budget';
                     $draft->update(['gallery_search_stop_reason' => $gallerySearchStopReason]);
                 }
-                $automaticallyContinuing = $gallerySearchStopReason === 'exhausted'
+                // The watcher's "end the photo search" stands for the whole request:
+                // no automatic cycle after it (live #178 ran four more, each forgetting it).
+                $watcherEnded = app(SearchProgressSupervisor::class)->deliverNowReason($this->update->id);
+                $automaticallyContinuing = $watcherEnded === null && ($gallerySearchStopReason === 'exhausted'
                     || ($gallerySearchStopReason === 'time_budget'
-                        && app(ProductSearchCostBudget::class)->hasRemaining($this->update->id));
+                        && app(ProductSearchCostBudget::class)->hasRemaining($this->update->id)));
                 // 'exhausted' means every source tried so far came up empty,
                 // but the request's own time/cost budget (tracked per
                 // telegram_update_id) is not actually used up yet - a
@@ -597,7 +601,9 @@ class ResearchProduct implements Tool
                 // cost_budget/time_budget means the allowance itself is
                 // gone, so only an explicit user action (fresh budget) can
                 // resume it.
-                if ($gallerySearchStopReason === 'exhausted') {
+                if ($watcherEnded !== null) {
+                    $progress->warning('Наблюдатель закончил поиск фото: '.$watcherEnded.' Автоматическое продолжение не запускается; продолжить можно кнопкой под карточкой.');
+                } elseif ($gallerySearchStopReason === 'exhausted') {
                     $progress->warning('Все известные и найденные AI-поиском источники проверены без результата. Автоматически продолжаю поиск новым циклом.');
                     ContinueDraftGallerySearch::dispatch(
                         $draft->id,
