@@ -232,6 +232,34 @@ final class SearchJournal
             ? 'card_assembly' : 'photo_search';
     }
 
+    /**
+     * One line per site for the operator: what the search got there. Facts from
+     * the journal, so a card with no photos says why - "only thumbnails", "refused
+     * (HTTP 403)", "five rounds, no frames" - instead of "photos not found".
+     *
+     * @return list<string>
+     */
+    public static function whereWeLooked(int $runId, ?ProductDraft $draft, int $limit = 6): array
+    {
+        return collect(self::pagesOpened($runId, $draft, 40))->map(function (array $site): string {
+            $small = (int) (($site['rejections'] ?? [])['too_small'] ?? 0);
+            $why = match (true) {
+                $site['photos_saved'] > 0 => "{$site['photos_saved']} фото в карточке",
+                $site['photos_accepted'] > 0 => "{$site['photos_accepted']} фото принято",
+                preg_match('/http_(\d{3})/', (string) $site['last_step'], $match) === 1 => "отказ (HTTP {$match[1]})",
+                str_contains((string) $site['last_step'], 'access_gate') || str_contains((string) $site['last_step'], 'host_refusing') => 'отказ (защита от ботов)',
+                $small > 0 && $site['images_downloaded'] === 0 => "только миниатюры ({$small})",
+                $site['training_rounds'] > 0 && $site['images_downloaded'] === 0 => "{$site['training_rounds']} раунд(ов) обучения без кадров",
+                $site['images_downloaded'] > 0 => "{$site['images_downloaded']} кадров скачано, ни один не подтверждён",
+                ($site['photo_match'] ?? null) === 'conflicting' => 'другой товар',
+                ($site['photo_match'] ?? null) === 'uncertain' => 'товар не подтверждён',
+                default => str_replace('_', ' ', (string) $site['last_step']),
+            };
+
+            return "{$site['site_name']} — {$why}";
+        })->take($limit)->values()->all();
+    }
+
     /** How long the search has been busy without Vision accepting a photo; null before the first. */
     public static function minutesSinceLastAcceptedPhoto(int $runId): ?float
     {
