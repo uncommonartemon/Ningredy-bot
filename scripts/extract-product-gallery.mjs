@@ -394,14 +394,24 @@ let screenshotPath = null;
 let dismissedOverlays = { dismissed: [], still_blocking: [] };
 let galleryReadiness = {};
 let browserStage = 'page_created';
+// Milliseconds spent in each stage so far: a round that ends at its deadline
+// says where the time went (live #181: two ASUS rounds hit the deadline at
+// "interaction" and "gallery_dom" with nothing but the stage name to go on).
+const stageTimings = {};
+let stageStartedAt = Date.now();
+const stageTimingsSoFar = () => ({ ...stageTimings, [browserStage]: (stageTimings[browserStage] || 0) + (Date.now() - stageStartedAt) });
 const checkpoint = (stage = browserStage) => {
+    if (stage !== browserStage) {
+        stageTimings[browserStage] = (stageTimings[browserStage] || 0) + (Date.now() - stageStartedAt);
+        stageStartedAt = Date.now();
+    }
     browserStage = stage;
     saveGalleryCheckpoint(transferDirectory, {
         images: [], // Observations are not validated photographs.
         scout: { ...scout, network_image_samples: [...new Set([...networkImages, ...payloadImages])].slice(0, 30) },
         post_interaction_scout: postInteractionScout,
         action_trace: actionTrace,
-        diagnostics: { partial: true, stopped_early: true, browser_stage: stage },
+        diagnostics: { partial: true, stopped_early: true, browser_stage: stage, stage_timings_ms: stageTimingsSoFar() },
     });
 };
 checkpoint();
@@ -509,6 +519,7 @@ const emitCrashResult = (error, failureKind = 'browser_crash') => {
             partial: true,
             stopped_early: true,
             browser_stage: browserStage,
+            stage_timings_ms: stageTimingsSoFar(),
             dom_candidates: gathered.length,
             network_candidates: networkImages.length,
             action_plan: recipeActionPlanStatus({ actions: recipeActions, actionTrace }),
