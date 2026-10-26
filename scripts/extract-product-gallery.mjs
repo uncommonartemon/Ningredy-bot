@@ -19,6 +19,7 @@ import {
     galleryCollectionTarget,
     imageAssetKey,
     isAllowedProductNavigation,
+    largerRenditions,
     normalizeImageCandidate,
     normalizeRecipeActions,
     prioritizeCandidateRenditions,
@@ -2451,6 +2452,40 @@ if (!scoutOnly) {
     }
 }
 
+// Where the page's own frames fell short of the size floor and their addresses
+// name the rendition, the same frames are asked for large (live #187: a 16-frame
+// gallery at 461 px on a VTEX shop, the 1600 px frames one token away, and the
+// page abandoned as "thumbnails only"). A guess that loads is attributed to the
+// frame it enlarges - same gallery provenance, same asset - and measured like
+// any other candidate; one that does not is only a request that failed.
+const enlargedFrom = new Map();
+const renditionProbe = { undersized_frames: 0, guesses: 0, found: 0, examples: [] };
+if (!scoutOnly) {
+    const probed = new Set(probes.map((probe) => probe.url));
+    const guesses = [];
+    for (const probe of probes) {
+        if (probe.reason !== 'dimensions_below_minimum' || (probe.width || 0) < 48) continue;
+        renditionProbe.undersized_frames++;
+        for (const guess of largerRenditions(probe.url)) {
+            if (probed.has(guess)) continue;
+            probed.add(guess);
+            guesses.push({ guess, original: probe.url });
+        }
+    }
+    renditionProbe.guesses = guesses.length;
+    for (let index = 0; index < guesses.length && !outOfTime(); index += 4) {
+        const batch = guesses.slice(index, index + 4);
+        const results = await Promise.all(batch.map(({ guess }) => probeImage(guess)));
+        results.forEach((result, offset) => {
+            if (!result.ok) return;
+            enlargedFrom.set(result.url, batch[offset].original);
+            probes.push(result);
+            if (renditionProbe.examples.length < 3) renditionProbe.examples.push({ frame: batch[offset].original, larger: result.url });
+        });
+    }
+    renditionProbe.found = new Set(enlargedFrom.values()).size;
+}
+
 const bestImages = new Map();
 const validationFailures = [];
 const unresolvedImageProbes = unresolvedGalleryImageProbes(probes, domKeys);
@@ -2482,7 +2517,9 @@ for (const probe of probes) {
         continue;
     }
 
-    const key = imageAssetKey(candidate);
+    // An enlarged frame is the frame it enlarges: its slot, its provenance.
+    const enlarges = enlargedFrom.get(probe.url) ?? null;
+    const key = imageAssetKey(enlarges ?? candidate);
     const existing = bestImages.get(key);
     const score = Math.max(
         urlQualityScore(candidate),
@@ -2496,6 +2533,7 @@ for (const probe of probes) {
             width: probe.width || 0,
             height: probe.height || 0,
             source: domKeys.has(key) ? 'recipe_dom' : 'network_or_payload',
+            ...(enlarges ? { rendition_of: enlarges } : {}),
         });
     }
 }
@@ -2619,13 +2657,15 @@ if (!crashResultEmitted) process.stdout.write(JSON.stringify({
         distinct_candidate_assets: new Set(candidates.map(imageAssetKey)).size,
         probed_candidates: probes.length,
         validated_candidates: images.length,
-        validated_image_evidence: selectedImages.map(({ url, width, height, source }) => ({
+        validated_image_evidence: selectedImages.map(({ url, width, height, source, rendition_of }) => ({
             url,
             width,
             height,
             source,
+            ...(rendition_of ? { rendition_of } : {}),
         })),
         rejected_candidates: strictRecipe ? validationFailures : validationFailures.slice(0, 20),
+        rendition_probe: renditionProbe,
         observed_gallery_count: galleryReadiness.observed_count || 0,
         gallery_readiness: {
             thumbnail_count: galleryReadiness.thumbnail_count || 0,

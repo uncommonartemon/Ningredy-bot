@@ -49,6 +49,10 @@ class ProductPhotoApplicabilityAgent implements Agent, HasStructuredOutput
               color. State concrete evidence for all six physical_checks. Family resemblance or
               absence of a known difference is not proof. A different regional keyboard is allowed
               with an explicit difference note; do not invent either side's keyboard layout.
+              A maker's model code shared up to its configuration or region suffix (Cyborg 15
+              A13VF-1483US and A13VF-838XES share A13VF) names one platform and chassis revision:
+              that is positive evidence for platform and revision - never for color or keyboard -
+              unless the page shows an exterior difference.
             - conflicting: observed different chassis, generation, size, convertible construction,
               ports, color or other material exterior conflict. Another SKU or a memory-clock
               difference alone is not an exterior conflict.
