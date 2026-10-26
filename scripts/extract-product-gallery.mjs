@@ -2637,8 +2637,10 @@ const hiddenClickTargets = [...new Set(actionTrace
 const nothingClicked = !actionTrace.some((item) => item.clicked === true);
 // Controls the scout saw that name photos or a gallery: the likeliest opener of
 // a hidden one (ASUS keeps its gallery behind a "Photos" tab).
-const galleryControls = (Array.isArray(scout?.action_candidates) ? scout.action_candidates : [])
-    .filter((control) => controlNamesGallery(control?.text)).slice(0, 6);
+const galleryControls = [...new Map([...(Array.isArray(scout?.observed_controls) ? scout.observed_controls : []),
+    ...(Array.isArray(scout?.action_candidates) ? scout.action_candidates : [])]
+    .filter((control) => control?.selector && controlNamesGallery(`${control.text || ''} ${control.aria_label || ''}`))
+    .map((control) => [control.selector, { selector: control.selector, text: control.text || control.aria_label || '' }])).values()].slice(0, 6);
 
 if (!crashResultEmitted) process.stdout.write(JSON.stringify({
     images,
