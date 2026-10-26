@@ -74,6 +74,18 @@ final class ImageRenditionProbe
                 $variants[] = self::build($parts, (string) preg_replace($pattern, $replacement, $parts['path']), $query);
             }
         }
+        // A lone number closing the file name, with or without an extension, is
+        // the bounding box of what was measured (#212 xcom-shop: .../79+f2Npd7n8pG_600
+        // measured 600x405 and 540x472, _80 measured 80x54; no suffix and _1000 are
+        // served, _1200 and above are not): the bare name first, then the ladder.
+        $longest = max($width, $height);
+        if (preg_match('#([-_])(\d{2,4})((?:\.[a-z0-9]{3,4})?)$#i', $parts['path'], $token) === 1
+            && (int) $token[2] >= $longest && (int) $token[2] <= 2 * $longest) {
+            $stem = substr($parts['path'], 0, -strlen($token[0]));
+            foreach ([$stem.$token[3], $stem.$token[1].'1600'.$token[3], $stem.$token[1].'1000'.$token[3]] as $path) {
+                $variants[] = self::build($parts, $path, $query);
+            }
+        }
 
         return $variants;
     }
