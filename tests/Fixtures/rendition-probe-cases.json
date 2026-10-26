@@ -3,7 +3,9 @@
         "name": "shopify size suffix (#161 kwancorp)",
         "thumbnail": "https://www.kwancorp.com/cdn/shop/files/X1404VA-EB2113WSM_300x.png?v=1792787868",
         "first": "https://www.kwancorp.com/cdn/shop/files/X1404VA-EB2113WSM.png?v=1792787868",
-        "also": ["https://www.kwancorp.com/cdn/shop/files/X1404VA-EB2113WSM_1600x.png?v=1792787868"]
+        "also": [
+            "https://www.kwancorp.com/cdn/shop/files/X1404VA-EB2113WSM_1600x.png?v=1792787868"
+        ]
     },
     {
         "name": "shopify retina suffix",
@@ -14,7 +16,9 @@
         "name": "wordpress size and width query (#161 dwinstore)",
         "thumbnail": "https://dwinstore.com/wp-content/uploads/2024/02/acer-aspire-lite-500x500-1.webp?w=640",
         "first": "https://dwinstore.com/wp-content/uploads/2024/02/acer-aspire-lite-500x500-1.webp",
-        "also": ["https://dwinstore.com/wp-content/uploads/2024/02/acer-aspire-lite-1.webp?w=640"]
+        "also": [
+            "https://dwinstore.com/wp-content/uploads/2024/02/acer-aspire-lite-1.webp?w=640"
+        ]
     },
     {
         "name": "bigcommerce size directory (#87)",
@@ -30,7 +34,9 @@
         "name": "next.js image proxy (#87 pcnation)",
         "thumbnail": "https://www.pcnation.com/_next/image?url=https%3A%2F%2Fwww.pcnation.com%2Fapi%2Fmedia%2Ffile%2Flaptops-500x500.png&w=256&q=75",
         "first": "https://www.pcnation.com/api/media/file/laptops-500x500.png",
-        "also": ["https://www.pcnation.com/api/media/file/laptops.png"]
+        "also": [
+            "https://www.pcnation.com/api/media/file/laptops.png"
+        ]
     },
     {
         "name": "height query (laptopoutlet)",
@@ -51,19 +57,25 @@
         "name": "width directory without an extension (#181 asus)",
         "thumbnail": "https://dlcdnwebimgs.asus.com/gain/419bcbb5-b469-4805-b50a-56f41dab768c/w80/fwebp",
         "first": "https://dlcdnwebimgs.asus.com/gain/419bcbb5-b469-4805-b50a-56f41dab768c/w1600/fwebp",
-        "also": ["https://dlcdnwebimgs.asus.com/gain/419bcbb5-b469-4805-b50a-56f41dab768c/fwebp"]
+        "also": [
+            "https://dlcdnwebimgs.asus.com/gain/419bcbb5-b469-4805-b50a-56f41dab768c/fwebp"
+        ]
     },
     {
         "name": "vtex id-width-height segment (#187 pcbox gallery)",
         "thumbnail": "https://pcbox.vteximg.com.br/arquivos/ids/2225516-461-461/9S7-15K111-838_GAL_1.jpg?v=638584546361630000",
         "first": "https://pcbox.vteximg.com.br/arquivos/ids/2225516/9S7-15K111-838_GAL_1.jpg?v=638584546361630000",
-        "also": ["https://pcbox.vteximg.com.br/arquivos/ids/2225516-1600-1600/9S7-15K111-838_GAL_1.jpg?v=638584546361630000"]
+        "also": [
+            "https://pcbox.vteximg.com.br/arquivos/ids/2225516-1600-1600/9S7-15K111-838_GAL_1.jpg?v=638584546361630000"
+        ]
     },
     {
         "name": "next.js proxy over a vtex thumbnail (#187 pcbox thumbnail rail)",
         "thumbnail": "https://www.pcbox.com/_next/image?url=https%3A%2F%2Fpcbox.vteximg.com.br%2Farquivos%2Fids%2F2225515-64-64%2F9S7-15K111-838-IMG-DEF.jpg%3Fv%3D638937933798430000&w=2048&q=75",
         "first": "https://pcbox.vteximg.com.br/arquivos/ids/2225515-64-64/9S7-15K111-838-IMG-DEF.jpg?v=638937933798430000",
-        "also": ["https://pcbox.vteximg.com.br/arquivos/ids/2225515/9S7-15K111-838-IMG-DEF.jpg?v=638937933798430000"]
+        "also": [
+            "https://pcbox.vteximg.com.br/arquivos/ids/2225515/9S7-15K111-838-IMG-DEF.jpg?v=638937933798430000"
+        ]
     },
     {
         "name": "sanity query sizes (#187 pcbox banners)",
@@ -81,7 +93,9 @@
         "width": 600,
         "height": 600,
         "first": "https://doc.smarty.cz/pic/XL2B000N01-1600-1600.webp",
-        "also": ["https://doc.smarty.cz/pic/XL2B000N01-1000-1000.webp"]
+        "also": [
+            "https://doc.smarty.cz/pic/XL2B000N01-1000-1000.webp"
+        ]
     },
     {
         "name": "numeric size directory equal to the measured size (#203 ispace)",
@@ -89,7 +103,9 @@
         "width": 320,
         "height": 320,
         "first": "https://cdn.ispace.cz/files/photos/1600/7/7ef5fd51aee83782f728ca83c4b795847aadd25f.webp",
-        "also": ["https://cdn.ispace.cz/files/photos/1000/7/7ef5fd51aee83782f728ca83c4b795847aadd25f.webp"]
+        "also": [
+            "https://cdn.ispace.cz/files/photos/1000/7/7ef5fd51aee83782f728ca83c4b795847aadd25f.webp"
+        ]
     },
     {
         "name": "file-name size pair with a different height (#203 elektro-unima)",
@@ -97,7 +113,9 @@
         "width": 300,
         "height": 300,
         "first": "https://www.elektro-unima.cz/Prilohy/214221-1600-1600.jpg",
-        "also": ["https://www.elektro-unima.cz/Prilohy/214221-1000-1000.jpg"]
+        "also": [
+            "https://www.elektro-unima.cz/Prilohy/214221-1000-1000.jpg"
+        ]
     },
     {
         "name": "a measured size that the address does not name is not guessed",
@@ -114,6 +132,35 @@
     {
         "name": "an address that names no rendition",
         "thumbnail": "https://images.icecat.biz/img/gallery/86675d0ed90456c979edcc2f243ae6f3e155597d.jpg",
+        "first": null
+    },
+    {
+        "name": "a lone size token closing the file name without an extension (#212 xcom-shop)",
+        "thumbnail": "https://cdn.xcomweb.ru/upload/pictures/779/d60c93ll5exztuegqzhciszb6dy3ji0n/79+f2Npd7n8pG_600",
+        "width": 600,
+        "height": 405,
+        "first": "https://cdn.xcomweb.ru/upload/pictures/779/d60c93ll5exztuegqzhciszb6dy3ji0n/79+f2Npd7n8pG",
+        "also": [
+            "https://cdn.xcomweb.ru/upload/pictures/779/d60c93ll5exztuegqzhciszb6dy3ji0n/79+f2Npd7n8pG_1600",
+            "https://cdn.xcomweb.ru/upload/pictures/779/d60c93ll5exztuegqzhciszb6dy3ji0n/79+f2Npd7n8pG_1000"
+        ]
+    },
+    {
+        "name": "a lone size token as the bounding box of a smaller measured frame, with an extension",
+        "thumbnail": "https://shop.example.com/pictures/f3gM5UhxWMhF-600.jpg",
+        "width": 540,
+        "height": 472,
+        "first": "https://shop.example.com/pictures/f3gM5UhxWMhF.jpg",
+        "also": [
+            "https://shop.example.com/pictures/f3gM5UhxWMhF-1600.jpg",
+            "https://shop.example.com/pictures/f3gM5UhxWMhF-1000.jpg"
+        ]
+    },
+    {
+        "name": "a trailing number smaller than the measured frame is not a size",
+        "thumbnail": "https://shop.example.com/pictures/photo_2.jpg",
+        "width": 600,
+        "height": 400,
         "first": null
     }
 ]

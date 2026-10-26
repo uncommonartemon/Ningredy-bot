@@ -1525,6 +1525,15 @@ const measuredRenditionVariants = (rawUrl, dims) => {
     if (file.test(url.pathname)) for (const size of [1600, 1000]) out.push(buildRenditionUrl(url, url.pathname.replace(file, `$1${size}$2${size}`), params));
     const directory = new RegExp(`/${escape(width)}/`);
     if (directory.test(url.pathname)) for (const size of [1600, 1000]) out.push(buildRenditionUrl(url, url.pathname.replace(directory, `/${size}/`), params));
+    // A lone number closing the file name, with or without an extension, is the bounding
+    // box of what was measured (#212 xcom-shop: .../79+f2Npd7n8pG_600 measured 600x405,
+    // _80 measured 80x54; the bare name and _1000 are served): the bare name first, then the ladder.
+    const longest = Math.max(width, height);
+    const token = url.pathname.match(/([-_])(\d{2,4})((?:\.[a-z0-9]{3,4})?)$/i);
+    if (token && Number(token[2]) >= longest && Number(token[2]) <= 2 * longest) {
+        const stem = url.pathname.slice(0, -token[0].length);
+        for (const path of [`${stem}${token[3]}`, `${stem}${token[1]}1600${token[3]}`, `${stem}${token[1]}1000${token[3]}`]) out.push(buildRenditionUrl(url, path, params));
+    }
     return out;
 };
 /** Addresses of the same frame that may be larger, best guess first; never the address itself. */
