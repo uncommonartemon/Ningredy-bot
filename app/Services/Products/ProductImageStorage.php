@@ -3819,9 +3819,12 @@ class ProductImageStorage
             $checksums[$checksum] = true;
         }
 
-        // A source whose frames all fell under the minimum may only have shown
-        // its thumbnails: the same frames are asked for at a larger rendition.
-        if (count($candidates) < $this->minimumVerifiedImages($draft)) {
+        // A source whose frames fell under the minimum may only have shown its
+        // thumbnails: the same frames are asked for at a larger rendition. Not
+        // only when the count is short of the category minimum - on live #192
+        // five marketing images met the minimum while the six product views sat
+        // in the rejected 80 px thumbnails, and Vision kept one of the five.
+        if (count($candidates) < $this->targetDraftImageCount($draft)) {
             $this->probeLargerRenditions($draft, $urls, $candidates, $checksums, $decodedPixels, $decodedPixelBudget,
                 $sourcePagesByUrl, $sourceContextsByUrl, $telegramUpdateId);
         }
