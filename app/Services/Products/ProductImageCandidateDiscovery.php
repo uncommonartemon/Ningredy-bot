@@ -915,6 +915,14 @@ class ProductImageCandidateDiscovery
         ];
     }
 
+    /**
+     * Every discovered page keeps its own best frames (up to the card's photo
+     * count; a confirmed gallery whole). The global limit applies only to bare
+     * image addresses that belong to no page. It used to cut across pages too:
+     * live #192 found four shops, the first (59 static images) took the twenty
+     * slots, and the three-frame Ponder Blue gallery of the fourth and forty
+     * browser frames of the second and third never reached a download.
+     */
     private function limitCandidateUrlsBySource(array $urls): array
     {
         $globalLimit = max(1, (int) config('product-images.ai_result_limit', 20));
@@ -922,6 +930,7 @@ class ProductImageCandidateDiscovery
             $globalLimit,
             (int) config('product-images.max_images', 10),
         ));
+        $bareKept = 0;
 
         $kept = collect($urls)
             ->values()
@@ -957,7 +966,13 @@ class ProductImageCandidateDiscovery
                 ?: ($left['first_index'] <=> $right['first_index'])
             )
             ->flatMap(fn (array $group) => $group['items'])
-            ->filter(fn (array $item, int $index): bool => $item['gallery_rank'] === 2 || $index < $globalLimit)
+            ->filter(function (array $item) use ($globalLimit, &$bareKept): bool {
+                if ($item['gallery_rank'] === 2 || str_starts_with($item['group'], 'page:')) {
+                    return true;
+                }
+
+                return $bareKept++ < $globalLimit;
+            })
             ->pluck('url')
             ->values()
             ->all();

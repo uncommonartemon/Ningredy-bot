@@ -132,6 +132,34 @@ class IncrementalGalleryDiscoveryTest extends TestCase
         $this->assertSame($urls, $method->invoke($discovery, $urls));
     }
 
+    public function test_every_discovered_page_keeps_its_own_frames_and_only_bare_addresses_share_the_global_limit(): void
+    {
+        // Live #192: four shops found, the first took all twenty slots, the
+        // other three never reached a download.
+        config()->set('product-images.ai_result_limit', 20);
+        config()->set('product-images.max_images', 10);
+        $resolver = $this->mock(ProductImageResolver::class);
+        $resolver->shouldReceive('isConfirmedGalleryImage')->andReturn(false);
+        $resolver->shouldReceive('isPartialGalleryImage')->andReturn(false);
+        $discovery = app(ProductImageCandidateDiscovery::class);
+        $pages = [];
+        foreach (['first', 'second', 'third'] as $shop) {
+            foreach (range(1, 12) as $n) {
+                $pages["https://{$shop}.example/cdn/frame-{$n}.jpg"] = "https://{$shop}.example/product/laptop";
+            }
+        }
+        $bare = array_map(fn (int $n): string => "https://images.example/loose-{$n}.jpg", range(1, 25));
+        (new \ReflectionProperty($discovery, 'sourcePagesByImageUrl'))->setValue($discovery, $pages);
+        $method = new \ReflectionMethod($discovery, 'limitCandidateUrlsBySource');
+
+        $kept = $method->invoke($discovery, [...array_keys($pages), ...$bare]);
+
+        foreach (['first', 'second', 'third'] as $shop) {
+            $this->assertCount(10, array_filter($kept, fn (string $url): bool => str_contains($url, "{$shop}.example")), "{$shop} keeps its ten best frames");
+        }
+        $this->assertCount(20, array_filter($kept, fn (string $url): bool => str_contains($url, 'images.example')), 'bare addresses share the global limit');
+    }
+
     public function test_compatible_regional_gallery_survives_both_discovery_checks_with_its_differences(): void
     {
         $url = 'https://shop.example/product/other-region';

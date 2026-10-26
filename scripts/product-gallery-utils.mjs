@@ -336,13 +336,21 @@ export const captureObservedControlsInPage = () => {
     };
     const seenSelectors = new Set();
 
+    // Twenty controls is the cap and a product page has hundreds. The ones that
+    // name photos, a gallery or a zoom come first, then tabs, then the rest in
+    // DOM order - live #192: the ASUS "Photos" tab that reveals the gallery sat
+    // fourteen thousand pixels down, after far more than twenty other controls,
+    // and the agent clicked the hidden thumbnails for two rounds instead.
+    const namesGallery = (text) => /(\bphotos?\b|\bgallery\b|\bgaler|\bimages?\b|\bpictures?\b|\bslideshow\b|\bzoom\b|\b360\b|фото|галере|изображен)/i.test(text);
     return [...document.querySelectorAll(
         'button, [role="tab"], [role="button"], [aria-expanded], summary, a[href^="#"]',
     )]
         .filter(isVisible)
-        .map((element) => ({
+        .map((element, order) => ({
             selector: stableSelectorFor(element),
-            text: (element.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 120),
+            text: ((element.textContent || '').trim() || element.getAttribute('aria-label') || '').replace(/\s+/g, ' ').slice(0, 120),
+            tab: element.getAttribute('role') === 'tab',
+            order,
         }))
         .filter(({ selector, text }) => {
             if (!selector || !text || seenSelectors.has(selector)) {
@@ -353,8 +361,15 @@ export const captureObservedControlsInPage = () => {
 
             return true;
         })
-        .slice(0, 20);
+        .sort((left, right) => (Number(namesGallery(right.text)) - Number(namesGallery(left.text)))
+            || (Number(right.tab) - Number(left.tab))
+            || (left.order - right.order))
+        .slice(0, 20)
+        .map(({ selector, text }) => ({ selector, text }));
 };
+
+// The same words, for naming such controls to the agent outside the page.
+export const controlNamesGallery = (text) => /(\bphotos?\b|\bgallery\b|\bgaler|\bimages?\b|\bpictures?\b|\bslideshow\b|\bzoom\b|\b360\b|фото|галере|изображен)/i.test(String(text || ''));
 
 /**
  * The structural candidates revealedContainerTextInPage() considers for one

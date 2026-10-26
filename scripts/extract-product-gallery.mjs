@@ -15,6 +15,7 @@ import {
     revealedCandidatesVisibilityInPage,
     revealedContainerTextInPage,
     clearBlockingOverlays,
+    controlNamesGallery,
     EXCLUDED_GALLERY_CONTEXT_PATTERN_SOURCE,
     galleryCollectionTarget,
     imageAssetKey,
@@ -2634,6 +2635,10 @@ const hiddenClickTargets = [...new Set(actionTrace
     .filter((item) => item.clicked === false && /not visible/i.test(String(item.interaction_error || '')))
     .map((item) => item.selector).filter(Boolean))];
 const nothingClicked = !actionTrace.some((item) => item.clicked === true);
+// Controls the scout saw that name photos or a gallery: the likeliest opener of
+// a hidden one (ASUS keeps its gallery behind a "Photos" tab).
+const galleryControls = (Array.isArray(scout?.action_candidates) ? scout.action_candidates : [])
+    .filter((control) => controlNamesGallery(control?.text)).slice(0, 6);
 
 if (!crashResultEmitted) process.stdout.write(JSON.stringify({
     images,
@@ -2663,11 +2668,12 @@ if (!crashResultEmitted) process.stdout.write(JSON.stringify({
         // The hidden-target finding comes first: on live #192 (ASUS) the generic
         // "DOM-bound assets only" text hid it, and read like a canvas viewer.
         collection_capability_feedback: hiddenClickTargets.length > 0 && nothingClicked
-            ? `Every click target of the plan resolved in the DOM but was hidden (${hiddenClickTargets.join(', ')}): the gallery is not open on this page as loaded, and repeating these clicks cannot open it. ${images.length} frame(s) were still collected from its DOM${strictRecipe && domImages.length === 0 && requestedImages.length > 0 ? ` (${requestedImages.length} network image candidates were observed, none with DOM gallery provenance)` : ''}. The next plan needs the control that reveals the gallery before these clicks - or no clicks at all when the DOM already lists every frame.`
+            ? `Every click target of the plan resolved in the DOM but was hidden (${hiddenClickTargets.join(', ')}): the gallery is not open on this page as loaded, and repeating these clicks cannot open it. ${images.length} frame(s) were still collected from its DOM${strictRecipe && domImages.length === 0 && requestedImages.length > 0 ? ` (${requestedImages.length} network image candidates were observed, none with DOM gallery provenance)` : ''}. The next plan needs the control that reveals the gallery before these clicks - or no clicks at all when the DOM already lists every frame.${galleryControls.length ? ` Controls on this page that name photos or a gallery: ${galleryControls.map((control) => `${control.selector} ("${control.text}")`).join(', ')}.` : ''}`
             : (strictRecipe && domImages.length === 0 && requestedImages.length > 0
                 ? `Strict recipe accepts DOM-bound image assets only. ${requestedImages.length} network candidates were observed, but none have DOM gallery provenance. A canvas/WebGL viewer cannot yield images through this DOM-only recipe. Inspect an alternative image-backed viewer or another exact product source; repeating canvas clicks does not remove this provenance restriction.`
                 : null),
         hidden_click_targets: hiddenClickTargets,
+        gallery_controls: galleryControls,
         collection_errors: [...new Set(collectionErrors)].slice(0, 10),
         distinct_candidate_assets: new Set(candidates.map(imageAssetKey)).size,
         probed_candidates: probes.length,
