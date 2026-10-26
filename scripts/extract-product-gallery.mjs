@@ -2485,7 +2485,7 @@ if (!scoutOnly) {
     for (const probe of probes) {
         if (probe.reason !== 'dimensions_below_minimum' || (probe.width || 0) < 48) continue;
         renditionProbe.undersized_frames++;
-        for (const guess of largerRenditions(probe.url)) {
+        for (const guess of largerRenditions(probe.url, 6, { width: probe.width, height: probe.height })) {
             if (probed.has(guess)) continue;
             probed.add(guess);
             guesses.push({ guess, original: probe.url });

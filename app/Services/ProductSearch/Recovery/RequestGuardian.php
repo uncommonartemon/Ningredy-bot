@@ -270,6 +270,11 @@ final class RequestGuardian
         if ($note === '' || ! Cache::add('request-guard:note:'.$update->id, true, now()->addMinutes(10))) {
             return null;
         }
+        if ($draft !== null && ($premature = $this->supervisor->tooEarlyToEnd($update->id, $draft)) !== null) {
+            $this->record($update, $draft, 'note_too_early', 'completed', 'Наблюдатель хотел свернуть поиск, но рано: '.$premature.'.', ['reason' => $note]);
+
+            return null;
+        }
         $this->supervisor->requestWrapUp($update->id, $note);
         Cache::put('request-guard:wrap-up:'.$update->id, now()->timestamp, now()->addHour());
         $this->record($update, $draft, 'wrap_up', 'completed',

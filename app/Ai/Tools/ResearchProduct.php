@@ -800,8 +800,17 @@ class ResearchProduct implements Tool
         }
 
         if ($data['status'] === 'unresolved') {
+            // Live #197: the operator's label code was on no page, sibling regional
+            // suffixes of the same model were, and three identical "unresolved"
+            // answers ended in no draft at all. The repair asks for the closest
+            // observed product by name, which the agent's own rules already allow.
             throw ValidationException::withMessages(['selected_identity' => 'Identity/configuration remains unresolved: '
-                .($data['research_notes'] ?? 'Explain the concrete missing evidence.').' Retain useful observations and repair only the missing evidence; this is not proof that the product does not exist.']);
+                .($data['research_notes'] ?? 'Explain the concrete missing evidence.')
+                .' Retain useful observations and repair only the missing evidence; this is not proof that the product does not exist.'
+                .' If the operator\'s code or exact model suffix is on no observed page while a sibling configuration of the same model line is'
+                .' (another regional suffix or SKU of the same chassis), that sibling is the closest observed product: return found for it,'
+                .' with selected_identity on its page, the operator\'s code in unconfirmed_operator_codes and kept unchanged as their label fact,'
+                .' and research_notes naming the sibling taken and why. Keep unresolved only when no concrete product was observed at all.']);
         }
 
         if ($data['status'] === 'found') {

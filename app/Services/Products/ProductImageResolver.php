@@ -1308,13 +1308,6 @@ class ProductImageResolver
             $galleryScope.'//img/@data-src',
             $galleryScope.'//source/@src',
             $galleryScope.'//img/@src',
-            '//meta[@property="og:image"]/@content',
-            '//meta[@property="og:image:url"]/@content',
-            '//meta[@property="og:image:secure_url"]/@content',
-            '//meta[@name="twitter:image"]/@content',
-            '//meta[@name="twitter:image:src"]/@content',
-            '//meta[@itemprop="image"]/@content',
-            '//link[@rel="image_src"]/@href',
             '//*[@data-big]/@data-big',
             '//*[@data-old-hires]/@data-old-hires',
             '//img/@data-full',
@@ -1337,7 +1330,38 @@ class ProductImageResolver
             '//img/@data-srcset',
             '//source/@srcset',
         ];
-        $images = [];
+        // The pictures the page itself names as the product's: its social preview
+        // and structured data. They lead the list below, whatever the DOM order.
+        $ownQueries = [
+            '//meta[@property="og:image"]/@content',
+            '//meta[@property="og:image:url"]/@content',
+            '//meta[@property="og:image:secure_url"]/@content',
+            '//meta[@name="twitter:image"]/@content',
+            '//meta[@name="twitter:image:src"]/@content',
+            '//meta[@itemprop="image"]/@content',
+            '//link[@rel="image_src"]/@href',
+        ];
+        $own = [];
+
+        // Structured data first: Product.image lists the gallery in its own order.
+        foreach ($xpath->query('//script[@type="application/ld+json"]') ?: [] as $node) {
+            $structuredData = json_decode(html_entity_decode($node->nodeValue, ENT_QUOTES | ENT_HTML5), true);
+
+            if (is_array($structuredData)) {
+                $this->collectStructuredImageUrls($structuredData, $own);
+            }
+        }
+
+        foreach ($ownQueries as $query) {
+            foreach ($xpath->query($query) ?: [] as $node) {
+                $candidate = trim(html_entity_decode($node->nodeValue, ENT_QUOTES | ENT_HTML5));
+
+                if ($candidate !== '') {
+                    $own[] = $candidate;
+                }
+            }
+        }
+        $images = [...$own];
 
         foreach ($directQueries as $query) {
             foreach ($xpath->query($query) ?: [] as $node) {
@@ -1372,11 +1396,13 @@ class ProductImageResolver
             }
         }
 
-        foreach ($xpath->query('//script[@type="application/ld+json"]') ?: [] as $node) {
-            $structuredData = json_decode(html_entity_decode($node->nodeValue, ENT_QUOTES | ENT_HTML5), true);
+        // The full-size photograph behind a thumbnail is often only the thumbnail's
+        // link (live #203: ispace.cz links every gallery frame to its /1600/ file).
+        foreach ($xpath->query('//a/@href') ?: [] as $node) {
+            $href = trim(html_entity_decode((string) $node->nodeValue, ENT_QUOTES | ENT_HTML5));
 
-            if (is_array($structuredData)) {
-                $this->collectStructuredImageUrls($structuredData, $images);
+            if (preg_match('/\.(?:jpe?g|png|webp|avif)(?:\?|#|$)/i', $href) === 1) {
+                $images[] = $href;
             }
         }
 
@@ -1384,19 +1410,58 @@ class ProductImageResolver
             $images = [...$images, ...$this->scriptImageUrls($node->nodeValue)];
         }
 
-        return collect($images)
-            ->map(fn (string $candidate): ?string => $this->normalizeImageCandidate($candidate, $pageUrl))
-            ->filter()
-            // Two different query-string renditions of one CDN photo (Scene7
-            // wid/hei, $PRESET$, ASUS w48/64/96/184, ...) are not distinct
-            // photos - collapsing them here, at the root of every page scrape,
-            // keeps every downstream count and gallery-sufficiency decision
-            // from inheriting an inflated "distinct photo" count.
-            ->map(fn (string $url): string => ImageUrls::normalizeCandidateUrl($url))
-            ->unique(fn (string $url): string => ImageUrls::imageAssetKey($url))
-            ->take((int) config('product-images.max_urls_per_page', 60))
-            ->values()
-            ->all();
+        $normalize = fn (string $candidate): ?string => $this->normalizeImageCandidate($candidate, $pageUrl);
+        $ownKeys = collect($own)->map($normalize)->filter()
+            ->map(fn (string $url): string => ImageUrls::imageAssetKey(ImageUrls::normalizeCandidateUrl($url)))->flip()->all();
+        // Site furniture by its address: navigation, flags, payment and trust badges,
+        // placeholders. Never dropped here, only put last.
+        $furniture = '#(?:^|/)(?:nav|navigation|menu|flags?|lang|payments?|badges?|trust|sprites?|placeholder|no[_-]?image|default|associations?|shops?-map)(?:[/_.-]|$)#i';
+        // Two different query-string renditions of one CDN photo (Scene7
+        // wid/hei, $PRESET$, ASUS w48/64/96/184, ...) are not distinct
+        // photos - collapsing them here, at the root of every page scrape,
+        // keeps every downstream count and gallery-sufficiency decision
+        // from inheriting an inflated "distinct photo" count.
+        $groups = [];
+        foreach (collect($images)->map($normalize)->filter()->map(fn (string $url): string => ImageUrls::normalizeCandidateUrl($url)) as $url) {
+            $groups[ImageUrls::imageAssetKey($url)][] = $url;
+        }
+        $ranked = [];
+        foreach (array_values($groups) as $index => $variants) {
+            // One address per photograph, at its largest rendition rather than its
+            // first mention: the gallery's 100 px thumbnail is in the DOM before the
+            // 1600 px file its link and the product's structured data point at
+            // (live #203: ispace.cz and elektro-unima.cz gave thumbnails, icons and
+            // other products' pictures while four 1000 px frames sat in the markup).
+            usort($variants, fn (string $left, string $right): int => self::renditionSizeHint($right) <=> self::renditionSizeHint($left));
+            $url = $variants[0];
+            $tier = preg_match($furniture, (string) parse_url($url, PHP_URL_PATH)) === 1 ? 2
+                : (isset($ownKeys[ImageUrls::imageAssetKey($url)]) ? 0 : 1);
+            $ranked[] = ['url' => $url, 'rank' => sprintf('%d%06d', $tier, $index)];
+        }
+        usort($ranked, fn (array $left, array $right): int => strcmp($left['rank'], $right['rank']));
+
+        return array_slice(array_column($ranked, 'url'), 0, (int) config('product-images.max_urls_per_page', 60));
+    }
+
+    /**
+     * How large an address says its rendition is: the catalog's quality score,
+     * and - between variants of one asset - any size written as a numeric
+     * directory ("/1600/"), a "-1000-1000" or "_1000x1000" file-name pair, or an
+     * Amazon "_SL1500_" token. A number is only a size hint, never a download.
+     */
+    private static function renditionSizeHint(string $url): int
+    {
+        $path = (string) parse_url($url, PHP_URL_PATH);
+        $hint = ImageUrls::candidateUrlQualityScore($url);
+        foreach ([
+            '#/(\d{2,4})/#', '#[-_](\d{2,4})[-_x](\d{2,4})(?=\.[a-z0-9]{3,4}$)#i', '#\._(?:AC_)?[SU]L(\d{2,4})_#',
+        ] as $pattern) {
+            if (preg_match_all($pattern, $path, $matches) > 0) {
+                $hint = max($hint, ...array_map('intval', $matches[1]));
+            }
+        }
+
+        return min(4000, $hint);
     }
 
     /** @return array<int, string> */
@@ -1485,8 +1550,13 @@ class ProductImageResolver
         ) {
             return null;
         }
+        $absolute = $this->absoluteUrl($candidate, $pageUrl);
+        // The page's own address (a thumbnail's "#" link resolves to it) is never a frame.
+        if (Str::before($absolute, '#') === Str::before($pageUrl, '#')) {
+            return null;
+        }
 
-        return $this->absoluteUrl($candidate, $pageUrl);
+        return $absolute;
     }
 
     private function looksLikeAccessGate(string $html): bool

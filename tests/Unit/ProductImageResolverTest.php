@@ -87,9 +87,10 @@ class ProductImageResolverTest extends TestCase
             ['url' => 'https://93.184.216.34/modern-product'],
         ], 10);
 
+        // Structured data names the gallery in the shop's own order, so it leads.
         $this->assertSame([
-            'https://93.184.216.34/cdn/itemprop-product.webp',
             'https://93.184.216.34/cdn/jsonld-object.jpg',
+            'https://93.184.216.34/cdn/itemprop-product.webp',
             'https://93.184.216.34/cdn/script-front.png?width=1200',
         ], $images);
     }
@@ -129,13 +130,52 @@ class ProductImageResolverTest extends TestCase
             ['url' => 'https://93.184.216.34/catalog/product'],
         ], 10);
 
+        // The product's own pictures (its structured data) lead; the page's other frames follow in DOM order.
         $this->assertSame([
+            'https://93.184.216.34/gallery/product-front.jpg',
+            'https://93.184.216.34/gallery/product-back.jpg',
             'https://93.184.216.34/gallery/product-detail.jpg',
             'https://93.184.216.34/gallery/product-large.webp',
             'https://93.184.216.34/gallery/product-small.webp',
-            'https://93.184.216.34/gallery/product-front.jpg',
-            'https://93.184.216.34/gallery/product-back.jpg',
         ], $images);
+    }
+
+    public function test_the_products_own_full_size_pictures_lead_and_each_asset_comes_at_its_largest_rendition(): void
+    {
+        // Live #203 (ispace.cz, elektro-unima.cz): the gallery's 1000 px files sat in the
+        // product's JSON-LD and behind each thumbnail's link, while the first twenty
+        // candidates were /100/ thumbnails, navigation flags and other products' pictures.
+        Http::fake([
+            'https://93.184.216.34/p/laptop' => Http::response(<<<'HTML'
+                <html><head>
+                    <script type="application/ld+json">{"@type":"Product","image":["https://93.184.216.34/photos/1600/a/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.webp"]}</script>
+                    <meta property="og:image" content="https://93.184.216.34/photos/1600/b/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.webp">
+                </head><body>
+                    <img src="/img/nav/flag-cz.png"><img src="/img/nav/flag-sk.png">
+                    <div class="product-gallery">
+                        <a href="/photos/1600/a/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.webp"><img src="/photos/100/a/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.webp"></a>
+                        <a href="/photos/1600/b/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.webp"><img src="/photos/100/b/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.webp"></a>
+                        <a href="/photos/1600/c/cccccccccccccccccccccccccccccccccccccccc.webp"><img src="/photos/100/c/cccccccccccccccccccccccccccccccccccccccc.webp"></a>
+                    </div>
+                    <div class="related"><img src="/photos/300/d/dddddddddddddddddddddddddddddddddddddddd.webp"></div>
+                </body></html>
+                HTML, 200, ['Content-Type' => 'text/html']),
+        ]);
+        $this->mockBrowser()->shouldReceive('extract')->andReturn([]);
+
+        $images = app(ProductImageResolver::class)->resolve([['url' => 'https://93.184.216.34/p/laptop']], 10);
+
+        $this->assertSame([
+            'https://93.184.216.34/photos/1600/a/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.webp',
+            'https://93.184.216.34/photos/1600/b/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.webp',
+            'https://93.184.216.34/photos/1600/c/cccccccccccccccccccccccccccccccccccccccc.webp',
+            'https://93.184.216.34/photos/300/d/dddddddddddddddddddddddddddddddddddddddd.webp',
+        ], array_slice($images, 0, 4), 'Own pictures first, each at its largest rendition, then the rest in DOM order.');
+        foreach ($images as $index => $url) {
+            if (str_contains($url, '/nav/')) {
+                $this->assertGreaterThanOrEqual(4, $index, 'Navigation flags come last.');
+            }
+        }
     }
 
     public function test_it_uses_the_browser_fallback_when_static_html_has_too_few_gallery_images(): void

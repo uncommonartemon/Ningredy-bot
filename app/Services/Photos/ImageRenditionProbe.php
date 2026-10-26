@@ -30,14 +30,52 @@ final class ImageRenditionProbe
     /** The smallest width or height a numeric path token can mean: a date's month or day never is one. */
     private const SMALLEST_SIZE_TOKEN = 32;
 
-    /** @return list<string> addresses of the same frame that may be larger, best guess first; never the address itself */
-    public static function largerRenditions(string $url, int $limit = 4): array
+    /**
+     * Addresses of the same frame that may be larger, best guess first; never the
+     * address itself. The frame's measured width and height, when known, make the
+     * surest guesses: a number in the address that equals what was measured is
+     * its size, whatever form the site gives it (live #203: smarty.cz
+     * "-600-600.webp", ispace.cz "/photos/320/", elektro-unima.cz "-300-300.jpg").
+     *
+     * @return list<string>
+     */
+    public static function largerRenditions(string $url, int $limit = 6, ?int $width = null, ?int $height = null): array
     {
         $url = ImageUrls::normalizeCandidateUrl($url);
-        $variants = array_values(array_unique(array_filter(self::variants($url, true),
+        $variants = array_values(array_unique(array_filter([...self::measuredVariants($url, $width, $height), ...self::variants($url, true)],
             fn (string $variant): bool => $variant !== $url && filter_var($variant, FILTER_VALIDATE_URL) !== false)));
 
         return array_slice($variants, 0, max(1, $limit));
+    }
+
+    /** @return list<string> the address with its measured size rewritten large, in two sizes a CDN commonly keeps */
+    private static function measuredVariants(string $url, ?int $width, ?int $height): array
+    {
+        if (! $width || $width < self::SMALLEST_SIZE_TOKEN) {
+            return [];
+        }
+        $parts = parse_url($url);
+        if (! is_array($parts) || empty($parts['host']) || empty($parts['path'])) {
+            return [];
+        }
+        parse_str((string) ($parts['query'] ?? ''), $query);
+        $height = $height && $height >= self::SMALLEST_SIZE_TOKEN ? $height : $width;
+        $w = preg_quote((string) $width, '#');
+        $h = preg_quote((string) $height, '#');
+        $variants = [];
+        foreach ([
+            ["#([-_]){$w}([-_x]){$h}(?=\.[a-z0-9]{3,4}$)#i", ['${1}1600${2}1600', '${1}1000${2}1000']],
+            ["#/{$w}/#", ['/1600/', '/1000/']],
+        ] as [$pattern, $replacements]) {
+            if (preg_match($pattern, $parts['path']) !== 1) {
+                continue;
+            }
+            foreach ($replacements as $replacement) {
+                $variants[] = self::build($parts, (string) preg_replace($pattern, $replacement, $parts['path']), $query);
+            }
+        }
+
+        return $variants;
     }
 
     /** @return list<string> */

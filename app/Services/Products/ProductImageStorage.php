@@ -3917,7 +3917,8 @@ class ProductImageStorage
         $known = array_fill_keys(array_map([ImageUrls::class, 'normalizeCandidateUrl'], $urls), true);
         $guesses = [];
         foreach ($thumbnails as $thumbnail) {
-            foreach (ImageRenditionProbe::largerRenditions((string) $thumbnail['url']) as $guess) {
+            foreach (ImageRenditionProbe::largerRenditions((string) $thumbnail['url'], 6,
+                (int) ($thumbnail['width'] ?? 0) ?: null, (int) ($thumbnail['height'] ?? 0) ?: null) as $guess) {
                 $key = ImageUrls::normalizeCandidateUrl($guess);
                 if (! isset($known[$key])) {
                     $known[$key] = true;

@@ -12,6 +12,18 @@ export const normalizeImageCandidate = (rawUrl, sourceUrl) => {
     }
 
     let normalized = url.toString();
+    // The page's own address (a thumbnail's "#" link resolves to it) is never a
+    // frame: live #204 spent three training rounds on one that "failed to load".
+    if (sourceUrl) {
+        try {
+            const page = new URL(sourceUrl);
+            if (url.origin + url.pathname + url.search === page.origin + page.pathname + page.search) {
+                return null;
+            }
+        } catch {
+            // An unparsable page address compares with nothing.
+        }
+    }
     // A hostname or a product name is not an asset role: Silicon contains
     // "icon", and Pixel is a real product family. Match bounded path tokens.
     const assetPath = url.pathname + url.search;
@@ -1493,11 +1505,33 @@ const renditionVariants = (rawUrl, unwrapProxies) => {
     }
     return variants;
 };
+// The frame's measured size, named in its address, is the surest guess of all:
+// smarty.cz "-600-600.webp", ispace.cz "/photos/320/", elektro-unima.cz
+// "-300-300.jpg" (live #203) - rewritten to the two sizes a CDN commonly keeps.
+const measuredRenditionVariants = (rawUrl, dims) => {
+    const width = Number(dims?.width || 0);
+    const height = Number(dims?.height || 0) || width;
+    let url;
+    try {
+        url = new URL(rawUrl);
+    } catch {
+        return [];
+    }
+    if (!width || width < SMALLEST_SIZE_TOKEN) return [];
+    const escape = (n) => String(n).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const params = [...url.searchParams];
+    const out = [];
+    const file = new RegExp(`([-_])${escape(width)}([-_x])${escape(height)}(?=\\.[a-z0-9]{3,4}$)`, 'i');
+    if (file.test(url.pathname)) for (const size of [1600, 1000]) out.push(buildRenditionUrl(url, url.pathname.replace(file, `$1${size}$2${size}`), params));
+    const directory = new RegExp(`/${escape(width)}/`);
+    if (directory.test(url.pathname)) for (const size of [1600, 1000]) out.push(buildRenditionUrl(url, url.pathname.replace(directory, `/${size}/`), params));
+    return out;
+};
 /** Addresses of the same frame that may be larger, best guess first; never the address itself. */
-export const largerRenditions = (rawUrl, limit = 4) => {
+export const largerRenditions = (rawUrl, limit = 6, dims = null) => {
     const seen = new Set([rawUrl]);
     const guesses = [];
-    for (const variant of renditionVariants(rawUrl, true)) {
+    for (const variant of [...measuredRenditionVariants(rawUrl, dims), ...renditionVariants(rawUrl, true)]) {
         if (seen.has(variant)) continue;
         try {
             new URL(variant);
