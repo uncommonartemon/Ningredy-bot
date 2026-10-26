@@ -10,7 +10,7 @@ const exec = promisify(execFile);
 const script = fileURLToPath(new URL('../../scripts/extract-product-gallery.mjs', import.meta.url));
 const preload = new URL('./fixtures/gallery-runner-preload.mjs', import.meta.url).href;
 
-for (const [mode, count] of [['shadow-consent', 3], ['blocked-overlay', 3], ['slider', 3], ['slider', 7], ['frame', 7], ['static', 7], ['static-digest', 4], ['static-digest', 7], ['static-sized-rendition', 5], ['finite', 7], ['growing', 7], ['broken', 7], ['nested', 3], ['observe', 3], ['opened-frame', 7], ['relative-frame', 7], ['tab-title', 7], ['tab-inline-title', 7], ['tab-known-sku', 7], ['tab-other-sku', 7]]) test(`actual CLI: ${mode}, ${count} frames`, { timeout: 90000 }, async () => {
+for (const [mode, count] of [['shadow-consent', 3], ['blocked-overlay', 3], ['slider', 3], ['slider', 7], ['frame', 7], ['static', 7], ['static-digest', 4], ['static-digest', 7], ['static-sized-rendition', 5], ['hidden-targets', 3], ['finite', 7], ['growing', 7], ['broken', 7], ['nested', 3], ['observe', 3], ['opened-frame', 7], ['relative-frame', 7], ['tab-title', 7], ['tab-inline-title', 7], ['tab-known-sku', 7], ['tab-other-sku', 7]]) test(`actual CLI: ${mode}, ${count} frames`, { timeout: 90000 }, async () => {
     const work = await mkdtemp(join(tmpdir(), 'ningredy-gallery-e2e-'));
     const frame_selectors = mode === 'nested' ? ['#viewer', '#inner'] : ['frame', 'opened-frame', 'relative-frame'].includes(mode) ? ['#viewer'] : [];
     const readOnly = ['static', 'static-digest', 'static-sized-rendition', 'relative-frame'].includes(mode);
@@ -47,6 +47,15 @@ for (const [mode, count] of [['shadow-consent', 3], ['blocked-overlay', 3], ['sl
         if (mode.startsWith('tab-')) {
             assert.equal(result.diagnostics.identity_unconfirmed, ['tab-title', 'tab-inline-title'].includes(mode));
             assert.ok(!result.action_trace.some((item) => item.navigated_away === true));
+        }
+        if (mode === 'hidden-targets') {
+            // The zoom control exists but is hidden (#181): the round says so in plain words
+            // instead of leaving a bare click timeout for the next round to repeat.
+            assert.deepEqual(result.diagnostics.hidden_click_targets, ['#zoom'], JSON.stringify(result.action_trace));
+            assert.match(String(result.diagnostics.collection_capability_feedback), /hidden/);
+            assert.equal(result.diagnostics.action_plan.complete, false);
+            assert.ok(!result.action_trace.some((item) => item.clicked === true));
+            return;
         }
         if (mode === 'static-sized-rendition') {
             // Every frame was under the floor at the address the page gave (#187). The recipe

@@ -24,6 +24,9 @@ const counterLabel = (index) => (counterLabels[mode] || '').replace('{index}', S
 const staticMedia = `<div id="media" ${Object.hasOwn(counterLabels, mode) ? `class="product-gallery" data-image-count="${count}"` : ''}>${Array.from({ length: count }, (_, i) => `<img alt="${counterLabel(i)}" src="https://8.8.8.8/1600x1200/${i}.jpg">`).join('')}
     ${['static-rendition', 'static-small-failed-original'].includes(mode) ? '<img src="https://8.8.8.8/1600x1200/0.jpg?width=900">' : ''}
     ${mode === 'static-duplicate-thumbnails' ? [200, 300].map(width => `<ul class="thumbnail-slider">${Array.from({ length: count }, (_, i) => `<li><button><img src="https://8.8.8.8/1600x1200/${i}.jpg?width=${width}"></button></li>`).join('')}</ul>`).join('') : ''}</div>`;
+// Live #181: the gallery is mounted hidden - its frames are in the DOM, its zoom
+// control resolves, and no click on it can succeed until something reveals it.
+const hiddenMedia = `<div id="media" style="display:none">${Array.from({ length: count }, (_, i) => `<img src="https://8.8.8.8/1600x1200/${i}.jpg">`).join('')}<button id="zoom">Zoom</button></div>`;
 // Live #187: every gallery frame served under the size floor, the original one
 // address token away (VTEX "/ids/{id}-{w}-{h}/" against "/ids/{id}/").
 const sizedRenditionMedia = `<div id="media">${Array.from({ length: count }, (_, i) => `<img src="https://8.8.8.8/ids/${100 + i}-400-400/frame.jpg">`).join('')}</div>`;
@@ -70,7 +73,7 @@ const canvasMedia = `<div id="media"><canvas width="800" height="600"></canvas>
     mixedmedia_fullScreenButton.onclick=reveal;addToCart.onclick=reveal;</script>`;
 const product = `<html><head>${consent}<title>Fixture laptop</title><link rel="canonical" href="https://8.8.8.8/product">
     <script type="application/ld+json">{"@type":"Product","name":"Fixture laptop","sku":"TEST123"}</script></head>
-    <body>${['frame', 'nested', 'relative-frame'].includes(mode) ? `<iframe id="viewer" src="https://8.8.8.8/${mode === 'nested' ? 'outer' : 'viewer'}" style="width:1300px;height:950px"></iframe>` : mode === 'canvas-fullscreen' ? canvasMedia : mode === 'opened-frame' ? openedFrame : mode === 'lazy-scroll-native' ? nativeLazyMedia : mode === 'lazy-scroll-zoom' ? zoomLazyMedia : mode === 'lazy-scroll-growing' ? growingLazyMedia : mode.startsWith('lazy-scroll') ? lazyMedia : mode === 'static-digest' ? digestMedia : mode === 'static-sized-rendition' ? sizedRenditionMedia : mode.startsWith('static') ? staticMedia : media}</body></html>`;
+    <body>${['frame', 'nested', 'relative-frame'].includes(mode) ? `<iframe id="viewer" src="https://8.8.8.8/${mode === 'nested' ? 'outer' : 'viewer'}" style="width:1300px;height:950px"></iframe>` : mode === 'canvas-fullscreen' ? canvasMedia : mode === 'opened-frame' ? openedFrame : mode === 'lazy-scroll-native' ? nativeLazyMedia : mode === 'lazy-scroll-zoom' ? zoomLazyMedia : mode === 'lazy-scroll-growing' ? growingLazyMedia : mode.startsWith('lazy-scroll') ? lazyMedia : mode === 'static-digest' ? digestMedia : mode === 'static-sized-rendition' ? sizedRenditionMedia : mode === 'hidden-targets' ? hiddenMedia : mode.startsWith('static') ? staticMedia : media}</body></html>`;
 const launch = chromium.launch.bind(chromium);
 const tabPage = (gallery) => `<html><head><title>Fixture laptop${gallery ? ' - slim sharp stylish' : ''}</title>
     <script type="application/ld+json">${JSON.stringify({ '@type': 'Product',

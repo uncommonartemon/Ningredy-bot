@@ -57,6 +57,27 @@ class TelegramDraftInteractionsTest extends TestCase
         Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => ['message_id' => 700]])]);
     }
 
+    public function test_a_message_during_a_button_confirmation_is_the_next_request_and_the_buttons_keep_waiting(): void
+    {
+        // Live #153-#155: three products sent while a card waited for its button
+        // were answered with "confirm by button" and never searched.
+        $draft = $this->draft();
+        $update = TelegramUpdate::create(['update_id' => ++$this->sequence, 'telegram_user_id' => '123',
+            'chat_id' => '900', 'payload' => [], 'status' => 'processing']);
+        $tool = new ReviewProductDraft($update, app(ProductDraftWorkflow::class));
+        $tool->handle(new \Laravel\Ai\Tools\Request(['draft_id' => $draft->id, 'action' => 'reject']));
+        $this->assertSame('confirmation', app(DraftTelegramInteractionState::class)->get('900', '123')['kind'] ?? null);
+
+        $this->message('HP Victus 15-fb2000 Mica Silver');
+
+        Queue::assertPushed(ProcessTelegramMessage::class);
+        $this->assertSame('confirmation', app(DraftTelegramInteractionState::class)->get('900', '123')['kind'] ?? null,
+            'The confirmation still waits on its buttons.');
+        Http::assertNotSent(fn (Request $request): bool => str_contains($request->url(), 'sendMessage')
+            && str_contains((string) ($request['text'] ?? ''), 'подтвердите кнопкой'));
+        $this->assertSame('pending_review', $draft->fresh()->status);
+    }
+
     public function test_text_tool_uses_the_same_rejection_confirmation_as_buttons(): void
     {
         $draft = $this->draft();

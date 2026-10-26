@@ -12,9 +12,13 @@ use App\Jobs\TrainProductGalleryRecipe;
 use App\Jobs\TranscribeTelegramPhoto;
 use App\Jobs\TranscribeTelegramVoice;
 use App\Models\TelegramUpdate;
+use App\Services\ProductSearch\Recovery\RequestGuardian;
+use App\Services\Telegram\TelegramClient;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Str;
+use Throwable;
 
 /**
  * The bot is stopped by closing its console window, which kills every worker
@@ -83,13 +87,55 @@ class ClearStaleBotWork extends Command
 
         // Only updates that never reached a terminal state: a finished request
         // has processed_at set and must keep its real status for the audit log.
-        $cancelled = TelegramUpdate::query()
-            ->whereNull('processed_at')
-            ->update(['status' => 'cancelled', 'processed_at' => now()]);
+        // The operator hears about each one: on 2026-10-25 three searches ended
+        // this way (#139, #176, #177) and the chat simply went quiet - a request
+        // that vanished looks like a bot that found nothing. What the search had
+        // saved is shown as the card with its "continue" button; a request that
+        // never reached a draft is named, so it can be sent again.
+        $shown = 0;
+        $cancelled = 0;
+        foreach (TelegramUpdate::query()->whereNull('processed_at')->orderBy('id')->get() as $update) {
+            if ($this->isOperatorRequest($update) && $this->tellOperator($update)) {
+                $shown++;
 
-        $this->info("Очистка перед стартом: снято задач из очереди — {$jobs}, отменено незавершённых запросов — {$cancelled}.");
+                continue;
+            }
+            $update->update(['status' => 'cancelled', 'processed_at' => now()]);
+            $cancelled++;
+        }
+
+        $this->info("Очистка перед стартом: снято задач из очереди — {$jobs}, показано прерванных запросов — {$shown}, отменено — {$cancelled}.");
 
         return self::SUCCESS;
+    }
+
+    /** A product request from the operator - not a button press or a rejected sender. */
+    private function isOperatorRequest(TelegramUpdate $update): bool
+    {
+        return filled($update->chat_id) && $update->status !== 'rejected'
+            && ! is_array(data_get($update->payload, 'callback_query'))
+            && (filled($update->text) || is_array(data_get($update->payload, 'message.voice'))
+                || is_array(data_get($update->payload, 'message.photo')));
+    }
+
+    /**
+     * The request's draft as the found card, or a line naming the lost request.
+     * Returns true when the guardian completed the request with its card.
+     */
+    private function tellOperator(TelegramUpdate $update): bool
+    {
+        try {
+            if (app(RequestGuardian::class)->showFound($update, '🔄 Бот был перезапущен во время поиска, поиск прерван.')) {
+                return true;
+            }
+            $request = filled($update->text) ? '«'.Str::limit(trim((string) $update->text), 80).'»' : 'голосовой или фото-запрос';
+            app(TelegramClient::class)->sendMessage((string) $update->chat_id,
+                "🔄 Бот был перезапущен; запрос {$request} (#{$update->id}) прерван до того, как появился черновик. Отправьте его ещё раз.");
+        } catch (Throwable $exception) {
+            report($exception);
+        }
+
+        return false;
     }
 
     /**
