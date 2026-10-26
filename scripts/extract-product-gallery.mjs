@@ -402,6 +402,20 @@ let browserStage = 'page_created';
 const stageTimings = {};
 let stageStartedAt = Date.now();
 const stageTimingsSoFar = () => ({ ...stageTimings, [browserStage]: (stageTimings[browserStage] || 0) + (Date.now() - stageStartedAt) });
+// Click targets that resolved in the DOM but stayed hidden, and the controls
+// that name a gallery: computed the same way for the finished result and for
+// the one the deadline cuts short (live #193: three rounds on ASUS ended at
+// the deadline with the hidden zoom as the only evidence, and the trainer
+// replayed the plan each time because a deadline reads as a chance failure).
+const hiddenClickTargetsOf = (trace) => [...new Set(trace
+    .filter((item) => item.clicked === false && /not visible/i.test(String(item.interaction_error || '')))
+    .map((item) => item.selector).filter(Boolean))];
+const galleryControlsOf = (observation) => [...new Map([...(Array.isArray(observation?.observed_controls) ? observation.observed_controls : []),
+    ...(Array.isArray(observation?.action_candidates) ? observation.action_candidates : [])]
+    .filter((control) => control?.selector && controlNamesGallery(`${control.text || ''} ${control.aria_label || ''}`))
+    .map((control) => [control.selector, { selector: control.selector, text: control.text || control.aria_label || '' }])).values()].slice(0, 6);
+const hiddenTargetFeedback = (hidden, controls, framesCollected, networkNote) => (hidden.length === 0 ? null
+    : `Every click target of the plan resolved in the DOM but was hidden (${hidden.join(', ')}): the gallery is not open on this page as loaded, and repeating these clicks cannot open it. ${framesCollected} frame(s) were still collected from its DOM${networkNote}. The next plan needs the control that reveals the gallery before these clicks - or no clicks at all when the DOM already lists every frame.${controls.length ? ` Controls on this page that name photos or a gallery: ${controls.map((control) => `${control.selector} ("${control.text}")`).join(', ')}.` : ''}`);
 const checkpoint = (stage = browserStage) => {
     if (stage !== browserStage) {
         stageTimings[browserStage] = (stageTimings[browserStage] || 0) + (Date.now() - stageStartedAt);
@@ -525,6 +539,10 @@ const emitCrashResult = (error, failureKind = 'browser_crash') => {
             dom_candidates: gathered.length,
             network_candidates: networkImages.length,
             action_plan: recipeActionPlanStatus({ actions: recipeActions, actionTrace }),
+            hidden_click_targets: hiddenClickTargetsOf(actionTrace),
+            gallery_controls: galleryControlsOf(scout),
+            collection_capability_feedback: actionTrace.some((item) => item.clicked === true) ? null
+                : hiddenTargetFeedback(hiddenClickTargetsOf(actionTrace), galleryControlsOf(scout), partialImages.length, ''),
         },
     }));
 
@@ -2631,14 +2649,11 @@ await closeWithin(() => sharedBrowser ? context.close() : browser.close());
 // button hidden; two rounds clicked them until the deadline). Named here so the
 // next round starts from the control that reveals the gallery - or from no
 // clicks at all, when the hidden DOM already lists the frames.
-const hiddenClickTargets = [...new Set(actionTrace
-    .filter((item) => item.clicked === false && /not visible/i.test(String(item.interaction_error || '')))
-    .map((item) => item.selector).filter(Boolean))];
+const hiddenClickTargets = hiddenClickTargetsOf(actionTrace);
 const nothingClicked = !actionTrace.some((item) => item.clicked === true);
 // Controls the scout saw that name photos or a gallery: the likeliest opener of
 // a hidden one (ASUS keeps its gallery behind a "Photos" tab).
-const galleryControls = (Array.isArray(scout?.action_candidates) ? scout.action_candidates : [])
-    .filter((control) => controlNamesGallery(control?.text)).slice(0, 6);
+const galleryControls = galleryControlsOf(scout);
 
 if (!crashResultEmitted) process.stdout.write(JSON.stringify({
     images,
@@ -2668,7 +2683,8 @@ if (!crashResultEmitted) process.stdout.write(JSON.stringify({
         // The hidden-target finding comes first: on live #192 (ASUS) the generic
         // "DOM-bound assets only" text hid it, and read like a canvas viewer.
         collection_capability_feedback: hiddenClickTargets.length > 0 && nothingClicked
-            ? `Every click target of the plan resolved in the DOM but was hidden (${hiddenClickTargets.join(', ')}): the gallery is not open on this page as loaded, and repeating these clicks cannot open it. ${images.length} frame(s) were still collected from its DOM${strictRecipe && domImages.length === 0 && requestedImages.length > 0 ? ` (${requestedImages.length} network image candidates were observed, none with DOM gallery provenance)` : ''}. The next plan needs the control that reveals the gallery before these clicks - or no clicks at all when the DOM already lists every frame.${galleryControls.length ? ` Controls on this page that name photos or a gallery: ${galleryControls.map((control) => `${control.selector} ("${control.text}")`).join(', ')}.` : ''}`
+            ? hiddenTargetFeedback(hiddenClickTargets, galleryControls, images.length,
+                strictRecipe && domImages.length === 0 && requestedImages.length > 0 ? ` (${requestedImages.length} network image candidates were observed, none with DOM gallery provenance)` : '')
             : (strictRecipe && domImages.length === 0 && requestedImages.length > 0
                 ? `Strict recipe accepts DOM-bound image assets only. ${requestedImages.length} network candidates were observed, but none have DOM gallery provenance. A canvas/WebGL viewer cannot yield images through this DOM-only recipe. Inspect an alternative image-backed viewer or another exact product source; repeating canvas clicks does not remove this provenance restriction.`
                 : null),

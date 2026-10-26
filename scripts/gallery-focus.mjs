@@ -274,10 +274,15 @@ export const captureGalleryScoutInPage = ({ excludedContextPatternSource, focusS
                 within_observation: withinObservation(element),
                 contains_image: containsImage,
                 rect: rectFor(element),
+                // A control that names the gallery outranks one that merely says
+                // "more" or "next": live #193 (ASUS) had forty "Learn more" buttons
+                // scoring the same as the "Photos" tab that reveals the gallery, and
+                // document order kept the tab out of the list the agent reads.
                 relevance: (withinMedia ? 4 : 0)
                     + (containsImage ? 2 : 0)
                     + (inViewport(element) ? 1 : 0)
-                    + (/\b(gallery|media|image|photo|thumbnail|carousel|slider|zoom|next|more)\b/i.test(signal) ? 5 : 0),
+                    + (/\b(gallery|galer\w*|photos?|images?|pictures?|zoom|360|slideshow)\b|фото|галере|изображен/i.test(signal) ? 8
+                        : (/\b(media|thumbnail|carousel|slider|next|more)\b/i.test(signal) ? 5 : 0)),
             };
         });
     const actionCandidates = scopeFilter(actionCandidateObjects, (candidate) => candidate.within_observation)

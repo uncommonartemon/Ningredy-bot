@@ -35,7 +35,9 @@ class SearchProgressAgent implements Agent, HasStructuredOutput
               check of held frames. "Time and money remain" is never by itself a reason to continue.
             leave_current_page: the page keeps producing the same frames, or its second round in a row collected
               nothing new, or it has accepted no photo after two rounds; the search moves on to its next source.
-              Photos already found stay.
+              Photos already found stay. A page selling another configuration of the same model is not by
+              itself a reason to leave: whether its photos apply is the applicability verdict's question, not
+              yours (live #193: a Ponder Blue shop was left for its SKU while its gallery was being collected).
             skip_site: the whole site is a dead end for this product - it refused access (http_403/404/406, an
               access gate, timeouts), its downloads were only thumbnails (rejections too_small and nothing
               accepted), or its pages keep returning the same frames or nothing usable. No more of its pages are
