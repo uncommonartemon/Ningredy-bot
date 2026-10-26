@@ -88,6 +88,36 @@ test('a shared class across three tabs does not collapse them into one indisting
     }
 });
 
+test('a tab that names photos is observed first, however far down the page it sits', async (t) => {
+    const browser = await launch();
+    if (!browser) {
+        t.skip('No Chromium available on this machine.');
+        return;
+    }
+
+    try {
+        const page = await browser.newPage();
+        // Live #192 (ASUS): the "Photos" tab that reveals the gallery came after
+        // more than twenty other controls and fell off the twenty-control list.
+        await page.setContent(`
+            ${Array.from({ length: 30 }, (_, i) => `<button id="nav-${i}">Menu ${i}</button>`).join('')}
+            <button id="specs" role="tab">Tech Specs</button>
+            <button id="photos" role="tab">Photos</button>
+            <div role="button" id="zoom" aria-label="Zoom in Zenbook" style="width:24px;height:24px"></div>
+        `);
+
+        const controls = await page.evaluate(captureObservedControlsInPage);
+
+        assert.equal(controls.length, 20);
+        assert.equal(controls[0].selector, '#photos');
+        assert.equal(controls[1].selector, '#zoom', 'an icon control is named by its aria-label');
+        assert.equal(controls[2].selector, '#specs', 'tabs come before plain buttons');
+        assert.equal(controls[3].selector, '#nav-0', 'the rest keep DOM order');
+    } finally {
+        await browser.close();
+    }
+});
+
 test('clicking one of several same-class tabs opens that exact tab, not always the first', async (t) => {
     const browser = await launch();
     if (!browser) {
