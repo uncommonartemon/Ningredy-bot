@@ -149,11 +149,15 @@ class TelegramWebhookController extends Controller
         }
 
         $inputState = $chatId !== null ? app(DraftTelegramInteractionState::class)->get((string) $chatId, (string) $telegramUserId) : null;
+        // A pending button confirmation cannot be answered with a message, so a
+        // message during one is what it looks like: the operator's next request
+        // (live #153-#155: three products sent while a card waited for its
+        // button were answered with "confirm by button" and lost). The
+        // confirmation stays on its buttons until it expires.
         if (($hasVoice || $hasPhoto || $hasImageDocument) && $chatId !== null
-            && (in_array($inputState['kind'] ?? '', ['source_hint', 'new_search', 'manual_fields', 'confirmation', 'processing'], true)
+            && (in_array($inputState['kind'] ?? '', ['source_hint', 'new_search', 'manual_fields', 'processing'], true)
                 || ($hasVoice && ($inputState['kind'] ?? '') === 'manual_photos'))) {
             $this->telegram->sendMessage((string) $chatId, match ($inputState['kind']) {
-                'confirmation' => 'Сейчас ожидаю подтверждение кнопкой под последним сообщением. /cancel — отменить действие.',
                 'processing' => 'Карточка сейчас обрабатывается. Дождитесь результата или /cancel.',
                 'manual_photos' => 'Сейчас ожидаю фото для выбранной карточки. Отправьте фото или альбом либо /cancel.',
                 default => 'Сейчас ожидаю текст для выбранного черновика. Напишите его текстом или нажмите «Отменить ввод».',
@@ -1766,15 +1770,33 @@ class TelegramWebhookController extends Controller
      * reach ServerAssistantAgent without explicit confirmation. Returns false when nothing is
      * pending, so the caller falls through to the normal AI dispatch.
      */
+    /** Up to two words and no digit: a reply to a question, not a product. */
+    private function readsAsShortReply(string $text): bool
+    {
+        $text = trim($text);
+
+        return $text !== '' && preg_match('/\d/u', $text) !== 1
+            && count(preg_split('/\s+/u', $text, -1, PREG_SPLIT_NO_EMPTY) ?: []) <= 2;
+    }
+
     private function handlePendingDraftInput(string $text, string $chatId, TelegramUpdate $update): bool
     {
         $states = app(DraftTelegramInteractionState::class);
         $state = $states->get($chatId, (string) $update->telegram_user_id);
-        if (in_array($state['kind'] ?? '', ['confirmation', 'processing'], true)) {
-            $this->telegram->sendMessage($chatId, ($state['kind'] === 'processing'
-                ? 'Карточка сейчас обрабатывается. Дождитесь результата или /cancel.'
-                : 'Проверьте показанные изменения и подтвердите кнопкой. /cancel — отменить действие.')
-                .' Текст не отправлен в новый поиск.');
+        // A button confirmation is not answered by text: a message during one is
+        // the operator's next request and goes its normal way (live #153-#155),
+        // while the confirmation keeps waiting on its buttons. The exception is
+        // a short reply without a model number - "да", "ok", "подтверждаю" - which
+        // is an attempt to answer the button, not a product: it gets the reminder
+        // and never a paid search.
+        if (($state['kind'] ?? '') === 'confirmation' && $this->readsAsShortReply($text)) {
+            $this->telegram->sendMessage($chatId, 'Подтвердить или отменить можно только кнопкой под сообщением. /cancel — отменить действие. Текст не отправлен в новый поиск.');
+            $this->markCommandProcessed($update);
+
+            return true;
+        }
+        if (($state['kind'] ?? '') === 'processing') {
+            $this->telegram->sendMessage($chatId, 'Карточка сейчас обрабатывается. Дождитесь результата или /cancel. Текст не отправлен в новый поиск.');
             $this->markCommandProcessed($update);
 
             return true;

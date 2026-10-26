@@ -152,6 +152,7 @@ class ProductGalleryRecipeTrainer
             'observed_gallery_count', 'distinct_dom_assets', 'validated_candidates',
             'strict_recipe', 'partial', 'recipe_action_outcome',
             'network_candidates', 'collection_capability_feedback',
+            'hidden_click_targets', 'rendition_probe', 'stage_timings_ms',
         ]));
         $diagnostics['rejected_candidates'] = array_slice($result['diagnostics']['rejected_candidates'] ?? [], 0, 5);
 

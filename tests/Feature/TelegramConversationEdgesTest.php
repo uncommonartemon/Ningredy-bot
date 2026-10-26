@@ -87,18 +87,22 @@ class TelegramConversationEdgesTest extends TestCase
         Http::assertNotSent(fn (Request $request): bool => str_contains((string) ($request['text'] ?? ''), 'Ваш текст'));
     }
 
-    public function test_voice_while_a_button_or_photos_are_awaited_gets_the_matching_hint(): void
+    public function test_voice_while_photos_are_awaited_gets_the_hint_and_a_button_confirmation_lets_it_through(): void
     {
         $draft = $this->draft();
         $this->press("draft:restage:{$draft->id}");
         $this->update(['voice' => ['file_id' => 'voice-1', 'duration' => 3]]);
-        $this->assertSentText('ожидаю подтверждение кнопкой');
+        // A button confirmation is not answered by voice: the voice is the next
+        // request, and the confirmation keeps waiting on its buttons (live #153-#155).
+        Http::assertNotSent(fn (Request $request): bool => str_contains((string) ($request['text'] ?? ''), 'ожидаю подтверждение кнопкой'));
+        $this->assertSame('confirmation', app(DraftTelegramInteractionState::class)->get('900', '123')['kind'] ?? null);
+        Queue::assertPushed(TranscribeTelegramVoice::class, 1);
 
         app(DraftTelegramInteractionState::class)->remember('900', '123', $draft, 'manual_photos');
         $this->update(['voice' => ['file_id' => 'voice-2', 'duration' => 3]]);
         $this->assertSentText('ожидаю фото для выбранной карточки');
 
-        Queue::assertNotPushed(TranscribeTelegramVoice::class);
+        Queue::assertPushed(TranscribeTelegramVoice::class, 1);
     }
 
     public function test_files_and_stickers_are_answered_but_service_messages_are_not(): void

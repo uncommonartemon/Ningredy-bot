@@ -2625,6 +2625,16 @@ await closeWithin(() => sharedBrowser ? context.close() : browser.close());
 //
 // The callback runs after stdout is flushed, which matters because stdout is a
 // pipe here and a bare exit can truncate the last write.
+// A click target that resolved in the DOM but stayed hidden is a gallery that is
+// not open on the page as loaded (live #181: ASUS mounts its thumbnails and zoom
+// button hidden; two rounds clicked them until the deadline). Named here so the
+// next round starts from the control that reveals the gallery - or from no
+// clicks at all, when the hidden DOM already lists the frames.
+const hiddenClickTargets = [...new Set(actionTrace
+    .filter((item) => item.clicked === false && /not visible/i.test(String(item.interaction_error || '')))
+    .map((item) => item.selector).filter(Boolean))];
+const nothingClicked = !actionTrace.some((item) => item.clicked === true);
+
 if (!crashResultEmitted) process.stdout.write(JSON.stringify({
     images,
     transferred_images: transferredImages,
@@ -2652,7 +2662,10 @@ if (!crashResultEmitted) process.stdout.write(JSON.stringify({
         distinct_dom_assets: new Set(domImages.map(imageAssetKey)).size,
         collection_capability_feedback: strictRecipe && domImages.length === 0 && requestedImages.length > 0
             ? `Strict recipe accepts DOM-bound image assets only. ${requestedImages.length} network candidates were observed, but none have DOM gallery provenance. A canvas/WebGL viewer cannot yield images through this DOM-only recipe. Inspect an alternative image-backed viewer or another exact product source; repeating canvas clicks does not remove this provenance restriction.`
-            : null,
+            : (hiddenClickTargets.length > 0 && nothingClicked
+                ? `Every click target of the plan resolved in the DOM but was hidden (${hiddenClickTargets.join(', ')}): the gallery is not open on this page as loaded, and repeating these clicks cannot open it. ${images.length} frame(s) were still collected from its DOM. The next plan needs the control that reveals the gallery before these clicks - or no clicks at all when the DOM already lists every frame.`
+                : null),
+        hidden_click_targets: hiddenClickTargets,
         collection_errors: [...new Set(collectionErrors)].slice(0, 10),
         distinct_candidate_assets: new Set(candidates.map(imageAssetKey)).size,
         probed_candidates: probes.length,
@@ -2681,6 +2694,9 @@ if (!crashResultEmitted) process.stdout.write(JSON.stringify({
         effective_minimum_width: minimumWidth,
         effective_minimum_height: minimumHeight,
         stopped_early: outOfTime(),
+        // Where the round's time went, on every run - not only the ones the
+        // deadline ended: a heavy page shows its cost before it costs a round.
+        stage_timings_ms: stageTimingsSoFar(),
         // True when frames were collected from a page whose identity could not be
         // compared with the product page - unknown, not wrong. Whatever accepts
         // photographs has to weigh this rather than assume.
