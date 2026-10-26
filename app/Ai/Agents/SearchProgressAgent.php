@@ -39,7 +39,9 @@ class SearchProgressAgent implements Agent, HasStructuredOutput
               itself a reason to leave: whether its photos apply is the applicability verdict's question, not
               yours (live #193: a Ponder Blue shop was left for its SKU while its gallery was being collected).
             skip_site: the whole site is a dead end for this product - it refused access (http_403/404/406, an
-              access gate, timeouts), its downloads were only thumbnails (rejections too_small and nothing
+              access gate; a quick_check_timeout is not a refusal: the cheap fetch gave up on a slow page and
+              the browser opens it afterwards - judge the site by the browser's result), its downloads were
+              only thumbnails (rejections too_small and nothing
               accepted), or its pages keep returning the same frames or nothing usable. No more of its pages are
               opened in this search and its page in work ends. Put the site's host from the journal in site; null
               means the site of the current page. When only this page is the problem, leave_current_page.
@@ -48,8 +50,10 @@ class SearchProgressAgent implements Agent, HasStructuredOutput
               and the last two sources added nothing; when two fallback_discovery rounds in a row came back
               empty (empty_discovery_rounds_in_a_row); or when every avenue still open is of a kind that already
               failed here (the same shops with thumbnails, refusals, the same frames) - a card with few photos
-              now is worth more to the operator than the same card fifteen minutes later. With zero accepted
-              photos keep looking while a source of a new kind remains; the time and money limits end that.
+              now is worth more to the operator than the same card fifteen minutes later. With fewer accepted
+              photos than minimum_photos_for_card keep looking while a source of a new kind remains: while
+              fallback_discovery_rounds is 0 the search has not yet looked for shops beyond the research's own
+              list, and deliver_now is refused by the server then; the time and money limits end that.
             Judge like a person who pays for every minute: the operator is waiting for a card with photos, and
             every round and page costs money. Judge by results in the journal: being busy is not progress, only
             photos_accepted and photos_saved count, and minutes_since_last_accepted_photo says how long the search

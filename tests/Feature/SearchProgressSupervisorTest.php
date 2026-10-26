@@ -96,9 +96,31 @@ class SearchProgressSupervisorTest extends TestCase
         $this->assertCount(1, $prompts);
     }
 
+    public function test_deliver_now_with_fewer_photos_than_the_minimum_waits_for_the_first_discovery_round(): void
+    {
+        // Live #203: "no source gave a photo, assemble the card" at minute 16, before
+        // the search had looked for a single shop beyond the research's list - and the
+        // card had no photo while three shops with them were one discovery round away.
+        $draft = $this->draft(minutesAgo: 16);
+        SearchProgressAgent::fake(fn (): array => ['decision' => 'deliver_now', 'reason' => 'Ни один источник не дал фото.'])
+            ->preventStrayPrompts();
+        $supervisor = app(SearchProgressSupervisor::class);
+
+        $verdict = $this->review($draft);
+
+        $this->assertSame('continue', $verdict['decision']);
+        $this->assertStringContainsString('Рано сворачивать', $verdict['reason']);
+        $this->assertNull($supervisor->deliverNowReason($draft->telegram_update_id));
+        // Inside a discovery round, or once one has run, the watcher's word stands.
+        $this->assertNull($supervisor->tooEarlyToEnd($draft->telegram_update_id, $draft, ['kind' => 'fallback_discovery']));
+        $this->fallbackRound($draft);
+        $this->assertNull($supervisor->tooEarlyToEnd($draft->telegram_update_id, $draft));
+    }
+
     public function test_deliver_now_stands_for_the_rest_of_the_request_through_automatic_cycles(): void
     {
         $draft = $this->draft(minutesAgo: 12);
+        $this->fallbackRound($draft);
         SearchProgressAgent::fake([['decision' => 'deliver_now', 'reason' => 'Семь фото уже есть; остальные магазины те же.']])
             ->preventStrayPrompts();
         $supervisor = app(SearchProgressSupervisor::class);
@@ -317,6 +339,14 @@ class SearchProgressSupervisorTest extends TestCase
         app(ProductSourceAttemptRecorder::class)->record(['telegram_update_id' => $draft->telegram_update_id,
             'product_draft_id' => $draft->id, 'product_url' => $page, 'actor' => 'ai', 'phase' => 'gallery_training',
             'action' => 'propose_recipe', 'status' => 'completed', 'decision' => 'execute_candidate', 'output' => ['images' => $images]]);
+    }
+
+    /** The search has looked for shops beyond its research list: a wrap-up is no longer premature. */
+    private function fallbackRound(ProductDraft $draft): void
+    {
+        ProductSourceAttempt::query()->create(['telegram_update_id' => $draft->telegram_update_id, 'product_draft_id' => $draft->id,
+            'domain' => 'shop.example', 'product_url' => self::PAGE, 'actor' => 'downloader', 'phase' => 'fallback_image_download',
+            'action' => 'download_discovered_candidates', 'status' => 'failed', 'decision' => 'continue_fallback_search']);
     }
 
     private function draft(int $minutesAgo): ProductDraft

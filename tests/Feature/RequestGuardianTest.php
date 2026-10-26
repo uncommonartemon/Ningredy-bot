@@ -105,6 +105,7 @@ class RequestGuardianTest extends TestCase
         // Operator, 2026-10-25 (#187): no messages or questions during a search - the
         // card is the answer. What the watcher would have asked is the decision itself.
         [$update] = $this->runningSearch(silentMinutes: 2, withPhotos: false);
+        $this->fallbackRound($update);
         $prompts = 0;
         SearchProgressAgent::fake(function () use (&$prompts): array {
             $prompts++;
@@ -130,6 +131,7 @@ class RequestGuardianTest extends TestCase
         // decision to stop is the agent's; the card is still the search's to assemble.
         [$update, $draft] = $this->runningSearch(silentMinutes: 1, withPhotos: false);
         $draft->update(['specifications_reconciled_source_url' => null]);
+        $this->fallbackRound($update);
         SearchProgressAgent::fake([
             ['decision' => 'deliver_now', 'reason' => 'Ни одного фото, оставшиеся магазины такие же.', 'operator_note' => null],
             ['decision' => 'show_now', 'reason' => 'Карточка так и не собралась за шесть минут.', 'operator_note' => null],
@@ -432,6 +434,29 @@ class RequestGuardianTest extends TestCase
     }
 
     /** @return array{TelegramUpdate, ?ProductDraft} */
+    public function test_a_watcher_note_with_no_photo_before_any_discovery_round_does_not_end_the_search(): void
+    {
+        // Live #203: ended at minute 16 with no photo while the shops that had them
+        // were one discovery round away. The note is recorded; the search goes on.
+        [$update] = $this->runningSearch(silentMinutes: 2, withPhotos: false);
+        SearchProgressAgent::fake(fn (): array => ['decision' => 'continue', 'reason' => 'Пока ничего.',
+            'operator_note' => 'Десять минут без фото; оператор, возможно, предпочтёт имеющийся результат.'])->preventStrayPrompts();
+
+        $this->sweep();
+
+        $this->assertNull(app(SearchProgressSupervisor::class)->deliverNowReason($update->id));
+        $this->assertDatabaseHas('product_source_attempts', ['telegram_update_id' => $update->id, 'phase' => 'guardian', 'action' => 'note_too_early']);
+        $this->assertDatabaseMissing('product_source_attempts', ['telegram_update_id' => $update->id, 'phase' => 'guardian', 'action' => 'wrap_up']);
+    }
+
+    /** The search has looked for shops beyond its research list: a wrap-up is no longer premature. */
+    private function fallbackRound(TelegramUpdate $update): void
+    {
+        ProductSourceAttempt::query()->create(['telegram_update_id' => $update->id, 'domain' => 'shop.example',
+            'product_url' => 'https://shop.example/legion', 'actor' => 'downloader', 'phase' => 'fallback_image_download',
+            'action' => 'download_discovered_candidates', 'status' => 'failed', 'decision' => 'continue_fallback_search']);
+    }
+
     private function runningSearch(int $silentMinutes, bool $withDraft = true, bool $withPhotos = true, int $startedMinutesAgo = 12): array
     {
         $update = $this->update('processing', $startedMinutesAgo, activityMinutesAgo: $silentMinutes);

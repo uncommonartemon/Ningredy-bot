@@ -9,6 +9,7 @@ use App\Models\ProductSourceAttempt;
 use App\Models\TelegramUpdate;
 use App\Services\Photos\ImageUrls;
 use App\Services\Products\ProductImageCandidateDiscovery;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Str;
@@ -62,7 +63,7 @@ final class SearchJournal
     {
         $start = TelegramUpdate::query()->find($runId)?->created_at;
         $steps = self::story($runId)->reject(fn (object $row): bool => in_array($row->phase, self::OWN_PHASES, true));
-        $accepted = $steps->where('phase', 'image_verification')
+        $accepted = $steps->where('phase', 'image_verification')->where('decision', '!=', 'current_pixels_pending')
             ->groupBy(fn (object $row): string => self::host($row->product_url))
             ->map(fn (Collection $rows): int => (int) $rows->sum(fn (object $row): int => (int) $row->accepted_images));
 
@@ -146,9 +147,13 @@ final class SearchJournal
     {
         $frames = self::frames($row);
         $failure = filled($row->failure_kind ?? null) ? ' · failure '.$row->failure_kind : '';
+        // The cheap fetch timing out is not the host refusing: the browser opens
+        // the page afterwards and its result is the one to judge (live #204).
+        $decision = $row->decision === 'http_error' && $row->action === 'check_source_access'
+            ? 'quick_check_timeout (browser still opens the page)' : $row->decision;
 
         return match (true) {
-            $frames === null => ($row->decision ?: $row->status).$failure,
+            $frames === null => ($decision ?: $row->status).$failure,
             $frames === [] => 'no frames'.$failure,
             // The tag is the training round's own frame-set hash, shortened.
             default => count($frames).' frames ['.substr(hash('sha256', json_encode($frames)), 0, 4).']',
@@ -199,7 +204,10 @@ final class SearchJournal
                 return ['host' => $host, 'site_name' => ProductImageCandidateDiscovery::siteName('https://'.$host),
                     'training_rounds' => $rows->where('action', 'propose_recipe')->count(),
                     'images_downloaded' => (int) $rows->sum(fn (ProductSourceAttempt $row): int => (int) data_get($row->output, 'downloaded_images', 0)),
-                    'photos_accepted' => (int) $rows->where('phase', 'image_verification')
+                    // Only a verdict on the pixels counts: a set accepted as gallery evidence
+                    // and still awaiting Vision is not a photo (live #200: six such frames
+                    // plus one accepted read as "7 photos", and the watcher ended the search).
+                    'photos_accepted' => (int) $rows->where('phase', 'image_verification')->where('decision', '!=', 'current_pixels_pending')
                         ->sum(fn (ProductSourceAttempt $row): int => (int) data_get($row->output, 'accepted_images', 0)),
                     'photos_saved' => (int) ($photosByHost[$host] ?? 0),
                     // Why the site's downloads were dropped: a site whose frames are all
@@ -261,12 +269,37 @@ final class SearchJournal
     }
 
     /** How long the search has been busy without Vision accepting a photo; null before the first. */
+    /** A verification row whose verdict is final: "current pixels pending" is a frame still being checked, not a photo (SQL would drop rows without a decision on a plain !=). */
+    private static function finalVerdict(Builder $query): void
+    {
+        $query->whereNull('decision')->orWhere('decision', '!=', 'current_pixels_pending');
+    }
+
     public static function minutesSinceLastAcceptedPhoto(int $runId): ?float
     {
         $accepted = ProductSourceAttempt::query()->where('telegram_update_id', $runId)
-            ->where('phase', 'image_verification')->where('output->accepted_images', '>', 0)->max('created_at');
+            ->where('phase', 'image_verification')->where(self::finalVerdict(...))
+            ->where('output->accepted_images', '>', 0)->max('created_at');
 
         return $accepted === null ? null : round(Carbon::parse($accepted)->diffInSeconds(now()) / 60, 1);
+    }
+
+    /** The most photos one site has had accepted by a verdict on the pixels; galleries of different sites do not add up. */
+    public static function acceptedPhotos(int $runId): int
+    {
+        return (int) ProductSourceAttempt::query()->where('telegram_update_id', $runId)
+            ->where('phase', 'image_verification')->where(self::finalVerdict(...))
+            ->get(['product_url', 'output'])
+            ->groupBy(fn (ProductSourceAttempt $row): string => self::host($row->product_url))
+            ->map(fn ($rows): int => (int) $rows->sum(fn (ProductSourceAttempt $row): int => (int) data_get($row->output, 'accepted_images', 0)))
+            ->max();
+    }
+
+    /** Rounds of finding new shops beyond the research's own sources that this search has run. */
+    public static function fallbackRounds(int $runId): int
+    {
+        return ProductSourceAttempt::query()->where('telegram_update_id', $runId)
+            ->where('action', 'download_discovered_candidates')->count();
     }
 
     /**
@@ -279,7 +312,9 @@ final class SearchJournal
     public static function refusingHosts(int $days = 14, int $limit = 30): array
     {
         $since = now()->subDays($days);
-        $refusals = ['http_401', 'http_403', 'http_429', 'http_444', 'http_error', 'access_gate', 'unconfirmed_access_gate', 'blocked'];
+        // http_error without a status is the quick check's own timeout (live #204:
+        // microsoft.com answers 200 in twelve seconds), not the host refusing.
+        $refusals = ['http_401', 'http_403', 'http_429', 'http_444', 'access_gate', 'unconfirmed_access_gate', 'blocked'];
         $worked = ProductSourceAttempt::query()->where('created_at', '>=', $since)
             ->where(fn ($query) => $query->where('decision', 'candidate_ranked')
                 ->orWhere(fn ($query) => $query->where('action', 'extract_page_images')->where('status', 'completed')))

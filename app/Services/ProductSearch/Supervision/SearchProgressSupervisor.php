@@ -209,6 +209,10 @@ final class SearchProgressSupervisor
             $verdict = [...$verdict, 'decision' => 'continue', 'site' => null,
                 'reason' => 'Поиск фото уже завершён, идёт сборка карточки. '.$verdict['reason']];
         }
+        if ($verdict['decision'] === 'deliver_now' && ($premature = $this->tooEarlyToEnd($updateId, $draft, $current)) !== null) {
+            $verdict = [...$verdict, 'decision' => 'continue', 'site' => null,
+                'reason' => 'Рано сворачивать: '.$premature.'. '.$verdict['reason']];
+        }
 
         $this->record($draft, $updateId, $current, 'completed', $verdict['decision'], $verdict['reason'], $verdict, $mark);
         if ($verdict['decision'] === 'skip_site') {
@@ -230,6 +234,26 @@ final class SearchProgressSupervisor
         }
 
         return $verdict;
+    }
+
+    /**
+     * Why ending the photo search now would be premature, or null when it may end.
+     * With fewer photos than the card's minimum, time and money left, and the
+     * fallback discovery of new shops not yet tried, "deliver now" is a card
+     * without photos for no reason: live #203 ended at minute 16 with none while
+     * the shops that had the photos were one discovery round away; #178, #179,
+     * #200 the same. The watcher judges; this is the one line it may not cross.
+     */
+    public function tooEarlyToEnd(int $updateId, ProductDraft $draft, array $current = []): ?string
+    {
+        $minimum = Category::query()->where('slug', trim((string) $draft->category))->first()?->minimumVerifiedImages() ?? 3;
+        $photos = max($draft->media()->count(), SearchJournal::acceptedPhotos($updateId));
+        if ($photos >= $minimum || ($current['kind'] ?? null) === 'fallback_discovery' || SearchJournal::fallbackRounds($updateId) > 0
+            || $this->costBudget->exceeded($updateId) || ! $this->timeBudget->canStart($updateId, 180)) {
+            return null;
+        }
+
+        return "фото {$photos} из {$minimum}, а резервный поиск новых магазинов ещё не запускался";
     }
 
     /** @return array{decision: string, reason: string, operator_note: ?string, site: ?string} */
@@ -341,6 +365,7 @@ final class SearchProgressSupervisor
             'photos_saved_for_card' => $draft->media()->count(),
             'minimum_photos_for_card' => Category::query()->where('slug', trim((string) $draft->category))->first()?->minimumVerifiedImages() ?? 3,
             'minutes_since_last_accepted_photo' => SearchJournal::minutesSinceLastAcceptedPhoto($updateId),
+            'fallback_discovery_rounds' => SearchJournal::fallbackRounds($updateId),
             'search_phase' => SearchJournal::phase($updateId),
             'frames_held_unchecked' => array_intersect_key($this->timeBudget->heldForCheck($updateId), array_flip(['sets', 'frames'])),
             'current_activity' => $current,
