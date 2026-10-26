@@ -31,7 +31,7 @@ class ResearchProductTextOnlyResultTest extends TestCase
 
     private const SOURCE = 'https://shop.example/lenovo-exact-123';
 
-    private function research(string $stopReason, bool $assembled, bool $moneyRemains = false, bool $moneyExhausted = false, int $photoCount = 0, string $verificationStatus = 'verified', bool $filesExist = true, string $sourceType = 'retailer', array $responseOverrides = [], ?callable $beforeStage = null): array
+    private function research(string $stopReason, bool $assembled, bool $moneyRemains = false, bool $moneyExhausted = false, int $photoCount = 0, string $verificationStatus = 'verified', bool $filesExist = true, string $sourceType = 'retailer', array $responseOverrides = [], ?callable $beforeStage = null, string $text = 'Find Lenovo Exact 123'): array
     {
         Storage::fake('public');
         Http::preventStrayRequests();
@@ -50,7 +50,7 @@ class ResearchProductTextOnlyResultTest extends TestCase
             ...$responseOverrides,
         ]])->preventStrayPrompts();
         $update = TelegramUpdate::query()->create(['update_id' => 1234567, 'telegram_user_id' => '123', 'chat_id' => '456',
-            'message_id' => 10, 'text' => 'Find Lenovo Exact 123', 'payload' => [], 'status' => 'processing']);
+            'message_id' => 10, 'text' => $text, 'payload' => [], 'status' => 'processing']);
         $resolver = $this->mock(ProductImageResolver::class);
         $resolver->shouldNotReceive('resolve');
         $storage = $this->mock(ProductImageStorage::class);
@@ -287,9 +287,13 @@ class ResearchProductTextOnlyResultTest extends TestCase
 
     public function test_an_operator_code_nobody_shows_is_warned_about_at_once_and_the_search_continues(): void
     {
+        // The operator's code stays in the card as their label fact; the tool
+        // refuses an answer that drops it or names the product by another page's code.
         $result = $this->research('cost_budget', assembled: true, responseOverrides: [
             'unconfirmed_operator_codes' => ['AWAC16251-9765BLU-PDE'],
-        ]);
+            'specifications' => [['key' => 'ram', 'name' => 'Memory', 'value' => '16 GB'],
+                ['key' => 'mpn', 'name' => 'Part number', 'value' => 'AWAC16251-9765BLU-PDE']],
+        ], text: 'Find Lenovo Exact 123 AWAC16251-9765BLU-PDE');
 
         $this->assertSame('found', $result['status']);
         $this->assertSame(1, ProductDraft::query()->count());

@@ -494,6 +494,30 @@ class TelegramAssistantReplyDeliveryTest extends TestCase
     }
 
     /** @return array{TelegramUpdate, ProductDraft} */
+    public function test_the_partial_result_names_the_operators_request_and_the_found_product_separately(): void
+    {
+        // Live #206: the operator asked for 14-fm0001nn by its label, the closest
+        // observed sibling was 14-fm0001na, and the caption read "Запрос: ... 14-fm0001na".
+        [$update, $draft] = $this->readyDraft(1);
+        $update->update(['text' => "HP OmniBook X Flip 14-fm0001nn\nP/N: B2VK4EA#BED"]);
+        $draft->update(['title' => 'HP OmniBook X Flip 14-fm0001na 14-inch Convertible Laptop',
+            'specifications_reconciled_source_url' => null, 'gallery_search_stop_reason' => 'specifications_unreconciled']);
+        $draft->media()->first()->update(['verification_status' => 'source_verified']);
+        Http::fake(fn () => Http::response(['ok' => true, 'result' => ['message_id' => 71]]));
+        $delivery = app(TelegramAssistantReplyDelivery::class);
+
+        $delivery->deliver($delivery->prepareDraft($update, $draft), app(TelegramClient::class));
+
+        Http::assertSent(function (Request $request): bool {
+            if (! str_ends_with($request->url(), '/sendPhoto')) {
+                return false;
+            }
+            $caption = (string) collect($request->data())->pluck('contents', 'name')->get('caption');
+
+            return str_contains($caption, "Запрос: HP OmniBook X Flip 14-fm0001nn P/N: B2VK4EA#BED\nНайдено: HP OmniBook X Flip 14-fm0001na 14-inch Convertible Laptop");
+        });
+    }
+
     private function readyDraft(int $photoCount): array
     {
         $update = TelegramUpdate::create(['update_id' => 910001, 'chat_id' => '98765', 'telegram_user_id' => '12345',

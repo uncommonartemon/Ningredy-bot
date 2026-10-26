@@ -70,6 +70,9 @@ class ResearchProduct implements Tool
         private readonly ?StreamingProductResearch $streamingResearch = null,
     ) {}
 
+    /** The query of the current call, so validation can tell the operator's codes from a page's. */
+    private string $query = '';
+
     public function description(): Stringable|string
     {
         return 'Search the internet for a real product, verify its data and create a pending catalog draft. Use for explicit web searches or after local catalog search returns no suitable match.';
@@ -81,6 +84,7 @@ class ResearchProduct implements Tool
             return $this->cancelledResult();
         }
         $query = trim((string) $request->string('query'));
+        $this->query = $query;
         $payload = is_array($this->update->payload) ? $this->update->payload : [];
         $existingProgressMessageId = (int) ($payload['_progress_message_id'] ?? 0);
         $progress = new TelegramProgressReporter(
@@ -825,7 +829,7 @@ class ResearchProduct implements Tool
             ], ['primary_source.required' => 'The found result has no unblocked source that identifies the exact product. Keep observed URLs and facts and add the page or record that shows this exact product; do not invent or relabel its source type.'])->validate();
 
             $category = app(ProductCategoryResolver::class)->resolve($data['product_type'] ?? null, $data['category'] ?? null);
-            $issues = app(ProductResearchConfigurationGuard::class)->issues($data);
+            $issues = app(ProductResearchConfigurationGuard::class)->issues($data, trim($this->query.' '.(string) $this->update->text));
             if (! $category) {
                 $issues[] = 'Category and product_type are incompatible or ambiguous in the live category configuration.';
             }

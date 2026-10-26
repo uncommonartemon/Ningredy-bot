@@ -18,6 +18,7 @@ use App\Services\Products\ProductCondition;
 use App\Services\Products\ProductSourcePriority;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 
 class DraftTelegramPresenter
 {
@@ -79,7 +80,7 @@ class DraftTelegramPresenter
                 $sourceUrl = trim((string) ($draft->photo_source_context['url'] ?? $draft->primary_source_url));
                 $photoNotice = $this->photoNotice($draft);
                 $caption = '📷 Частичный результат: '.count($paths)." фото\n"
-                    .'Запрос: '.mb_substr((string) $draft->title, 0, 180)."\n\n"
+                    .$this->requestLine($draft)."\n\n"
                     .$reason."\nФото найдены; точная комплектация и характеристики ещё не подтверждены. Публикация недоступна."
                     .($photoNotice !== '' ? "\nℹ️ ".$photoNotice : '')
                     .($sourceUrl !== '' && mb_strlen($sourceUrl) <= 350 ? "\n🔗 ".$sourceUrl : '')
@@ -754,6 +755,23 @@ class DraftTelegramPresenter
         })->implode(', ');
 
         return "Эта модель уже есть в каталоге: {$list}. Проверьте, не дубль ли это: у черновика другой артикул или комплектация.";
+    }
+
+    /**
+     * "Запрос" is what the operator wrote; the found product's name is a separate
+     * line when it differs (live #206: a sibling configuration's name read as if
+     * the operator had asked for it). A button press carries no request text.
+     */
+    private function requestLine(ProductDraft $draft): string
+    {
+        $title = Str::squish((string) $draft->title);
+        $update = $draft->telegram_update_id ? TelegramUpdate::query()->find($draft->telegram_update_id, ['id', 'text', 'payload']) : null;
+        $request = $update !== null && ! isset($update->payload['callback_query']) ? Str::squish((string) $update->text) : '';
+        if ($request === '' || mb_strtolower($request) === mb_strtolower($title)) {
+            return 'Запрос: '.mb_substr($title, 0, 180);
+        }
+
+        return 'Запрос: '.mb_substr($request, 0, 180)."\nНайдено: ".mb_substr($title, 0, 180);
     }
 
     private function photoNotice(ProductDraft $draft, bool $compact = true): string
