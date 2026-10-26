@@ -24,6 +24,9 @@ const counterLabel = (index) => (counterLabels[mode] || '').replace('{index}', S
 const staticMedia = `<div id="media" ${Object.hasOwn(counterLabels, mode) ? `class="product-gallery" data-image-count="${count}"` : ''}>${Array.from({ length: count }, (_, i) => `<img alt="${counterLabel(i)}" src="https://8.8.8.8/1600x1200/${i}.jpg">`).join('')}
     ${['static-rendition', 'static-small-failed-original'].includes(mode) ? '<img src="https://8.8.8.8/1600x1200/0.jpg?width=900">' : ''}
     ${mode === 'static-duplicate-thumbnails' ? [200, 300].map(width => `<ul class="thumbnail-slider">${Array.from({ length: count }, (_, i) => `<li><button><img src="https://8.8.8.8/1600x1200/${i}.jpg?width=${width}"></button></li>`).join('')}</ul>`).join('') : ''}</div>`;
+// Live #187: every gallery frame served under the size floor, the original one
+// address token away (VTEX "/ids/{id}-{w}-{h}/" against "/ids/{id}/").
+const sizedRenditionMedia = `<div id="media">${Array.from({ length: count }, (_, i) => `<img src="https://8.8.8.8/ids/${100 + i}-400-400/frame.jpg">`).join('')}</div>`;
 // Originals only enter the selected DOM after each element is scrolled into
 // view. A fixed list of four scroll addresses cannot load a nine-frame page.
 const lazyMedia = `<div id="media" data-image-count="${count}">${Array.from({ length: count }, (_, i) =>
@@ -67,7 +70,7 @@ const canvasMedia = `<div id="media"><canvas width="800" height="600"></canvas>
     mixedmedia_fullScreenButton.onclick=reveal;addToCart.onclick=reveal;</script>`;
 const product = `<html><head>${consent}<title>Fixture laptop</title><link rel="canonical" href="https://8.8.8.8/product">
     <script type="application/ld+json">{"@type":"Product","name":"Fixture laptop","sku":"TEST123"}</script></head>
-    <body>${['frame', 'nested', 'relative-frame'].includes(mode) ? `<iframe id="viewer" src="https://8.8.8.8/${mode === 'nested' ? 'outer' : 'viewer'}" style="width:1300px;height:950px"></iframe>` : mode === 'canvas-fullscreen' ? canvasMedia : mode === 'opened-frame' ? openedFrame : mode === 'lazy-scroll-native' ? nativeLazyMedia : mode === 'lazy-scroll-zoom' ? zoomLazyMedia : mode === 'lazy-scroll-growing' ? growingLazyMedia : mode.startsWith('lazy-scroll') ? lazyMedia : mode === 'static-digest' ? digestMedia : mode.startsWith('static') ? staticMedia : media}</body></html>`;
+    <body>${['frame', 'nested', 'relative-frame'].includes(mode) ? `<iframe id="viewer" src="https://8.8.8.8/${mode === 'nested' ? 'outer' : 'viewer'}" style="width:1300px;height:950px"></iframe>` : mode === 'canvas-fullscreen' ? canvasMedia : mode === 'opened-frame' ? openedFrame : mode === 'lazy-scroll-native' ? nativeLazyMedia : mode === 'lazy-scroll-zoom' ? zoomLazyMedia : mode === 'lazy-scroll-growing' ? growingLazyMedia : mode.startsWith('lazy-scroll') ? lazyMedia : mode === 'static-digest' ? digestMedia : mode === 'static-sized-rendition' ? sizedRenditionMedia : mode.startsWith('static') ? staticMedia : media}</body></html>`;
 const launch = chromium.launch.bind(chromium);
 const tabPage = (gallery) => `<html><head><title>Fixture laptop${gallery ? ' - slim sharp stylish' : ''}</title>
     <script type="application/ld+json">${JSON.stringify({ '@type': 'Product',
@@ -99,7 +102,10 @@ chromium.launch = async (options) => {
                             if (['broken', 'lazy-scroll-broken'].includes(mode) && url.pathname === '/1600x1200/2.jpg') {
                                 return realRoute.fulfill({ status: 503, body: '' });
                             }
-                            const size = mode.startsWith('static-small') ? 180 : url.pathname.includes('1600x1200') ? 1600 : 180;
+                            // "/ids/101-400-400/frame.jpg" is 400 px; "/ids/101/frame.jpg" and "/ids/101-1600-1600/frame.jpg" are 1600 px.
+                            const sizedRendition = url.pathname.match(/^\/ids\/\d+(?:-(\d+)-\d+)?\/frame\.jpg$/);
+                            const size = sizedRendition ? Number(sizedRendition[1] || 1600)
+                                : mode.startsWith('static-small') ? 180 : url.pathname.includes('1600x1200') ? 1600 : 180;
                             await new Promise((resolve) => setTimeout(resolve, 100));
                             return realRoute.fulfill({ contentType: 'image/svg+xml', body:
                                 `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}"><rect width="100%" height="100%" fill="red"/></svg>` });

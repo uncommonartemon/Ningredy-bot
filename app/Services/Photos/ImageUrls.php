@@ -95,6 +95,16 @@ class ImageUrls
             $normalized,
         ) ?: $normalized;
 
+        // An asset id with its size (VTEX "/arquivos/ids/2225516-461-461/", live
+        // #187) is asset 2225516: every size and the bare original are one frame.
+        // A date's month or day is never a size. Mirrors imageAssetKey() in
+        // scripts/product-gallery-utils.mjs.
+        $normalized = preg_replace_callback(
+            '#/(\d+)-(\d{2,4})-(\d{2,4})/#',
+            fn (array $match): string => (int) $match[2] >= 32 && (int) $match[3] >= 32 ? '/'.$match[1].'/' : $match[0],
+            $normalized,
+        ) ?: $normalized;
+
         // A bare "WxH" or "Nw" path segment (BigCommerce Stencil:
         // /stencil/1280x1280/products/.../file.jpg vs /stencil/640w/... same
         // file - a real case that reached production undeduped) is a size

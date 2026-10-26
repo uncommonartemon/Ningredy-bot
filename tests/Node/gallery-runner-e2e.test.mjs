@@ -10,10 +10,10 @@ const exec = promisify(execFile);
 const script = fileURLToPath(new URL('../../scripts/extract-product-gallery.mjs', import.meta.url));
 const preload = new URL('./fixtures/gallery-runner-preload.mjs', import.meta.url).href;
 
-for (const [mode, count] of [['shadow-consent', 3], ['blocked-overlay', 3], ['slider', 3], ['slider', 7], ['frame', 7], ['static', 7], ['static-digest', 4], ['static-digest', 7], ['finite', 7], ['growing', 7], ['broken', 7], ['nested', 3], ['observe', 3], ['opened-frame', 7], ['relative-frame', 7], ['tab-title', 7], ['tab-inline-title', 7], ['tab-known-sku', 7], ['tab-other-sku', 7]]) test(`actual CLI: ${mode}, ${count} frames`, { timeout: 90000 }, async () => {
+for (const [mode, count] of [['shadow-consent', 3], ['blocked-overlay', 3], ['slider', 3], ['slider', 7], ['frame', 7], ['static', 7], ['static-digest', 4], ['static-digest', 7], ['static-sized-rendition', 5], ['finite', 7], ['growing', 7], ['broken', 7], ['nested', 3], ['observe', 3], ['opened-frame', 7], ['relative-frame', 7], ['tab-title', 7], ['tab-inline-title', 7], ['tab-known-sku', 7], ['tab-other-sku', 7]]) test(`actual CLI: ${mode}, ${count} frames`, { timeout: 90000 }, async () => {
     const work = await mkdtemp(join(tmpdir(), 'ningredy-gallery-e2e-'));
     const frame_selectors = mode === 'nested' ? ['#viewer', '#inner'] : ['frame', 'opened-frame', 'relative-frame'].includes(mode) ? ['#viewer'] : [];
-    const readOnly = ['static', 'static-digest', 'relative-frame'].includes(mode);
+    const readOnly = ['static', 'static-digest', 'static-sized-rendition', 'relative-frame'].includes(mode);
     const action = (kind, selector) => ({ kind, selector, index: 0, limit: 1, wait_after_ms: 100,
         when: 'always', purpose: 'product media', frame_selectors });
     const recipe = { gallery_present: true, content_confirmed_product: true, frame_selectors,
@@ -47,6 +47,17 @@ for (const [mode, count] of [['shadow-consent', 3], ['blocked-overlay', 3], ['sl
         if (mode.startsWith('tab-')) {
             assert.equal(result.diagnostics.identity_unconfirmed, ['tab-title', 'tab-inline-title'].includes(mode));
             assert.ok(!result.action_trace.some((item) => item.navigated_away === true));
+        }
+        if (mode === 'static-sized-rendition') {
+            // Every frame was under the floor at the address the page gave (#187). The recipe
+            // still delivers the gallery, at the size the addresses name, as the page's own frames.
+            assert.equal(result.images.length, count, JSON.stringify({ probe: result.diagnostics.rendition_probe, rejected: result.diagnostics.rejected_candidates }));
+            assert.ok(result.images.every((url) => /\/ids\/\d+(?:-1600-1600)?\/frame\.jpg$/.test(url)), result.images.join('\n'));
+            assert.equal(result.diagnostics.rendition_probe.found, count);
+            assert.ok(result.diagnostics.validated_image_evidence.every((item) => item.source === 'recipe_dom' && /-400-400\//.test(item.rendition_of)));
+            assert.equal(result.diagnostics.rejected_candidates.filter((item) => item.reason === 'dimensions_below_minimum').length, count);
+            assert.equal(result.diagnostics.partial, false);
+            return;
         }
         if (mode === 'broken') {
             assert.equal(result.diagnostics.partial, true);

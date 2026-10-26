@@ -750,6 +750,11 @@ export const imageAssetKey = (rawUrl) => {
     }
 
     url.pathname = url.pathname.replace(UUID_PHYSICAL_ASSET, '$1.__image__');
+    // An asset id with its size (VTEX "/ids/2225516-461-461/", live #187) is asset
+    // 2225516: every size and the bare original are one frame. A date's month or
+    // day is never a size. Mirrors ImageUrls::imageAssetKey() in PHP.
+    url.pathname = url.pathname.replace(/\/(\d+)-(\d{2,4})-(\d{2,4})\//g, (match, id, width, height) => (
+        Number(width) >= 32 && Number(height) >= 32 ? `/${id}/` : match));
     url.pathname = url.pathname.replace(SIZE_SEGMENT, '/__rendition__/');
 
     // Many commerce galleries keep the same filename under rendition
@@ -1399,4 +1404,93 @@ export const clearBlockingOverlays = async (target) => {
         .slice(0, 3)).catch(() => []);
 
     return { dismissed, still_blocking: stuck };
+};
+
+// Where a CDN names the rendition in the address, the same frame can be asked
+// for without that name or at a large size. Live #187: a VTEX shop showed its
+// 16-frame gallery at 461 px (/ids/2225516-461-461/), the 1600 px frames were
+// one token away, and the page was abandoned as "thumbnails only". These are
+// guesses about the address, never about the picture: every guess is loaded and
+// measured like any other candidate. The same rules run on the server
+// (app/Services/Photos/ImageRenditionProbe.php); both are held to
+// tests/Fixtures/rendition-probe-cases.json.
+const RENDITION_SIZE_QUERY_KEYS = new Set(['w', 'h', 'width', 'height', 'wid', 'hei', 'size', 'resize', 'fit', 'dpr', 'q', 'quality',
+    'maxwidth', 'maxheight', 'max_width', 'max_height', 'scale', 'crop', 'sw', 'sh']);
+const IMAGE_PROXY_KEYS = ['url', 'src', 'image', 'img', 'file'];
+// The smallest width or height a numeric path token can mean: a date's month or day never is one.
+const SMALLEST_SIZE_TOKEN = 32;
+const sizedSegment = (rewrite) => (match, id, width, height) => (
+    Number(width) >= SMALLEST_SIZE_TOKEN && Number(height) >= SMALLEST_SIZE_TOKEN ? rewrite(id) : match);
+const RENDITION_PATH_REWRITES = [
+    // An image service's own resize operation (uploadcare "/-/resize/400/") comes off first.
+    [/\/-\/(?:resize|scale_crop)\/[^/]+\//gi, '/'],
+    // A transformation segment of comma-separated parameters with a width or height (Cloudinary).
+    [/\/(?:[a-z]{1,3}_[a-z0-9.:-]+,)*[wh]_\d{2,4}(?:,[a-z]{1,3}_[a-z0-9.:-]+)*\//gi, '/'],
+    // A size in the file name: Shopify "_300x", WordPress "-500x500" (also before its "-1"
+    // duplicate counter), retina "@2x" - without it, or at a large size.
+    [/[-_]\d{2,4}x\d{0,4}(?:@\dx)?(?=(?:-\d+)?\.[a-z0-9]{3,4}$)/gi, ''],
+    [/(?<=[-_])\d{2,4}x(?=(?:-\d+)?\.[a-z0-9]{3,4}$)/gi, '1600x'],
+    [/(?<=[-_])\d{2,4}x\d{2,4}(?:@\dx)?(?=(?:-\d+)?\.[a-z0-9]{3,4}$)/gi, '1600x1600'],
+    [/[-_](?:xs|s|sm|small|m|md|medium|thumb|thumbnail|mini|preview|tn)(?=\.[a-z0-9]{3,4}$)/gi, ''],
+    // An asset id with its size (VTEX "/ids/2225516-461-461/"): the bare id is the original,
+    // and the id at a large size is served as well.
+    [/\/(\d+)-(\d{2,4})-(\d{2,4})\//g, sizedSegment((id) => `/${id}/`)],
+    [/\/(\d+)-(\d{2,4})-(\d{2,4})\//g, sizedSegment((id) => `/${id}-1600-1600/`)],
+    // A size directory (BigCommerce "/stencil/400x400/", "/300x300/") at a large size.
+    [/\/(?:[a-z]+[-_]?)?\d{2,4}x\d{2,4}\//gi, '/1600x1600/'],
+    // A width directory ("/w80/", "/w_600/": ASUS, imgix-style CDNs) at a large width, or without it.
+    [/\/w_?\d{2,4}\//gi, '/w1600/'],
+    [/\/w_?\d{2,4}\//gi, '/'],
+    [/(\/-\/(?:resize|preview)\/)[^/]+\//gi, (match, operation) => `${operation}1600x1600/`],
+    [/\/r\d{2,5}\//gi, '/r1600/'],
+    [/\/(?:thumbs?|thumbnails?|small|medium)\/(?=[^/]+$)/gi, '/large/'],
+];
+const buildRenditionUrl = (url, pathname, params) => {
+    const query = params.map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`).join('&');
+    return `${url.protocol}//${url.host}${pathname}${query ? `?${query}` : ''}`;
+};
+const renditionVariants = (rawUrl, unwrapProxies) => {
+    let url;
+    try {
+        url = new URL(rawUrl);
+    } catch {
+        return [];
+    }
+    if (!/^https?:$/.test(url.protocol) || !url.hostname || !url.pathname) return [];
+    const variants = [];
+    // An image proxy carries the original address as a parameter - and that address may
+    // name a rendition of its own (#187: /_next/image?url=…/ids/2225515-64-64/…).
+    if (unwrapProxies) {
+        for (const key of IMAGE_PROXY_KEYS) {
+            let inner = url.searchParams.get(key);
+            if (inner && inner.startsWith('/')) inner = `${url.protocol}//${url.host}${inner}`;
+            if (inner && /^https?:\/\//i.test(inner)) variants.push(inner, ...renditionVariants(inner, false));
+        }
+    }
+    // Size parameters in the query: the address without them.
+    const params = [...url.searchParams];
+    const withoutSize = params.filter(([key]) => !RENDITION_SIZE_QUERY_KEYS.has(key));
+    if (withoutSize.length !== params.length) variants.push(buildRenditionUrl(url, url.pathname, withoutSize));
+    // Rendition names in the path: dropped, or replaced with a large size.
+    for (const [pattern, replacement] of RENDITION_PATH_REWRITES) {
+        const rewritten = url.pathname.replace(pattern, replacement);
+        if (rewritten !== url.pathname) variants.push(buildRenditionUrl(url, rewritten, params));
+    }
+    return variants;
+};
+/** Addresses of the same frame that may be larger, best guess first; never the address itself. */
+export const largerRenditions = (rawUrl, limit = 4) => {
+    const seen = new Set([rawUrl]);
+    const guesses = [];
+    for (const variant of renditionVariants(rawUrl, true)) {
+        if (seen.has(variant)) continue;
+        try {
+            new URL(variant);
+        } catch {
+            continue;
+        }
+        seen.add(variant);
+        guesses.push(variant);
+    }
+    return guesses.slice(0, Math.max(1, limit));
 };

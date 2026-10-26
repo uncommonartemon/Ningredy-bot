@@ -3896,12 +3896,16 @@ class ProductImageStorage
         if (! ($settings['enabled'] ?? true)) {
             return;
         }
+        // The page's own gallery frames first, then the widest: on #187 the eight
+        // widest thumbnails were marketing banners, and the 64 px gallery rail -
+        // the only addresses that led to the product at 1200 px - went unprobed.
         $thumbnails = collect($this->lastDownloadRejections)
             ->filter(fn (array $rejection): bool => str_starts_with((string) $rejection['reason'], 'too_small')
-                && (int) ($rejection['width'] ?? 0) >= (int) ($settings['min_width'] ?? 250)
+                && (int) ($rejection['width'] ?? 0) >= (int) ($settings['min_width'] ?? 48)
                 && ! str_ends_with(strtolower((string) parse_url((string) $rejection['url'], PHP_URL_PATH)), '.gif'))
-            ->sortByDesc(fn (array $rejection): int => (int) $rejection['width'])
-            ->take(max(1, (int) ($settings['max_frames'] ?? 8)))
+            ->sortByDesc(fn (array $rejection): int => ($this->trustedGalleryImage((string) $rejection['url']) ? 100_000 : 0)
+                + (int) $rejection['width'])
+            ->take(max(1, (int) ($settings['max_frames'] ?? 24)))
             ->values();
         if ($thumbnails->isEmpty()) {
             return;

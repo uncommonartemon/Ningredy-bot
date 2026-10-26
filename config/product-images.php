@@ -19,7 +19,7 @@ return [
     // Thumbnails only: when a source's frames all fell under the minimum, the
     // same frames are asked for again at the rendition their CDN address names
     // as larger - up to this many of the largest frames, a few guesses each.
-    'rendition_probe' => ['enabled' => true, 'max_frames' => 8, 'min_width' => 250],
+    'rendition_probe' => ['enabled' => true, 'max_frames' => 24, 'min_width' => 48],
     // Total decoded pixels one download pass may hold in memory at once. A
     // decoded truecolor bitmap costs ~4 bytes per pixel, so this is roughly a
     // 240MB ceiling on retained images - the loop stops with a partial gallery
