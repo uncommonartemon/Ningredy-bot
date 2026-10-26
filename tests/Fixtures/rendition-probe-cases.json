@@ -76,6 +76,37 @@
         "first": "https://res.cloudinary.com/demo/image/upload/v1/sample.jpg"
     },
     {
+        "name": "file-name size pair equal to the measured size (#203 smarty)",
+        "thumbnail": "https://doc.smarty.cz/pic/XL2B000N01-600-600.webp",
+        "width": 600,
+        "height": 600,
+        "first": "https://doc.smarty.cz/pic/XL2B000N01-1600-1600.webp",
+        "also": ["https://doc.smarty.cz/pic/XL2B000N01-1000-1000.webp"]
+    },
+    {
+        "name": "numeric size directory equal to the measured size (#203 ispace)",
+        "thumbnail": "https://cdn.ispace.cz/files/photos/320/7/7ef5fd51aee83782f728ca83c4b795847aadd25f.webp",
+        "width": 320,
+        "height": 320,
+        "first": "https://cdn.ispace.cz/files/photos/1600/7/7ef5fd51aee83782f728ca83c4b795847aadd25f.webp",
+        "also": ["https://cdn.ispace.cz/files/photos/1000/7/7ef5fd51aee83782f728ca83c4b795847aadd25f.webp"]
+    },
+    {
+        "name": "file-name size pair with a different height (#203 elektro-unima)",
+        "thumbnail": "https://www.elektro-unima.cz/Prilohy/214221-300-300.jpg",
+        "width": 300,
+        "height": 300,
+        "first": "https://www.elektro-unima.cz/Prilohy/214221-1600-1600.jpg",
+        "also": ["https://www.elektro-unima.cz/Prilohy/214221-1000-1000.jpg"]
+    },
+    {
+        "name": "a measured size that the address does not name is not guessed",
+        "thumbnail": "https://cdn.example.com/photos/9/7ef5fd51aee83782f728ca83c4b795847aadd25f.webp",
+        "width": 320,
+        "height": 320,
+        "first": null
+    },
+    {
         "name": "a date directory is not a size",
         "thumbnail": "https://shop.example.com/images/products/2024-07-04/443940.webp",
         "first": null

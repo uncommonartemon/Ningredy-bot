@@ -14,9 +14,9 @@ use PHPUnit\Framework\TestCase;
 class ImageRenditionProbeTest extends TestCase
 {
     #[DataProvider('thumbnails')]
-    public function test_a_thumbnail_address_names_where_its_larger_rendition_is(string $thumbnail, ?string $expectedFirst, array $alsoExpected): void
+    public function test_a_thumbnail_address_names_where_its_larger_rendition_is(string $thumbnail, ?string $expectedFirst, array $alsoExpected, ?int $width, ?int $height): void
     {
-        $guesses = ImageRenditionProbe::largerRenditions($thumbnail);
+        $guesses = ImageRenditionProbe::largerRenditions($thumbnail, 6, $width, $height);
 
         if ($expectedFirst === null) {
             $this->assertSame([], $guesses, implode("\n", $guesses));
@@ -28,7 +28,7 @@ class ImageRenditionProbeTest extends TestCase
             $this->assertContains($guess, $guesses, implode("\n", $guesses));
         }
         $this->assertNotContains($thumbnail, $guesses);
-        $this->assertLessThanOrEqual(4, count($guesses));
+        $this->assertLessThanOrEqual(6, count($guesses));
     }
 
     public static function thumbnails(): array
@@ -36,7 +36,7 @@ class ImageRenditionProbeTest extends TestCase
         $cases = json_decode((string) file_get_contents(__DIR__.'/../Fixtures/rendition-probe-cases.json'), true, 512, JSON_THROW_ON_ERROR);
         $rows = [];
         foreach ($cases as $case) {
-            $rows[$case['name']] = [$case['thumbnail'], $case['first'], $case['also'] ?? []];
+            $rows[$case['name']] = [$case['thumbnail'], $case['first'], $case['also'] ?? [], $case['width'] ?? null, $case['height'] ?? null];
         }
 
         return $rows;
