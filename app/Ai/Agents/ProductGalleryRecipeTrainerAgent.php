@@ -478,9 +478,14 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
             markup sharing that container - prices, SKU/model codes, "Compare"/"Buy"/"Notify me" controls,
             size/color/configuration pickers, star ratings. A structurally perfect slider or repeated-card
             row proves nothing about what the images are; only that surrounding evidence does. Set it to
-            true only when that evidence positively confirms every image is the requested unit itself (its
-            own angles/views) - filenames/URLs naming actual product views (front/side/angle/open/closed, a
-            color/finish name, a port/hinge close-up) with no contradicting context is enough on its own.
+            true only when that evidence positively confirms every image is the product this page sells,
+            as its own angles/views - filenames/URLs naming actual product views (front/side/angle/open/
+            closed, a color/finish name, a port/hinge close-up) with no contradicting context is enough on
+            its own. Whether the page's product is the selected configuration is not this flag's question:
+            that is the photo-applicability verdict, decided elsewhere. A page selling another SKU or
+            configuration of the same model, whose images are coherent views of its own unit, is
+            content_confirmed_product=true (live #187 Avendor and #192 PSC Computer: three identical
+            rounds each, the gallery confirmed in words and the flag left false over the SKU).
             Set it to false whenever the surrounding evidence instead points to something else that can
             reuse an identical slider/card structure - two real cases already seen:
             - Manufacturing story: per-slide captions reading "Each [product] begins as a single block of
@@ -504,7 +509,8 @@ class ProductGalleryRecipeTrainerAgent implements Agent, HasStructuredOutput, Ha
             assuming. When markup cannot establish what visually different frames contain, use
             InspectGalleryImages on URLs already present in the supplied evidence before deciding. This is
             independent of confidence, which is about whether the recipe will technically
-            execute - content_confirmed_product is about whether the images are the product being sold.
+            execute - content_confirmed_product is about whether the images are the product being sold on
+            this page, not about whether that product is the selected SKU.
             PROMPT;
     }
 

@@ -2660,10 +2660,12 @@ if (!crashResultEmitted) process.stdout.write(JSON.stringify({
         network_candidates: requestedImages.length,
         unique_candidates: allCandidates.length,
         distinct_dom_assets: new Set(domImages.map(imageAssetKey)).size,
-        collection_capability_feedback: strictRecipe && domImages.length === 0 && requestedImages.length > 0
-            ? `Strict recipe accepts DOM-bound image assets only. ${requestedImages.length} network candidates were observed, but none have DOM gallery provenance. A canvas/WebGL viewer cannot yield images through this DOM-only recipe. Inspect an alternative image-backed viewer or another exact product source; repeating canvas clicks does not remove this provenance restriction.`
-            : (hiddenClickTargets.length > 0 && nothingClicked
-                ? `Every click target of the plan resolved in the DOM but was hidden (${hiddenClickTargets.join(', ')}): the gallery is not open on this page as loaded, and repeating these clicks cannot open it. ${images.length} frame(s) were still collected from its DOM. The next plan needs the control that reveals the gallery before these clicks - or no clicks at all when the DOM already lists every frame.`
+        // The hidden-target finding comes first: on live #192 (ASUS) the generic
+        // "DOM-bound assets only" text hid it, and read like a canvas viewer.
+        collection_capability_feedback: hiddenClickTargets.length > 0 && nothingClicked
+            ? `Every click target of the plan resolved in the DOM but was hidden (${hiddenClickTargets.join(', ')}): the gallery is not open on this page as loaded, and repeating these clicks cannot open it. ${images.length} frame(s) were still collected from its DOM${strictRecipe && domImages.length === 0 && requestedImages.length > 0 ? ` (${requestedImages.length} network image candidates were observed, none with DOM gallery provenance)` : ''}. The next plan needs the control that reveals the gallery before these clicks - or no clicks at all when the DOM already lists every frame.`
+            : (strictRecipe && domImages.length === 0 && requestedImages.length > 0
+                ? `Strict recipe accepts DOM-bound image assets only. ${requestedImages.length} network candidates were observed, but none have DOM gallery provenance. A canvas/WebGL viewer cannot yield images through this DOM-only recipe. Inspect an alternative image-backed viewer or another exact product source; repeating canvas clicks does not remove this provenance restriction.`
                 : null),
         hidden_click_targets: hiddenClickTargets,
         collection_errors: [...new Set(collectionErrors)].slice(0, 10),
