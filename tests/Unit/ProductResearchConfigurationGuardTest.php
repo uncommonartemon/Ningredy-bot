@@ -73,4 +73,76 @@ class ProductResearchConfigurationGuardTest extends TestCase
 
         $this->assertSame([], $issues);
     }
+
+    public function test_a_sibling_configuration_lends_its_page_but_not_its_codes(): void
+    {
+        // Live #206: the label said 14-fm0001nn / B2VK4EA#BED, no page showed them,
+        // and the research wrote the observed sibling's 14-fm0001na / BG3E7EA#ABU
+        // as sku, mpn and model - the operator's card described another product.
+        $request = "HP OmniBook X Flip 14-fm0001nn\nP/N: B2VK4EA#BED\nS/N: 5CD5231ABC";
+        $sibling = [
+            'status' => 'found',
+            'model' => '14-fm0001na',
+            'unconfirmed_operator_codes' => ['B2VK4EA#BED'],
+            'primary_source_url' => 'https://shop.example/14-fm0001na',
+            'sources' => [['url' => 'https://shop.example/14-fm0001na', 'type' => 'retailer']],
+            'specifications' => [
+                ['key' => 'sku', 'value' => '14-fm0001na'],
+                ['key' => 'mpn', 'value' => 'BG3E7EA#ABU'],
+                ['key' => 'ram', 'value' => '16 GB'],
+            ],
+        ];
+
+        $issues = app(ProductResearchConfigurationGuard::class)->issues($sibling, $request);
+
+        $this->assertCount(4, $issues);
+        $this->assertStringContainsString('Operator code B2VK4EA#BED is unconfirmed but missing', $issues[0]);
+        $this->assertStringContainsString('sku holds 14-fm0001na', $issues[1]);
+        $this->assertStringContainsString('mpn holds BG3E7EA#ABU', $issues[2]);
+        $this->assertStringContainsString('model is 14-fm0001na', $issues[3]);
+
+        // The repaired answer: the operator's codes as their label facts, the sibling in the notes.
+        $repaired = [...$sibling, 'model' => '14-fm0001nn', 'unconfirmed_operator_codes' => ['14-fm0001nn', 'B2VK4EA#BED'],
+            'research_notes' => 'Closest observed sibling: 14-fm0001na (BG3E7EA#ABU) at shop.example.',
+            'specifications' => [
+                ['key' => 'sku', 'value' => '14-fm0001nn'],
+                ['key' => 'mpn', 'value' => 'B2VK4EA#BED'],
+                ['key' => 'ram', 'value' => '16 GB'],
+            ]];
+
+        $this->assertSame([], app(ProductResearchConfigurationGuard::class)->issues($repaired, $request));
+    }
+
+    public function test_an_unobserved_barcode_alone_leaves_the_observed_model_in_place(): void
+    {
+        // An EAN names no product line: the page's full model stands, the barcode stays a label fact.
+        $issues = app(ProductResearchConfigurationGuard::class)->issues([
+            'status' => 'found',
+            'model' => '82XT003GUS',
+            'unconfirmed_operator_codes' => ['0197528721569'],
+            'primary_source_url' => 'https://shop.example/82xt003gus',
+            'sources' => [['url' => 'https://shop.example/82xt003gus', 'type' => 'retailer']],
+            'specifications' => [
+                ['key' => 'sku', 'value' => '82XT003GUS'],
+                ['key' => 'ean', 'value' => '0197528721569'],
+            ],
+        ], 'Lenovo Legion 5 EAN 0197528721569');
+
+        $this->assertSame([], $issues);
+    }
+
+    public function test_confirmed_codes_are_not_checked_against_the_request_wording(): void
+    {
+        // Every code was observed: the research names the product as the pages do.
+        $issues = app(ProductResearchConfigurationGuard::class)->issues([
+            'status' => 'found',
+            'model' => '21M7CTO1WW',
+            'unconfirmed_operator_codes' => [],
+            'primary_source_url' => 'https://shop.example/e14',
+            'sources' => [['url' => 'https://shop.example/e14', 'type' => 'retailer']],
+            'specifications' => [['key' => 'sku', 'value' => '21M7CTO1WW']],
+        ], 'Lenovo ThinkPad E14 Gen 6 21M7');
+
+        $this->assertSame([], $issues);
+    }
 }

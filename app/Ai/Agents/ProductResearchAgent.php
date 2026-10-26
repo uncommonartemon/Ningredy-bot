@@ -182,7 +182,9 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
             search: list it in unconfirmed_operator_codes (the operator is warned at once), select the closest
             observed product whose complete model, configuration and colour match the request, with selected_identity
             on that page, keep the operator's code unchanged as their label fact in specifications (never replace it
-            with another page's code), and name the closest product's own code and page in research_notes. When even
+            with another page's code), and name the closest product's own code and page in research_notes. model and
+            title name the operator's product by their own code; the sibling's code appears only in research_notes and
+            selected_identity (the tool refuses an answer whose sku, mpn or model is a code the operator did not write). When even
             the exact model suffix is on no page but a sibling configuration of the same model line is (another
             regional suffix or SKU of the same chassis: 14-fm0001na for a requested 14-fm0001nn), that sibling is the
             closest observed product - select it the same way and say so; unresolved is for the case where no

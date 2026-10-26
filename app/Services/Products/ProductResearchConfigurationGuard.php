@@ -3,19 +3,26 @@
 namespace App\Services\Products;
 
 use App\Services\ProductSearch\Research\ResearchSourceRoles;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Str;
 
 class ProductResearchConfigurationGuard
 {
     private const IDENTITY_KEYS = ['sku', 'mpn', 'ean', 'upc', 'gtin'];
 
+    /** Rows that name the product sold; a barcode row is judged elsewhere. */
+    private const OPERATOR_IDENTITY_KEYS = ['sku', 'mpn', 'part_number', 'product_code'];
+
     private const CONFIGURATION_KEYS = [
         'cpu', 'gpu', 'ram', 'storage', 'display', 'screen_size',
         'refresh_rate', 'color', 'pack_count', 'module_count',
     ];
 
-    /** @return array<int, string> */
-    public function issues(array $data): array
+    /**
+     * @param  string  $request  what the operator wrote (message, label, query); used only when a code of theirs was observed nowhere
+     * @return array<int, string>
+     */
+    public function issues(array $data, string $request = ''): array
     {
         if (($data['status'] ?? null) !== 'found') {
             return [];
@@ -46,6 +53,56 @@ class ProductResearchConfigurationGuard
             if ($value !== '' && $this->ambiguous($value)) {
                 $issues[] = $key.' describes alternatives instead of the installed/boxed value: '.$value;
             }
+        }
+
+        return [...$issues, ...$this->operatorCodeIssues($data, $specifications, $request)];
+    }
+
+    /**
+     * A code the operator wrote that no page showed is their label fact, and the
+     * card names their product: the closest observed sibling lends its page,
+     * photos and notes, never its codes. Live #206: the research listed the
+     * label's P/N as unconfirmed, then wrote the sibling's 14-fm0001na and
+     * BG3E7EA#ABU as sku, mpn, model and title - the operator's card described
+     * a product they did not ask for. The prompt already says this; the tool
+     * now refuses the answer and the repair loop fixes it.
+     *
+     * @param  Collection<string, array<string, mixed>>  $specifications
+     * @return array<int, string>
+     */
+    private function operatorCodeIssues(array $data, Collection $specifications, string $request): array
+    {
+        $normal = static fn (string $value): string => strtoupper((string) preg_replace('/[^A-Za-z0-9]/', '', $value));
+        $unconfirmed = collect((array) ($data['unconfirmed_operator_codes'] ?? []))
+            ->filter(fn (mixed $code): bool => is_string($code) && trim($code) !== '')
+            ->map(fn (string $code): string => trim($code))
+            // A barcode names no product line: an unobserved EAN leaves the model alone.
+            ->reject(fn (string $code): bool => ctype_digit($normal($code)))
+            ->values();
+        if ($unconfirmed->isEmpty()) {
+            return [];
+        }
+        $values = $specifications->map(fn (array $row): string => $normal((string) data_get($row, 'value', '')))->filter()->values();
+        $issues = [];
+        foreach ($unconfirmed as $code) {
+            if (! $values->contains(fn (string $value): bool => str_contains($value, $normal($code)))) {
+                $issues[] = "Operator code {$code} is unconfirmed but missing from specifications: keep it as their label fact in its own sku/mpn/model row, and name the observed sibling's code in research_notes.";
+            }
+        }
+        $written = $normal($request);
+        if ($written === '') {
+            return $issues;
+        }
+        $theirs = $unconfirmed->implode(', ');
+        foreach (self::OPERATOR_IDENTITY_KEYS as $key) {
+            $value = trim((string) data_get($specifications->get($key), 'value', ''));
+            if ($value !== '' && ! str_contains($written, $normal($value))) {
+                $issues[] = "{$key} holds {$value}, a code the operator did not write, while their own code ({$theirs}) was observed nowhere: identity rows name the operator's product; the observed sibling's code belongs in research_notes and selected_identity.";
+            }
+        }
+        $model = trim((string) ($data['model'] ?? ''));
+        if ($model !== '' && ! str_contains($written, $normal($model))) {
+            $issues[] = "model is {$model}, which the operator did not write, while their own code ({$theirs}) was observed nowhere: model and title name the operator's product; the sibling's code stays in research_notes and selected_identity.";
         }
 
         return $issues;
