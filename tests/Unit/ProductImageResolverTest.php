@@ -95,6 +95,33 @@ class ProductImageResolverTest extends TestCase
         ], $images);
     }
 
+    public function test_pictures_in_the_folder_of_the_marked_up_picture_lead_ahead_of_other_products(): void
+    {
+        // Live #223: og:image named Steam_Blue_3 in the product's asset folder; _1 and _2
+        // sat beside it, after a slider of accessories in their own asset folders.
+        Http::fake([
+            'https://93.184.216.34/swift' => Http::response(<<<'HTML'
+                <html><head>
+                    <meta property="og:image" content="https://93.184.216.34/assets/n47231/product_image/Steam_Blue_3.jpeg">
+                </head><body>
+                    <img src="https://93.184.216.34/assets/12042319/product_image/dock.jpeg?width=226&height=196">
+                    <img src="https://93.184.216.34/assets/19646795/product_image/mouse.jpeg?width=226&height=196">
+                    <img src="https://93.184.216.34/assets/n47231/product_image/Steam_Blue_1.jpeg">
+                    <img src="https://93.184.216.34/assets/n47231/product_image/Steam_Blue_2.jpeg">
+                    <img src="https://93.184.216.34/images/logo.png">
+                </body></html>
+                HTML, 200, ['Content-Type' => 'text/html']),
+        ]);
+
+        $images = app(ProductImageResolver::class)->resolve([['url' => 'https://93.184.216.34/swift']], 10);
+
+        $this->assertSame([
+            'https://93.184.216.34/assets/n47231/product_image/Steam_Blue_3.jpeg',
+            'https://93.184.216.34/assets/n47231/product_image/Steam_Blue_1.jpeg',
+            'https://93.184.216.34/assets/n47231/product_image/Steam_Blue_2.jpeg',
+        ], array_slice($images, 0, 3));
+    }
+
     public function test_it_blocks_private_source_addresses(): void
     {
         Http::fake();
@@ -207,10 +234,11 @@ class ProductImageResolverTest extends TestCase
             ['url' => 'https://93.184.216.34/javascript-product'],
         ], 5);
 
+        // An unconfirmed browser scrape follows the page's own marked-up picture (live #223).
         $this->assertSame([
+            'https://93.184.216.34/static-fallback.jpg',
             'https://93.184.216.34/browser-product-front.jpg',
             'https://93.184.216.34/browser-product-back.jpg',
-            'https://93.184.216.34/static-fallback.jpg',
         ], $images);
     }
 
@@ -382,11 +410,13 @@ class ProductImageResolverTest extends TestCase
 
         $images = app(ProductImageResolver::class)->resolve([
             ['url' => 'https://93.184.216.34/product'],
-        ], 2);
+        ], 3);
 
+        // The browser still runs; its unconfirmed frame follows the page's own pictures (live #223).
         $this->assertSame([
-            'https://93.184.216.34/browser.jpg',
             'https://93.184.216.34/static-1.jpg',
+            'https://93.184.216.34/static-2.jpg',
+            'https://93.184.216.34/browser.jpg',
         ], $images);
     }
 
@@ -787,6 +817,7 @@ class ProductImageResolverTest extends TestCase
         $browser->shouldReceive('lastProductIdentity')->andReturn(null)->byDefault();
         $browser->shouldReceive('lastSourceIdentityAssessment')->andReturn(null)->byDefault();
         $browser->shouldReceive('exportObservation')->andReturn([])->byDefault();
+        $browser->shouldReceive('isConfirmedGalleryImage')->andReturn(false)->byDefault();
 
         return $browser;
     }

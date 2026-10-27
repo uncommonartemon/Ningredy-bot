@@ -35,6 +35,9 @@ class ProductImageResolver
     /** @var array<int, true> */
     private array $reportedBudgetExhaustion = [];
 
+    /** @var array<string, int> asset keys of the last extracted page's own pictures */
+    private array $lastOwnImageKeys = [];
+
     /** @var array<string, array<string, mixed>> */
     private array $sourceContextsByImageUrl = [];
 
@@ -469,6 +472,7 @@ class ProductImageResolver
             $browserUrl = $sourceUrl;
             $browserEligible = true;
             $accessGateDetected = false;
+            $ownStaticKeys = [];
             $browserImages = [];
             $failureKind = null;
             $identityEvidence = '';
@@ -504,6 +508,7 @@ class ProductImageResolver
                                 $images[] = $imageUrl;
                             }
                         }
+                        $ownStaticKeys = $this->lastOwnImageKeys;
                     }
                 } else {
                     $browserEligible = false;
@@ -651,7 +656,19 @@ class ProductImageResolver
                     // attributes already present in HTML remain a safety net.
                     // A partial or broken recipe must never erase usable
                     // static originals collected before Playwright started.
-                    $images = [...$previousSourceImages, ...$browserImages, ...$staticSourceImages];
+                    // A confirmed recipe gallery leads. An unconfirmed browser scrape
+                    // can be a slider of other products (live #223: office-partner.de
+                    // gave twenty accessory thumbnails while the three Steam Blue photos
+                    // in og:image's folder were never downloaded), so the page's own
+                    // pictures it did not bring go first.
+                    $browserKeys = array_flip(array_map(fn (string $url): string => ImageUrls::imageAssetKey(ImageUrls::normalizeCandidateUrl($url)), $browserImages));
+                    $ownFirst = array_values(array_filter($staticSourceImages,
+                        fn (string $url): bool => isset($ownStaticKeys[$key = ImageUrls::imageAssetKey(ImageUrls::normalizeCandidateUrl($url))])
+                            && ! isset($browserKeys[$key])));
+                    if ($ownFirst !== [] && collect($browserImages)->contains(fn (string $url): bool => $this->browser->isConfirmedGalleryImage($url))) {
+                        $ownFirst = [];
+                    }
+                    $images = [...$previousSourceImages, ...$ownFirst, ...$browserImages, ...$staticSourceImages];
                 }
             }
 
@@ -1413,6 +1430,17 @@ class ProductImageResolver
         $normalize = fn (string $candidate): ?string => $this->normalizeImageCandidate($candidate, $pageUrl);
         $ownKeys = collect($own)->map($normalize)->filter()
             ->map(fn (string $url): string => ImageUrls::imageAssetKey(ImageUrls::normalizeCandidateUrl($url)))->flip()->all();
+        // A product's photos share the folder of the picture its markup names (live
+        // #223: og:image .../assets/n2000047231/product_image/Steam_Blue_3, beside _1
+        // and _2; accessories in their own asset folders). A shallow folder such as
+        // /images/ says nothing and is ignored.
+        $folder = static function (string $url): ?string {
+            $path = (string) parse_url($url, PHP_URL_PATH);
+            $directory = substr($path, 0, (int) strrpos($path, '/'));
+
+            return substr_count(trim($directory, '/'), '/') >= 1 ? strtolower((string) parse_url($url, PHP_URL_HOST)).$directory : null;
+        };
+        $ownFolders = collect($own)->map($normalize)->filter()->map($folder)->filter()->flip()->all();
         // Site furniture by its address: navigation, flags, payment and trust badges,
         // placeholders. Never dropped here, only put last.
         $furniture = '#(?:^|/)(?:nav|navigation|menu|flags?|lang|payments?|badges?|trust|sprites?|placeholder|no[_-]?image|default|associations?|shops?-map)(?:[/_.-]|$)#i';
@@ -1435,10 +1463,12 @@ class ProductImageResolver
             usort($variants, fn (string $left, string $right): int => self::renditionSizeHint($right) <=> self::renditionSizeHint($left));
             $url = $variants[0];
             $tier = preg_match($furniture, (string) parse_url($url, PHP_URL_PATH)) === 1 ? 2
-                : (isset($ownKeys[ImageUrls::imageAssetKey($url)]) ? 0 : 1);
+                : (isset($ownKeys[ImageUrls::imageAssetKey($url)]) || isset($ownFolders[$folder($url) ?? '']) ? 0 : 1);
             $ranked[] = ['url' => $url, 'rank' => sprintf('%d%06d', $tier, $index)];
         }
         usort($ranked, fn (array $left, array $right): int => strcmp($left['rank'], $right['rank']));
+        $this->lastOwnImageKeys = collect($ranked)->filter(fn (array $item): bool => str_starts_with($item['rank'], '0'))
+            ->map(fn (array $item): string => ImageUrls::imageAssetKey($item['url']))->flip()->all();
 
         return array_slice(array_column($ranked, 'url'), 0, (int) config('product-images.max_urls_per_page', 60));
     }
