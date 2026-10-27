@@ -147,8 +147,23 @@ class ProductResearchConfigurationGuard
         $needle = $text($model);
         $observed = $text((string) ($identity['observed_model'] ?? ''));
         $excerpt = $text((string) ($identity['source_excerpt'] ?? ''));
-        $contains = static fn (string $haystack): bool => preg_match(
-            '/(?<![\p{L}\p{N}])'.preg_quote($needle, '/').'(?![\p{L}\p{N}])/u', $haystack) === 1;
+        // Shops spell one model with different punctuation and spacing ("XPS 13-9340",
+        // "XPS13 9340", live #237: "Dell XPS 13- 9340"): the model is its run of
+        // letter and digit tokens, compared whole-token and in order.
+        $tokens = static fn (string $value): array => preg_split('/[^\p{L}\p{N}]+|(?<=\p{L})(?=\p{N})|(?<=\p{N})(?=\p{L})/u',
+            $value, -1, PREG_SPLIT_NO_EMPTY) ?: [];
+        $needleTokens = $tokens($needle);
+        $contains = static function (string $haystack) use ($tokens, $needleTokens): bool {
+            $haystackTokens = $tokens($haystack);
+            $length = count($needleTokens);
+            for ($start = 0; $length > 0 && $start + $length <= count($haystackTokens); $start++) {
+                if (array_slice($haystackTokens, $start, $length) === $needleTokens) {
+                    return true;
+                }
+            }
+
+            return false;
+        };
 
         // The page must prove the WHOLE selected model: a verbatim excerpt that
         // contains it. A page naming more ("Brand Family MODEL-123 Silver")
