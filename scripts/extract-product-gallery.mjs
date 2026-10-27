@@ -79,6 +79,15 @@ const softDeadline = Date.now() + Math.max(10000, Number.parseInt(
     10,
 ));
 const outOfTime = () => Date.now() >= softDeadline;
+// Measuring frames is the last thing before their transfer: it stops early
+// enough for the frames already measured to leave the browser (live #255:
+// 81 frames, 17.7 s of probing, and the deadline cut the round at image_probe).
+const transferReserveMs = Math.max(4000, Math.min(15000, Number.parseInt(
+    process.env.PRODUCT_GALLERY_TRANSFER_RESERVE_MS || '12000',
+    10,
+)));
+const probingOutOfTime = () => Date.now() >= softDeadline - transferReserveMs;
+const probeTimeoutLeft = (ceiling) => Math.max(500, Math.min(ceiling, softDeadline - transferReserveMs - Date.now()));
 let recipe = {};
 
 try {
@@ -2432,7 +2441,7 @@ const candidates = strictRecipe
         : (domImages.length >= 2
             ? allCandidates.filter((candidate) => domKeys.has(imageAssetKey(candidate)))
             : allCandidates));
-const probeImage = async (candidate, timeout = probeTimeoutMs) => {
+const probeImage = async (candidate, timeout = probeTimeoutMs, ceiling = timeout) => {
     if (!await publicHttpUrl(candidate)) {
         return { ok: false, url: candidate, reason: 'non_public_url' };
     }
@@ -2469,7 +2478,10 @@ const probeImage = async (candidate, timeout = probeTimeoutMs) => {
         minWidth: minimumWidth,
         minHeight: minimumHeight,
     }).catch(() => ({ ok: false, url: candidate, reason: 'probe_failed' }));
-    return result.ok ? result : { ...result, ...(imageLoadEvidence.get(candidate) || {}) };
+    if (result.ok) return result;
+    const failed = { ...result, ...(imageLoadEvidence.get(candidate) || {}) };
+    // Cut short to leave time for the transfer: our limit, not the image failing.
+    return failed.reason === 'probe_timeout' && timeout < ceiling ? { ...failed, reason: 'probe_cut_for_transfer' } : failed;
 };
 const orderedCandidates = prioritizeCandidateRenditions(candidates);
 const candidatesToProbe = selectGalleryFrames(orderedCandidates, strictRecipe, Math.max(30, limit * 3));
@@ -2477,8 +2489,8 @@ const probes = [];
 
 checkpoint('image_probe');
 if (!scoutOnly) {
-    for (let index = 0; index < candidatesToProbe.length && !outOfTime(); index += 4) {
-        probes.push(...await Promise.all(candidatesToProbe.slice(index, index + 4).map((candidate) => probeImage(candidate))));
+    for (let index = 0; index < candidatesToProbe.length && !probingOutOfTime(); index += 4) {
+        probes.push(...await Promise.all(candidatesToProbe.slice(index, index + 4).map((candidate) => probeImage(candidate, probeTimeoutLeft(probeTimeoutMs), probeTimeoutMs))));
     }
 }
 
@@ -2488,6 +2500,7 @@ if (!scoutOnly) {
 // page abandoned as "thumbnails only"). A guess that loads is attributed to the
 // frame it enlarges - same gallery provenance, same asset - and measured like
 // any other candidate; one that does not is only a request that failed.
+const probedCandidateCount = probes.length;
 const enlargedFrom = new Map();
 const renditionProbe = { undersized_frames: 0, guesses: 0, tried: 0, found: 0, budget_exhausted: false, examples: [] };
 if (!scoutOnly) {
@@ -2512,7 +2525,7 @@ if (!scoutOnly) {
     const budgetEnd = Date.now() + Math.min(15000, Math.max(0, Math.floor((softDeadline - Date.now()) / 3)));
     const enlargedOriginals = new Set();
     const pending = [...guesses];
-    while (pending.length > 0 && !outOfTime()) {
+    while (pending.length > 0 && !probingOutOfTime()) {
         if (Date.now() >= budgetEnd) { renditionProbe.budget_exhausted = true; break; }
         const batch = [];
         while (pending.length > 0 && batch.length < 4) {
@@ -2521,7 +2534,7 @@ if (!scoutOnly) {
         }
         if (batch.length === 0) break;
         renditionProbe.tried += batch.length;
-        const results = await Promise.all(batch.map(({ guess }) => probeImage(guess, Math.min(probeTimeoutMs, 3000))));
+        const results = await Promise.all(batch.map(({ guess }) => probeImage(guess, probeTimeoutLeft(Math.min(probeTimeoutMs, 3000)), Math.min(probeTimeoutMs, 3000))));
         results.forEach((result, offset) => { if (result.ok) enlargedOriginals.add(batch[offset].original); });
         results.forEach((result, offset) => {
             if (!result.ok) return;
@@ -2731,6 +2744,7 @@ if (!crashResultEmitted) process.stdout.write(JSON.stringify({
         })),
         rejected_candidates: strictRecipe ? validationFailures : validationFailures.slice(0, 20),
         rendition_probe: renditionProbe,
+        unprobed_candidates: Math.max(0, candidatesToProbe.length - probedCandidateCount),
         observed_gallery_count: galleryReadiness.observed_count || 0,
         gallery_readiness: {
             thumbnail_count: galleryReadiness.thumbnail_count || 0,

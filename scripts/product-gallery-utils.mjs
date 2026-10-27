@@ -1,8 +1,20 @@
+/** Width and height placeholders filled large; any other placeholder left means no address yet. */
+export const fillImageTemplate = (rawUrl) => {
+    const filled = String(rawUrl).replace(/\{width\}|%7Bwidth%7D/gi, '1600').replace(/\{height\}|%7Bheight%7D/gi, '1600');
+    return /\{[a-z_]+\}|%7B[a-z_]+%7D/i.test(filled) ? null : filled;
+};
+
 export const normalizeImageCandidate = (rawUrl, sourceUrl) => {
     let url;
+    // A lazy-load template ("..._{width}x.png") is an address with its size left
+    // blank; filled large it is the frame at a big rendition, left blank it is a
+    // 404 that made a validated round partial (live #255: eleven Shopify frames
+    // checked, ten templates "failed to load", three rounds repeated).
+    const filled = fillImageTemplate(String(rawUrl).replaceAll('&amp;', '&'));
+    if (filled === null) return null;
 
     try {
-        url = new URL(String(rawUrl).replaceAll('&amp;', '&'), sourceUrl);
+        url = new URL(filled, sourceUrl);
     } catch {
         return null;
     }

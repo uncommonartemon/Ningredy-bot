@@ -14,6 +14,7 @@ import {
     recipeActionPlanStatus,
     recipeActionShouldStop,
     controlLooksDisabled,
+    fillImageTemplate,
     renditionGuessRounds,
     recipeActionTraversesGallery,
     urlQualityScore,
@@ -728,4 +729,14 @@ test('larger-rendition guesses go in rounds across the gallery, best guess of ev
     assert.deepEqual(rounds.map((item) => item.guess), ['a1', 'b1', 'c1', 'a2', 'c2', 'a3']);
     assert.deepEqual(rounds[1], { guess: 'b1', original: 'b' });
     assert.deepEqual(renditionGuessRounds(undefined), []);
+});
+
+test('a lazy-load image template is filled large, and one with an unknown placeholder is no address', () => {
+    // Live #255: Shopify srcset templates "..._{width}x.png" were probed as frames, 404ed and made a validated round partial.
+    assert.equal(fillImageTemplate('https://shop.test/files/a_{width}x.png?v=1'), 'https://shop.test/files/a_1600x.png?v=1');
+    assert.equal(fillImageTemplate('https://shop.test/files/a_%7Bwidth%7Dx.png'), 'https://shop.test/files/a_1600x.png');
+    assert.equal(fillImageTemplate('https://shop.test/i/{width}x{height}/a.jpg'), 'https://shop.test/i/1600x1600/a.jpg');
+    assert.equal(fillImageTemplate('https://shop.test/files/a_{size}.png'), null);
+    assert.equal(normalizeImageCandidate('/files/a_{width}x.png', 'https://shop.test/p/1'), 'https://shop.test/files/a_1600x.png');
+    assert.equal(normalizeImageCandidate('/files/a_{size}.png', 'https://shop.test/p/1'), null);
 });
