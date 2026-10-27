@@ -3,6 +3,7 @@
 namespace App\Services\Products;
 
 use App\Models\ProductDraft;
+use App\Models\TelegramUpdate;
 
 /**
  * What the operator asked for and which product research settled on, as one
@@ -34,6 +35,13 @@ final class ProductRequestContext
 
     public const string STATUS_UNAVAILABLE = 'unavailable';
 
+    /** Request payload keys: what research found unlike the request (live #215), and the operator's codes no page showed. */
+    public const string DIFFERENCES_KEY = '_request_differences';
+
+    public const string UNCONFIRMED_CODES_KEY = '_unconfirmed_operator_codes';
+
+    private const string DIFFERENCES_NOTE = 'Research observed none of these operator requirements on any page of the requested model and built the card for the closest observed configuration; the operator sees each difference beside the add button and decides. Judge pages and frames against selected_product on these points: a listed difference is not by itself a reason to reject a source, a frame or the card.';
+
     /** The same identifier keys ProductIdentityMatcher and ProductSourceIdentityJudge read. */
     private const array IDENTIFIER_KEYS = ['model', 'sku', 'mpn', 'ean', 'upc', 'gtin'];
 
@@ -43,6 +51,7 @@ final class ProductRequestContext
         private readonly ?array $selectedProduct,
         private readonly ?string $operatorHint = null,
         private readonly array $inputContext = [],
+        private readonly array $requestDifferences = [],
     ) {}
 
     public static function forDraft(ProductDraft $draft): self
@@ -76,7 +85,46 @@ final class ProductRequestContext
                     ->all(),
             ],
             inputContext: $input,
+            requestDifferences: self::stored($draft)['differences'],
         );
+    }
+
+    /**
+     * Research's own word on where the found product differs from the request,
+     * kept on the request so a continued search, every agent and the card read
+     * the same list. Written on each research answer, so a new answer replaces it.
+     */
+    public static function rememberDifferences(TelegramUpdate $update, array $research): void
+    {
+        $differences = collect((array) ($research['request_differences'] ?? []))
+            ->filter(fn (mixed $item): bool => is_array($item) && self::text($item['requested'] ?? null) !== null && self::text($item['found'] ?? null) !== null)
+            ->map(fn (array $item): array => ['requirement' => self::text($item['requirement'] ?? null) ?? 'other',
+                'requested' => self::text($item['requested']), 'found' => self::text($item['found']),
+                'evidence' => self::text($item['evidence'] ?? null)])
+            ->values()->all();
+        $codes = collect((array) ($research['unconfirmed_operator_codes'] ?? []))
+            ->map(fn (mixed $code): ?string => self::text($code))->filter()->values()->all();
+        $fresh = $update->fresh() ?? $update;
+        $payload = is_array($fresh->payload) ? $fresh->payload : [];
+        if (($payload[self::DIFFERENCES_KEY] ?? []) === $differences && ($payload[self::UNCONFIRMED_CODES_KEY] ?? []) === $codes) {
+            return;
+        }
+        $payload[self::DIFFERENCES_KEY] = $differences;
+        $payload[self::UNCONFIRMED_CODES_KEY] = $codes;
+        $fresh->update(['payload' => $payload]);
+        $update->setAttribute('payload', $payload);
+    }
+
+    /** @return array{differences: list<array{requirement: string, requested: string, found: string, evidence: ?string}>, codes: list<string>} */
+    public static function stored(ProductDraft $draft): array
+    {
+        $payload = $draft->telegramUpdate?->payload;
+        $payload = is_array($payload) ? $payload : [];
+
+        return [
+            'differences' => array_values(array_filter(is_array($payload[self::DIFFERENCES_KEY] ?? null) ? $payload[self::DIFFERENCES_KEY] : [], 'is_array')),
+            'codes' => array_values(array_filter(is_array($payload[self::UNCONFIRMED_CODES_KEY] ?? null) ? $payload[self::UNCONFIRMED_CODES_KEY] : [], 'is_string')),
+        ];
     }
 
     /**
@@ -105,7 +153,7 @@ final class ProductRequestContext
      */
     public function withOperatorHint(?string $hint): self
     {
-        return new self($this->originalRequest, $this->selectedProduct, self::text($hint), $this->inputContext);
+        return new self($this->originalRequest, $this->selectedProduct, self::text($hint), $this->inputContext, $this->requestDifferences);
     }
 
     public function originalRequest(): ?string
@@ -142,6 +190,8 @@ final class ProductRequestContext
             'input_evidence' => $this->inputContext['input_evidence'] ?? [],
             'search_keys' => $this->inputContext['search_keys'] ?? [],
             'search_plan' => $this->inputContext['search_plan'] ?? [],
+            ...($this->requestDifferences === [] ? [] : ['request_differences' => [
+                'note' => self::DIFFERENCES_NOTE, 'items' => $this->requestDifferences]]),
         ];
     }
 

@@ -159,6 +159,7 @@ class ProductSpecificationReconciler
             'original_operator_request' => is_string($originalOperatorRequest) ? $originalOperatorRequest : null,
             'original_operator_request_status' => $requestContext['original_operator_request_status'],
             'input_evidence' => $inputEvidence,
+            ...(isset($requestContext['request_differences']) ? ['request_differences' => $requestContext['request_differences']] : []),
             'photo_applicability' => $photoApplicability,
             'current_title' => (string) $draft->title,
             'current_model' => (string) $draft->model,

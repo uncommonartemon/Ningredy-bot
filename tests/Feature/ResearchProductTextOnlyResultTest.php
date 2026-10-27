@@ -14,6 +14,7 @@ use App\Models\TelegramUpdate;
 use App\Services\Ai\ProductSearchCostBudget;
 use App\Services\Products\ProductImageResolver;
 use App\Services\Products\ProductImageStorage;
+use App\Services\Products\ProductRequestContext;
 use App\Services\Products\SourceIdentityProvenance;
 use App\Services\ProductSearch\Supervision\SearchProgressSupervisor;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -299,6 +300,23 @@ class ResearchProductTextOnlyResultTest extends TestCase
         $this->assertSame(1, ProductDraft::query()->count());
         Http::assertSent(fn ($request): bool => str_contains((string) ($request['text'] ?? ''), 'Не найдено ни на одной странице: AWAC16251-9765BLU-PDE')
             && str_contains((string) ($request['text'] ?? ''), 'Продолжаю поиск по ближайшему товару'));
+    }
+
+    public function test_a_requested_colour_no_page_shows_is_kept_as_a_difference_for_every_later_step(): void
+    {
+        // Live #215: every page of the model and the maker's sheet named another colour;
+        // three "unresolved" answers left no draft. A found answer names the difference.
+        $this->research('cost_budget', assembled: false, responseOverrides: [
+            'color' => 'Storm Grey',
+            'request_differences' => [['requirement' => 'color', 'requested' => 'Luna Grey', 'found' => 'Storm Grey',
+                'evidence' => 'The maker lists Storm Grey for this model; Luna Grey belongs to another model.']],
+        ], text: 'Find Lenovo Exact 123 Luna Grey');
+
+        $draft = ProductDraft::query()->sole();
+        $this->assertSame('Storm Grey', $draft->color);
+        $this->assertSame('Luna Grey', ProductRequestContext::forDraft($draft)->forAgent()['request_differences']['items'][0]['requested']);
+        $summary = ProductSourceAttempt::query()->where('action', 'research_summary')->sole();
+        $this->assertSame('Storm Grey', $summary->output['request_differences'][0]['found']);
     }
 
     public function test_a_matching_official_datasheet_joins_the_photo_queue_and_a_mismatch_is_skipped_with_a_record(): void
