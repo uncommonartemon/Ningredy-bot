@@ -44,6 +44,26 @@ class SearchJournalTest extends TestCase
         $this->assertSame('check_source_access: quick_check_timeout (browser still opens the page)', $page['last_step']);
     }
 
+    public function test_the_same_frames_from_a_partial_and_then_a_complete_round_read_as_progress(): void
+    {
+        // Live #256: the fourth lenovo.com round completed the nine frames; the watcher saw "the same set" and left.
+        $update = TelegramUpdate::query()->create(['update_id' => 925601, 'chat_id' => '1', 'telegram_user_id' => '1',
+            'text' => 'Lenovo ThinkBook 16 G7', 'payload' => [], 'status' => 'processing']);
+        $round = fn (array $diagnostics) => ProductSourceAttempt::query()->create(['telegram_update_id' => $update->id,
+            'product_url' => 'https://www.lenovo.com/p/tb16', 'domain' => 'www.lenovo.com', 'actor' => 'ai', 'phase' => 'gallery_training',
+            'action' => 'propose_recipe', 'status' => 'completed', 'decision' => 'execute_candidate',
+            'output' => ['images' => ['https://cdn.example/1.jpg', 'https://cdn.example/2.jpg'], 'diagnostics' => $diagnostics]]);
+        $round(['partial' => true, 'interruption_reason' => 'image_load_failed', 'action_plan' => ['complete' => false]]);
+        $round(['partial' => false, 'action_plan' => ['complete' => true]]);
+
+        $timeline = implode("\n", SearchJournal::timeline($update->id));
+
+        $this->assertStringContainsString('2 frames', $timeline);
+        $this->assertStringContainsString('· partial: image_load_failed', $timeline);
+        $this->assertStringContainsString('· complete', $timeline);
+        $this->assertSame([], SearchJournal::repeats($update->id));
+    }
+
     private function attempt(string $host, string $action, string $status, string $decision, int $times = 1, $at = null): void
     {
         foreach (range(1, $times) as $ignored) {
