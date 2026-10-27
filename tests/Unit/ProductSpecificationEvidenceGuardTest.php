@@ -224,6 +224,68 @@ class ProductSpecificationEvidenceGuardTest extends TestCase
         (new ProductSpecificationEvidenceGuard)->validate([$fact], [[...$fact, 'value' => '48 GB', 'evidence' => 'confirmed']], [], []);
     }
 
+    public function test_the_confirmed_but_changed_message_names_both_values(): void
+    {
+        // Live #274: three repairs kept "confirmed" while the message never named the earlier value.
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('ram: confirmed but changed from "64 GB" to "48 GB"');
+        $fact = $this->fact();
+        (new ProductSpecificationEvidenceGuard)->validate([$fact], [[...$fact, 'value' => '48 GB', 'evidence' => 'confirmed']], [], []);
+    }
+
+    public function test_a_trailing_decimal_zero_is_the_same_value(): void
+    {
+        // Live #274: "19.90 mm" against "19.9 mm" was "confirmed but changed" three times.
+        $page = ['url' => 'https://shop.example/aspire', 'specification_text' => 'Dimensions: 362.3 × 237.4 × 19.90 mm'];
+        $fact = ['key' => 'dimensions', 'name' => 'Dimensions', 'value' => '362.3 × 237.4 × 19.9 mm',
+            'source_url' => 'https://maker.example/aspire', 'source_excerpt' => 'Dimensions: 362.3 × 237.4 × 19.9 mm'];
+        $candidate = [...$fact, 'evidence' => 'confirmed', 'value' => '362.3 × 237.4 × 19.90 mm',
+            'source_url' => 'https://shop.example/aspire', 'source_excerpt' => 'Dimensions: 362.3 × 237.4 × 19.90 mm'];
+
+        (new ProductSpecificationEvidenceGuard)->validate([$fact], [$candidate], [], [$page]);
+        $this->addToAssertionCount(1);
+    }
+
+    public function test_a_thousands_group_is_not_a_trailing_zero(): void
+    {
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('confirmed but changed');
+        $fact = $this->fact(['key' => 'weight', 'name' => 'Weight', 'value' => '1.25 kg', 'source_excerpt' => 'Weight: 1.25 kg']);
+        (new ProductSpecificationEvidenceGuard)->validate([$fact], [[...$fact, 'value' => '1.250 kg', 'evidence' => 'confirmed']], [], []);
+    }
+
+    public function test_a_value_capitalised_at_its_start_is_held_by_its_lower_case_quote(): void
+    {
+        // Live #273: "Up to 4.9 GHz" quoted as "up to 4.9 GHz" stayed "confirmed but changed".
+        $fact = ['key' => 'cpu_max_frequency', 'name' => 'Max frequency', 'value' => '4.9 GHz',
+            'source_url' => 'https://maker.example/elitebook', 'source_excerpt' => 'Max turbo: 4.9 GHz'];
+        $listing = 'https://shop.example/elitebook';
+        $candidate = [...$fact, 'evidence' => 'confirmed', 'value' => 'Up to 4.9 GHz', 'source_url' => $listing,
+            'source_excerpt' => 'Intel Core Ultra 5 125U (up to 4.9 GHz)', 'considered_source_urls' => ['https://maker.example/elitebook'],
+            'reason' => 'The selected listing states the boost frequency.'];
+        $pages = [['url' => $listing, 'specification_text' => 'Processor: Intel Core Ultra 5 125U (up to 4.9 GHz)']];
+
+        $result = (new ProductSpecificationEvidenceGuard)->normalizeAndValidate([$fact], [$candidate], [], $pages);
+
+        $this->assertSame('corrected', $result[0]['evidence']);
+    }
+
+    public function test_only_the_first_letter_of_a_value_is_case_free_against_its_quote(): void
+    {
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('confirmed but changed');
+        $fact = ['key' => 'cpu_max_frequency', 'name' => 'Max frequency', 'value' => '4.9 GHz',
+            'source_url' => 'https://maker.example/elitebook', 'source_excerpt' => 'Max turbo: 4.9 GHz'];
+        $listing = 'https://shop.example/elitebook';
+        $candidate = [...$fact, 'evidence' => 'confirmed', 'value' => 'Up To 4.9 GHZ', 'source_url' => $listing,
+            'source_excerpt' => 'Intel Core Ultra 5 125U (up to 4.9 GHz)', 'considered_source_urls' => ['https://maker.example/elitebook'],
+            'reason' => 'The selected listing states the boost frequency.'];
+
+        (new ProductSpecificationEvidenceGuard)->normalizeAndValidate([$fact], [$candidate], [], [
+            ['url' => $listing, 'specification_text' => 'Processor: Intel Core Ultra 5 125U (up to 4.9 GHz)'],
+        ]);
+    }
+
     public function test_unchanged_cited_value_only_repairs_the_status_after_all_conflicts_are_accounted_for(): void
     {
         $fact = $this->fact(['value' => '256 GB', 'source_excerpt' => 'Max. Memory: 256 GB']);

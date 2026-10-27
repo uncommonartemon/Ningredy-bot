@@ -127,8 +127,17 @@ class ProductSpecificationEvidenceGuard
         }
         $quote = $this->literalText((string) ($item['source_excerpt'] ?? ''));
 
-        return $literal !== '' && $this->containsWholeNumbers($quote, $literal)
-            && preg_match('/(?<![\p{L}\p{N}])'.preg_quote($literal, '/').'(?![\p{L}\p{N}])/u', $quote) === 1;
+        // A value capitalised at its start is still the quote's own words: "Up to 4.9 GHz"
+        // from "up to 4.9 GHz" (live #273), "Aluminum chassis" from "aluminum chassis"
+        // (#274). Only the first letter: "Gb" is still not "GB".
+        foreach (array_unique([$literal, mb_lcfirst($literal)]) as $text) {
+            if ($text !== '' && $this->containsWholeNumbers($quote, $text)
+                && preg_match('/(?<![\p{L}\p{N}])'.preg_quote($text, '/').'(?![\p{L}\p{N}])/u', $quote) === 1) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function sameActualValue(array $left, array $right): bool
@@ -181,7 +190,11 @@ class ProductSpecificationEvidenceGuard
                 if ($item['evidence'] === 'corrected' && $sameValue) {
                     $errors[] = $key.': corrected but unchanged; change the actual value or use confirmed with supporting evidence.';
                 } elseif ($item['evidence'] === 'confirmed' && ! $sameValue) {
-                    $errors[] = $key.': confirmed but changed; account for the correction explicitly.';
+                    // Both values named: three repairs of #274 kept "confirmed" while
+                    // the message never said which earlier value they had changed.
+                    $errors[] = $key.': confirmed but changed from "'.mb_substr($this->literalText((string) ($old['value'] ?? '')), 0, 80)
+                        .'" to "'.mb_substr($this->literalText((string) $item['value']), 0, 80)
+                        .'"; account for the correction explicitly: mark it corrected and say why, or keep the earlier value as confirmed.';
                 }
             }
             if (! $dropped) {
@@ -371,6 +384,12 @@ class ProductSpecificationEvidenceGuard
 
     private function text(string $text): string
     {
-        return mb_strtolower(trim(preg_replace('/[\s\p{Z}]+/u', ' ', html_entity_decode($text, ENT_QUOTES | ENT_HTML5, 'UTF-8')) ?? $text));
+        $text = mb_strtolower(trim(preg_replace('/[\s\p{Z}]+/u', ' ', html_entity_decode($text, ENT_QUOTES | ENT_HTML5, 'UTF-8')) ?? $text));
+
+        // A trailing decimal zero is formatting: 19.90 mm is 19.9 mm (live #274 lost its
+        // card to "confirmed but changed" over it). Three decimals may be a thousands
+        // group ("1.250 g"), and "5.0" stays as written.
+        return preg_replace_callback('/(?<!\p{N}|\p{N}[.,])(\p{N}+)\.(\p{N}{1,2}|\p{N}{4,})(?!\p{N}|[.,]\p{N})/u',
+            fn (array $m): string => rtrim($m[2], '0') === '' ? $m[0] : $m[1].'.'.rtrim($m[2], '0'), $text) ?? $text;
     }
 }
