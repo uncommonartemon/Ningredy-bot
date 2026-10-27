@@ -676,7 +676,12 @@ class ResearchProduct implements Tool
             $result = [...$result, ...$draft->only([
                 'title', 'model', 'color', 'description', 'specifications',
                 'sources', 'primary_source_url', 'image_urls',
-            ]), 'ready_for_approval' => $imageCount > 0, 'text_only_result' => $textOnlyResult];
+            ]), 'ready_for_approval' => $imageCount > 0, 'text_only_result' => $textOnlyResult,
+                // Live #223: "поиск фото продолжается" was told after the search had
+                // stopped at its time limit with no photo; the state is said, not inferred.
+                ...($imageCount === 0 ? ['photo_search' => 'stopped', 'photo_search_stop_reason' => $draft->gallery_search_stop_reason,
+                    'message' => 'Поиск фото остановлен без пригодных фото. Скажи это прямо; продолжить можно кнопкой под карточкой. Не пиши, что поиск фото продолжается.'] : []),
+            ];
             $progress->done(
                 '3/3 · черновик #'.$draft->id.' готов, фото: '.$imageCount
                 .($sourceUrl !== '' ? "\n🔗 {$sourceUrl}" : ''),

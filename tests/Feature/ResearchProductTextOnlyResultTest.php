@@ -115,6 +115,10 @@ class ResearchProductTextOnlyResultTest extends TestCase
         $this->assertTrue($result['text_only_result']);
         $this->assertFalse($result['ready_for_approval']);
         $this->assertSame(0, $result['image_count']);
+        // Live #223: the assistant said the photo search went on after it had stopped.
+        $this->assertSame('stopped', $result['photo_search']);
+        $this->assertSame($reason, $result['photo_search_stop_reason']);
+        $this->assertStringContainsString('Не пиши, что поиск фото продолжается', $result['message']);
         $this->assertSame('Lenovo Exact 123 verified', $result['title']);
         $this->assertSame('Final assembled description.', $result['description']);
         $this->assertSame('32 GB', $result['specifications'][0]['value']);
