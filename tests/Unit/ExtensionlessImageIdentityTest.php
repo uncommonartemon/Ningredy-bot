@@ -57,6 +57,16 @@ class ExtensionlessImageIdentityTest extends TestCase
         ])));
     }
 
+    public function test_a_width_segment_closing_the_path_is_a_rendition_of_the_same_frame_on_any_host(): void
+    {
+        // Live #278 asus.com: /gain/<id>/w80 thumbnails, /w1600 and the bare id the same photo.
+        $base = 'https://dlcdnwebimgs.asus.com/gain/2323a5ef-f5e6-48ed-b731-493e988e38c4';
+        $this->assertCount(1, array_unique(array_map(ImageUrls::imageAssetKey(...), [$base.'/w80', $base.'/w1600', $base.'//w184', $base])));
+        $this->assertSame(ImageUrls::imageAssetKey('https://cdn.shop.test/p/123/w300'), ImageUrls::imageAssetKey('https://cdn.shop.test/p/123/w1200'));
+        $this->assertNotSame(ImageUrls::imageAssetKey($base.'/w80'),
+            ImageUrls::imageAssetKey('https://dlcdnwebimgs.asus.com/gain/7fb77e0a-97ef-4be0-babd-22892330add9/w80'));
+    }
+
     public function test_a_url_lifted_out_of_inline_json_loses_its_escaped_slashes(): void
     {
         // Live #1: sixteen product photos arrived as https://shop.example\/getimage/... and were dropped as not public.

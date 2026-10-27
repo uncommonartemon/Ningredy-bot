@@ -56,9 +56,9 @@ class ImageUrls
             ) ?: $normalized;
         }
 
-        if ($host === 'dlcdnwebimgs.asus.com' || str_ends_with($host, '.dlcdnwebimgs.asus.com')) {
-            $normalized = preg_replace('#//w\d{2,5}(?=\?|$)#i', '', $normalized) ?: $normalized;
-        }
+        // A width segment closing the path ("/gain/<id>/w80", "//w184": live #278 asus.com) names a
+        // rendition of the frame at that path, whatever the host. Mirrors product-gallery-utils.mjs.
+        $normalized = preg_replace('#/{1,2}w\d{2,5}(?=\?|$)#i', '', $normalized) ?: $normalized;
 
         if (preg_match('#/is/image/#i', $path) === 1) {
             $normalized = Str::before($normalized, '?');

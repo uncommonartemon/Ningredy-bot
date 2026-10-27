@@ -171,9 +171,10 @@ final class ImageRenditionProbe
             ['#/(\d+)-(\d{2,4})-(\d{2,4})/#', $sizedSegment(fn (string $id): string => '/'.$id.'-1600-1600/')],
             // A size directory (BigCommerce "/stencil/400x400/", "/300x300/") at a large size.
             ['#/(?:[a-z]+[-_]?)?\d{2,4}x\d{2,4}/#i', '/1600x1600/'],
-            // A width directory ("/w80/", "/w_600/": ASUS, imgix-style CDNs) at a large width, or without it.
-            ['#/w_?\d{2,4}/#i', '/w1600/'],
-            ['#/w_?\d{2,4}/#i', '/'],
+            // A width segment ("/w80/", "/w_600/": imgix-style CDNs; closing the path, "/gain/<id>/w80":
+            // live #278 asus.com, 80x80 thumbnails of a 2400x2400 original) at a large width, or without it.
+            ['#/w_?\d{2,4}(?=/|$)#i', '/w1600'],
+            ['#/w_?\d{2,4}(?=/|$)#i', ''],
             ['#(/-/(?:resize|preview)/)[^/]+/#i', '${1}1600x1600/'],
             ['#/r\d{2,5}/#i', '/r1600/'],
             ['#/(?:thumbs?|thumbnails?|small|medium)/(?=[^/]+$)#i', '/large/'],
