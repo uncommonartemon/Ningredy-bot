@@ -87,17 +87,21 @@ final class RenditionRules
         self::forget();
     }
 
-    /** A learned rule for one site; the caller has already seen it give larger frames. */
+    /**
+     * A learned rule for one site; the caller has already seen it give larger frames. The
+     * same rule learned again is that rule measured again: active, its misses there forgotten.
+     */
     public static function learn(string $host, string $find, string $flags, string $replace, ?string $note, string $exampleFrom, string $exampleTo): ?ImageRenditionRule
     {
         if (! self::valid($find, $flags)) {
             return null;
         }
-        $rule = ImageRenditionRule::query()->create([
-            'host' => strtolower($host), 'find' => $find, 'flags' => self::flags($flags), 'replace' => $replace,
-            'origin' => 'agent', 'status' => 'active', 'position' => 5, 'note' => $note,
-            'example_from' => mb_substr($exampleFrom, 0, 2048), 'example_to' => mb_substr($exampleTo, 0, 2048),
-        ]);
+        $host = strtolower($host);
+        $rule = ImageRenditionRule::query()->firstOrNew(['host' => $host, 'find' => $find, 'flags' => self::flags($flags), 'replace' => $replace]);
+        $rule->fill(['origin' => $rule->exists ? $rule->origin : 'agent', 'status' => 'active', 'position' => $rule->exists ? $rule->position : 5,
+            'note' => $note, 'example_from' => mb_substr($exampleFrom, 0, 2048), 'example_to' => mb_substr($exampleTo, 0, 2048)])->save();
+        ImageRenditionRuleOutcome::query()->where('image_rendition_rule_id', $rule->id)->where('host', $host)
+            ->update(['consecutive_misses' => 0, 'disabled_at' => null]);
         self::forget();
 
         return $rule;

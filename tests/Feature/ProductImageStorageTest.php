@@ -7,12 +7,14 @@ use App\Ai\Agents\ProductImageDiscoveryAgent;
 use App\Ai\Agents\ProductImageVisionAgent;
 use App\Ai\Agents\ProductPhotoApplicabilityAgent;
 use App\Ai\Agents\ProductSourceIdentityAgent;
+use App\Ai\Agents\RenditionRuleAgent;
 use App\Exceptions\ProductSearchCancelled;
 use App\Jobs\StoreProductImages;
 use App\Models\AiRun;
 use App\Models\AppSetting;
 use App\Models\Brand;
 use App\Models\Category;
+use App\Models\ImageRenditionRule;
 use App\Models\ImageRenditionRuleOutcome;
 use App\Models\Product;
 use App\Models\ProductDraft;
@@ -2346,6 +2348,59 @@ class ProductImageStorageTest extends TestCase
             'action' => 'probe_larger_renditions', 'decision' => 'larger_renditions_found', 'output->found' => 4]);
         // The rule that found them is counted on this host: rules are data that learn where they work.
         $this->assertTrue(ImageRenditionRuleOutcome::query()->where('host', '93.184.216.36')->where('hits', 1)->exists());
+    }
+
+    public function test_thumbnails_no_rule_enlarges_are_learned_for_their_site_and_the_learned_rule_brings_the_photographs(): void
+    {
+        // Series 2026-10-27: a shop's gallery served /th/..._w470_h470.jpg and no rule knew
+        // the shape. The agent learns where that site keeps the photographs, the server
+        // measures its rule, and the same source gets its frames at once.
+        Storage::fake('public');
+        config()->set('product-images.max_images_by_type.laptop', 10);
+        $page = 'https://93.184.216.37/notebook/acer-swift-go-14';
+        $thumbnails = collect(range(1, 4))->map(fn (int $index): string => "https://93.184.216.37/th/product/acer/gallery-{$index}_w470_h470.jpg")->all();
+        Http::fake(function (Request $request) {
+            if (! str_contains($request->url(), '/gallery-')) {
+                return Http::response('<html><h1>Acer Swift Go 14 SFG14-73</h1></html>', 200, ['Content-Type' => 'text/html']);
+            }
+            preg_match('/gallery-(\d+)/', $request->url(), $matches);
+            $seed = (int) ($matches[1] ?? 1);
+
+            return match (true) {
+                str_contains($request->url(), '/th/') => Http::response($this->thumbnailJpeg($seed), 200, ['Content-Type' => 'image/jpeg']),
+                str_contains($request->url(), '/product/') => Http::response($this->jpeg($seed), 200, ['Content-Type' => 'image/jpeg']),
+                default => Http::response('Not found', 404),
+            };
+        });
+        $browser = $this->mockBrowser();
+        $browser->shouldReceive('extract')->andReturn([]);
+        $browser->shouldReceive('isConfirmedGalleryImage')->andReturn(false);
+        $browser->shouldReceive('isPartialGalleryImage')->andReturn(false);
+        ProductPhotoApplicabilityAgent::fake()->preventStrayPrompts();
+        ProductImageVisionAgent::fake(fn ($prompt, $attachments): array => ['images' => $attachments->keys()->map(fn (int $index): array => [
+            'index' => $index + 1, 'exact_match' => true, 'color_match' => true, 'publishable' => true, 'kind' => 'product',
+            'view' => 'front', 'gallery_rank' => 1, 'score' => 95, 'reason' => 'Product photo.'])->all()]);
+        RenditionRuleAgent::fake(fn (): array => ['decision' => 'rule', 'find' => '/th/(.+)_w\d{2,4}_h\d{2,4}(\.[a-z]{3,4})$', 'flags' => 'i',
+            'replace' => '/{1}{2}', 'reason' => 'The /th/ folder and the size token mark the thumbnail; without both it is the photograph.'])
+            ->preventStrayPrompts();
+        [, , $draft] = $this->records();
+        $source = ['title' => 'Acer Swift Go 14 SFG14-73', 'url' => $page, 'type' => 'retailer', 'image_urls' => $thumbnails,
+            '_preflight_identity_evidence' => 'Acer Swift Go 14 SFG14-73', '_preflight_index' => 0];
+        $draft->update(['title' => 'Acer Swift Go 14 SFG14-73', 'brand' => 'Acer', 'model' => 'SFG14-73',
+            'product_type' => 'laptop', 'primary_source_url' => $page, 'image_urls' => [], 'sources' => [$source]]);
+        $this->partialMock(SourceQueueBuilder::class)->shouldReceive('buildSourceQueue')->once()
+            ->andReturn([collect([$source]), collect([$source])]);
+
+        $this->assertSame(4, app(ProductImageStorage::class)->stage($draft->fresh()));
+
+        $this->assertSame('https://93.184.216.37/product/acer/gallery-1.jpg', $draft->fresh()->media->sortBy('sort_order')->first()->source_url);
+        $rule = ImageRenditionRule::query()->where('origin', 'agent')->sole();
+        $this->assertSame('93.184.216.37', $rule->host);
+        $this->assertDatabaseHas('product_source_attempts', ['product_draft_id' => $draft->id, 'action' => 'learn_rendition_rule',
+            'decision' => 'rule_learned', 'output->rule_id' => $rule->id]);
+        $this->assertDatabaseHas('product_source_attempts', ['product_draft_id' => $draft->id, 'action' => 'probe_larger_renditions',
+            'decision' => 'larger_renditions_found', 'input->learned_rule_id' => $rule->id, 'output->found' => 4]);
+        $this->assertTrue(ImageRenditionRuleOutcome::query()->where('image_rendition_rule_id', $rule->id)->where('hits', 1)->exists());
     }
 
     public function test_a_record_gallery_matched_by_code_is_a_confirmed_gallery_without_a_site_recipe(): void

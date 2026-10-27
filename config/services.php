@@ -116,6 +116,14 @@ return [
         'timeout' => (int) env('AI_GALLERY_RECIPE_TRAINING_TIMEOUT', 180),
     ],
 
+    // Learns where one site keeps the larger rendition of its thumbnails when no
+    // rendition rule gives one (RenditionRuleLearner): once a day per image host.
+    'rendition_rule_learning' => [
+        'provider' => 'openai',
+        'model' => env('AI_RENDITION_RULE_LEARNING_MODEL', 'gpt-5.4-mini'),
+        'timeout' => (int) env('AI_RENDITION_RULE_LEARNING_TIMEOUT', 90),
+    ],
+
     // Looks at a long-running search every few minutes and may end the
     // current page or the photo search early. Its answer is advice: any
     // failure means "continue" and the search goes on unchanged.
