@@ -73,6 +73,9 @@ class ProductImageVisionAgent implements Agent, HasStructuredOutput
             physical conflict; CPU/RAM/SSD differences, visible or not, do not reject a photo. Only another model
             name or number, another body, another colour or a conflicting keyboard layout does (live #214: seven
             Lenovo renders with a Core i7 badge were dropped for a Core i5 configuration, the hero shot with them).
+            When such a sticker names another processor or graphics than the card, copy it into configuration_marking
+            (for example "Intel Core i7") so the operator and the buyer are told stickers may differ; leave it empty
+            when there is none or it matches the card.
 
             Record color_observability separately: clear only when the actual body color is visible,
             not_visible for packaging or detail views that cannot establish it, uncertain for ambiguous pixels.
@@ -151,6 +154,7 @@ class ProductImageVisionAgent implements Agent, HasStructuredOutput
                 'keyboard_requirement_scope' => $schema->string()->enum(['product', 'photos', 'none', 'unknown'])->required(),
                 'keyboard_layout' => $schema->string()->max(100)->required(),
                 'keyboard_layout_note' => $schema->string()->max(500)->required(),
+                'configuration_marking' => $schema->string()->max(100)->required(),
                 'publishable' => $schema->boolean()->required(),
                 'kind' => $schema->string()->enum([
                     'product', 'packaging', 'detail', 'logo', 'banner', 'screenshot', 'unrelated', 'uncertain',

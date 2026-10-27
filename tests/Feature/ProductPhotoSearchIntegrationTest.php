@@ -315,6 +315,24 @@ class ProductPhotoSearchIntegrationTest extends TestCase
         $this->assertSame('', $kept[0]['photo_visual_review']['keyboard_layout_note']);
     }
 
+    public function test_a_processor_sticker_keeps_the_frame_and_is_recorded_on_its_review(): void
+    {
+        // Live #214: seven renders were dropped over a Core i7 badge; the badge is now recorded, the frame kept.
+        $draft = $this->draft();
+        ProductImageVisionAgent::fake(fn (): array => ['images' => [
+            ['index' => 1, 'exact_match' => true, 'color_match' => true, 'publishable' => true, 'kind' => 'product',
+                'view' => 'front', 'gallery_rank' => 1, 'score' => 95, 'reason' => 'Front render; Core i7 sticker on the panel.',
+                'keyboard_visibility' => 'not_applicable', 'keyboard_layout_match' => 'not_applicable',
+                'configuration_marking' => ' Intel Core i7 '],
+        ]])->preventStrayPrompts();
+        $frames = [['image' => imagecreatefromstring($this->jpeg()), 'source_url' => self::PAGE.'/front.jpg', 'source_identity_confirmed' => true]];
+
+        $kept = app(ProductImageVisionVerifier::class)->reviewCompleteGallery($frames, $draft, $draft->telegram_update_id);
+
+        $this->assertCount(1, $kept);
+        $this->assertSame('Intel Core i7', $kept[0]['photo_visual_review']['configuration_marking']);
+    }
+
     public function test_exact_source_cannot_override_a_visible_body_conflict(): void
     {
         $draft = $this->draft();

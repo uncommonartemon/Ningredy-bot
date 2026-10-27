@@ -364,6 +364,7 @@ class ProductImageVisionVerifier
                     'keyboard_requirement_scope' => $review['keyboard_requirement_scope'] ?? 'unknown',
                     'keyboard_layout' => $review['keyboard_layout'] ?? '',
                     'keyboard_layout_note' => $review['keyboard_layout_note'] ?? '',
+                    'configuration_marking' => trim((string) ($review['configuration_marking'] ?? '')),
                     'source_url' => $candidates[$review['index'] - 1]['source_url'] ?? null,
                 ],
             ];
@@ -450,6 +451,7 @@ class ProductImageVisionVerifier
                     'images.*.keyboard_requirement_scope' => ['sometimes', 'in:product,photos,none,unknown'],
                     'images.*.keyboard_layout' => ['sometimes', 'nullable', 'string', 'max:100'],
                     'images.*.keyboard_layout_note' => ['sometimes', 'nullable', 'string', 'max:500'],
+                    'images.*.configuration_marking' => ['sometimes', 'nullable', 'string', 'max:100'],
                     'images.*.publishable' => ['required', 'boolean'],
                     'images.*.kind' => ['required', 'in:product,packaging,detail,logo,banner,screenshot,unrelated,uncertain'],
                     'images.*.view' => ['required', 'in:front,angle,side,back,detail,packaging,other'],
