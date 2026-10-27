@@ -17,7 +17,7 @@ class ProductSpecificationEvidenceGuard
     public function differingObservations(array $facts): array
     {
         return collect($facts)->filter(fn ($fact) => $this->isCitedFact($fact))
-            ->groupBy('key')->filter(fn ($group) => $group->map(fn ($fact) => $this->text($fact['value']))->unique()->count() > 1)
+            ->groupBy('key')->filter(fn ($group) => $group->map(fn ($fact) => $this->valueText($fact['value']))->unique()->count() > 1)
             ->map(fn ($group) => $group->values()->all())->all();
     }
 
@@ -36,7 +36,7 @@ class ProductSpecificationEvidenceGuard
             // "confirmed" (live #451, MPN). It becomes the correction it is, and
             // every correction requirement in validate() still applies to it.
             if (($item['evidence'] ?? null) === 'confirmed' && $old !== null
-                && $this->text((string) ($old['value'] ?? '')) !== $this->text((string) ($item['value'] ?? ''))
+                && $this->valueText((string) ($old['value'] ?? '')) !== $this->valueText((string) ($item['value'] ?? ''))
                 && $this->quoteHoldsValue($item)) {
                 $result[$index]['evidence'] = 'corrected';
                 // The cited quote holds the new value: that is the account of the
@@ -185,9 +185,12 @@ class ProductSpecificationEvidenceGuard
             $key = $item['key'];
             $dropped = $item['evidence'] === 'dropped';
             $old = $originals->get($key);
-            $sameValue = $old !== null && $this->text((string) ($old['value'] ?? '')) === $this->text($item['value']);
+            $sameValue = $old !== null && $this->valueText((string) ($old['value'] ?? '')) === $this->valueText($item['value']);
+            // "Corrected" is wrong only for the very same text: a reformatted number
+            // ("19.9" to "19.90") is the same value and may be labelled either way.
+            $sameText = $old !== null && $this->text((string) ($old['value'] ?? '')) === $this->text($item['value']);
             if (! $dropped && $old !== null) {
-                if ($item['evidence'] === 'corrected' && $sameValue) {
+                if ($item['evidence'] === 'corrected' && $sameText) {
                     $errors[] = $key.': corrected but unchanged; change the actual value or use confirmed with supporting evidence.';
                 } elseif ($item['evidence'] === 'confirmed' && ! $sameValue) {
                     // Both values named: three repairs of #274 kept "confirmed" while
@@ -239,7 +242,7 @@ class ProductSpecificationEvidenceGuard
 
             $known = $facts->where('key', $key)->concat($labels->where('key', $key));
             $hasDifference = $dropped ? $known->isNotEmpty()
-                : $known->contains(fn ($fact) => $this->text($fact['value']) !== $this->text($item['value']));
+                : $known->contains(fn ($fact) => $this->valueText($fact['value']) !== $this->valueText($item['value']));
             if ($hasDifference) {
                 $needed = $known->pluck('source_url')->filter();
                 $considered = $item['considered_source_urls'] ?? [];
@@ -384,11 +387,19 @@ class ProductSpecificationEvidenceGuard
 
     private function text(string $text): string
     {
-        $text = mb_strtolower(trim(preg_replace('/[\s\p{Z}]+/u', ' ', html_entity_decode($text, ENT_QUOTES | ENT_HTML5, 'UTF-8')) ?? $text));
+        return mb_strtolower(trim(preg_replace('/[\s\p{Z}]+/u', ' ', html_entity_decode($text, ENT_QUOTES | ENT_HTML5, 'UTF-8')) ?? $text));
+    }
 
-        // A trailing decimal zero is formatting: 19.90 mm is 19.9 mm (live #274 lost its
-        // card to "confirmed but changed" over it). Three decimals may be a thousands
-        // group ("1.250 g"), and "5.0" stays as written.
+    /**
+     * A value as compared with another value. A trailing decimal zero is formatting:
+     * 19.90 mm is 19.9 mm (live #274 lost its card to "confirmed but changed" over it).
+     * Three decimals may be a thousands group ("1.250 g"), and "5.0" stays as written.
+     * Quotes are still matched by text(): they must be the page's own words.
+     */
+    private function valueText(string $text): string
+    {
+        $text = $this->text($text);
+
         return preg_replace_callback('/(?<!\p{N}|\p{N}[.,])(\p{N}+)\.(\p{N}{1,2}|\p{N}{4,})(?!\p{N}|[.,]\p{N})/u',
             fn (array $m): string => rtrim($m[2], '0') === '' ? $m[0] : $m[1].'.'.rtrim($m[2], '0'), $text) ?? $text;
     }
