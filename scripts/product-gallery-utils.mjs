@@ -742,6 +742,9 @@ const CONTENT_DIGEST_FILENAME = /\/([0-9a-f]{32,})(?:\.(?:jpe?g|png|webp|gif|avi
 // directory (Magento 2 "/cache/<md5>/", Magento 1 "/cache/1/image/600x/<md5>/").
 // The uploaded original sits at the same path without it.
 const CMS_IMAGE_CACHE_RUN = /\/cache\/(?:[^/]+\/){0,3}[0-9a-f]{16,64}\//gi;
+// A shop image type after the image id (PrestaShop "/308628-large_default/name.jpg"):
+// "/308628/name.jpg" is the original. Mirrors ImageUrls::IMAGE_TYPE_SEGMENT.
+const IMAGE_TYPE_SEGMENT = /\/(\d+)-[a-z0-9]+(?:[-_][a-z0-9]+)*_default\//gi;
 
 export const isShopifyCdnUrl = (url) => url.hostname.endsWith('shopify.com')
     || /\/cdn\/shop\/(?:files|products)\//i.test(url.pathname);
@@ -801,6 +804,10 @@ export const imageAssetKey = (rawUrl) => {
     // A CMS image cache run (Magento "/cache/<hash>/", live #273) only picks a
     // rendition of the original at the same path. Mirrors ImageUrls::imageAssetKey().
     url.pathname = url.pathname.replace(CMS_IMAGE_CACHE_RUN, '/');
+    // A shop image type (PrestaShop "/308628-large_default/") names a size of image 308628.
+    url.pathname = url.pathname.replace(IMAGE_TYPE_SEGMENT, '/$1/');
+    // "/original/" beside size buckets is one more bucket (BigCommerce "/stencil/original/").
+    url.pathname = url.pathname.replace(/\/original\/(?=.+\/)/gi, '/__rendition__/');
     url.pathname = url.pathname.replace(SIZE_SEGMENT, '/__rendition__/');
 
     // Many commerce galleries keep the same filename under rendition
@@ -1509,6 +1516,14 @@ const RENDITION_PATH_REWRITES = [
     // (Magento "/media/catalog/product/cache/<hash>/i/m/x.jpg"; live #273 jtfcorp.com: 600x600
     // and 120x120 cached, 900x515 without it).
     [CMS_IMAGE_CACHE_RUN, '/'],
+    // A shop image type after the image id: without it the original, or the largest stock type
+    // (PrestaShop; live #250 dataspot.ro: large_default 554x554, original 900x900, thickbox_default 1275x800).
+    [IMAGE_TYPE_SEGMENT, '/$1/'],
+    [IMAGE_TYPE_SEGMENT, '/$1-thickbox_default/'],
+    // A width bucket ("/stencil/320w/", BigCommerce): the original, or a large bucket
+    // (320x320 in the series; "/original/" and "/1280w/" both 1280x1280).
+    [/\/\d{2,4}w\//gi, '/original/'],
+    [/\/\d{2,4}w\//gi, '/1280w/'],
     // A transformation segment of comma-separated parameters with a width or height (Cloudinary).
     [/\/(?:[a-z]{1,3}_[a-z0-9.:-]+,)*[wh]_\d{2,4}(?:,[a-z]{1,3}_[a-z0-9.:-]+)*\//gi, '/'],
     // A size in the file name: Shopify "_300x", WordPress "-500x500" (also before its "-1"

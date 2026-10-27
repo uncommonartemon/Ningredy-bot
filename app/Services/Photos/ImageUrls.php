@@ -16,6 +16,13 @@ class ImageUrls
     public const CMS_IMAGE_CACHE_RUN = '#/cache/(?:[^/]+/){0,3}[0-9a-f]{16,64}/#i';
 
     /**
+     * A shop image type after the image id (PrestaShop "/308628-large_default/name.jpg"):
+     * "/308628/name.jpg" is the original. Mirrors IMAGE_TYPE_SEGMENT in
+     * scripts/product-gallery-utils.mjs.
+     */
+    public const IMAGE_TYPE_SEGMENT = '#/(\d+)-[a-z0-9]+(?:[-_][a-z0-9]+)*_default/#i';
+
+    /**
      * Normalize only the syntax of an actually observed URL. Rendition
      * canonicalization belongs in imageAssetKey(); this return value is a
      * download target and therefore must never contain a guessed size.
@@ -115,6 +122,10 @@ class ImageUrls
         // A CMS image cache run (Magento "/cache/<hash>/", live #273) only picks a
         // rendition of the original at the same path.
         $normalized = preg_replace(self::CMS_IMAGE_CACHE_RUN, '/', $normalized) ?: $normalized;
+        // A shop image type (PrestaShop "/308628-large_default/") names a size of image 308628.
+        $normalized = preg_replace(self::IMAGE_TYPE_SEGMENT, '/$1/', $normalized) ?: $normalized;
+        // "/original/" beside size buckets is one more bucket (BigCommerce "/stencil/original/").
+        $normalized = preg_replace('#/original/(?=.+/)#i', '/__rendition__/', $normalized) ?: $normalized;
 
         // A bare "WxH" or "Nw" path segment (BigCommerce Stencil:
         // /stencil/1280x1280/products/.../file.jpg vs /stencil/640w/... same
