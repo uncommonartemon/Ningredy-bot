@@ -15,7 +15,11 @@ final class PhotoSourceNotice
             $visualDifferences = [...(is_array($visualDifferences) ? $visualDifferences : []), $keyboardNotice];
         }
         $compatible = is_array($assessment) && ($assessment['verdict'] ?? null) === 'compatible';
-        if (! $compatible && (! is_array($visualDifferences) || $visualDifferences === [])) {
+        $markings = ($context['_photo_visual_review']['scope'] ?? null) === 'current_downloaded_frames'
+            ? collect((array) ($context['_photo_visual_review']['configuration_markings'] ?? []))
+                ->map(fn (mixed $marking): string => self::text($marking, 100))->filter()->unique()->values()->all()
+            : [];
+        if (! $compatible && (! is_array($visualDifferences) || $visualDifferences === []) && $markings === []) {
             return null;
         }
 
@@ -26,6 +30,8 @@ final class PhotoSourceNotice
                 ...(is_array($visualDifferences) ? $visualDifferences : []),
             ])
                 ->map(fn (mixed $value): string => self::text($value, 600))->filter()->unique()->values()->all(),
+            // The storefront words this itself in the buyer's language; the marking is a brand name.
+            ...($markings === [] ? [] : ['configuration_markings' => $markings, 'markings_may_differ' => true]),
         ];
     }
 
@@ -39,7 +45,9 @@ final class PhotoSourceNotice
         return (($context['_photo_applicability']['verdict'] ?? null) === 'compatible'
             ? 'Фото другой комплектации с совместимым корпусом' : 'Особенности фотографий')
             .($notice['source_model'] !== '' ? ': '.$notice['source_model'] : '').'.'
-            .($notice['differences'] !== [] ? ' Отличия: '.implode(' ', $notice['differences']) : '');
+            .($notice['differences'] !== [] ? ' Отличия: '.implode(' ', $notice['differences']) : '')
+            .(($notice['configuration_markings'] ?? []) !== [] ? ' На фото наклейка: '.implode(', ', $notice['configuration_markings'])
+                .' — наклейки процессора и видеокарты на фото производителя могут отличаться от комплектации товара.' : '');
     }
 
     private static function text(mixed $value, int $length): string

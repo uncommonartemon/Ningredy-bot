@@ -134,6 +134,40 @@ class BrowserIdentityEvidencePropagationTest extends TestCase
         ];
     }
 
+    public function test_the_pages_own_pictures_lead_when_the_browser_brings_a_slider_of_other_products(): void
+    {
+        // Live #223: the browser returned twenty accessory thumbnails and the static
+        // own pictures came after them; the download cap never reached them.
+        $own = 'https://93.184.216.34/assets/n47231/product_image/Steam_Blue_3.jpeg';
+        $sibling = 'https://93.184.216.34/assets/n47231/product_image/Steam_Blue_1.jpeg';
+        $accessories = ['https://93.184.216.34/assets/77/product_image/dock.jpeg', 'https://93.184.216.34/assets/78/product_image/mouse.jpeg'];
+        Http::fake([self::PAGE => Http::response('<html><head><meta property="og:image" content="'.$own.'"></head>'
+            .'<body><img src="'.$accessories[0].'"><img src="'.$sibling.'"></body></html>', 200, ['Content-Type' => 'text/html'])]);
+        $observation = $this->observation();
+        $browser = $this->mock(BrowserProductGalleryExtractor::class);
+        $browser->shouldReceive('extract')->once()->andReturn($accessories);
+        $browser->shouldReceive('lastSpecificationText')->andReturn(null);
+        $browser->shouldReceive('lastProductPageUrl')->andReturn(null);
+        $browser->shouldReceive('lastProductIdentity')->andReturn(null);
+        $browser->shouldReceive('lastSourceIdentityAssessment')->andReturn(null);
+        $browser->shouldReceive('exportObservation')->andReturn($observation);
+        $confirmed = false;
+        $browser->shouldReceive('isConfirmedGalleryImage')->andReturnUsing(function () use (&$confirmed): bool {
+            return $confirmed;
+        });
+
+        $images = app(ProductImageResolver::class)->resolve([['url' => self::PAGE, 'title' => 'Swift 14 AI']]);
+
+        $this->assertSame([$own, $sibling, ...$accessories], $images);
+
+        // A confirmed recipe gallery keeps the lead.
+        $confirmed = true;
+        $browser->shouldReceive('extract')->once()->andReturn($accessories);
+        $images = app(ProductImageResolver::class)->resolve([['url' => self::PAGE, 'title' => 'Swift 14 AI']]);
+
+        $this->assertSame([...$accessories, $own, $sibling], $images);
+    }
+
     private function browser(array $observation, array $images, ?array $assessment = null): void
     {
         Http::fake([self::PAGE => Http::response(

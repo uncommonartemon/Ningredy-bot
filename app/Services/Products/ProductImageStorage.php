@@ -2810,7 +2810,11 @@ class ProductImageStorage
         $source['_photo_visual_review'] = ['scope' => 'current_downloaded_frames',
             'keyboard_target' => ProductPhotoKeyboardContext::target($draft->specifications ?? []),
             'photo_requirement' => ProductPhotoKeyboardContext::photoRequirement(ProductInputContext::forDraft($draft)),
-            'differences' => $differences, 'frames' => $reviews->values()->all()];
+            'differences' => $differences,
+            // A processor/graphics sticker kept on a frame (live #214): said, not hidden.
+            'configuration_markings' => $reviews->pluck('configuration_marking')->map(fn (mixed $marking): string => trim((string) $marking))
+                ->filter()->unique()->values()->all(),
+            'frames' => $reviews->values()->all()];
         unset($source['_photo_keyboard_reconciliation']);
         if ($this->modelConfirmedAwaitingColour($source)
             && $reviews->contains(fn (array $review): bool => ($review['color_observability'] ?? null) === 'clear'

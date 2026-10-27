@@ -8,9 +8,9 @@ import { useI18n } from '../i18n';
 const props = defineProps({ media: { type: Array, default: () => [] }, title: { type: String, default: '' } });
 const { locale, t } = useI18n();
 const labels = computed(() => ({
-    cs: { gallery: 'Fotografie produktu', previous: 'Předchozí fotografie', next: 'Další fotografie', expand: 'Zvětšit fotografii', close: 'Zavřít galerii', photo: 'Fotografie', hint: 'Kliknutím zvětšíte', notice: 'Poznámka k fotografiím', differences: 'Rozdíly' },
-    uk: { gallery: 'Фотографії товару', previous: 'Попереднє фото', next: 'Наступне фото', expand: 'Збільшити фото', close: 'Закрити галерею', photo: 'Фото', hint: 'Натисніть, щоб збільшити', notice: 'Примітка до фотографій', differences: 'Відмінності' },
-    en: { gallery: 'Product photos', previous: 'Previous photo', next: 'Next photo', expand: 'Enlarge photo', close: 'Close gallery', photo: 'Photo', hint: 'Click to enlarge', notice: 'Photo details', differences: 'Differences' },
+    cs: { gallery: 'Fotografie produktu', previous: 'Předchozí fotografie', next: 'Další fotografie', expand: 'Zvětšit fotografii', close: 'Zavřít galerii', photo: 'Fotografie', hint: 'Kliknutím zvětšíte', notice: 'Poznámka k fotografiím', differences: 'Rozdíly', markings: 'Nálepky procesoru nebo grafiky na fotografiích se mohou lišit od konfigurace produktu.' },
+    uk: { gallery: 'Фотографії товару', previous: 'Попереднє фото', next: 'Наступне фото', expand: 'Збільшити фото', close: 'Закрити галерею', photo: 'Фото', hint: 'Натисніть, щоб збільшити', notice: 'Примітка до фотографій', differences: 'Відмінності', markings: 'Наліпки процесора чи відеокарти на фото можуть відрізнятися від комплектації товару.' },
+    en: { gallery: 'Product photos', previous: 'Previous photo', next: 'Next photo', expand: 'Enlarge photo', close: 'Close gallery', photo: 'Photo', hint: 'Click to enlarge', notice: 'Photo details', differences: 'Differences', markings: 'Processor or graphics stickers in the photos may differ from the product configuration.' },
 }[locale.value]));
 const selected = ref(0);
 const swiper = ref(null);
@@ -95,6 +95,7 @@ onBeforeUnmount(() => { if (isOpen.value) document.body.style.overflow = previou
         <aside v-if="current?.photo_notice" class="product-gallery__notice" aria-live="polite">
             <p>{{ labels.notice }}<template v-if="current.photo_notice.source_model">: <strong>{{ current.photo_notice.source_model }}</strong></template>.</p>
             <p v-if="current.photo_notice.differences?.length">{{ labels.differences }}: {{ current.photo_notice.differences.join(' ') }}</p>
+            <p v-if="current.photo_notice.markings_may_differ">{{ labels.markings }}</p>
         </aside>
         <dialog ref="dialog" class="product-lightbox" :aria-label="`${labels.gallery}: ${title}`" @close="afterClose" @keydown.stop="keys" @click="($event.target === dialog) && close()">
             <div class="product-lightbox__header"><div><span>{{ title }}</span><small>{{ labels.photo }} {{ selected + 1 }} / {{ media.length }}</small></div><button ref="closeButton" type="button" :aria-label="labels.close" @click="close">×</button></div>
@@ -102,6 +103,7 @@ onBeforeUnmount(() => { if (isOpen.value) document.body.style.overflow = previou
             <aside v-if="current?.photo_notice" class="product-gallery__notice" aria-live="polite">
                 <p>{{ labels.notice }}<template v-if="current.photo_notice.source_model">: <strong>{{ current.photo_notice.source_model }}</strong></template>.</p>
                 <p v-if="current.photo_notice.differences?.length">{{ labels.differences }}: {{ current.photo_notice.differences.join(' ') }}</p>
+                <p v-if="current.photo_notice.markings_may_differ">{{ labels.markings }}</p>
             </aside>
             <div v-if="media.length > 1" class="product-lightbox__controls"><button type="button" :aria-label="labels.previous" :disabled="selected === 0" @click="select(selected - 1)">← <span>{{ labels.previous }}</span></button><span role="status" aria-live="polite">{{ selected + 1 }} / {{ media.length }}</span><button type="button" :aria-label="labels.next" :disabled="selected === media.length - 1" @click="select(selected + 1)"><span>{{ labels.next }}</span> →</button></div>
         </dialog>

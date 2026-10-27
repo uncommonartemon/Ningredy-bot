@@ -100,6 +100,24 @@ class PhotoSourceContextTest extends TestCase
         $this->assertSame(['source_model', 'differences'], array_keys($notice));
     }
 
+    public function test_a_processor_sticker_kept_on_the_photos_is_named_for_the_operator_and_flagged_for_the_buyer(): void
+    {
+        // Live #214: Lenovo renders of the exact SKU carry a Core i7 badge on a Core i5 card.
+        $context = ['url' => 'https://icecat.example/12ud00c8uk', '_photo_applicability' => ['verdict' => 'exact'],
+            '_photo_visual_review' => ['scope' => 'current_downloaded_frames', 'differences' => [],
+                'configuration_markings' => ['Intel Core i7', ' ', '<b>Intel Core i7</b>']]];
+
+        $notice = PhotoSourceNotice::fromContext($context);
+
+        $this->assertSame(['Intel Core i7'], $notice['configuration_markings']);
+        $this->assertTrue($notice['markings_may_differ']);
+        $this->assertStringContainsString('На фото наклейка: Intel Core i7 — наклейки процессора и видеокарты на фото производителя могут отличаться',
+            PhotoSourceNotice::russian($context));
+        // Markings of another scope (an old source's review) are not this photo's.
+        $context['_photo_visual_review']['scope'] = 'source_metadata';
+        $this->assertNull(PhotoSourceNotice::fromContext($context));
+    }
+
     private function context(string $verdict = 'compatible'): array
     {
         return ['url' => 'https://shop.example/other-sku', 'private_diagnostic' => 'Never exposed',
