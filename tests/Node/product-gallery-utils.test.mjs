@@ -740,3 +740,13 @@ test('a lazy-load image template is filled large, and one with an unknown placeh
     assert.equal(normalizeImageCandidate('/files/a_{width}x.png', 'https://shop.test/p/1'), 'https://shop.test/files/a_1600x.png');
     assert.equal(normalizeImageCandidate('/files/a_{size}.png', 'https://shop.test/p/1'), null);
 });
+
+test('cms image cache renditions and their original are one frame', () => {
+    // Live #273 jtfcorp.com: 120x120 and 600x600 Magento cache copies counted as two frames.
+    const product = 'https://www.jtfcorp.com/media/catalog/product/';
+    const original = product+'i/m/img_0_A6TP0UT_ABA_1780476523_1.jpg';
+
+    assert.equal(imageAssetKey(product+'cache/77bea8c14f304a0f0e40165f8c18646f/i/m/img_0_A6TP0UT_ABA_1780476523_1.jpg'), imageAssetKey(original));
+    assert.equal(imageAssetKey(product+'cache/71dbad14b00e391f00d8d8b368cc891c/i/m/img_0_A6TP0UT_ABA_1780476523_1.jpg'), imageAssetKey(original));
+    assert.notEqual(imageAssetKey(product+'cache/77bea8c14f304a0f0e40165f8c18646f/i/m/img_1_A6TP0UT_ABA_1780476523_1.jpg'), imageAssetKey(original));
+});

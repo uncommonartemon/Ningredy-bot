@@ -162,5 +162,22 @@
         "width": 600,
         "height": 400,
         "first": null
+    },
+    {
+        "name": "magento image cache: the original without the cache run (#273 jtfcorp)",
+        "thumbnail": "https://www.jtfcorp.com/media/catalog/product/cache/77bea8c14f304a0f0e40165f8c18646f/i/m/img_0_A6TP0UT_ABA_1780476523_1.jpg",
+        "width": 600,
+        "height": 600,
+        "first": "https://www.jtfcorp.com/media/catalog/product/i/m/img_0_A6TP0UT_ABA_1780476523_1.jpg"
+    },
+    {
+        "name": "magento 1 image cache with its resize parameters",
+        "thumbnail": "https://shop.example.com/media/catalog/product/cache/1/image/600x/9df78eab33525d08d6e5fb8d27136e95/a/b/ab123.jpg",
+        "first": "https://shop.example.com/media/catalog/product/a/b/ab123.jpg"
+    },
+    {
+        "name": "a cache directory without a hash is not a cms cache run",
+        "thumbnail": "https://shop.example.com/cache/products/photo.jpg",
+        "first": null
     }
 ]
