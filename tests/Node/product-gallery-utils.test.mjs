@@ -761,3 +761,12 @@ test('shop image types and width buckets of one image are one frame', () => {
     const stencil = 'https://cdn11.bigcommerce.com/s-xwx16vh8tc/images/stencil/';
     assert.equal(imageAssetKey(stencil+'320w/products/430599/2828792/tablet__12345.jpg'), imageAssetKey(stencil+'original/products/430599/2828792/tablet__12345.jpg'));
 });
+
+test('a width segment closing the path is a rendition of the same frame on any host', () => {
+    // Live #278 asus.com: /gain/<id>/w80 thumbnails, /w1600 and the bare id the same photo.
+    const base = 'https://dlcdnwebimgs.asus.com/gain/2323a5ef-f5e6-48ed-b731-493e988e38c4';
+    assert.equal(imageAssetKey(base+'/w80'), imageAssetKey(base));
+    assert.equal(imageAssetKey(base+'/w1600'), imageAssetKey(base));
+    assert.equal(imageAssetKey('https://cdn.shop.test/p/123/w300'), imageAssetKey('https://cdn.shop.test/p/123/w1200'));
+    assert.notEqual(imageAssetKey(base+'/w80'), imageAssetKey('https://dlcdnwebimgs.asus.com/gain/7fb77e0a-97ef-4be0-babd-22892330add9/w80'));
+});

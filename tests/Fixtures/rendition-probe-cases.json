@@ -199,5 +199,15 @@
         "also": [
             "https://cdn11.bigcommerce.com/s-xwx16vh8tc/images/stencil/1280w/products/430599/2828792/tablet__12345.1700000000.jpg"
         ]
+    },
+    {
+        "name": "a width segment closing the path (#278 asus.com)",
+        "thumbnail": "https://dlcdnwebimgs.asus.com/gain/2323a5ef-f5e6-48ed-b731-493e988e38c4/w80",
+        "width": 80,
+        "height": 80,
+        "first": "https://dlcdnwebimgs.asus.com/gain/2323a5ef-f5e6-48ed-b731-493e988e38c4/w1600",
+        "also": [
+            "https://dlcdnwebimgs.asus.com/gain/2323a5ef-f5e6-48ed-b731-493e988e38c4"
+        ]
     }
 ]
