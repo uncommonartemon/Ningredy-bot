@@ -26,8 +26,11 @@ final class CardOfferSelection
     {
         $request = ProductRequestContext::forDraft($draft);
 
+        $differences = $request->forAgent()['request_differences'] ?? null;
+
         return [
             'original_operator_request' => $request->originalRequest(),
+            ...($differences === null ? [] : ['request_differences' => $differences]),
             // Full facts and page text already have their own payload fields.
             // Keep only the choice here, rather than paying for a second copy.
             'research_offer' => array_intersect_key($request->selectedProduct() ?? [],

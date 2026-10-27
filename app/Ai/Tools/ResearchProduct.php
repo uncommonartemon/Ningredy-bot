@@ -25,6 +25,7 @@ use App\Services\Products\ProductImageResolver;
 use App\Services\Products\ProductImageStorage;
 use App\Services\Products\ProductInputContext;
 use App\Services\Products\ProductPublicDescription;
+use App\Services\Products\ProductRequestContext;
 use App\Services\Products\ProductResearchConfigurationGuard;
 use App\Services\Products\ProductResearchResponseNormalizer;
 use App\Services\Products\ProductSourceAttemptRecorder;
@@ -382,6 +383,8 @@ class ResearchProduct implements Tool
                     'usage' => $response->usage->toArray(),
                     'research_notes' => $data['research_notes'] ?? null,
                     'selected_product' => array_intersect_key($data, array_flip(['title', 'brand', 'model', 'color', 'specifications'])),
+                    'unconfirmed_operator_codes' => array_values((array) ($data['unconfirmed_operator_codes'] ?? [])),
+                    'request_differences' => array_values((array) ($data['request_differences'] ?? [])),
                     'sources' => $data['sources'],
                 ],
             ]);
@@ -394,6 +397,11 @@ class ResearchProduct implements Tool
                 $progress->info('⚠️ Не найдено ни на одной странице: '.implode(', ', $unconfirmedCodes)
                     .'. Продолжаю поиск по ближайшему товару: '.($data['title'] ?? $data['model'] ?? 'без названия')
                     .'. Код оставлю в карточке как указанный тобой.');
+            }
+            if ($data['status'] === 'found') {
+                // Every later agent and the card beside the add button read the
+                // differences from the request itself (live #215).
+                ProductRequestContext::rememberDifferences($this->update, $data);
             }
 
             if ($data['status'] === 'found') {
@@ -765,6 +773,12 @@ class ResearchProduct implements Tool
             'code_lookup_verdict.decision' => ['required_with:code_lookup_verdict', 'in:used,ignored,not_applicable'],
             'code_lookup_verdict.reason' => ['required_with:code_lookup_verdict', 'string', 'max:500'],
             'unconfirmed_operator_codes.*' => ['string', 'max:100'],
+            'request_differences' => ['sometimes', 'array', 'max:10'],
+            'request_differences.*' => ['array:requirement,requested,found,evidence'],
+            'request_differences.*.requirement' => ['required', 'in:color,model,configuration,condition,other'],
+            'request_differences.*.requested' => ['required', 'string', 'max:255'],
+            'request_differences.*.found' => ['required', 'string', 'max:255'],
+            'request_differences.*.evidence' => ['nullable', 'string', 'max:800'],
             'selected_identity' => ['sometimes', 'nullable', 'array:basis,model_scope,observed_model,source_url,source_excerpt,reason'],
             'selected_identity.basis' => ['required_with:selected_identity', 'in:commercial_code,full_model'],
             'selected_identity.model_scope' => ['required_with:selected_identity', 'in:single_product,product_family,unknown'],
@@ -814,7 +828,14 @@ class ResearchProduct implements Tool
                 .' If the operator\'s code or exact model suffix is on no observed page while a sibling configuration of the same model line is'
                 .' (another regional suffix or SKU of the same chassis), that sibling is the closest observed product: return found for it,'
                 .' with selected_identity on its page, the operator\'s code in unconfirmed_operator_codes and kept unchanged as their label fact,'
-                .' and research_notes naming the sibling taken and why. Keep unresolved only when no concrete product was observed at all.']);
+                .' and research_notes naming the sibling taken and why.'
+                // Live #215: "Legion 5 15IRX9 Luna Grey" - every page of that model and
+                // Lenovo PSREF said Storm Grey, three "unresolved" answers, no draft,
+                // and the operator was asked to clarify instead of shown the product.
+                .' The same holds for a visible requirement such as a colour name that no page of the observed model shows:'
+                .' select the closest observed configuration of that model, keep what the pages show in color and the other fields,'
+                .' and list each difference in request_differences with the requested and the found value.'
+                .' Keep unresolved only when no concrete product of the requested model was observed at all.']);
         }
 
         if ($data['status'] === 'found') {

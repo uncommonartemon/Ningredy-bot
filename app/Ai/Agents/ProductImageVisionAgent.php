@@ -67,6 +67,12 @@ class ProductImageVisionAgent implements Agent, HasStructuredOutput
             physical_match compares the visible body/platform/revision/ports with the requested product:
             match, not_observable, or conflicting. Mark conflicting for a visible different body even if
             its page carries the exact SKU. Invisible CPU/RAM/SSD differences are not body conflicts.
+            A processor, graphics or platform sticker on the body (Intel Core i7, AMD Ryzen, NVIDIA GeForce, Windows) is
+            a configuration marker of the unit that was photographed, not a model marking: manufacturers render one
+            chassis for every configuration. It never sets exact_match or publishable to false and is not a
+            physical conflict; CPU/RAM/SSD differences, visible or not, do not reject a photo. Only another model
+            name or number, another body, another colour or a conflicting keyboard layout does (live #214: seven
+            Lenovo renders with a Core i7 badge were dropped for a Core i5 configuration, the hero shot with them).
 
             Record color_observability separately: clear only when the actual body color is visible,
             not_visible for packaging or detail views that cannot establish it, uncertain for ambiguous pixels.

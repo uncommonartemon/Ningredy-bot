@@ -15,6 +15,7 @@ use App\Services\Catalog\AttributePresentation;
 use App\Services\Products\PhotoSourceNotice;
 use App\Services\Products\ProductCatalogIdentity;
 use App\Services\Products\ProductCondition;
+use App\Services\Products\ProductRequestContext;
 use App\Services\Products\ProductSourcePriority;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Storage;
@@ -82,6 +83,7 @@ class DraftTelegramPresenter
                 $caption = '📷 Частичный результат: '.count($paths)." фото\n"
                     .$this->requestLine($draft)."\n\n"
                     .$reason."\nФото найдены; точная комплектация и характеристики ещё не подтверждены. Публикация недоступна."
+                    .(($requestNotice = $this->requestNotice($draft)) !== '' ? "\n⚠️ ".$requestNotice : '')
                     .($photoNotice !== '' ? "\nℹ️ ".$photoNotice : '')
                     .($sourceUrl !== '' && mb_strlen($sourceUrl) <= 350 ? "\n🔗 ".$sourceUrl : '')
                     .$usageFootnote;
@@ -176,6 +178,8 @@ class DraftTelegramPresenter
         $description = htmlspecialchars($description, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
         $details = $description !== '' && ! $this->reconciliationPending($draft)
             ? "\n\n<blockquote expandable>".$description."</blockquote>\n" : '';
+        $requestNotice = $this->requestNotice($draft);
+        $details .= $requestNotice !== '' ? "\n⚠️ ".htmlspecialchars($requestNotice, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8')."\n" : '';
         $photoNotice = $this->photoNotice($draft);
         $details .= $photoNotice !== '' ? "\nℹ️ ".htmlspecialchars($photoNotice, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8')."\n" : '';
         $catalogNotice = $this->catalogNotice($draft);
@@ -758,8 +762,26 @@ class DraftTelegramPresenter
     }
 
     /**
-     * "Запрос" is what the operator wrote; the found product's name is a separate
-     * line when it differs (live #206: a sibling configuration's name read as if
+     * Where the found product is not what the operator wrote, said before they
+     * press anything (strategy: significant differences are named before
+     * confirmation; live #215: the requested colour was on no page of the model).
+     */
+    private function requestNotice(ProductDraft $draft): string
+    {
+        $stored = ProductRequestContext::stored($draft);
+        $labels = ['color' => 'Цвет', 'model' => 'Модель', 'configuration' => 'Комплектация', 'condition' => 'Состояние'];
+        $lines = array_map(fn (array $item): string => ($labels[$item['requirement'] ?? ''] ?? 'Требование')
+            .': в запросе «'.$item['requested'].'», найдено «'.$item['found'].'».', $stored['differences']);
+        if ($stored['codes'] !== []) {
+            $lines[] = 'Код из запроса не найден ни на одной странице: '.implode(', ', $stored['codes'])
+                .'. Карточка собрана по ближайшей найденной конфигурации.';
+        }
+
+        return $lines === [] ? '' : 'Не совпадает с запросом. '.implode(' ', $lines);
+    }
+
+    /**
+     * "Запрос" is what the operator wrote; the found product's name is a separate     * line when it differs (live #206: a sibling configuration's name read as if
      * the operator had asked for it). A button press carries no request text.
      */
     private function requestLine(ProductDraft $draft): string

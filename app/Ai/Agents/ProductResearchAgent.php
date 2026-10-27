@@ -190,6 +190,14 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
             closest observed product - select it the same way and say so; unresolved is for the case where no
             concrete product was observed at all. Leave unconfirmed_operator_codes empty when every supplied code
             was observed.
+            A visible requirement the operator wrote that no observed page of the requested model shows - most often a
+            colour name - does not stop the search either. When the model itself is observed (its listings and the
+            manufacturer's sheet name another colour), select the closest observed configuration of that model, write
+            what the pages show in color and the other fields (never the requested value as if it were observed), and
+            list each difference in request_differences with the requested value, the found value and the evidence; if
+            the requested value belongs to another model, name that model in the evidence. The operator sees every
+            difference beside the add button and decides. Leave request_differences empty when the pages show what
+            was asked.
 
             The prompt may include structured product database results (Icecat, UPCitemdb) for codes in the
             request, with their recent track record. They are hints, not verification: use them when brand, code
@@ -299,6 +307,13 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
             ])->required()->description('Your decision about structured product database results in the prompt.'),
             'unconfirmed_operator_codes' => $schema->array()->max(10)->items($schema->string()->max(100))->required()
                 ->description('Operator-supplied EAN/UPC, SKU or part numbers that no observed page shows; empty when all were observed.'),
+            'request_differences' => $schema->array()->max(10)->items($schema->object([
+                'requirement' => $schema->string()->enum(['color', 'model', 'configuration', 'condition', 'other'])->required(),
+                'requested' => $schema->string()->max(255)->required(),
+                'found' => $schema->string()->max(255)->required(),
+                'evidence' => $schema->string()->max(800)->required(),
+            ])->withoutAdditionalProperties())->required()
+                ->description('Operator requirements that no observed page of the selected model shows, with what the pages show instead; empty when the pages show what was asked.'),
             'selected_identity' => $schema->object([
                 'basis' => $schema->string()->enum(['commercial_code', 'full_model'])->required(),
                 'model_scope' => $schema->string()->enum(['single_product', 'product_family', 'unknown'])->required(),
