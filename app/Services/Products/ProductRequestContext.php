@@ -83,6 +83,12 @@ final class ProductRequestContext
                     ])
                     ->values()
                     ->all(),
+                // What research learned about the identity, for every agent that
+                // judges a page or a frame against it (live #279: research knew
+                // "MSN 30035506 / MD 62518", the model said only "(30035506)", and
+                // a shop's MD62518 photos were held as another chassis).
+                ...(self::text($draft->research_notes) === null ? []
+                    : ['research_notes' => mb_substr(self::text($draft->research_notes), 0, 2000)]),
             ],
             inputContext: $input,
             requestDifferences: self::stored($draft)['differences'],

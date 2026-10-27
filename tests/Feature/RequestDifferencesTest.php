@@ -66,6 +66,21 @@ class RequestDifferencesTest extends TestCase
         $this->assertArrayNotHasKey('request_differences', ProductRequestContext::forDraft($draft->fresh())->forAgent());
     }
 
+    public function test_research_notes_reach_every_agent_with_the_selected_product(): void
+    {
+        // Live #279: research knew "MSN 30035506 / MD 62518", the model said only "(30035506)",
+        // and a shop selling the MD62518 chassis was held as another configuration.
+        [, $draft] = $this->draft(photoCount: 0);
+        $draft->update(['research_notes' => 'The manufacturer document identifies this configuration as MSN 30035506 / MD 62518.']);
+
+        $context = ProductRequestContext::forDraft($draft->fresh())->forAgent();
+
+        $this->assertStringContainsString('MD 62518', $context['selected_product']['research_notes']);
+
+        $draft->update(['research_notes' => null]);
+        $this->assertArrayNotHasKey('research_notes', ProductRequestContext::forDraft($draft->fresh())->forAgent()['selected_product']);
+    }
+
     public function test_card_assembly_and_the_offer_choice_see_the_differences(): void
     {
         [$update, $draft] = $this->draft(photoCount: 0);
