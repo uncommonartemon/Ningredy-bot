@@ -127,7 +127,7 @@ final class SearchJournal
         ]));
 
         return self::minute($row->created_at, $start).' '.(self::host($row->product_url) ?: '-').' '.$row->phase.'.'.$row->action
-            .': '.($row->decision ?: $row->status).($facts === [] ? '' : ' · '.implode(' · ', $facts));
+            .': '.(self::decisionText($row) ?: $row->status).($facts === [] ? '' : ' · '.implode(' · ', $facts));
     }
 
     /** @return ?list<string> what a training round collected, as image identities; null for any other step */
@@ -142,15 +142,24 @@ final class SearchJournal
             ->map(fn (string $url): string => ImageUrls::imageAssetKey($url))->unique()->sort()->values()->all();
     }
 
+    /**
+     * The cheap fetch timing out is not the host refusing: the browser opens the
+     * page afterwards and its result is the one to judge (live #204). One wording
+     * for the timeline, the outcome and a page's last step (live #218, #234: the
+     * timeline still said "http_error" and the watcher dropped hp.com for it).
+     */
+    private static function decisionText(object $row): ?string
+    {
+        return $row->decision === 'http_error' && $row->action === 'check_source_access'
+            ? 'quick_check_timeout (browser still opens the page)' : $row->decision;
+    }
+
     /** Same outcome, same text: a training round by the pictures it collected, any other step by its result. */
     private static function outcome(object $row): string
     {
         $frames = self::frames($row);
         $failure = filled($row->failure_kind ?? null) ? ' · failure '.$row->failure_kind : '';
-        // The cheap fetch timing out is not the host refusing: the browser opens
-        // the page afterwards and its result is the one to judge (live #204).
-        $decision = $row->decision === 'http_error' && $row->action === 'check_source_access'
-            ? 'quick_check_timeout (browser still opens the page)' : $row->decision;
+        $decision = self::decisionText($row);
 
         return match (true) {
             $frames === null => ($decision ?: $row->status).$failure,
@@ -217,7 +226,7 @@ final class SearchJournal
                         ->flatMap(fn (ProductSourceAttempt $row): array => (array) data_get($row->output, 'rejection_summary', []))
                         ->groupBy(fn (int $count, string $reason): string => Str::before($reason, ' ('))
                         ->map(fn ($counts): int => (int) $counts->sum())->sortDesc()->take(4)->all(),
-                    'last_step' => $steps->last()->action.': '.($steps->last()->decision ?? '-'),
+                    'last_step' => $steps->last()->action.': '.(self::decisionText($steps->last()) ?? '-'),
                     'ended_by_agent' => $endedByAgent[$host] ?? null,
                     // Live #7: an exact-SKU page with a seven-frame gallery whose
                     // collection had just begun looked like any other empty page.
