@@ -39,8 +39,9 @@ class TrainingBrowserContextTransferTest extends TestCase
         ]);
         app(ProductGalleryRecipeProof::class)->remember($recipe, 'https://shop.example/control', ['passed' => true]);
 
+        // A changed body: the recipe's own body needs no control replay.
         $result = (new ReflectionMethod($trainer, 'canaryFailure'))->invoke(
-            $trainer, $recipe, $recipe->recipe, 'https://shop.example/model-009it', null, null,
+            $trainer, $recipe, ['collect_selectors' => ['.gallery-v2 img']], 'https://shop.example/model-009it', null, null,
         );
 
         $this->assertSame('interrupted', $result['status']);

@@ -102,6 +102,13 @@ class ProductGalleryRecipeTrainer
         if ((int) $recipe->success_count < 1) {
             return ['status' => 'not_required', 'reason' => 'No previous successful recipe.'];
         }
+        // The control page already ran exactly this body. Running it there again
+        // proves nothing new and only lets a slow page block the promotion (live
+        // #265: dell.com's training proposed its proven body again, the replay
+        // came back partial and the domain stayed in paid training).
+        if ($this->canaryCacheKey($candidate) === $this->canaryCacheKey($recipe->recipe ?? [])) {
+            return ['status' => 'not_required', 'reason' => 'The proposed recipe executes the current proven body unchanged.'];
+        }
 
         $provenUrl = app(ProductGalleryRecipeProof::class)->provenUrl($recipe, $trainingUrl);
 
@@ -112,7 +119,7 @@ class ProductGalleryRecipeTrainer
         // No unfinished control replay may replace the old working recipe.
         // Current-page photographs remain available to the caller.
         if (! $this->timeBudget->canStart($telegramUpdateId, 40) || $this->costBudget->exceeded($telegramUpdateId)) {
-            return ['status' => 'interrupted', 'url' => $provenUrl, 'reason' => 'Insufficient budget for the control replay.'];
+            return $this->controlInterrupted($provenUrl, $candidate, 'Insufficient budget for the control replay.', [], $telegramUpdateId, $version);
         }
 
         $debug?->__invoke('step', 'Проверяю починенный рецепт на прежде рабочей странице: '.$provenUrl);
@@ -127,7 +134,7 @@ class ProductGalleryRecipeTrainer
             throw $exception;
         } catch (Throwable $exception) {
             // A timeout is not proof of another layout.
-            return ['status' => 'interrupted', 'url' => $provenUrl, 'reason' => $exception->getMessage()];
+            return $this->controlInterrupted($provenUrl, $candidate, $exception->getMessage(), [], $telegramUpdateId, $version);
         }
 
         $failure = trim((string) ($result['failure_kind'] ?? ''));
@@ -137,7 +144,11 @@ class ProductGalleryRecipeTrainer
             || ($failure !== '' && $failure !== 'recipe_mismatch')
             || data_get($result, 'diagnostics.partial') === true
             || ! empty($result['error'])) {
-            return ['status' => 'interrupted', 'url' => $provenUrl, 'reason' => $failure ?: (string) ($result['error'] ?? 'Partial control replay.')];
+            $stage = trim((string) (data_get($result, 'diagnostics.interruption_reason') ?? data_get($result, 'diagnostics.browser_stage') ?? ''));
+
+            return $this->controlInterrupted($provenUrl, $candidate,
+                $failure ?: (filled($result['error'] ?? null) ? (string) $result['error'] : 'Partial control replay'.($stage !== '' ? ': '.$stage : '').'.'),
+                $result, $telegramUpdateId, $version);
         }
         $validation = $this->resultValidator->validate($candidate, $result, countedOnThisPage: false);
         $audit = $this->attempts->record([
@@ -167,6 +178,33 @@ class ProductGalleryRecipeTrainer
             'observation' => $this->observationForAgent($result['post_interaction_scout'] ?? $result['scout'] ?? []),
             'progress_signature' => $this->trainingProgressSignature($result),
         ];
+    }
+
+    /**
+     * A control replay that did not finish keeps the old recipe, and the journal
+     * says why: #265's "Partial control replay." left no trace of what cut it.
+     */
+    private function controlInterrupted(string $provenUrl, array $candidate, string $reason, array $result, ?int $telegramUpdateId, ?ProductGalleryRecipeVersion $version): array
+    {
+        $this->attempts->record([
+            'telegram_update_id' => $telegramUpdateId,
+            'product_gallery_recipe_version_id' => $version?->id,
+            'product_url' => $provenUrl, 'actor' => 'playwright', 'phase' => 'gallery_training',
+            'action' => 'control_recipe_execution', 'status' => 'interrupted', 'decision' => 'control_interrupted',
+            'input' => ['recipe' => $candidate],
+            'output' => [
+                'reason' => $reason,
+                'failure_kind' => $result['failure_kind'] ?? null,
+                'error' => $result['error'] ?? null,
+                'images' => count($result['images'] ?? []),
+                'diagnostics' => array_intersect_key($result['diagnostics'] ?? [], array_flip([
+                    'partial', 'interruption_reason', 'browser_stage', 'stopped_early', 'stage_timings_ms',
+                    'probed_candidates', 'validated_candidates', 'unprobed_candidates', 'selector_errors', 'collection_errors',
+                ])),
+            ],
+        ]);
+
+        return ['status' => 'interrupted', 'url' => $provenUrl, 'reason' => $reason];
     }
 
     private function canaryCacheKey(array $candidate): string
@@ -2563,17 +2601,16 @@ class ProductGalleryRecipeTrainer
             in_array($kind, ['recipe_mismatch', 'dom_unusable', 'agent_abandoned'], true) => now()->addMinutes(10),
             default => now()->addMinutes(15),
         };
-        $pausePlaywright = in_array($kind, [
-            'access_gate',
-            'rate_limited',
-            'browser_timeout',
-            'browser_unavailable',
-            'browser_process',
-            'browser_protocol',
-        ], true);
-        $status = $disable
-            ? 'disabled'
-            : ($pausePlaywright ? 'learning' : ($hasUsableRecipe ? 'active' : 'learning'));
+        $pausePlaywright = in_array($kind, ProductGalleryRecipe::PAUSING_FAILURES, true);
+        $status = match (true) {
+            $disable => 'disabled',
+            // A pause is not a demotion: a proven recipe waits it out and then
+            // replays as it is (live #237: one CAPTCHA during a repair turned
+            // dell.com's four-times-proven recipe into paid training on every
+            // later request, and #265's training proposed the same body again).
+            $hasUsableRecipe && (! $pausePlaywright || $recipe->status === 'active') => 'active',
+            default => 'learning',
+        };
         $disableReason = match ($kind) {
             'access_gate' => 'CAPTCHA/WAF: повторный вход тем же Playwright с высокой вероятностью снова будет заблокирован.',
             'recipe_mismatch', 'dom_unusable' => 'две полные тренировки рецепта не смогли получить галерею.',

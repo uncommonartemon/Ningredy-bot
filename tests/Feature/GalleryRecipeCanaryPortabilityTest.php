@@ -6,6 +6,7 @@ use App\Ai\Agents\ProductGalleryPreflightAgent;
 use App\Ai\Agents\ProductGalleryRecipeTrainerAgent;
 use App\Models\ProductGalleryRecipe;
 use App\Models\ProductGalleryRecipeVersion;
+use App\Models\ProductSourceAttempt;
 use App\Services\Products\BrowserProductGalleryExtractor;
 use App\Services\Products\ProductGalleryRecipeProof;
 use App\Services\Products\ProductGalleryRecipeRouter;
@@ -298,6 +299,62 @@ class GalleryRecipeCanaryPortabilityTest extends TestCase
             $this->assertFalse($browser->isConfirmedGalleryImage($photo));
             $this->assertTrue($browser->isPartialGalleryImage($photo));
         }
+    }
+
+    public function test_the_proven_body_proposed_again_is_promoted_without_a_control_replay(): void
+    {
+        // Live #265: dell.com's training proposed its proven body again, the control
+        // replay came back partial and the domain stayed in paid training.
+        $this->provenRecipe();
+        $visited = [];
+        $this->browser(function (string $url) use (&$visited): array {
+            $visited[] = $url;
+            $count = str_ends_with($url, '/original') ? 9 : 4;
+
+            return ['images' => $this->images($count), 'diagnostics' => ['observed_gallery_count' => $count]];
+        });
+        $round = 0;
+        ProductGalleryRecipeTrainerAgent::fake(function () use (&$round): array {
+            return [...$this->candidate('.gallery img', 4), 'reason' => 'Same selector, new explanation '.++$round];
+        })->preventStrayPrompts();
+        $trainer = app(ProductGalleryRecipeTrainer::class);
+
+        $this->assertCount(4, $trainer->train('https://portability.example/products/current', force: true, previousRecipeImages: []));
+        $this->assertCount(4, $trainer->train('https://portability.example/products/next', force: true, previousRecipeImages: []));
+
+        $this->assertSame([
+            'https://portability.example/products/current', 'https://portability.example/products/original',
+            'https://portability.example/products/next',
+        ], $visited);
+        $this->assertSame(2, ProductGalleryRecipeVersion::where('status', 'promoted')->count());
+        $control = ProductGalleryRecipeVersion::latest('id')->firstOrFail()->result['control_replay'];
+        $this->assertSame('not_required', $control['status']);
+        $this->assertStringContainsString('unchanged', $control['reason']);
+    }
+
+    public function test_an_interrupted_control_replay_is_journaled_with_its_cause(): void
+    {
+        // Live #265: "Partial control replay." left no trace of what cut the replay.
+        $recipe = $this->provenRecipe();
+        $oldBody = $recipe->recipe;
+        ProductGalleryRecipeTrainerAgent::fake(fn (): array => $this->candidate('.gallery img', 4))->preventStrayPrompts();
+        $this->browser(fn (string $url): array => str_ends_with($url, '/original')
+            ? ['images' => $this->images(5), 'diagnostics' => ['observed_gallery_count' => 9, 'partial' => true, 'interruption_reason' => 'image_load_failed']]
+            : ['images' => $this->images(4), 'diagnostics' => ['observed_gallery_count' => 4]]);
+
+        $this->assertSame($this->images(4), app(ProductGalleryRecipeTrainer::class)->train(
+            'https://portability.example/products/current', force: true, previousRecipeImages: [],
+        ));
+
+        $this->assertSame($oldBody, $recipe->fresh()->recipe);
+        $row = ProductSourceAttempt::query()->where('action', 'control_recipe_execution')->sole();
+        $this->assertSame('control_interrupted', $row->decision);
+        $this->assertSame('https://portability.example/products/original', $row->product_url);
+        $this->assertSame('Partial control replay: image_load_failed.', $row->output['reason']);
+        $this->assertSame('image_load_failed', $row->output['diagnostics']['interruption_reason']);
+        $this->assertSame(5, $row->output['images']);
+        $this->assertSame('Partial control replay: image_load_failed.',
+            ProductGalleryRecipeVersion::latest('id')->firstOrFail()->result['control_replay']['reason']);
     }
 
     private function provenRecipe(): ProductGalleryRecipe

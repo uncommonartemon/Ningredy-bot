@@ -1046,6 +1046,56 @@ class ProductGalleryRecipeTrainerTest extends TestCase
         $this->assertTrue($router->domainIsBlocked('https://blocked.example/product-four'));
     }
 
+    public function test_a_captcha_pauses_a_proven_recipe_without_demoting_it(): void
+    {
+        // Live #237/#265: one CAPTCHA during a repair turned dell.com's four-times-proven
+        // recipe into "learning", and every later request paid for training again.
+        $recipe = ProductGalleryRecipe::create([
+            'domain' => 'proven-gate.example', 'path_pattern' => '*', 'status' => 'active', 'success_count' => 4,
+            'recipe' => ['collect_selectors' => ['.gallery img'], 'attributes' => ['src'], 'gallery_present' => true,
+                'content_confirmed_product' => true],
+        ]);
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('scout')->once()->andReturn(['scout' => [
+                'fragments' => [], 'access_gate' => true, 'access_gate_reason' => 'captcha', 'rate_limited' => false,
+            ]]);
+        });
+
+        app(ProductGalleryRecipeTrainer::class)->train('https://proven-gate.example/p/one', 'automatic_failure');
+        $recipe->refresh();
+
+        $this->assertSame('active', $recipe->status);
+        $this->assertSame('access_gate', $recipe->last_failure_kind);
+        $this->assertTrue($recipe->retry_after->isFuture());
+        $this->assertTrue($recipe->playwrightPaused());
+        $this->assertFalse((bool) $recipe->source_blocked);
+
+        // The browser waits the pause out, then replays the proven recipe without training.
+        config(['product-images.browser_fallback.enabled' => true]);
+        $dependencies = array_map(
+            fn ($parameter) => app((string) $parameter->getType()),
+            (new \ReflectionClass(BrowserProductGalleryExtractor::class))->getConstructor()->getParameters(),
+        );
+        $photos = ['https://cdn.example/g1.jpg', 'https://cdn.example/g2.jpg', 'https://cdn.example/g3.jpg', 'https://cdn.example/g4.jpg'];
+        $browser = \Mockery::mock(BrowserProductGalleryExtractor::class, $dependencies)->makePartial();
+        $browser->shouldReceive('executeRecipe')->once()->andReturn(['images' => $photos, 'diagnostics' => ['observed_gallery_count' => 4]]);
+
+        $log = [];
+        $debug = function (string $level, string $message) use (&$log): void {
+            $log[] = $level.': '.$message;
+        };
+
+        $this->assertSame([], $browser->extract('https://proven-gate.example/p/two', debug: $debug));
+        $this->assertStringContainsString('на паузе', implode("\n", $log));
+
+        $this->travelTo($recipe->retry_after->addMinute());
+        $this->assertFalse($recipe->fresh()->playwrightPaused());
+        $this->assertSame($photos, $browser->extract('https://proven-gate.example/p/two', debug: $debug,
+            context: ['minimum_verified_images' => 3]));
+        $this->assertSame(5, $recipe->fresh()->success_count);
+        $this->assertSame('active', $recipe->fresh()->status);
+    }
+
     public function test_the_agent_is_told_what_budget_is_left_and_what_became_of_its_photos(): void
     {
         // Nothing in this system may decide when the agent has had enough

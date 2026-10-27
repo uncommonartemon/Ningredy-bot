@@ -132,10 +132,7 @@ class BrowserProductGalleryExtractor
             return [];
         }
 
-        if (
-            $recipe?->status !== 'active'
-            && $recipe?->retry_after?->isFuture()
-        ) {
+        if ($recipe?->playwrightPaused()) {
             $debug?->__invoke(
                 'warning',
                 "Playwright для {$host} на паузе до {$recipe->retry_after->format('H:i d.m')}; перехожу к следующему источнику.",
