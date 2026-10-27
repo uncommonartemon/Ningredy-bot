@@ -19,6 +19,13 @@ final class ResearchSourceRoles
             || (is_array($source['roles']) && array_intersect($source['roles'], ['exact_photo', 'compatible_photo_candidate']) !== []);
     }
 
+    /** Research said in so many words that this page shows the product's photos. */
+    public static function namesPhotos(array $source): bool
+    {
+        return is_array($source['roles'] ?? null)
+            && array_intersect($source['roles'], ['exact_photo', 'compatible_photo_candidate']) !== [];
+    }
+
     public static function mayIdentifySelectedProduct(array $source): bool
     {
         return self::maySupplyFacts($source)

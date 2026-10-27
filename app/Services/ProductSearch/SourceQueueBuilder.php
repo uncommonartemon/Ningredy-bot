@@ -115,8 +115,12 @@ class SourceQueueBuilder
                 $reason = match (true) {
                     $url === '' => 'invalid_source',
                     // web means an unclassified source, not proof that its
-                    // HTML is not a product card. Let page evidence decide.
-                    ! in_array($source['type'] ?? null, ['retailer', 'marketplace', 'manufacturer', 'web'], true) => 'not_product_card_type',
+                    // HTML is not a product card. Let page evidence decide. So
+                    // does a page research named for photos, whatever its type
+                    // (live #279: a laptop database with the E40's photos was
+                    // dropped as "database", and the request ended with none).
+                    ! in_array($source['type'] ?? null, ['retailer', 'marketplace', 'manufacturer', 'web'], true)
+                        && ! ResearchSourceRoles::namesPhotos($source) => 'not_product_card_type',
                     // The same document test the fallback search has always applied.
                     // Research produces this list, and nothing filtered it: a search
                     // opened with a PDF catalogue as source #1 twice in one day

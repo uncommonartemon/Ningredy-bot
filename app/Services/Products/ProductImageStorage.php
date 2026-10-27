@@ -584,6 +584,7 @@ class ProductImageStorage
         $reserve = null;
         $deferredVisionSets = [];
         $reviewedSourceUrls = [];
+        $adoptedOffers = $this->adoptedOfferSources($draft);
 
         foreach ($sourceQueue as $sourceIndex => $source) {
             app(ProductSearchCancellation::class)->throwIfCancelled($telegramUpdateId);
@@ -622,13 +623,17 @@ class ProductImageStorage
 
                 continue;
             }
-            // The search watcher may skip this source or end the photo search; what
-            // was already found goes on to verification and card assembly as usual.
-            $watch = app(SearchProgressSupervisor::class)->review($telegramUpdateId, $draft, [
-                'kind' => 'next_source', 'url' => $source['url'], 'position' => $sourceIndex + 1,
-                'queue_size' => $sourceQueue->count(), 'photo_sets_waiting_for_check' => count($deferredVisionSets),
-                'best_unfinished_set_photos' => $reserve === null ? 0 : count($reserve->candidates),
-            ], $progress);
+            // The card's own source after it adopted that offer is not more search:
+            // it is what was found, checked against the card it became. A standing
+            // "wrap up" does not stop it (live #279 ended with none).
+            $watch = isset($adoptedOffers[rtrim((string) $source['url'], '/')]) ? ['decision' => 'continue']
+                // The search watcher may skip this source or end the photo search; what
+                // was already found goes on to verification and card assembly as usual.
+                : app(SearchProgressSupervisor::class)->review($telegramUpdateId, $draft, [
+                    'kind' => 'next_source', 'url' => $source['url'], 'position' => $sourceIndex + 1,
+                    'queue_size' => $sourceQueue->count(), 'photo_sets_waiting_for_check' => count($deferredVisionSets),
+                    'best_unfinished_set_photos' => $reserve === null ? 0 : count($reserve->candidates),
+                ], $progress);
             if ($watch['decision'] === 'deliver_now') {
                 break;
             }
@@ -2991,6 +2996,23 @@ class ProductImageStorage
         $progress?->__invoke("Пропускаю {$url}: наблюдатель поиска исключил этот сайт.");
     }
 
+    /**
+     * Pages whose offer the card adopted, with the journal row of the adoption.
+     *
+     * @return array<string, int>
+     */
+    private function adoptedOfferSources(ProductDraft $draft): array
+    {
+        return ProductSourceAttempt::query()
+            ->where('product_draft_id', $draft->id)
+            ->where('phase', 'card_assembly')->where('action', 'reconcile_card')->where('decision', 'reconciled')
+            ->where('output->offer_selection->action', 'adopt_source_offer')
+            ->orderBy('id')->get(['id', 'output'])
+            ->mapWithKeys(fn (ProductSourceAttempt $row): array => [
+                rtrim((string) data_get($row->output, 'offer_selection.source_url'), '/') => $row->id,
+            ])->all();
+    }
+
     /** @return array<int, string> */
     private function terminalSourceUrlsForContinuation(ProductDraft $draft): array
     {
@@ -3000,6 +3022,11 @@ class ProductImageStorage
             'verify_discovered_gallery',
             'verify_discovered_candidates',
         ];
+        // A card that adopted a source's offer made that source exact: what was
+        // decided about it under the earlier identity no longer ends it (live #279:
+        // coolblue's E40 frames were held as another configuration, the card then
+        // became that very offer, and the continuation skipped it as finished).
+        $adoptedAt = $this->adoptedOfferSources($draft);
 
         return ProductSourceAttempt::query()
             ->where('product_draft_id', $draft->id)
@@ -3028,6 +3055,8 @@ class ProductImageStorage
                     });
             })
             ->orderBy('id')
+            ->get(['id', 'product_url'])
+            ->reject(fn (ProductSourceAttempt $attempt): bool => $attempt->id < ($adoptedAt[rtrim((string) $attempt->product_url, '/')] ?? 0))
             ->pluck('product_url')
             ->filter(fn (mixed $url): bool => is_string($url) && filter_var($url, FILTER_VALIDATE_URL) !== false)
             ->unique()
