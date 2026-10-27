@@ -746,19 +746,17 @@ const CMS_IMAGE_CACHE_RUN = /\/cache\/(?:[^/]+\/){0,3}[0-9a-f]{16,64}\//gi;
 // "/308628/name.jpg" is the original. Mirrors ImageUrls::IMAGE_TYPE_SEGMENT.
 const IMAGE_TYPE_SEGMENT = /\/(\d+)-[a-z0-9]+(?:[-_][a-z0-9]+)*_default\//gi;
 
-export const isShopifyCdnUrl = (url) => url.hostname.endsWith('shopify.com')
-    || /\/cdn\/shop\/(?:files|products)\//i.test(url.pathname);
+// Shopify's file paths, on its own CDN ("/s/files/") and on a shop's domain ("/cdn/shop/files/").
+export const isShopifyCdnUrl = (url) => /\/(?:cdn\/shop\/(?:files|products)|s\/files)\//i.test(url.pathname);
 
 export const imageAssetKey = (rawUrl) => {
     const url = new URL(rawUrl);
 
-    if (url.hostname.endsWith('bhphoto.com')) {
-        return 'bh:'+(url.pathname.split('/').pop()?.toLowerCase() || '');
-    }
-
-    if (url.hostname.endsWith('media-amazon.com')) {
-        return 'amazon:'+url.pathname.replace(/\._[^/]+(?=\.[^./]+$)/, '').toLowerCase();
-    }
+    // An image service's size token closing the file name ("._AC_SL1500_.jpg": Amazon's
+    // CDN) picks a rendition of the same picture, whatever the host.
+    url.pathname = url.pathname.replace(/\._[A-Za-z0-9,_-]+_(?=\.[a-z0-9]{3,4}$)/i, '');
+    // A rendition-coded first directory ("/r705/": LDLC's CDN) picks a size of the frame below it.
+    url.pathname = url.pathname.replace(/^\/r\d{2,5}\//i, '/__rendition__/');
 
     // A width segment closing the path ("/gain/<id>/w80", "//w184": live #278 asus.com)
     // names a rendition of the frame at that path, whatever the host. Mirrors ImageUrls::imageAssetKey().

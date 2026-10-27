@@ -44,17 +44,11 @@ class ImageUrls
         $host = Str::lower((string) parse_url($normalized, PHP_URL_HOST));
         $path = (string) parse_url($normalized, PHP_URL_PATH);
 
-        if ($host === 'static.bhphoto.com' || str_ends_with($host, '.bhphoto.com')) {
-            return 'bh:'.Str::lower((string) pathinfo($path, PATHINFO_BASENAME));
-        }
-
-        if ($host === 'm.media-amazon.com' || str_ends_with($host, '.media-amazon.com')) {
-            $normalized = preg_replace(
-                '#\._[^/]+(?=\.(?:jpe?g|png|webp)(?:$|\?))#i',
-                '',
-                $normalized,
-            ) ?: $normalized;
-        }
+        // An image service's size token closing the file name ("._AC_SL1500_.jpg": Amazon's
+        // CDN) picks a rendition of the same picture, whatever the host.
+        $normalized = preg_replace('#\._[A-Za-z0-9,_-]+_(?=\.(?:jpe?g|png|webp|gif)(?:$|\?))#', '', $normalized) ?: $normalized;
+        // A rendition-coded first directory ("/r705/": LDLC's CDN) picks a size of the frame below it.
+        $normalized = preg_replace('#^(https?://[^/]+)/r\d{2,5}/#i', '$1/__rendition__/', $normalized) ?: $normalized;
 
         // A width segment closing the path ("/gain/<id>/w80", "//w184": live #278 asus.com) names a
         // rendition of the frame at that path, whatever the host. Mirrors product-gallery-utils.mjs.
@@ -85,7 +79,8 @@ class ImageUrls
             return 'digest:'.$host.':'.Str::lower($digest[1]).($query === '' ? '' : '?'.$query);
         }
 
-        if (str_ends_with($host, 'shopify.com') || preg_match('#/cdn/shop/(?:files|products)/#i', $path) === 1) {
+        // Shopify's file paths, on its own CDN ("/s/files/") and on a shop's domain ("/cdn/shop/files/").
+        if (preg_match('#/(?:cdn/shop/(?:files|products)|s/files)/#i', $path) === 1) {
             $normalized = preg_replace(
                 '/_(?:\d+x\d*|pico|icon|thumb|small|compact|medium|large|grande|original|master)(?:@\dx)?(?=\.(?:jpe?g|png|webp|gif)(?:$|\?))/i',
                 '',
@@ -99,11 +94,6 @@ class ImageUrls
             $normalized = $base.($query === [] ? '' : '?'.http_build_query($query));
         }
 
-        // LDLC encodes only the requested rendition in /r705/, /r1600/, ...;
-        // the remainder of the path is the physical gallery frame.
-        if ($host === 'media.ldlc.com' || str_ends_with($host, '.media.ldlc.com')) {
-            $normalized = preg_replace('#/r\d{2,5}/#i', '/__rendition__/', $normalized) ?: $normalized;
-        }
         $normalized = preg_replace(
             '/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:_(?:\d{2,5}|sea))?\.(?:jpe?g|png|webp|gif|avif)(?=$|\?)/i',
             '$1.__image__',

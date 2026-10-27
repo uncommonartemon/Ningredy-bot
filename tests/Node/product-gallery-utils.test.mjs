@@ -770,3 +770,13 @@ test('a width segment closing the path is a rendition of the same frame on any h
     assert.equal(imageAssetKey('https://cdn.shop.test/p/123/w300'), imageAssetKey('https://cdn.shop.test/p/123/w1200'));
     assert.notEqual(imageAssetKey(base+'/w80'), imageAssetKey('https://dlcdnwebimgs.asus.com/gain/7fb77e0a-97ef-4be0-babd-22892330add9/w80'));
 });
+
+test('rendition tokens and folders group frames without naming any host', () => {
+    // The rules once tied to Amazon, B&H and Shopify hosts are URL shapes on any host.
+    assert.equal(imageAssetKey('https://m.media-amazon.com/images/I/71abcDEF._AC_SL1500_.jpg'), imageAssetKey('https://m.media-amazon.com/images/I/71abcDEF._SX300_QL70_.jpg'));
+    assert.equal(imageAssetKey('https://cdn.example.test/i/71abcDEF._AC_SL1500_.jpg'), imageAssetKey('https://cdn.example.test/i/71abcDEF.jpg'));
+    assert.notEqual(imageAssetKey('https://m.media-amazon.com/images/I/71abcDEF._AC_SL1500_.jpg'), imageAssetKey('https://m.media-amazon.com/images/I/81xyzXYZ._AC_SL1500_.jpg'));
+    assert.equal(imageAssetKey('https://static.bhphoto.com/images/images500x500/1690283445_1771565.jpg'), imageAssetKey('https://static.bhphoto.com/images/images2500x2500/1690283445_1771565.jpg'));
+    assert.equal(imageAssetKey('https://media.shop.test/r705/ld/products/LD0006175263.jpg'), imageAssetKey('https://media.shop.test/r1600/ld/products/LD0006175263.jpg'));
+    assert.equal(imageAssetKey('https://cdn.shopify.com/s/files/1/0001/products/laptop_300x.jpg?v=1'), imageAssetKey('https://cdn.shopify.com/s/files/1/0001/products/laptop.jpg?v=1'));
+});
