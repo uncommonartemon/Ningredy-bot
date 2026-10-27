@@ -179,6 +179,8 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
               фото нет, а поиск фото остановлен (photo_search=stopped). Обязательно сохрани draft_id: приложение само
               отправит текстовую карточку с кнопкой продолжения поиска фото. Скажи прямо, что фото не нашлось; не пиши,
               что поиск фото продолжается. ready_for_approval=false запрещает публикацию, а не показ этой готовой информации.
+            - Если ResearchProduct вернул status=already_researched, этот же запрос уже исследован и черновик создан:
+              сохрани его draft_id и не вызывай ResearchProduct повторно с тем же запросом.
             - Если ResearchProduct вернул status=partial_result и partial_photo_result=true, найдены фотографии,
               но карточка ещё не согласована. Обязательно сохрани draft_id: приложение отправит фото как частичный
               результат с пояснением, что осталось неизвестным. Не называй это отсутствием результата или готовым

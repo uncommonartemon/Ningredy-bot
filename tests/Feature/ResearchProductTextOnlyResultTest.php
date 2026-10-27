@@ -323,6 +323,22 @@ class ResearchProductTextOnlyResultTest extends TestCase
         $this->assertSame('Storm Grey', $summary->output['request_differences'][0]['found']);
     }
 
+    public function test_the_same_query_asked_twice_in_one_request_returns_the_first_draft_without_new_research(): void
+    {
+        // Live #247: two identical ResearchProduct calls in one turn; the second bought the research again.
+        $this->research('cost_budget', assembled: true);
+        $draft = ProductDraft::query()->sole();
+        $update = TelegramUpdate::query()->sole();
+
+        $second = json_decode((string) (new ResearchProduct($update, app(ProductImageResolver::class)))
+            ->handle(new Request(['query' => $update->text])), true, flags: JSON_THROW_ON_ERROR);
+
+        $this->assertSame('already_researched', $second['status']);
+        $this->assertSame($draft->id, $second['draft_id']);
+        $this->assertSame(1, ProductDraft::query()->count());
+        $this->assertSame(1, ProductSourceAttempt::query()->where('action', 'research_summary')->count());
+    }
+
     public function test_a_matching_official_datasheet_joins_the_photo_queue_and_a_mismatch_is_skipped_with_a_record(): void
     {
         config(['services.icecat.username' => 'tester']);
