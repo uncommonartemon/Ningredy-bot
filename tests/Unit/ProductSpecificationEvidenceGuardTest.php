@@ -246,6 +246,20 @@ class ProductSpecificationEvidenceGuardTest extends TestCase
         $this->addToAssertionCount(1);
     }
 
+    public function test_a_reformatted_number_labelled_corrected_is_not_unchanged(): void
+    {
+        // The other label for the #274 case: "19.9" to "19.90" is the same value, so
+        // "corrected" is no lie and needs no review of the source that said "19.9".
+        $page = ['url' => 'https://shop.example/aspire', 'specification_text' => 'Dimensions: 362.3 × 237.4 × 19.90 mm'];
+        $fact = ['key' => 'dimensions', 'name' => 'Dimensions', 'value' => '362.3 × 237.4 × 19.9 mm',
+            'source_url' => 'https://maker.example/aspire', 'source_excerpt' => 'Dimensions: 362.3 × 237.4 × 19.9 mm'];
+        $candidate = [...$fact, 'evidence' => 'corrected', 'value' => '362.3 × 237.4 × 19.90 mm', 'reason' => 'The selected listing gives 19.90 mm.',
+            'source_url' => 'https://shop.example/aspire', 'source_excerpt' => 'Dimensions: 362.3 × 237.4 × 19.90 mm'];
+
+        (new ProductSpecificationEvidenceGuard)->validate([$fact], [$candidate], [], [$page]);
+        $this->addToAssertionCount(1);
+    }
+
     public function test_a_thousands_group_is_not_a_trailing_zero(): void
     {
         $this->expectException(RuntimeException::class);
