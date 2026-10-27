@@ -1565,6 +1565,12 @@ class ProductImageResolver
     private function normalizeImageCandidate(string $candidate, string $pageUrl): ?string
     {
         $candidate = trim(str_replace('\\/', '/', html_entity_decode($candidate, ENT_QUOTES | ENT_HTML5)));
+        // A lazy-load template ("..._{width}x.png") filled large is the frame at a big
+        // rendition; another placeholder left blank is no address yet (live #255).
+        $candidate = (string) preg_replace(['/\{width\}|%7Bwidth%7D/i', '/\{height\}|%7Bheight%7D/i'], '1600', $candidate);
+        if (preg_match('/\{[a-z_]+\}|%7B[a-z_]+%7D/i', $candidate) === 1) {
+            return null;
+        }
         $lower = strtolower($candidate);
 
         if (

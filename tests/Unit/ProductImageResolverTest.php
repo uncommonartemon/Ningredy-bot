@@ -122,6 +122,26 @@ class ProductImageResolverTest extends TestCase
         ], array_slice($images, 0, 3));
     }
 
+    public function test_a_lazy_load_template_is_filled_large_and_an_unknown_placeholder_is_skipped(): void
+    {
+        // Live #255: "..._{width}x.png" srcset templates were taken for frames and 404ed.
+        Http::fake([
+            'https://93.184.216.34/shopify' => Http::response(<<<'HTML'
+                <html><body>
+                    <img data-srcset="https://93.184.216.34/files/angle03_{width}x.png?v=1 1x">
+                    <img src="https://93.184.216.34/files/angle04_%7Bwidth%7Dx.png">
+                    <img src="https://93.184.216.34/files/angle05_{size}.png">
+                </body></html>
+                HTML, 200, ['Content-Type' => 'text/html']),
+        ]);
+
+        $images = app(ProductImageResolver::class)->resolve([['url' => 'https://93.184.216.34/shopify']], 10);
+
+        $this->assertContains('https://93.184.216.34/files/angle03_1600x.png?v=1', $images);
+        $this->assertContains('https://93.184.216.34/files/angle04_1600x.png', $images);
+        $this->assertSame([], array_values(array_filter($images, fn (string $url): bool => str_contains($url, 'angle05') || str_contains($url, '{') || str_contains($url, '%7B'))));
+    }
+
     public function test_it_blocks_private_source_addresses(): void
     {
         Http::fake();

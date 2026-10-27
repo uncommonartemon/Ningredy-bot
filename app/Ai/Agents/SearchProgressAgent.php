@@ -38,6 +38,9 @@ class SearchProgressAgent implements Agent, HasStructuredOutput
               Photos already found stay. A page selling another configuration of the same model is not by
               itself a reason to leave: whether its photos apply is the applicability verdict's question, not
               yours (live #193: a Ponder Blue shop was left for its SKU while its gallery was being collected).
+              The same frames are not "nothing new" when the later round is complete and the earlier one was
+              partial or its plan incomplete: that round is the recipe being confirmed, wait for it (live #256:
+              lenovo.com's complete fourth round was left four seconds later as "the same set").
             skip_site: the whole site is a dead end for this product - it refused access (http_403/404/406, an
               access gate; a quick_check_timeout is not a refusal: the cheap fetch gave up on a slow page and
               the browser opens it afterwards - judge the site by the browser's result), its downloads were

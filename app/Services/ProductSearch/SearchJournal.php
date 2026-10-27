@@ -110,6 +110,8 @@ final class SearchJournal
             ->whereNotIn('phase', ['source_queue', 'code_lookup'])->orderBy('id')
             ->get(['id', 'product_url', 'actor', 'phase', 'action', 'status', 'decision', 'message', 'created_at',
                 'output->images as images', 'output->failure_kind as failure_kind',
+                'output->diagnostics->partial as round_partial', 'output->diagnostics->interruption_reason as round_interruption',
+                'output->diagnostics->action_plan->complete as round_plan_complete',
                 ...array_map(fn (string $figure): string => "output->{$figure} as {$figure}", self::FIGURES)])
             ->reject(fn (object $row): bool => str_ends_with((string) $row->action, '_started')
                 || ($row->phase === 'gallery_training' && $row->actor === 'playwright')
@@ -165,7 +167,24 @@ final class SearchJournal
             $frames === null => ($decision ?: $row->status).$failure,
             $frames === [] => 'no frames'.$failure,
             // The tag is the training round's own frame-set hash, shortened.
-            default => count($frames).' frames ['.substr(hash('sha256', json_encode($frames)), 0, 4).']',
+            default => count($frames).' frames ['.substr(hash('sha256', json_encode($frames)), 0, 4).']'.self::roundState($row),
+        };
+    }
+
+    /**
+     * Whether a training round finished: the same frames from a partial round and then
+     * a complete one are progress, not a repeat (live #256: lenovo.com's fourth round
+     * collected the nine frames completely and the watcher left it as "the same set").
+     */
+    private static function roundState(object $row): string
+    {
+        $truthy = fn (mixed $value): bool => in_array($value, [true, 1, '1', 'true'], true);
+
+        return match (true) {
+            $truthy($row->round_partial ?? null) => ' · partial'.(filled($row->round_interruption ?? null) ? ': '.$row->round_interruption : ''),
+            in_array($row->round_plan_complete ?? null, [false, 0, '0', 'false'], true) => ' · plan incomplete',
+            $truthy($row->round_plan_complete ?? null) => ' · complete',
+            default => '',
         };
     }
 
