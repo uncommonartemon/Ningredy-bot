@@ -4321,6 +4321,92 @@ class ProductImageStorageTest extends TestCase
         ]);
     }
 
+    public function test_a_page_research_named_for_photos_is_queued_whatever_its_type(): void
+    {
+        // Live #279: a laptop database with the E40's photos, typed "database" and named a
+        // compatible photo candidate, was dropped as not a product card; the request ended with none.
+        config(['product-images.source_preflight' => false]);
+        Http::preventStrayRequests();
+        [, , $draft] = $this->records();
+        $draft->update(['sources' => [
+            ['url' => 'https://laptops.example/medion-e40-black', 'type' => 'database', 'roles' => ['compatible_photo_candidate']],
+            ['url' => 'https://shop.example/review', 'type' => 'review'],
+            ['url' => 'https://shop.example/product', 'type' => 'retailer'],
+        ]]);
+        [$queue] = (new \ReflectionMethod(ProductImageStorage::class, 'buildSourceQueue'))->invoke(
+            app(ProductImageStorage::class), $draft, [], [], false, 3, $draft->telegram_update_id, null,
+        );
+
+        $this->assertEqualsCanonicalizing(['https://laptops.example/medion-e40-black', 'https://shop.example/product'],
+            collect($queue)->pluck('url')->all());
+        $this->assertSame(['not_product_card_type'], ProductSourceAttempt::where('action', 'filter_candidate')->pluck('decision')->all());
+        Http::assertNothingSent();
+    }
+
+    public function test_a_verdict_given_before_the_card_adopted_that_offer_does_not_end_its_source(): void
+    {
+        // Live #279: coolblue's frames were held as another configuration, the card then
+        // adopted that very offer, and the continuation skipped coolblue as finished.
+        [, , $draft] = $this->records();
+        $adopted = 'https://shop.example/e40-md62518';
+        $other = 'https://other.example/e40';
+        $verdict = fn (string $url) => ProductSourceAttempt::query()->create([
+            'telegram_update_id' => $draft->telegram_update_id, 'product_draft_id' => $draft->id, 'product_url' => $url, 'domain' => parse_url($url, PHP_URL_HOST),
+            'actor' => 'vision', 'phase' => 'image_verification', 'action' => 'verify_deferred_source', 'status' => 'failed',
+            'decision' => 'try_next_independent_source',
+        ]);
+        $verdict($adopted);
+        $verdict($other);
+        ProductSourceAttempt::query()->create([
+            'telegram_update_id' => $draft->telegram_update_id, 'product_draft_id' => $draft->id, 'product_url' => $adopted, 'domain' => parse_url($adopted, PHP_URL_HOST),
+            'actor' => 'server', 'phase' => 'card_assembly', 'action' => 'reconcile_card', 'status' => 'completed',
+            'decision' => 'reconciled', 'output' => ['offer_selection' => ['action' => 'adopt_source_offer', 'source_url' => $adopted]],
+        ]);
+        $terminal = new \ReflectionMethod(ProductImageStorage::class, 'terminalSourceUrlsForContinuation');
+
+        $this->assertSame([$other], $terminal->invoke(app(ProductImageStorage::class), $draft));
+
+        // Checked again under the card it became, the source is finished like any other.
+        $verdict($adopted);
+        $this->assertEqualsCanonicalizing([$adopted, $other], $terminal->invoke(app(ProductImageStorage::class), $draft));
+    }
+
+    public function test_the_card_s_adopted_source_is_checked_again_despite_a_standing_wrap_up(): void
+    {
+        Storage::fake('public');
+        config()->set('product-images.fallback_discovery', false);
+        config()->set('product-images.source_preflight', false);
+        AppSetting::put('ai.fallback_sources_enabled', '0');
+        ProductImageVisionAgent::fake()->preventStrayPrompts();
+
+        $adopted = 'https://example.com/products/adopted-offer';
+        $resolver = $this->mockResolver();
+        $resolver->shouldReceive('resolve')->once()->andReturn([]);
+        $resolver->shouldNotReceive('download');
+
+        [, , $draft] = $this->records();
+        $draft->update([
+            'sources' => [['title' => 'Lenovo Test', 'url' => $adopted, 'type' => 'retailer']],
+            'primary_source_url' => $adopted,
+            'image_urls' => [],
+        ]);
+        ProductSourceAttempt::query()->create([
+            'telegram_update_id' => $draft->telegram_update_id, 'product_draft_id' => $draft->id, 'product_url' => $adopted, 'domain' => parse_url($adopted, PHP_URL_HOST),
+            'actor' => 'vision', 'phase' => 'image_verification', 'action' => 'verify_deferred_source', 'status' => 'failed',
+            'decision' => 'try_next_independent_source',
+        ]);
+        ProductSourceAttempt::query()->create([
+            'telegram_update_id' => $draft->telegram_update_id, 'product_draft_id' => $draft->id, 'product_url' => $adopted, 'domain' => parse_url($adopted, PHP_URL_HOST),
+            'actor' => 'server', 'phase' => 'card_assembly', 'action' => 'reconcile_card', 'status' => 'completed',
+            'decision' => 'reconciled', 'output' => ['offer_selection' => ['action' => 'adopt_source_offer', 'source_url' => $adopted]],
+        ]);
+        app(SearchProgressSupervisor::class)->requestWrapUp($draft->telegram_update_id, 'Two discovery rounds found nothing new.');
+
+        $stored = app(ProductImageStorage::class)->continueStage($draft->fresh());
+
+        $this->assertSame(0, $stored);
+    }
+
     public function test_staging_reports_a_final_outcome_line_with_the_winning_source_and_method(): void
     {
         // Real gap: progress logs used to go from a mid-flight failure
