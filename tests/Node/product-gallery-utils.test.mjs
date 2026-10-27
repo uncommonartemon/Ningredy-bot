@@ -750,3 +750,14 @@ test('cms image cache renditions and their original are one frame', () => {
     assert.equal(imageAssetKey(product+'cache/71dbad14b00e391f00d8d8b368cc891c/i/m/img_0_A6TP0UT_ABA_1780476523_1.jpg'), imageAssetKey(original));
     assert.notEqual(imageAssetKey(product+'cache/77bea8c14f304a0f0e40165f8c18646f/i/m/img_1_A6TP0UT_ABA_1780476523_1.jpg'), imageAssetKey(original));
 });
+
+test('shop image types and width buckets of one image are one frame', () => {
+    // Live #250 dataspot.ro (PrestaShop) and a BigCommerce shop of the series.
+    const shop = 'https://dataspot.ro/';
+    assert.equal(imageAssetKey(shop+'308628-large_default/laptop.jpg'), imageAssetKey(shop+'308628/laptop.jpg'));
+    assert.equal(imageAssetKey(shop+'308628-thickbox_default/laptop.jpg'), imageAssetKey(shop+'308628/laptop.jpg'));
+    assert.notEqual(imageAssetKey(shop+'308628-large_default/laptop.jpg'), imageAssetKey(shop+'308629-large_default/laptop.jpg'));
+
+    const stencil = 'https://cdn11.bigcommerce.com/s-xwx16vh8tc/images/stencil/';
+    assert.equal(imageAssetKey(stencil+'320w/products/430599/2828792/tablet__12345.jpg'), imageAssetKey(stencil+'original/products/430599/2828792/tablet__12345.jpg'));
+});

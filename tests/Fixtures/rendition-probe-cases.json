@@ -179,5 +179,25 @@
         "name": "a cache directory without a hash is not a cms cache run",
         "thumbnail": "https://shop.example.com/cache/products/photo.jpg",
         "first": null
+    },
+    {
+        "name": "prestashop image type: the original, then thickbox (#250 dataspot.ro)",
+        "thumbnail": "https://dataspot.ro/308628-large_default/laptop-razer-blade-14-rz09-05081ed3-r3e1.jpg",
+        "width": 554,
+        "height": 554,
+        "first": "https://dataspot.ro/308628/laptop-razer-blade-14-rz09-05081ed3-r3e1.jpg",
+        "also": [
+            "https://dataspot.ro/308628-thickbox_default/laptop-razer-blade-14-rz09-05081ed3-r3e1.jpg"
+        ]
+    },
+    {
+        "name": "bigcommerce width bucket: the original, then 1280w",
+        "thumbnail": "https://cdn11.bigcommerce.com/s-xwx16vh8tc/images/stencil/320w/products/430599/2828792/tablet__12345.1700000000.jpg",
+        "width": 320,
+        "height": 320,
+        "first": "https://cdn11.bigcommerce.com/s-xwx16vh8tc/images/stencil/original/products/430599/2828792/tablet__12345.1700000000.jpg",
+        "also": [
+            "https://cdn11.bigcommerce.com/s-xwx16vh8tc/images/stencil/1280w/products/430599/2828792/tablet__12345.1700000000.jpg"
+        ]
     }
 ]

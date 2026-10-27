@@ -38,6 +38,25 @@ class ExtensionlessImageIdentityTest extends TestCase
             ImageUrls::imageAssetKey($product.'cache/77bea8c14f304a0f0e40165f8c18646f/i/m/img_1_A6TP0UT_ABA_1780476523_1.jpg'));
     }
 
+    public function test_shop_image_types_and_width_buckets_of_one_image_are_one_frame(): void
+    {
+        // Live #250 dataspot.ro (PrestaShop) and a BigCommerce shop of the series: every stock
+        // size of an image and its original are one frame; another image id is another frame.
+        $shop = 'https://dataspot.ro/';
+        $this->assertCount(1, array_unique(array_map(ImageUrls::imageAssetKey(...), [
+            $shop.'308628-large_default/laptop-razer-blade-14.jpg', $shop.'308628-home_default/laptop-razer-blade-14.jpg',
+            $shop.'308628-thickbox_default/laptop-razer-blade-14.jpg', $shop.'308628/laptop-razer-blade-14.jpg',
+        ])));
+        $this->assertNotSame(ImageUrls::imageAssetKey($shop.'308628-large_default/laptop-razer-blade-14.jpg'),
+            ImageUrls::imageAssetKey($shop.'308629-large_default/laptop-razer-blade-14.jpg'));
+
+        $stencil = 'https://cdn11.bigcommerce.com/s-xwx16vh8tc/images/stencil/';
+        $this->assertCount(1, array_unique(array_map(ImageUrls::imageAssetKey(...), [
+            $stencil.'320w/products/430599/2828792/tablet__12345.jpg', $stencil.'original/products/430599/2828792/tablet__12345.jpg',
+            $stencil.'1280x1280/products/430599/2828792/tablet__12345.jpg',
+        ])));
+    }
+
     public function test_a_url_lifted_out_of_inline_json_loses_its_escaped_slashes(): void
     {
         // Live #1: sixteen product photos arrived as https://shop.example\/getimage/... and were dropped as not public.

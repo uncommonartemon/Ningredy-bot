@@ -147,6 +147,15 @@ final class ImageRenditionProbe
             // (Magento "/media/catalog/product/cache/<hash>/i/m/x.jpg"; live #273 jtfcorp.com: 600x600
             // and 120x120 cached, 900x515 without it).
             [ImageUrls::CMS_IMAGE_CACHE_RUN, '/'],
+            // A shop image type after the image id: without it the original, or the largest stock
+            // type (PrestaShop; live #250 dataspot.ro: large_default 554x554, the original 900x900,
+            // thickbox_default 1275x800).
+            [ImageUrls::IMAGE_TYPE_SEGMENT, '/$1/'],
+            [ImageUrls::IMAGE_TYPE_SEGMENT, '/$1-thickbox_default/'],
+            // A width bucket ("/stencil/320w/", BigCommerce): the original, or a large bucket
+            // (320x320 in the series; "/original/" and "/1280w/" both 1280x1280).
+            ['#/\d{2,4}w/#i', '/original/'],
+            ['#/\d{2,4}w/#i', '/1280w/'],
             // A transformation segment of comma-separated parameters with a width or height
             // (Cloudinary "/c_fill,w_300,h_300/"): without it, the original.
             ['#/(?:[a-z]{1,3}_[a-z0-9.:-]+,)*[wh]_\d{2,4}(?:,[a-z]{1,3}_[a-z0-9.:-]+)*/#i', '/'],
