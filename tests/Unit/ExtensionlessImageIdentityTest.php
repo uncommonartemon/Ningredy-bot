@@ -22,6 +22,22 @@ class ExtensionlessImageIdentityTest extends TestCase
         }
     }
 
+    public function test_cms_image_cache_renditions_and_their_original_are_one_frame(): void
+    {
+        // Live #273 jtfcorp.com: the same photo at 120x120 and 600x600 in two Magento cache
+        // directories counted as two frames, and the 900x515 original sits outside the cache.
+        $product = 'https://www.jtfcorp.com/media/catalog/product/';
+        $keys = array_unique(array_map(ImageUrls::imageAssetKey(...), [
+            $product.'cache/77bea8c14f304a0f0e40165f8c18646f/i/m/img_0_A6TP0UT_ABA_1780476523_1.jpg',
+            $product.'cache/71dbad14b00e391f00d8d8b368cc891c/i/m/img_0_A6TP0UT_ABA_1780476523_1.jpg',
+            $product.'i/m/img_0_A6TP0UT_ABA_1780476523_1.jpg',
+        ]));
+
+        $this->assertCount(1, $keys);
+        $this->assertNotSame(ImageUrls::imageAssetKey($product.'i/m/img_0_A6TP0UT_ABA_1780476523_1.jpg'),
+            ImageUrls::imageAssetKey($product.'cache/77bea8c14f304a0f0e40165f8c18646f/i/m/img_1_A6TP0UT_ABA_1780476523_1.jpg'));
+    }
+
     public function test_a_url_lifted_out_of_inline_json_loses_its_escaped_slashes(): void
     {
         // Live #1: sixteen product photos arrived as https://shop.example\/getimage/... and were dropped as not public.

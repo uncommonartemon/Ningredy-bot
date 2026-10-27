@@ -8,6 +8,14 @@ use Illuminate\Support\Str;
 class ImageUrls
 {
     /**
+     * A CMS image cache run: "/cache/", at most three parameter segments, then a hash
+     * directory (Magento 2 "/cache/<md5>/", Magento 1 "/cache/1/image/600x/<md5>/").
+     * The uploaded original sits at the same path without it. Mirrors
+     * CMS_IMAGE_CACHE_RUN in scripts/product-gallery-utils.mjs.
+     */
+    public const CMS_IMAGE_CACHE_RUN = '#/cache/(?:[^/]+/){0,3}[0-9a-f]{16,64}/#i';
+
+    /**
      * Normalize only the syntax of an actually observed URL. Rendition
      * canonicalization belongs in imageAssetKey(); this return value is a
      * download target and therefore must never contain a guessed size.
@@ -104,6 +112,9 @@ class ImageUrls
             fn (array $match): string => (int) $match[2] >= 32 && (int) $match[3] >= 32 ? '/'.$match[1].'/' : $match[0],
             $normalized,
         ) ?: $normalized;
+        // A CMS image cache run (Magento "/cache/<hash>/", live #273) only picks a
+        // rendition of the original at the same path.
+        $normalized = preg_replace(self::CMS_IMAGE_CACHE_RUN, '/', $normalized) ?: $normalized;
 
         // A bare "WxH" or "Nw" path segment (BigCommerce Stencil:
         // /stencil/1280x1280/products/.../file.jpg vs /stencil/640w/... same

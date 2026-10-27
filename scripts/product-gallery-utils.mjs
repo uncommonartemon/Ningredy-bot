@@ -738,6 +738,10 @@ const UUID_PHYSICAL_ASSET = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0
 // the same dHash. Mirrors ImageUrls::imageAssetKey(). The image endpoint may
 // omit the extension; query fields selecting content must still be retained.
 const CONTENT_DIGEST_FILENAME = /\/([0-9a-f]{32,})(?:\.(?:jpe?g|png|webp|gif|avif))?$/i;
+// A CMS image cache run: "/cache/", at most three parameter segments, then a hash
+// directory (Magento 2 "/cache/<md5>/", Magento 1 "/cache/1/image/600x/<md5>/").
+// The uploaded original sits at the same path without it.
+const CMS_IMAGE_CACHE_RUN = /\/cache\/(?:[^/]+\/){0,3}[0-9a-f]{16,64}\//gi;
 
 export const isShopifyCdnUrl = (url) => url.hostname.endsWith('shopify.com')
     || /\/cdn\/shop\/(?:files|products)\//i.test(url.pathname);
@@ -794,6 +798,9 @@ export const imageAssetKey = (rawUrl) => {
     // day is never a size. Mirrors ImageUrls::imageAssetKey() in PHP.
     url.pathname = url.pathname.replace(/\/(\d+)-(\d{2,4})-(\d{2,4})\//g, (match, id, width, height) => (
         Number(width) >= 32 && Number(height) >= 32 ? `/${id}/` : match));
+    // A CMS image cache run (Magento "/cache/<hash>/", live #273) only picks a
+    // rendition of the original at the same path. Mirrors ImageUrls::imageAssetKey().
+    url.pathname = url.pathname.replace(CMS_IMAGE_CACHE_RUN, '/');
     url.pathname = url.pathname.replace(SIZE_SEGMENT, '/__rendition__/');
 
     // Many commerce galleries keep the same filename under rendition
@@ -1498,6 +1505,10 @@ const sizedSegment = (rewrite) => (match, id, width, height) => (
 const RENDITION_PATH_REWRITES = [
     // An image service's own resize operation (uploadcare "/-/resize/400/") comes off first.
     [/\/-\/(?:resize|scale_crop)\/[^/]+\//gi, '/'],
+    // A CMS image cache keeps the uploaded original at the same path without the cache run
+    // (Magento "/media/catalog/product/cache/<hash>/i/m/x.jpg"; live #273 jtfcorp.com: 600x600
+    // and 120x120 cached, 900x515 without it).
+    [CMS_IMAGE_CACHE_RUN, '/'],
     // A transformation segment of comma-separated parameters with a width or height (Cloudinary).
     [/\/(?:[a-z]{1,3}_[a-z0-9.:-]+,)*[wh]_\d{2,4}(?:,[a-z]{1,3}_[a-z0-9.:-]+)*\//gi, '/'],
     // A size in the file name: Shopify "_300x", WordPress "-500x500" (also before its "-1"

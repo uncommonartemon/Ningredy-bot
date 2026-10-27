@@ -143,6 +143,10 @@ final class ImageRenditionProbe
         return [
             // An image service's own resize operation (uploadcare "/-/resize/400/") comes off first.
             ['#/-/(?:resize|scale_crop)/[^/]+/#i', '/'],
+            // A CMS image cache keeps the uploaded original at the same path without the cache run
+            // (Magento "/media/catalog/product/cache/<hash>/i/m/x.jpg"; live #273 jtfcorp.com: 600x600
+            // and 120x120 cached, 900x515 without it).
+            [ImageUrls::CMS_IMAGE_CACHE_RUN, '/'],
             // A transformation segment of comma-separated parameters with a width or height
             // (Cloudinary "/c_fill,w_300,h_300/"): without it, the original.
             ['#/(?:[a-z]{1,3}_[a-z0-9.:-]+,)*[wh]_\d{2,4}(?:,[a-z]{1,3}_[a-z0-9.:-]+)*/#i', '/'],
