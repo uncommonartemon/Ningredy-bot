@@ -9,6 +9,7 @@ use App\Models\AiRun;
 use App\Models\AttributeDefinition;
 use App\Models\Category;
 use App\Models\ProductDraft;
+use App\Models\ProductSourceAttempt;
 use App\Models\ProductSourcePageEvidence;
 use App\Models\TelegramUpdate;
 use App\Services\Ai\AiErrorPresenter;
@@ -86,6 +87,19 @@ class ResearchProduct implements Tool
         }
         $query = trim((string) $request->string('query'));
         $this->query = $query;
+        // Live #247: the assistant called this tool twice with the same query in
+        // one turn; the second call bought the research again and only then met
+        // the draft the first one had made. The same request asking the same
+        // question gets the same answer, free.
+        $previousDraft = ProductDraft::query()->where('telegram_update_id', $this->update->id)->latest('id')->first();
+        if ($previousDraft !== null && ProductSourceAttempt::query()->where('telegram_update_id', $this->update->id)
+            ->where('action', 'research_summary')->where('decision', 'found')->where('output->query', $query)->exists()) {
+            return $this->json([
+                'ok' => true, 'status' => 'already_researched', 'draft_id' => $previousDraft->id,
+                'image_count' => $previousDraft->media()->count(),
+                'message' => "Этот запрос уже исследован в этом же ходе: черновик #{$previousDraft->id}. Используй этот draft_id; повторно ResearchProduct с тем же запросом не вызывай.",
+            ]);
+        }
         $payload = is_array($this->update->payload) ? $this->update->payload : [];
         $existingProgressMessageId = (int) ($payload['_progress_message_id'] ?? 0);
         $progress = new TelegramProgressReporter(
