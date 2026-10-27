@@ -67,6 +67,21 @@ class ExtensionlessImageIdentityTest extends TestCase
             ImageUrls::imageAssetKey('https://dlcdnwebimgs.asus.com/gain/7fb77e0a-97ef-4be0-babd-22892330add9/w80'));
     }
 
+    public function test_rendition_tokens_and_folders_group_frames_without_naming_any_host(): void
+    {
+        // The rules once tied to Amazon, B&H, LDLC and Shopify hosts are URL shapes on any host.
+        $key = ImageUrls::imageAssetKey(...);
+        $this->assertSame($key('https://m.media-amazon.com/images/I/71abcDEF._AC_SL1500_.jpg'), $key('https://m.media-amazon.com/images/I/71abcDEF._SX300_QL70_.jpg'));
+        $this->assertSame($key('https://cdn.example.test/i/71abcDEF._AC_SL1500_.jpg'), $key('https://cdn.example.test/i/71abcDEF.jpg'));
+        $this->assertNotSame($key('https://m.media-amazon.com/images/I/71abcDEF._AC_SL1500_.jpg'), $key('https://m.media-amazon.com/images/I/81xyzXYZ._AC_SL1500_.jpg'));
+        $this->assertSame($key('https://static.bhphoto.com/images/images500x500/1690283445_1771565.jpg'),
+            $key('https://static.bhphoto.com/images/images2500x2500/1690283445_1771565.jpg'));
+        $this->assertNotSame($key('https://static.bhphoto.com/images/images500x500/1690283445_1771565.jpg'),
+            $key('https://static.bhphoto.com/images/images500x500/1690283446_1771566.jpg'));
+        $this->assertSame($key('https://media.shop.test/r705/ld/products/LD0006175263.jpg'), $key('https://media.shop.test/r1600/ld/products/LD0006175263.jpg'));
+        $this->assertSame($key('https://cdn.shopify.com/s/files/1/0001/products/laptop_300x.jpg?v=1'), $key('https://cdn.shopify.com/s/files/1/0001/products/laptop.jpg?v=1'));
+    }
+
     public function test_a_url_lifted_out_of_inline_json_loses_its_escaped_slashes(): void
     {
         // Live #1: sixteen product photos arrived as https://shop.example\/getimage/... and were dropped as not public.
