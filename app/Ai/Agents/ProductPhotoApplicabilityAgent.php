@@ -56,6 +56,13 @@ class ProductPhotoApplicabilityAgent implements Agent, HasStructuredOutput
             - conflicting: observed different chassis, generation, size, convertible construction,
               ports, color or other material exterior conflict. Another SKU or a memory-clock
               difference alone is not an exterior conflict.
+              A page that offers several colors of the model (swatches, a color list, several color
+              names) conflicts on color only when the selected color is not among them: the one shown
+              or named first is a variant to switch to, not the only color the page sells. When the
+              selected color is offered, the color check is unknown, the verdict uncertain and
+              may_inspect_gallery true: the gallery is switched to that color and its pixels decide
+              (live #235: the MateBook 14 2024 page offered Space Grey, White and Green and was
+              rejected as "Green").
             - uncertain: evidence is insufficient for exact/compatible, including unknown color.
 
             physical_checks: for each of platform, revision, construction, dimensions, ports, color,
