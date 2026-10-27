@@ -41,6 +41,8 @@ if (mode === 'invalid') {
             height: process.env.PRODUCT_GALLERY_MINIMUM_HEIGHT,
             color: process.env.PRODUCT_GALLERY_REQUESTED_COLOR,
             http11: process.env.PRODUCT_IMAGE_DISABLE_HTTP2,
+            rendition_rules: process.env.PRODUCT_GALLERY_RENDITION_RULES_FILE && fs.existsSync(process.env.PRODUCT_GALLERY_RENDITION_RULES_FILE)
+                ? JSON.parse(fs.readFileSync(process.env.PRODUCT_GALLERY_RENDITION_RULES_FILE, 'utf8')).rules.length : null,
         },
     }));
 }

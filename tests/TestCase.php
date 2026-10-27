@@ -7,6 +7,7 @@ use App\Ai\Agents\GalleryTextLanguageAgent;
 use App\Ai\Agents\ProductCardRecoveryAgent;
 use App\Ai\Agents\ProductPhotoApplicabilityAgent;
 use App\Ai\Agents\ProductSourceIdentityAgent;
+use App\Services\Photos\RenditionRules;
 use Illuminate\Foundation\Testing\TestCase as BaseTestCase;
 use Illuminate\Support\Facades\Http;
 use Mockery\MockInterface;
@@ -45,6 +46,9 @@ abstract class TestCase extends BaseTestCase
     protected function setUp(): void
     {
         parent::setUp();
+
+        // Rendition rules are read once per half minute; each test starts from its own database.
+        RenditionRules::forget();
 
         // A missed fake must fail locally, never become a paid provider call
         // or a real Telegram message. Network canaries opt in to their own URL.

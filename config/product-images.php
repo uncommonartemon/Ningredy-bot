@@ -19,7 +19,9 @@ return [
     // Thumbnails only: when a source's frames all fell under the minimum, the
     // same frames are asked for again at the rendition their CDN address names
     // as larger - up to this many of the largest frames, a few guesses each.
-    'rendition_probe' => ['enabled' => true, 'max_frames' => 24, 'min_width' => 48],
+    // A rule that misses this many sources in a row on an image host stops there;
+    // a site's own learned rule stops everywhere, and the agent learns the site again.
+    'rendition_probe' => ['enabled' => true, 'max_frames' => 24, 'min_width' => 48, 'disable_after_misses' => 6],
     // Total decoded pixels one download pass may hold in memory at once. A
     // decoded truecolor bitmap costs ~4 bytes per pixel, so this is roughly a
     // 240MB ceiling on retained images - the loop stops with a partial gallery

@@ -13,6 +13,7 @@ use App\Models\AiRun;
 use App\Models\AppSetting;
 use App\Models\Brand;
 use App\Models\Category;
+use App\Models\ImageRenditionRuleOutcome;
 use App\Models\Product;
 use App\Models\ProductDraft;
 use App\Models\ProductDraftMedia;
@@ -2343,6 +2344,8 @@ class ProductImageStorageTest extends TestCase
         $this->assertSame('https://93.184.216.36/cdn/shop/files/gallery-1.jpg', $media->sortBy('sort_order')->first()->source_url);
         $this->assertDatabaseHas('product_source_attempts', ['product_draft_id' => $draft->id,
             'action' => 'probe_larger_renditions', 'decision' => 'larger_renditions_found', 'output->found' => 4]);
+        // The rule that found them is counted on this host: rules are data that learn where they work.
+        $this->assertTrue(ImageRenditionRuleOutcome::query()->where('host', '93.184.216.36')->where('hits', 1)->exists());
     }
 
     public function test_a_record_gallery_matched_by_code_is_a_confirmed_gallery_without_a_site_recipe(): void

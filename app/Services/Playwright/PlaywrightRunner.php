@@ -3,6 +3,7 @@
 namespace App\Services\Playwright;
 
 use App\Services\Ai\AiSettings;
+use App\Services\Photos\RenditionRules;
 use App\Services\Products\BrowserGalleryCheckpoint;
 use App\Services\Products\BrowserProductImageTransferStore;
 use Illuminate\Support\Facades\File;
@@ -26,6 +27,9 @@ class PlaywrightRunner implements BrowserRunner
 
         try {
             File::ensureDirectoryExists($directory);
+            // The browser asks for larger renditions by the same rules as the server: data the
+            // agent learns and a site's misses stop, not a copy written into the script.
+            File::put($directory.'/rendition-rules.json', (string) json_encode(RenditionRules::forBrowser(), JSON_UNESCAPED_SLASHES));
             $process = $this->process($request, $directory);
             $process->run();
 
@@ -104,6 +108,7 @@ class PlaywrightRunner implements BrowserRunner
             // Leave the JS process time to serialize its partial checkpoint before termination.
             'PRODUCT_GALLERY_DEADLINE_MS' => (string) max(10000, ($request->timeoutSeconds - 12) * 1000),
             'PRODUCT_GALLERY_TRANSFER_DIR' => $directory,
+            'PRODUCT_GALLERY_RENDITION_RULES_FILE' => $directory.'/rendition-rules.json',
             'PRODUCT_IMAGE_DISABLE_HTTP2' => $request->withoutHttp2 ? 'true' : 'false',
             'PRODUCT_IMAGE_BROWSER_HEADLESS' => $this->settings->browserHeadless() ? 'true' : 'false',
         ]);
