@@ -199,6 +199,10 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
             difference beside the add button and decides. Leave request_differences empty when the pages show what
             was asked.
 
+            The prompt may name the brand's own catalog (the manufacturer's reference: where it is, a web search that
+            finds a code there, addresses that open it). Look the exact code up there before shops: a page found there
+            is the manufacturer's own page for facts and photos (type manufacturer). It does not replace the identity
+            rules: the page must show the selected code or full model like any other source.
             The prompt may include structured product database results (Icecat, UPCitemdb) for codes in the
             request, with their recent track record. They are hints, not verification: use them when brand, code
             and product agree with the request, ignore them when they describe something else. Either way say so

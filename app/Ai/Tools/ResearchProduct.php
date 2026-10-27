@@ -33,6 +33,7 @@ use App\Services\Products\ProductSourceAttemptRecorder;
 use App\Services\Products\ProductSourcePriority;
 use App\Services\Products\ProductTextEvidenceContract;
 use App\Services\Products\SourceIdentityProvenance;
+use App\Services\ProductSearch\Catalogs\BrandCatalogs;
 use App\Services\ProductSearch\Codes\ProductCodeLookup;
 use App\Services\ProductSearch\Research\InvalidResearchResponse;
 use App\Services\ProductSearch\Research\RecoverableProductResearch;
@@ -184,6 +185,10 @@ class ResearchProduct implements Tool
             ->orderByDesc('values_count')->limit(80)->get(['id', 'key', 'label', 'translations'])
             ->map(fn (AttributeDefinition $definition): string => $definition->key.' ('.($definition->translations['en'] ?? $definition->label).')')
             ->implode(', ');
+        // The brand's own catalog for a brand named in the request: where it is and
+        // how a code is found there. Icecat, when it answered, keeps its priority.
+        $brandCatalogs = app(BrandCatalogs::class);
+        $catalogHints = $brandCatalogs->hints($brandCatalogs->forText($query), BrandCatalogs::codesIn($query));
         $researchPrompt = $query
             .PHP_EOL.'Input provenance and prioritized search alternatives (observations are not additional mandatory requirements): '
             .json_encode($inputContext, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
@@ -198,6 +203,10 @@ class ResearchProduct implements Tool
                 .json_encode($codeHints, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
                 .'. Use them only if they match what the operator asked for; otherwise ignore them and search as usual.'
                 .' Report your decision in code_lookup_verdict.')
+            .($catalogHints === [] ? '' : PHP_EOL.'The brand\'s own catalog (the manufacturer\'s reference for codes, specifications and photos): '
+                .json_encode($catalogHints, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
+                .'. Look the exact code up there first, with the search given, and list the page you find among the sources'
+                .' as the manufacturer\'s page; structured database results above, when present, still come first.')
             .($vocabulary === '' ? '' : PHP_EOL.'Specification keys this catalog already uses: '.$vocabulary
                 .'. Give a specification one of these keys when it means the same thing; a new snake_case key only'
                 .' for a concept not on the list. Two keys for one thing split the storefront filter in two.');
@@ -365,6 +374,20 @@ class ResearchProduct implements Tool
                 $data['sources'] = [...array_values(array_filter($data['sources'], fn (array $source): bool => ProductImageStorage::normalizeCandidateUrl((string) ($source['url'] ?? '')) !== $officialUrl)),
                     $officialGallery['source']];
             }
+            // After Icecat: the brand's catalog by the selected product's own codes.
+            $catalogSources = $data['status'] === 'found'
+                ? $brandCatalogs->sourcesFor($data['brand'] ?? null, $this->selectedCodes($data), $data['model'] ?? null, $this->update->id) : [];
+            foreach ($catalogSources as $catalogSource) {
+                $catalogUrl = ProductImageStorage::normalizeCandidateUrl($catalogSource['source']['url']);
+                $data['sources'] = [...array_values(array_filter($data['sources'], fn (array $source): bool => ProductImageStorage::normalizeCandidateUrl((string) ($source['url'] ?? '')) !== $catalogUrl)),
+                    $catalogSource['source']];
+            }
+            if ($catalogSources !== []) {
+                app(ProductSourceAttemptRecorder::class)->record(['telegram_update_id' => $this->update->id, 'actor' => 'server',
+                    'product_url' => $catalogSources[0]['source']['url'], 'phase' => 'brand_catalog', 'action' => 'offer_brand_catalog',
+                    'status' => 'completed', 'decision' => 'queued_after_icecat', 'output' => ['sources' => count($catalogSources),
+                        'brand' => $data['brand'] ?? null, 'images' => collect($catalogSources)->sum(fn (array $item): int => count($item['source']['image_urls']))]]);
+            }
             $attemptRecorder = app(ProductSourceAttemptRecorder::class);
             $blockedSourceCount = 0;
             foreach ($reportedSources as $source) {
@@ -500,7 +523,7 @@ class ResearchProduct implements Tool
                 class_basename(self::class),
                 'create_product_draft',
                 ['query' => $query],
-                function () use ($data, $run, $officialGallery): array {
+                function () use ($data, $run, $officialGallery, $catalogSources): array {
                     if ($this->isCancelled()) {
                         return ['ok' => true, 'status' => 'cancelled'];
                     }
@@ -525,6 +548,14 @@ class ResearchProduct implements Tool
                         'image_urls' => $data['image_urls'],
                         'confidence' => $data['confidence'],
                     ]);
+                    foreach ($catalogSources as $catalogSource) {
+                        if ($catalogSource['specification_text'] !== '') {
+                            ProductSourcePageEvidence::query()->updateOrCreate(
+                                ['product_draft_id' => $draft->id, 'url_hash' => hash('sha256', ProductImageStorage::normalizeCandidateUrl($catalogSource['source']['url']))],
+                                ['url' => $catalogSource['source']['url'], 'specification_text' => $catalogSource['specification_text'], 'captured_via' => 'brand_catalog'],
+                            );
+                        }
+                    }
                     if ($officialGallery !== null && $officialGallery['specification_text'] !== '') {
                         // The database datasheet becomes an observed page the
                         // assembly agent may cite or ignore like any other.
@@ -892,6 +923,20 @@ class ResearchProduct implements Tool
      *
      * @return array{source: array<string, mixed>, specification_text: string}|null
      */
+    /**
+     * The selected product's own codes, with the regional suffix dropped as a second form (AA3B6UA#ABA, AA3B6UA).
+     *
+     * @return list<string>
+     */
+    private function selectedCodes(array $data): array
+    {
+        return collect($data['specifications'] ?? [])->whereIn('key', ['sku', 'mpn', 'part_number', 'product_code'])->pluck('value')
+            ->push($data['model'] ?? null)->filter(fn (mixed $code): bool => is_string($code) && trim($code) !== '')
+            ->map(fn (string $code): string => trim($code))
+            ->flatMap(fn (string $code): array => str_contains($code, '#') ? [$code, trim((string) strstr($code, '#', true))] : [$code])
+            ->filter()->unique()->values()->all();
+    }
+
     private function officialGallery(ProductCodeLookup $lookup, array $data, array $queryGtins): ?array
     {
         $specs = collect($data['specifications'] ?? []);

@@ -7,6 +7,7 @@ use App\Ai\Agents\ServerAssistantAgent;
 use App\Ai\Tools\ResearchProduct;
 use App\Jobs\ContinueDraftGallerySearch;
 use App\Models\AiRun;
+use App\Models\BrandCatalog;
 use App\Models\ProductDraft;
 use App\Models\ProductSourceAttempt;
 use App\Models\ProductSourcePageEvidence;
@@ -337,6 +338,26 @@ class ResearchProductTextOnlyResultTest extends TestCase
         $this->assertSame($draft->id, $second['draft_id']);
         $this->assertSame(1, ProductDraft::query()->count());
         $this->assertSame(1, ProductSourceAttempt::query()->where('action', 'research_summary')->count());
+    }
+
+    public function test_the_brands_own_catalog_is_offered_to_research_and_its_page_joins_the_sources(): void
+    {
+        // Operator 2026-10-27: the agent sees the brand and the code, looks there; Icecat stays first.
+        BrandCatalog::query()->create(['brand' => 'Lenovo', 'catalog_url' => 'https://catalog.example', 'enabled' => true,
+            'search_hint' => 'site:catalog.example {code}', 'lookup_template' => 'https://catalog.example/p/{code}',
+            'instructions' => 'Manufacturer reference by model code.']);
+
+        $this->research('cost_budget', assembled: false, responseOverrides: [
+            'specifications' => [['key' => 'ram', 'name' => 'Memory', 'value' => '16 GB'], ['key' => 'mpn', 'name' => 'Part number', 'value' => 'EXACT-123']],
+        ], text: 'Find Lenovo Exact 123 EXACT-123');
+
+        $prompt = (string) AiRun::query()->orderBy('id')->value('prompt');
+        $this->assertStringContainsString("The brand's own catalog", $prompt);
+        $this->assertStringContainsString('site:catalog.example EXACT-123', $prompt);
+        $catalogSource = collect(ProductDraft::query()->sole()->sources)->firstWhere('_brand_catalog', true);
+        $this->assertSame('https://catalog.example/p/EXACT-123', $catalogSource['url']);
+        $this->assertSame('manufacturer', $catalogSource['type']);
+        $this->assertDatabaseHas('product_source_attempts', ['action' => 'offer_brand_catalog', 'decision' => 'queued_after_icecat']);
     }
 
     public function test_a_matching_official_datasheet_joins_the_photo_queue_and_a_mismatch_is_skipped_with_a_record(): void
