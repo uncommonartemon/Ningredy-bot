@@ -13,6 +13,8 @@ import {
     recipeActionOpensGallery,
     recipeActionPlanStatus,
     recipeActionShouldStop,
+    controlLooksDisabled,
+    renditionGuessRounds,
     recipeActionTraversesGallery,
     urlQualityScore,
 } from '../../scripts/product-gallery-utils.mjs';
@@ -699,4 +701,31 @@ test('normalizes the safe ordered AI action plan and rejects executable selector
             after_each_wait_after_ms: 50,
         },
     ]);
+});
+
+test('a slider control at its end reads as disabled by aria, class or pointer-events after progress', () => {
+    // Live #236: CDW's div.next went inert after the last photo; isDisabled() saw nothing.
+    assert.equal(controlLooksDisabled({ ariaDisabled: 'true' }), true);
+    assert.equal(controlLooksDisabled({ className: 'next swiper-button-disabled' }), true);
+    assert.equal(controlLooksDisabled({ className: 'slick-next slick-disabled' }), true);
+    assert.equal(controlLooksDisabled({ ancestorAriaDisabled: true }), true);
+    assert.equal(controlLooksDisabled({ disabled: true }), true);
+    assert.equal(controlLooksDisabled({ className: 'next', pointerEvents: 'none' }, { afterProgress: true }), true);
+    // Inert before it ever moved the gallery is not an end; ordinary names are not "disabled".
+    assert.equal(controlLooksDisabled({ className: 'next', pointerEvents: 'none' }), false);
+    assert.equal(controlLooksDisabled({ className: 'notdisabled-next', ariaDisabled: 'false' }), false);
+    assert.equal(controlLooksDisabled(null), false);
+});
+
+test('larger-rendition guesses go in rounds across the gallery, best guess of every frame first', () => {
+    // Live #237: a hundred guesses one frame at a time spent 43 s of the browser deadline.
+    const rounds = renditionGuessRounds([
+        { original: 'a', guesses: ['a1', 'a2', 'a3'] },
+        { original: 'b', guesses: ['b1'] },
+        { original: 'c', guesses: ['c1', 'c2'] },
+        null,
+    ]);
+    assert.deepEqual(rounds.map((item) => item.guess), ['a1', 'b1', 'c1', 'a2', 'c2', 'a3']);
+    assert.deepEqual(rounds[1], { guess: 'b1', original: 'b' });
+    assert.deepEqual(renditionGuessRounds(undefined), []);
 });

@@ -1249,6 +1249,41 @@ export const recipeActionPlanStatus = ({ actions, actionTrace }) => {
     };
 };
 
+/**
+ * A next/previous control at the end of a gallery says so in many ways: the
+ * `disabled` attribute only exists on form controls, while sliders mark a div
+ * with aria-disabled, a "...-disabled" class or pointer-events:none. Live #236:
+ * CDW's div.next went inert after the last photo, the click was intercepted and
+ * three paid rounds failed validation on a traversal that had actually ended.
+ * pointer-events counts only once the control has moved the gallery, so a
+ * control that is inert before the gallery opens is not mistaken for an end.
+ */
+export const controlLooksDisabled = (state, { afterProgress = false } = {}) => {
+    if (!state || typeof state !== 'object') return false;
+    if (state.disabled === true || state.ancestorAriaDisabled === true) return true;
+    if (String(state.ariaDisabled ?? '').toLowerCase() === 'true') return true;
+    if (/(?:^|[\s_-])disabled(?:$|[\s_-])/i.test(String(state.className ?? ''))) return true;
+    return afterProgress && String(state.pointerEvents ?? '') === 'none';
+};
+
+/**
+ * Larger-rendition guesses in rounds: every frame's best guess first, then every
+ * frame's second, so a small budget is spent across the gallery instead of on
+ * the first frame's six addresses (live #237: twenty dell.com frames, about a
+ * hundred guesses one frame at a time, 43 s, and the run died at image transfer).
+ */
+export const renditionGuessRounds = (frames) => {
+    const list = (Array.isArray(frames) ? frames : []).filter((frame) => frame && Array.isArray(frame.guesses));
+    const longest = Math.max(0, ...list.map((frame) => frame.guesses.length));
+    const rounds = [];
+    for (let round = 0; round < longest; round++) {
+        for (const frame of list) {
+            if (frame.guesses[round] !== undefined) rounds.push({ guess: frame.guesses[round], original: frame.original });
+        }
+    }
+    return rounds;
+};
+
 // A detached or covered thumbnail must not abort traversal of every remaining
 // thumbnail. Its failed click stays in the trace, so validation still rejects
 // an incomplete plan and the next AI round receives exact feedback.

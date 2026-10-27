@@ -15,6 +15,8 @@ import {
     revealedCandidatesVisibilityInPage,
     revealedContainerTextInPage,
     clearBlockingOverlays,
+    controlLooksDisabled,
+    renditionGuessRounds,
     controlNamesGallery,
     EXCLUDED_GALLERY_CONTEXT_PATTERN_SOURCE,
     galleryCollectionTarget,
@@ -2017,7 +2019,15 @@ try {
                 }
 
                 const target = locator.nth(targetIndex);
-                if (repeatedAction && !iteratesElements && await target.isDisabled().catch(() => false)) {
+                const controlState = repeatedAction && !iteratesElements ? await target.evaluate((element) => ({
+                    disabled: element.disabled === true || element.hasAttribute('disabled') || Boolean(element.closest('fieldset[disabled]')),
+                    ariaDisabled: element.getAttribute('aria-disabled'),
+                    ancestorAriaDisabled: Boolean(element.parentElement?.closest('[aria-disabled="true"]')),
+                    className: String(element.getAttribute('class') || ''),
+                    pointerEvents: getComputedStyle(element).pointerEvents,
+                })).catch(() => null) : null;
+                if (repeatedAction && !iteratesElements && (await target.isDisabled().catch(() => false)
+                    || controlLooksDisabled(controlState, { afterProgress: Boolean(lastPrimaryTrace) }))) {
                     const endTrace = lastPrimaryTrace || { action: action.kind, action_index: actionIndex,
                         phase: 'ai_action', selector: action.selector, clicked: false, selector_match_count: currentCount };
                     const media = await settleTraversalMedia();
@@ -2422,7 +2432,7 @@ const candidates = strictRecipe
         : (domImages.length >= 2
             ? allCandidates.filter((candidate) => domKeys.has(imageAssetKey(candidate)))
             : allCandidates));
-const probeImage = async (candidate) => {
+const probeImage = async (candidate, timeout = probeTimeoutMs) => {
     if (!await publicHttpUrl(candidate)) {
         return { ok: false, url: candidate, reason: 'non_public_url' };
     }
@@ -2455,7 +2465,7 @@ const probeImage = async (candidate) => {
         image.src = url;
     }), {
         url: candidate,
-        timeout: probeTimeoutMs,
+        timeout,
         minWidth: minimumWidth,
         minHeight: minimumHeight,
     }).catch(() => ({ ok: false, url: candidate, reason: 'probe_failed' }));
@@ -2465,9 +2475,10 @@ const orderedCandidates = prioritizeCandidateRenditions(candidates);
 const candidatesToProbe = selectGalleryFrames(orderedCandidates, strictRecipe, Math.max(30, limit * 3));
 const probes = [];
 
+checkpoint('image_probe');
 if (!scoutOnly) {
     for (let index = 0; index < candidatesToProbe.length && !outOfTime(); index += 4) {
-        probes.push(...await Promise.all(candidatesToProbe.slice(index, index + 4).map(probeImage)));
+        probes.push(...await Promise.all(candidatesToProbe.slice(index, index + 4).map((candidate) => probeImage(candidate))));
     }
 }
 
@@ -2478,23 +2489,40 @@ if (!scoutOnly) {
 // frame it enlarges - same gallery provenance, same asset - and measured like
 // any other candidate; one that does not is only a request that failed.
 const enlargedFrom = new Map();
-const renditionProbe = { undersized_frames: 0, guesses: 0, found: 0, examples: [] };
+const renditionProbe = { undersized_frames: 0, guesses: 0, tried: 0, found: 0, budget_exhausted: false, examples: [] };
 if (!scoutOnly) {
+    checkpoint('rendition_probe');
     const probed = new Set(probes.map((probe) => probe.url));
-    const guesses = [];
+    const frames = [];
     for (const probe of probes) {
         if (probe.reason !== 'dimensions_below_minimum' || (probe.width || 0) < 48) continue;
         renditionProbe.undersized_frames++;
+        const own = [];
         for (const guess of largerRenditions(probe.url, 6, { width: probe.width, height: probe.height })) {
             if (probed.has(guess)) continue;
             probed.add(guess);
-            guesses.push({ guess, original: probe.url });
+            own.push(guess);
         }
+        frames.push({ original: probe.url, guesses: own });
     }
+    const guesses = renditionGuessRounds(frames);
     renditionProbe.guesses = guesses.length;
-    for (let index = 0; index < guesses.length && !outOfTime(); index += 4) {
-        const batch = guesses.slice(index, index + 4);
-        const results = await Promise.all(batch.map(({ guess }) => probeImage(guess)));
+    // A third of the time left, at most fifteen seconds: the photos found so far
+    // still have to be transferred before the deadline (live #237).
+    const budgetEnd = Date.now() + Math.min(15000, Math.max(0, Math.floor((softDeadline - Date.now()) / 3)));
+    const enlargedOriginals = new Set();
+    const pending = [...guesses];
+    while (pending.length > 0 && !outOfTime()) {
+        if (Date.now() >= budgetEnd) { renditionProbe.budget_exhausted = true; break; }
+        const batch = [];
+        while (pending.length > 0 && batch.length < 4) {
+            const next = pending.shift();
+            if (!enlargedOriginals.has(next.original)) batch.push(next);
+        }
+        if (batch.length === 0) break;
+        renditionProbe.tried += batch.length;
+        const results = await Promise.all(batch.map(({ guess }) => probeImage(guess, Math.min(probeTimeoutMs, 3000))));
+        results.forEach((result, offset) => { if (result.ok) enlargedOriginals.add(batch[offset].original); });
         results.forEach((result, offset) => {
             if (!result.ok) return;
             enlargedFrom.set(result.url, batch[offset].original);

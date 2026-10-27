@@ -58,6 +58,26 @@ class ProductResearchIdentityAdmissionTest extends TestCase
         $this->assertNotEmpty(app(ProductResearchConfigurationGuard::class)->issues($data));
     }
 
+    public function test_a_shops_punctuation_or_spacing_of_the_model_still_proves_it(): void
+    {
+        // Live #237: "Name : Dell XPS 13- 9340 ... Color : Graphite" was refused twice for "XPS 13 9340".
+        foreach (['Name : Dell XPS 13- 9340 Graphite', 'Dell XPS13 9340 laptop', 'XPS 13-9340, 16 GB'] as $excerpt) {
+            $data = $this->modelOnly();
+            $data['model'] = 'XPS 13 9340';
+            $data['selected_identity']['observed_model'] = 'XPS 13 9340';
+            $data['selected_identity']['source_excerpt'] = $excerpt;
+            $this->assertSame([], app(ProductResearchConfigurationGuard::class)->issues($data), $excerpt);
+        }
+        // Still the whole model, token by token: a shorter or different number proves nothing.
+        foreach (['Dell XPS 13 laptops', 'Dell XPS 13 93401 refurbished', 'Dell XPS 9340 13'] as $excerpt) {
+            $data = $this->modelOnly();
+            $data['model'] = 'XPS 13 9340';
+            $data['selected_identity']['observed_model'] = 'XPS 13 9340';
+            $data['selected_identity']['source_excerpt'] = $excerpt;
+            $this->assertNotEmpty(app(ProductResearchConfigurationGuard::class)->issues($data), $excerpt);
+        }
+    }
+
     private function modelOnly(string $type = 'manufacturer'): array
     {
         return ['status' => 'found', 'model' => 'AMD Ryzen 7 9800X3D', 'primary_source_url' => 'https://maker.example/9800x3d',
