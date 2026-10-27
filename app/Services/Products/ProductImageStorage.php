@@ -21,6 +21,7 @@ use App\Services\Photos\ImageGeometry;
 use App\Services\Photos\ImageRenditionDeduplicator;
 use App\Services\Photos\ImageRenditionProbe;
 use App\Services\Photos\ImageUrls;
+use App\Services\Photos\RenditionRules;
 use App\Services\ProductSearch\Recovery\ProductCardRecoverySupervisor;
 use App\Services\ProductSearch\Research\ResearchSourceRoles;
 use App\Services\ProductSearch\SourceQueueBuilder;
@@ -3949,13 +3950,15 @@ class ProductImageStorage
         // By address, not by asset key: a guess is the same asset at another rendition.
         $known = array_fill_keys(array_map([ImageUrls::class, 'normalizeCandidateUrl'], $urls), true);
         $guesses = [];
+        $ruleOf = [];
         foreach ($thumbnails as $thumbnail) {
-            foreach (ImageRenditionProbe::largerRenditions((string) $thumbnail['url'], 6,
-                (int) ($thumbnail['width'] ?? 0) ?: null, (int) ($thumbnail['height'] ?? 0) ?: null) as $guess) {
+            foreach (ImageRenditionProbe::guesses((string) $thumbnail['url'], 6,
+                (int) ($thumbnail['width'] ?? 0) ?: null, (int) ($thumbnail['height'] ?? 0) ?: null) as $guess => $ruleId) {
                 $key = ImageUrls::normalizeCandidateUrl($guess);
                 if (! isset($known[$key])) {
                     $known[$key] = true;
                     $guesses[$guess] = (string) $thumbnail['url'];
+                    $ruleOf[$guess] = $ruleId;
                 }
             }
         }
@@ -3967,8 +3970,11 @@ class ProductImageStorage
             $referers[$guess] = $sourcePagesByUrl[$original] ?? null;
         }
         $found = [];
+        $evaluated = [];
+        $larger = [];
         $downloads = $this->resolver->downloadMany(array_keys($guesses), array_filter($referers));
         foreach ($guesses as $guess => $original) {
+            $evaluated[$guess] = true;
             $download = $downloads[$guess]['download'] ?? null;
             if (! is_array($download)) {
                 continue;
@@ -3979,6 +3985,7 @@ class ProductImageStorage
                 || ! $this->encoder->isSafeToDecode($download['width'], $download['height'])) {
                 continue;
             }
+            $larger[$guess] = true;
             $checksum = hash('sha256', $download['bytes']);
             if (isset($checksums[$checksum])) {
                 continue;
@@ -3998,6 +4005,19 @@ class ProductImageStorage
                 'rendition_of' => $original];
             $checksums[$checksum] = true;
             $found[$original] = $guess;
+        }
+        // Each rule's result on each image host for this source: a hit when any of its
+        // guesses was larger and usable. A rule that keeps missing on a host stops there.
+        $outcomes = [];
+        foreach ($ruleOf as $guess => $ruleId) {
+            if ($ruleId !== null && isset($evaluated[$guess])) {
+                $key = $ruleId.'|'.strtolower((string) parse_url($guess, PHP_URL_HOST));
+                $outcomes[$key] = ($outcomes[$key] ?? false) || isset($larger[$guess]);
+            }
+        }
+        foreach ($outcomes as $key => $hit) {
+            [$ruleId, $host] = explode('|', $key, 2);
+            RenditionRules::record((int) $ruleId, $host, $hit);
         }
         $this->attempts->record([
             'telegram_update_id' => $telegramUpdateId, 'product_draft_id' => $draft->id,

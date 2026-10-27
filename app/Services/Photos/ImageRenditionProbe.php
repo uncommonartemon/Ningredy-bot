@@ -2,8 +2,6 @@
 
 namespace App\Services\Photos;
 
-use Closure;
-
 /**
  * Where a CDN names the rendition in the address, the same frame can be asked
  * for without that name or at a large size. Over 45 live searches, 286 frames
@@ -16,9 +14,11 @@ use Closure;
  *
  * These are guesses about the address, never about the picture: every guess is
  * downloaded and measured like any other candidate, and a wrong one is only a
- * request that failed. The same rules run in the browser
- * (scripts/product-gallery-utils.mjs largerRenditions) and both are held to
- * tests/Fixtures/rendition-probe-cases.json.
+ * request that failed. What a site's path names is data (RenditionRules: seeds,
+ * rules the agent learned for a site, each one's record per host), not code;
+ * the measured size, the size parameters and proxies stay here. The browser
+ * applies the same rules (scripts/product-gallery-utils.mjs largerRenditions),
+ * and both are held to tests/Fixtures/rendition-probe-cases.json.
  */
 final class ImageRenditionProbe
 {
@@ -41,11 +41,27 @@ final class ImageRenditionProbe
      */
     public static function largerRenditions(string $url, int $limit = 6, ?int $width = null, ?int $height = null): array
     {
-        $url = ImageUrls::normalizeCandidateUrl($url);
-        $variants = array_values(array_unique(array_filter([...self::measuredVariants($url, $width, $height), ...self::variants($url, true)],
-            fn (string $variant): bool => $variant !== $url && filter_var($variant, FILTER_VALIDATE_URL) !== false)));
+        return array_keys(self::guesses($url, $limit, $width, $height));
+    }
 
-        return array_slice($variants, 0, max(1, $limit));
+    /**
+     * The same guesses, each with the rendition rule that produced it (null for the
+     * measured size, size parameters and proxies), so its outcome can be counted.
+     *
+     * @return array<string, ?int>
+     */
+    public static function guesses(string $url, int $limit = 6, ?int $width = null, ?int $height = null): array
+    {
+        $url = ImageUrls::normalizeCandidateUrl($url);
+        $guesses = [];
+        foreach ([...array_map(fn (string $variant): array => [$variant, null], self::measuredVariants($url, $width, $height)),
+            ...self::variants($url, true)] as [$variant, $ruleId]) {
+            if ($variant !== $url && ! array_key_exists($variant, $guesses) && filter_var($variant, FILTER_VALIDATE_URL) !== false) {
+                $guesses[$variant] = $ruleId;
+            }
+        }
+
+        return array_slice($guesses, 0, max(1, $limit), true);
     }
 
     /** @return list<string> the address with its measured size rewritten large, in two sizes a CDN commonly keeps */
@@ -90,7 +106,7 @@ final class ImageRenditionProbe
         return $variants;
     }
 
-    /** @return list<string> */
+    /** @return list<array{0: string, 1: ?int}> each variant with the rule that produced it */
     private static function variants(string $url, bool $unwrapProxies): array
     {
         $parts = parse_url($url);
@@ -109,7 +125,7 @@ final class ImageRenditionProbe
                     $inner = $parts['scheme'].'://'.$parts['host'].$inner;
                 }
                 if (is_string($inner) && preg_match('#^https?://#i', $inner) === 1) {
-                    array_push($variants, $inner, ...self::variants($inner, false));
+                    array_push($variants, [$inner, null], ...self::variants($inner, false));
                 }
             }
         }
@@ -117,68 +133,20 @@ final class ImageRenditionProbe
         // Size parameters in the query: the address without them.
         $withoutSize = array_diff_key($query, array_flip(self::SIZE_QUERY_KEYS));
         if (count($withoutSize) !== count($query)) {
-            $variants[] = self::build($parts, $parts['path'], $withoutSize);
+            $variants[] = [self::build($parts, $parts['path'], $withoutSize), null];
         }
 
-        // Rendition names in the path: dropped, or replaced with a large size.
+        // Rendition names in the path, by the rules this image host has: data, not code
+        // (RenditionRules), each one counted on this host and learned anew when a site changes.
         $path = $parts['path'];
-        foreach (self::pathRewrites() as [$pattern, $replacement]) {
-            $rewritten = $replacement instanceof Closure
-                ? preg_replace_callback($pattern, $replacement, $path)
-                : preg_replace($pattern, $replacement, $path);
-            if (is_string($rewritten) && $rewritten !== $path) {
-                $variants[] = self::build($parts, $rewritten, $query);
+        foreach (RenditionRules::forHost((string) $parts['host']) as $rule) {
+            $rewritten = RenditionRules::apply($rule, $path);
+            if ($rewritten !== null && $rewritten !== $path) {
+                $variants[] = [self::build($parts, $rewritten, $query), $rule['id']];
             }
         }
 
         return $variants;
-    }
-
-    /** @return list<array{0: string, 1: string|Closure}> in the order the guesses are worth making */
-    private static function pathRewrites(): array
-    {
-        $sizedSegment = fn (Closure $rewrite): Closure => fn (array $match): string => (int) $match[2] >= self::SMALLEST_SIZE_TOKEN
-            && (int) $match[3] >= self::SMALLEST_SIZE_TOKEN ? $rewrite($match[1]) : $match[0];
-
-        return [
-            // An image service's own resize operation (uploadcare "/-/resize/400/") comes off first.
-            ['#/-/(?:resize|scale_crop)/[^/]+/#i', '/'],
-            // A CMS image cache keeps the uploaded original at the same path without the cache run
-            // (Magento "/media/catalog/product/cache/<hash>/i/m/x.jpg"; live #273 jtfcorp.com: 600x600
-            // and 120x120 cached, 900x515 without it).
-            [ImageUrls::CMS_IMAGE_CACHE_RUN, '/'],
-            // A shop image type after the image id: without it the original, or the largest stock
-            // type (PrestaShop; live #250 dataspot.ro: large_default 554x554, the original 900x900,
-            // thickbox_default 1275x800).
-            [ImageUrls::IMAGE_TYPE_SEGMENT, '/$1/'],
-            [ImageUrls::IMAGE_TYPE_SEGMENT, '/$1-thickbox_default/'],
-            // A width bucket ("/stencil/320w/", BigCommerce): the original, or a large bucket
-            // (320x320 in the series; "/original/" and "/1280w/" both 1280x1280).
-            ['#/\d{2,4}w/#i', '/original/'],
-            ['#/\d{2,4}w/#i', '/1280w/'],
-            // A transformation segment of comma-separated parameters with a width or height
-            // (Cloudinary "/c_fill,w_300,h_300/"): without it, the original.
-            ['#/(?:[a-z]{1,3}_[a-z0-9.:-]+,)*[wh]_\d{2,4}(?:,[a-z]{1,3}_[a-z0-9.:-]+)*/#i', '/'],
-            // A size in the file name: Shopify "_300x", WordPress "-500x500" (also before its
-            // "-1" duplicate counter), retina "@2x" - without it, or at a large size.
-            ['#[-_]\d{2,4}x\d{0,4}(?:@\dx)?(?=(?:-\d+)?\.[a-z0-9]{3,4}$)#i', ''],
-            ['#(?<=[-_])\d{2,4}x(?=(?:-\d+)?\.[a-z0-9]{3,4}$)#i', '1600x'],
-            ['#(?<=[-_])\d{2,4}x\d{2,4}(?:@\dx)?(?=(?:-\d+)?\.[a-z0-9]{3,4}$)#i', '1600x1600'],
-            ['#[-_](?:xs|s|sm|small|m|md|medium|thumb|thumbnail|mini|preview|tn)(?=\.[a-z0-9]{3,4}$)#i', ''],
-            // An asset id with its size (VTEX "/ids/2225516-461-461/"): the bare id is the
-            // original, and the id at a large size is served as well.
-            ['#/(\d+)-(\d{2,4})-(\d{2,4})/#', $sizedSegment(fn (string $id): string => '/'.$id.'/')],
-            ['#/(\d+)-(\d{2,4})-(\d{2,4})/#', $sizedSegment(fn (string $id): string => '/'.$id.'-1600-1600/')],
-            // A size directory (BigCommerce "/stencil/400x400/", "/300x300/") at a large size.
-            ['#/(?:[a-z]+[-_]?)?\d{2,4}x\d{2,4}/#i', '/1600x1600/'],
-            // A width segment ("/w80/", "/w_600/": imgix-style CDNs; closing the path, "/gain/<id>/w80":
-            // live #278 asus.com, 80x80 thumbnails of a 2400x2400 original) at a large width, or without it.
-            ['#/w_?\d{2,4}(?=/|$)#i', '/w1600'],
-            ['#/w_?\d{2,4}(?=/|$)#i', ''],
-            ['#(/-/(?:resize|preview)/)[^/]+/#i', '${1}1600x1600/'],
-            ['#/r\d{2,5}/#i', '/r1600/'],
-            ['#/(?:thumbs?|thumbnails?|small|medium)/(?=[^/]+$)#i', '/large/'],
-        ];
     }
 
     /** @param array<string, mixed> $parts @param array<string, mixed> $query */

@@ -35,6 +35,7 @@ import {
     recipeActionTraversesGallery,
     resolveRecipeActionTargetIndex,
     sameProductIdentity,
+    setRenditionRules,
     settleLikeAReader,
     urlQualityScore,
     TRAVERSAL_CEILING,
@@ -69,6 +70,16 @@ const minimumHeight = Math.max(0, Math.min(4000, Number.parseInt(
     process.env.PRODUCT_GALLERY_MINIMUM_HEIGHT ?? '0',
     10,
 )));
+// The rendition rules the server holds (seeds, rules learned for a site, per-host stops);
+// without the file the seeds that ship with the code apply.
+const renditionRulesFile = String(process.env.PRODUCT_GALLERY_RENDITION_RULES_FILE || '').trim();
+if (renditionRulesFile && existsSync(renditionRulesFile)) {
+    try {
+        setRenditionRules(JSON.parse(await readFile(renditionRulesFile, 'utf8')));
+    } catch {
+        // The seeds stay; a rule file the server could not write is no reason to stop.
+    }
+}
 // PHP kills this process at its own timeout, and on Windows that kill is a
 const transferDirectory = String(process.env.PRODUCT_GALLERY_TRANSFER_DIR || '').trim();
 // hard TerminateProcess with no chance to run a signal handler - so the only

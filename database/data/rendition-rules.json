@@ -1,0 +1,116 @@
+[
+    {
+        "find": "/-/(?:resize|scale_crop)/[^/]+/",
+        "flags": "i",
+        "replace": "/",
+        "note": "An image service's own resize operation (uploadcare \"/-/resize/400/\") comes off first."
+    },
+    {
+        "find": "/cache/(?:[^/]+/){0,3}[0-9a-f]{16,64}/",
+        "flags": "i",
+        "replace": "/",
+        "note": "A CMS image cache run (Magento \"/media/catalog/product/cache/<hash>/\"): the uploaded original at the same path without it (live #273 jtfcorp.com: 600x600 cached, 900x515 original)."
+    },
+    {
+        "find": "/(\\d+)-[a-z0-9]+(?:[-_][a-z0-9]+)*_default/",
+        "flags": "i",
+        "replace": "/{1}/",
+        "note": "A shop image type after the image id (PrestaShop \"/308628-large_default/\"): the original (live #250 dataspot.ro: 554x554 typed, 900x900 original)."
+    },
+    {
+        "find": "/(\\d+)-[a-z0-9]+(?:[-_][a-z0-9]+)*_default/",
+        "flags": "i",
+        "replace": "/{1}-thickbox_default/",
+        "note": "The largest stock PrestaShop image type (live #250 dataspot.ro: thickbox_default 1275x800)."
+    },
+    {
+        "find": "/\\d{2,4}w/",
+        "flags": "i",
+        "replace": "/original/",
+        "note": "A width bucket (BigCommerce \"/stencil/320w/\"): the original, 1280x1280 where the bucket gave 320x320."
+    },
+    {
+        "find": "/\\d{2,4}w/",
+        "flags": "i",
+        "replace": "/1280w/",
+        "note": "A width bucket at a large size (BigCommerce \"/stencil/1280w/\")."
+    },
+    {
+        "find": "/(?:[a-z]{1,3}_[a-z0-9.:-]+,)*[wh]_\\d{2,4}(?:,[a-z]{1,3}_[a-z0-9.:-]+)*/",
+        "flags": "i",
+        "replace": "/",
+        "note": "A transformation segment of comma-separated parameters with a width or height (Cloudinary \"/c_fill,w_300,h_300/\"): without it, the original."
+    },
+    {
+        "find": "[-_]\\d{2,4}x\\d{0,4}(?:@\\dx)?(?=(?:-\\d+)?\\.[a-z0-9]{3,4}$)",
+        "flags": "i",
+        "replace": "",
+        "note": "A size in the file name (Shopify \"_300x\", WordPress \"-500x500\", also before a \"-1\" duplicate counter, retina \"@2x\"): without it."
+    },
+    {
+        "find": "(?<=[-_])\\d{2,4}x(?=(?:-\\d+)?\\.[a-z0-9]{3,4}$)",
+        "flags": "i",
+        "replace": "1600x",
+        "note": "A width in the file name (Shopify \"_300x\") at a large width."
+    },
+    {
+        "find": "(?<=[-_])\\d{2,4}x\\d{2,4}(?:@\\dx)?(?=(?:-\\d+)?\\.[a-z0-9]{3,4}$)",
+        "flags": "i",
+        "replace": "1600x1600",
+        "note": "A width and height in the file name (WordPress \"-500x500\") at a large size."
+    },
+    {
+        "find": "[-_](?:xs|s|sm|small|m|md|medium|thumb|thumbnail|mini|preview|tn)(?=\\.[a-z0-9]{3,4}$)",
+        "flags": "i",
+        "replace": "",
+        "note": "A named small size closing the file name (\"-thumb\", \"_s\"): without it."
+    },
+    {
+        "find": "/(\\d+)-(?:3[2-9]|[4-9]\\d|\\d{3,4})-(?:3[2-9]|[4-9]\\d|\\d{3,4})/",
+        "flags": "",
+        "replace": "/{1}/",
+        "note": "An asset id with its size (VTEX \"/ids/2225516-461-461/\", live #187): the bare id is the original. A number under 32 is a date part, never a size."
+    },
+    {
+        "find": "/(\\d+)-(?:3[2-9]|[4-9]\\d|\\d{3,4})-(?:3[2-9]|[4-9]\\d|\\d{3,4})/",
+        "flags": "",
+        "replace": "/{1}-1600-1600/",
+        "note": "An asset id with its size (VTEX) at a large size."
+    },
+    {
+        "find": "/(?:[a-z]+[-_]?)?\\d{2,4}x\\d{2,4}/",
+        "flags": "i",
+        "replace": "/1600x1600/",
+        "note": "A size directory (BigCommerce \"/stencil/400x400/\", \"/300x300/\") at a large size."
+    },
+    {
+        "find": "/w_?\\d{2,4}(?=/|$)",
+        "flags": "i",
+        "replace": "/w1600",
+        "note": "A width segment (\"/w80/\", \"/w_600/\", or closing the path: live #278 asus.com \"/gain/<id>/w80\") at a large width."
+    },
+    {
+        "find": "/w_?\\d{2,4}(?=/|$)",
+        "flags": "i",
+        "replace": "",
+        "note": "A width segment without it (live #278 asus.com: the bare id is the 2400x2400 original)."
+    },
+    {
+        "find": "(/-/(?:resize|preview)/)[^/]+/",
+        "flags": "i",
+        "replace": "{1}1600x1600/",
+        "note": "An image service's resize or preview operation at a large size."
+    },
+    {
+        "find": "/r\\d{2,5}/",
+        "flags": "i",
+        "replace": "/r1600/",
+        "note": "A rendition-coded directory (\"/r705/\") at a large size."
+    },
+    {
+        "find": "/(?:thumbs?|thumbnails?|small|medium)/(?=[^/]+$)",
+        "flags": "i",
+        "replace": "/large/",
+        "note": "A small-rendition directory just before the file name, asked for as \"large\"."
+    }
+]

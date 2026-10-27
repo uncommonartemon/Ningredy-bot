@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Services\Ai\AiSettings;
+use App\Services\Photos\RenditionRules;
 use App\Services\Playwright\BrowserRunRequest;
 use App\Services\Playwright\PlaywrightRunner;
 use App\Services\Products\BrowserProductImageTransferStore;
@@ -48,6 +49,9 @@ class PlaywrightRunnerTest extends TestCase
         $this->assertSame('300', $fixture['height']);
         $this->assertSame('true', $fixture['http11']);
         $this->assertSame('0', $fixture['scout']);
+        // The browser asks for larger renditions by the rules the server holds, not a copy of its own.
+        $this->assertSame(count(RenditionRules::forBrowser()['rules']), $fixture['rendition_rules']);
+        $this->assertGreaterThan(0, $fixture['rendition_rules']);
         $this->assertDirectoryDoesNotExist($fixture['directory']);
     }
 

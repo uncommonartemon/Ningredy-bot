@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+
 /** Width and height placeholders filled large; any other placeholder left means no address yet. */
 export const fillImageTemplate = (rawUrl) => {
     const filled = String(rawUrl).replace(/\{width\}|%7Bwidth%7D/gi, '1600').replace(/\{height\}|%7Bheight%7D/gi, '1600');
@@ -1500,45 +1502,59 @@ const RENDITION_SIZE_QUERY_KEYS = new Set(['w', 'h', 'width', 'height', 'wid', '
 const IMAGE_PROXY_KEYS = ['url', 'src', 'image', 'img', 'file'];
 // The smallest width or height a numeric path token can mean: a date's month or day never is one.
 const SMALLEST_SIZE_TOKEN = 32;
-const sizedSegment = (rewrite) => (match, id, width, height) => (
-    Number(width) >= SMALLEST_SIZE_TOKEN && Number(height) >= SMALLEST_SIZE_TOKEN ? rewrite(id) : match);
-const RENDITION_PATH_REWRITES = [
-    // An image service's own resize operation (uploadcare "/-/resize/400/") comes off first.
-    [/\/-\/(?:resize|scale_crop)\/[^/]+\//gi, '/'],
-    // A CMS image cache keeps the uploaded original at the same path without the cache run
-    // (Magento "/media/catalog/product/cache/<hash>/i/m/x.jpg"; live #273 jtfcorp.com: 600x600
-    // and 120x120 cached, 900x515 without it).
-    [CMS_IMAGE_CACHE_RUN, '/'],
-    // A shop image type after the image id: without it the original, or the largest stock type
-    // (PrestaShop; live #250 dataspot.ro: large_default 554x554, original 900x900, thickbox_default 1275x800).
-    [IMAGE_TYPE_SEGMENT, '/$1/'],
-    [IMAGE_TYPE_SEGMENT, '/$1-thickbox_default/'],
-    // A width bucket ("/stencil/320w/", BigCommerce): the original, or a large bucket
-    // (320x320 in the series; "/original/" and "/1280w/" both 1280x1280).
-    [/\/\d{2,4}w\//gi, '/original/'],
-    [/\/\d{2,4}w\//gi, '/1280w/'],
-    // A transformation segment of comma-separated parameters with a width or height (Cloudinary).
-    [/\/(?:[a-z]{1,3}_[a-z0-9.:-]+,)*[wh]_\d{2,4}(?:,[a-z]{1,3}_[a-z0-9.:-]+)*\//gi, '/'],
-    // A size in the file name: Shopify "_300x", WordPress "-500x500" (also before its "-1"
-    // duplicate counter), retina "@2x" - without it, or at a large size.
-    [/[-_]\d{2,4}x\d{0,4}(?:@\dx)?(?=(?:-\d+)?\.[a-z0-9]{3,4}$)/gi, ''],
-    [/(?<=[-_])\d{2,4}x(?=(?:-\d+)?\.[a-z0-9]{3,4}$)/gi, '1600x'],
-    [/(?<=[-_])\d{2,4}x\d{2,4}(?:@\dx)?(?=(?:-\d+)?\.[a-z0-9]{3,4}$)/gi, '1600x1600'],
-    [/[-_](?:xs|s|sm|small|m|md|medium|thumb|thumbnail|mini|preview|tn)(?=\.[a-z0-9]{3,4}$)/gi, ''],
-    // An asset id with its size (VTEX "/ids/2225516-461-461/"): the bare id is the original,
-    // and the id at a large size is served as well.
-    [/\/(\d+)-(\d{2,4})-(\d{2,4})\//g, sizedSegment((id) => `/${id}/`)],
-    [/\/(\d+)-(\d{2,4})-(\d{2,4})\//g, sizedSegment((id) => `/${id}-1600-1600/`)],
-    // A size directory (BigCommerce "/stencil/400x400/", "/300x300/") at a large size.
-    [/\/(?:[a-z]+[-_]?)?\d{2,4}x\d{2,4}\//gi, '/1600x1600/'],
-    // A width segment ("/w80/", "/w_600/": imgix-style CDNs; closing the path, "/gain/<id>/w80":
-    // live #278 asus.com, 80x80 thumbnails of a 2400x2400 original) at a large width, or without it.
-    [/\/w_?\d{2,4}(?=\/|$)/gi, '/w1600'],
-    [/\/w_?\d{2,4}(?=\/|$)/gi, ''],
-    [/(\/-\/(?:resize|preview)\/)[^/]+\//gi, (match, operation) => `${operation}1600x1600/`],
-    [/\/r\d{2,5}\//gi, '/r1600/'],
-    [/\/(?:thumbs?|thumbnails?|small|medium)\/(?=[^/]+$)/gi, '/large/'],
-];
+// What a site's path names is data, not code (app/Services/Photos/RenditionRules.php): the
+// seeds ship as database/data/rendition-rules.json, and the gallery runner replaces them with
+// what the server passes - the rules the agent learned for a site, and the hosts where a rule
+// stopped after missing. Replacements name groups as {1}, the same on both sides.
+const readSeedRenditionRules = () => {
+    try {
+        const rules = JSON.parse(readFileSync(new URL('../database/data/rendition-rules.json', import.meta.url), 'utf8'));
+        return Array.isArray(rules) ? rules.map((rule) => ({ id: null, host: null, ...rule })) : [];
+    } catch {
+        return [];
+    }
+};
+let renditionRules = { rules: readSeedRenditionRules(), disabled: {} };
+const compiledRenditionRules = new Map();
+export const setRenditionRules = (data) => {
+    renditionRules = {
+        rules: Array.isArray(data?.rules) ? data.rules : readSeedRenditionRules(),
+        disabled: data?.disabled && typeof data.disabled === 'object' ? data.disabled : {},
+    };
+    compiledRenditionRules.clear();
+};
+const compileRenditionRule = (rule) => {
+    const key = `${rule.find}\u0000${rule.flags || ''}`;
+    if (!compiledRenditionRules.has(key)) {
+        try {
+            compiledRenditionRules.set(key, new RegExp(String(rule.find), `${String(rule.flags || '').replace(/[^i]/g, '')}g`));
+        } catch {
+            compiledRenditionRules.set(key, null);
+        }
+    }
+    return compiledRenditionRules.get(key);
+};
+const renditionHostMatches = (host, ruleHost) => {
+    const owner = String(ruleHost).toLowerCase().replace(/^\./, '');
+    return host === owner || host.endsWith(`.${owner}`);
+};
+const renditionRulesForHost = (host) => {
+    const stopped = new Set((renditionRules.disabled[host] || []).map(Number));
+    return [
+        ...renditionRules.rules.filter((rule) => rule.host && renditionHostMatches(host, rule.host)),
+        ...renditionRules.rules.filter((rule) => !rule.host && !stopped.has(Number(rule.id))),
+    ];
+};
+/** The path rewritten by one rule, or null when the rule cannot run here. */
+export const applyRenditionRule = (rule, path) => {
+    const pattern = compileRenditionRule(rule);
+    if (!pattern) return null;
+    return path.replace(pattern, (...args) => {
+        const end = args.findIndex((value, index) => index > 0 && typeof value === 'number');
+        const groups = args.slice(0, end === -1 ? args.length : end);
+        return String(rule.replace).replace(/\{(\d)\}/g, (match, n) => groups[Number(n)] ?? '');
+    });
+};
 const buildRenditionUrl = (url, pathname, params) => {
     const query = params.map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`).join('&');
     return `${url.protocol}//${url.host}${pathname}${query ? `?${query}` : ''}`;
@@ -1565,10 +1581,10 @@ const renditionVariants = (rawUrl, unwrapProxies) => {
     const params = [...url.searchParams];
     const withoutSize = params.filter(([key]) => !RENDITION_SIZE_QUERY_KEYS.has(key));
     if (withoutSize.length !== params.length) variants.push(buildRenditionUrl(url, url.pathname, withoutSize));
-    // Rendition names in the path: dropped, or replaced with a large size.
-    for (const [pattern, replacement] of RENDITION_PATH_REWRITES) {
-        const rewritten = url.pathname.replace(pattern, replacement);
-        if (rewritten !== url.pathname) variants.push(buildRenditionUrl(url, rewritten, params));
+    // Rendition names in the path, by the rules this image host has.
+    for (const rule of renditionRulesForHost(url.hostname.toLowerCase())) {
+        const rewritten = applyRenditionRule(rule, url.pathname);
+        if (rewritten !== null && rewritten !== url.pathname) variants.push(buildRenditionUrl(url, rewritten, params));
     }
     return variants;
 };
