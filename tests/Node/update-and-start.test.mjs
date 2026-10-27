@@ -9,8 +9,8 @@ import { fileURLToPath } from 'node:url';
 // launcher are substitutes. No network, real bot, migrations or paid AI calls.
 const project = fileURLToPath(new URL('../..', import.meta.url));
 const windows = process.platform === 'win32';
-const php = windows ? execFileSync('powershell.exe', ['-NoProfile', '-Command', '(Get-Command php -CommandType Application).Source'], { encoding: 'utf8' }).trim() : 'php';
-const git = windows ? execFileSync('powershell.exe', ['-NoProfile', '-Command', '(Get-Command git -CommandType Application).Source'], { encoding: 'utf8' }).trim() : 'git';
+const php = windows ? execFileSync('powershell.exe', ['-NoProfile', '-Command', '(Get-Command php -CommandType Application | Select-Object -First 1).Source'], { encoding: 'utf8' }).trim() : 'php';
+const git = windows ? execFileSync('powershell.exe', ['-NoProfile', '-Command', '(Get-Command git -CommandType Application | Select-Object -First 1).Source'], { encoding: 'utf8' }).trim() : 'git';
 const artifactRoot = join(project, 'output', 'update-tests');
 mkdirSync(artifactRoot, { recursive: true });
 const psQuote = (value) => `'${value.replaceAll("'", "''")}'`;
@@ -29,7 +29,7 @@ function fixture(mode) {
     const remote = join(work, 'remote.git');
     const upstream = join(work, 'upstream');
     mkdirSync(root);
-    for (const folder of ['scripts', 'config', 'database', 'bootstrap/cache', 'storage/app/public', 'public']) {
+    for (const folder of ['scripts', 'config', 'database/seeders', 'bootstrap/cache', 'storage/app/public', 'public']) {
         mkdirSync(join(root, folder), { recursive: true });
     }
     const updaterFiles = ['scripts/update-and-start.ps1', 'scripts/backup-before-update.php', 'scripts/backup-update-code.mjs'];
@@ -38,6 +38,7 @@ function fixture(mode) {
     }
     symlinkSync(join(project, 'vendor'), join(root, 'vendor'), 'junction');
     writeFileSync(join(root, 'artisan'), '<?php // fixture only');
+    for (const seeder of ['ProductSourceDomainHintSeeder', 'BrandCatalogSeeder']) writeFileSync(join(root, `database/seeders/${seeder}.php`), '<?php // fixture only');
     writeFileSync(join(root, 'composer.lock'), '{}');
     writeFileSync(join(root, 'package.json'), '{"private":true}\n');
     writeFileSync(join(root, 'package-lock.json'), '{}');
@@ -204,6 +205,9 @@ for (const mode of ['success', 'running', 'dirty', 'untracked', 'diverged', 'off
             assert.equal(runGit(f.root, 'status', '--porcelain'), '', 'A successful update remains repeatable.');
             assert.ok(trace.indexOf('backup-before-update.php') < trace.indexOf('composer install'));
             assert.ok(trace.indexOf('artisan migrate --force') < trace.indexOf('npm run build'));
+            // Reference data reaches every machine, after the tables exist, without touching edits.
+            assert.ok(trace.indexOf('artisan migrate --force') < trace.indexOf('artisan db:seed --class=Database\\Seeders\\BrandCatalogSeeder --force'), trace);
+            assert.ok(trace.includes('artisan db:seed --class=Database\\Seeders\\ProductSourceDomainHintSeeder --force'), trace);
             const repeated = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', f.harness], {
                 cwd: f.root, env: f.env, encoding: 'utf8', timeout: 45000,
             });
