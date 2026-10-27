@@ -52,6 +52,12 @@ class ProductSpecificationReconciliationAgent implements Agent, HasStructuredOut
             but text facts may come from several verified sources about this same exact configuration.
             original_operator_request contains the user's binding requirements; current_* is the researcher's
             provisional offer, not additional user requirements. Choose one exact offer for the WHOLE card.
+            request_differences, when present, lists requirements research found on no page of the requested
+            model (most often a colour name) with the value the pages show instead. Each is already shown to the
+            operator beside the add button, who decides. Keep the observed value, do not mark that field
+            conflicting or unknown for that difference alone and do not ask to search for the requested value
+            again: such a card can be reconciled (live #248: Legion 5 15IRX9 exists only in Storm Grey; the card
+            was held back for "Luna Grey" and the search went on looking for a colour no page sells).
             input_evidence keeps observations separate from user requirements. A readable factory label
             (source_kind=photo_label, confidence >= 0.8, no uncertain_characters) is direct evidence about
             the photographed item: cite its source_ref and exact source_excerpt, without buying a web search
