@@ -32,6 +32,11 @@ jobs:
       - name: Install Composer dependencies
         run: composer install --no-interaction --no-progress --prefer-dist
 
+      # Every machine runs with a .env; the suite reads it too (ADMIN_PASSWORD
+      # for seeding, price settings). The example's placeholders are enough.
+      - name: Test environment
+        run: cp .env.example .env
+
       - name: Code style
         run: vendor/bin/pint --test
 
