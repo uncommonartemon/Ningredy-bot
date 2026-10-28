@@ -2,8 +2,8 @@
 
 namespace App\Services\Ai;
 
-use App\Ai\Agents\ProductResearchAgent;
 use App\Ai\Agents\ProductImageDiscoveryAgent;
+use App\Ai\Agents\ProductResearchAgent;
 use App\Exceptions\ProductSearchCancelled;
 use App\Services\ProductSearch\Research\InvalidResearchResponse;
 use Closure;

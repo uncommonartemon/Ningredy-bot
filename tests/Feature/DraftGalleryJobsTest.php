@@ -9,6 +9,8 @@ use App\Jobs\TrainDraftGalleryRecipe;
 use App\Models\AiRun;
 use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
+use App\Services\Ai\ProductSearchCostBudget;
+use App\Services\Ai\ProductSearchTimeBudget;
 use App\Services\Products\ProductImageStorage;
 use App\Services\Telegram\DraftTelegramPresenter;
 use App\Services\Telegram\TelegramClient;
@@ -299,10 +301,10 @@ class DraftGalleryJobsTest extends TestCase
         Queue::fake();
         $draft = $this->draft();
         $id = $draft->telegram_update_id;
-        $this->mock(\App\Services\Ai\ProductSearchCostBudget::class, function (MockInterface $mock) use ($id): void {
+        $this->mock(ProductSearchCostBudget::class, function (MockInterface $mock) use ($id): void {
             $mock->shouldReceive('hasRemaining')->with($id)->twice()->andReturn(true);
         });
-        $this->mock(\App\Services\Ai\ProductSearchTimeBudget::class, function (MockInterface $mock) use ($id): void {
+        $this->mock(ProductSearchTimeBudget::class, function (MockInterface $mock) use ($id): void {
             $mock->shouldReceive('canStart')->with($id, 120)->once()->andReturn(false);
             $mock->shouldReceive('restartSession')->with($id)->once();
         });
@@ -326,10 +328,10 @@ class DraftGalleryJobsTest extends TestCase
         Queue::fake();
         $draft = $this->draft();
         $id = $draft->telegram_update_id;
-        $this->mock(\App\Services\Ai\ProductSearchCostBudget::class, function (MockInterface $mock) use ($id): void {
+        $this->mock(ProductSearchCostBudget::class, function (MockInterface $mock) use ($id): void {
             $mock->shouldReceive('hasRemaining')->with($id)->twice()->andReturn(false);
         });
-        $this->mock(\App\Services\Ai\ProductSearchTimeBudget::class, function (MockInterface $mock) use ($id): void {
+        $this->mock(ProductSearchTimeBudget::class, function (MockInterface $mock) use ($id): void {
             $mock->shouldReceive('canStart')->with($id, 120)->once()->andReturn(false);
             $mock->shouldNotReceive('restartSession');
         });
@@ -350,7 +352,7 @@ class DraftGalleryJobsTest extends TestCase
         Queue::fake();
         $draft = $this->draft();
         $draft->update(['gallery_status' => 'missing', 'gallery_search_stop_reason' => 'time_budget']);
-        $this->mock(\App\Services\Ai\ProductSearchCostBudget::class, function (MockInterface $mock): void {
+        $this->mock(ProductSearchCostBudget::class, function (MockInterface $mock): void {
             $mock->shouldReceive('hasRemaining')->twice()->andReturn(true);
         });
         $telegram = $this->mock(TelegramClient::class);

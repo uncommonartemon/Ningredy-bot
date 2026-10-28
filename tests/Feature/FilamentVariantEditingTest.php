@@ -186,7 +186,7 @@ class FilamentVariantEditingTest extends TestCase
         $result = app(PastedProductAttributes::class)->merge("\xEF\xBB\xBF\n \nAttribute\tValue\nCPU\t\"Intel \"\"Demo\"\" processor\"", []);
         $this->assertSame('Intel "Demo" processor', array_values($result['rows'])[0]['value']);
         $this->assertSame(0, $result['created']);
-        $this->assertSame(0, app(PastedProductAttributes::class)->merge(str_repeat("\n", 5)."ram: 0", [])['created']);
+        $this->assertSame(0, app(PastedProductAttributes::class)->merge(str_repeat("\n", 5).'ram: 0', [])['created']);
     }
 
     public function test_fresh_form_state_has_one_primary_variant_and_empty_category_defaults_only(): void
