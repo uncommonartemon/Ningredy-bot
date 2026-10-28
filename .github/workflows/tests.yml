@@ -52,9 +52,14 @@ jobs:
         run: npm run build
 
       # Every machine runs with a .env; the suite reads it too (ADMIN_PASSWORD
-      # for seeding, price settings). The example's placeholders are enough.
+      # for seeding, price settings). The example's placeholders mostly serve,
+      # but Telegram senders skip quietly without a token, and the machines
+      # always have one - so the operator-message tests need these two.
       - name: Test environment
-        run: cp .env.example .env
+        run: |
+          cp .env.example .env
+          echo "TELEGRAM_BOT_TOKEN=1234567890:ci-test-token" >> .env
+          echo "TELEGRAM_WEBHOOK_SECRET=ci-test-webhook-secret" >> .env
 
       - name: Code style
         run: vendor/bin/pint --test
