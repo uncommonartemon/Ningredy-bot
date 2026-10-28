@@ -1,0 +1,16 @@
+{
+  "enabled": true,
+  "strategy_options": {
+    "checkpoint_remote": {
+      "provider": "github",
+      "repo": "uncommonartemon/Ningredy-bot-checkpoints"
+    }
+  },
+  "absolute_git_hook_path": true,
+  "telemetry": false,
+  "checkpoints": {
+    "primary": {
+      "type": "git-refs"
+    }
+  }
+}
