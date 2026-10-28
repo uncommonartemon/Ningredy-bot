@@ -1,0 +1,38 @@
+# Every pull request and every push to main runs the PHP suite on GitHub's
+# servers, so a change that slipped past a local run cannot reach main quietly.
+# The node suite stays local: its end-to-end tests drive a real Chromium.
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  php:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      # A key for the test run only; the real one lives in each machine's .env.
+      APP_KEY: 'base64:sn47gE0aHoQZq1U14BAxiydJnK8pisJnZBvUXjxbcwM='
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: gd, sqlite3, pdo_sqlite, zip, intl, exif, bcmath
+          coverage: none
+
+      - name: Install Composer dependencies
+        run: composer install --no-interaction --no-progress --prefer-dist
+
+      - name: Code style
+        run: vendor/bin/pint --test
+
+      - name: Tests
+        run: php artisan test
