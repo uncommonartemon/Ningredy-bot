@@ -74,6 +74,27 @@ class RenditionRulesTest extends TestCase
         $this->assertNotContains($learned->id, array_column(RenditionRules::forHost('img.media.shop.test'), 'id'));
     }
 
+    public function test_a_rule_learned_again_is_that_rule_again_with_its_misses_forgotten(): void
+    {
+        config(['product-images.rendition_probe.disable_after_misses' => 2]);
+        $learn = fn (): ?ImageRenditionRule => RenditionRules::learn('img.media.shop.test', '/th/(.+)_w\d{2,4}_h\d{2,4}(\.[a-z]{3,4})$', 'i',
+            '/{1}{2}', 'Measured larger.', 'https://img.media.shop.test/th/a_w470_h470.jpg', 'https://img.media.shop.test/a.jpg');
+        $first = $learn();
+        RenditionRules::record($first->id, 'img.media.shop.test', false);
+        RenditionRules::record($first->id, 'img.media.shop.test', false);
+        $this->assertSame('disabled', $first->fresh()->status);
+
+        // Measured larger again on the site's own frames: the evidence of today wins.
+        $again = $learn();
+
+        $this->assertSame($first->id, $again->id);
+        $this->assertSame('active', $again->fresh()->status);
+        $this->assertSame(1, ImageRenditionRule::query()->where('origin', 'agent')->count());
+        $outcome = ImageRenditionRuleOutcome::query()->where('image_rendition_rule_id', $first->id)->first();
+        $this->assertSame([0, null], [$outcome->consecutive_misses, $outcome->disabled_at]);
+        $this->assertContains($first->id, array_column(RenditionRules::forHost('img.media.shop.test'), 'id'));
+    }
+
     public function test_a_rule_that_cannot_run_is_not_learned(): void
     {
         $this->assertNull(RenditionRules::learn('shop.test', '/(unclosed', '', '/', null, 'https://a.test/x.jpg', 'https://a.test/y.jpg'));

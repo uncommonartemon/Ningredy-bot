@@ -7,6 +7,7 @@ use App\Ai\Agents\GalleryTextLanguageAgent;
 use App\Ai\Agents\ProductCardRecoveryAgent;
 use App\Ai\Agents\ProductPhotoApplicabilityAgent;
 use App\Ai\Agents\ProductSourceIdentityAgent;
+use App\Ai\Agents\RenditionRuleAgent;
 use App\Services\Photos\RenditionRules;
 use Illuminate\Foundation\Testing\TestCase as BaseTestCase;
 use Illuminate\Support\Facades\Http;
@@ -84,6 +85,12 @@ abstract class TestCase extends BaseTestCase
         GalleryFrameReviewAgent::fake(fn (): array => [
             'foreign_text_frames' => [], 'non_product_frames' => [], 'uncertain_content_frames' => [],
             'reason' => 'Product frames, no foreign text (test fixture).',
+        ])->preventStrayPrompts();
+
+        // Any source whose thumbnails no rendition rule enlarges reaches the learner;
+        // it learns nothing unless a test says what the site keeps.
+        RenditionRuleAgent::fake(fn (): array => [
+            'decision' => 'none', 'find' => '', 'flags' => '', 'replace' => '', 'reason' => 'No rendition rule configured by this test.',
         ])->preventStrayPrompts();
     }
 

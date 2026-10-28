@@ -21,6 +21,7 @@ use App\Services\Photos\ImageGeometry;
 use App\Services\Photos\ImageRenditionDeduplicator;
 use App\Services\Photos\ImageRenditionProbe;
 use App\Services\Photos\ImageUrls;
+use App\Services\Photos\RenditionRuleLearner;
 use App\Services\Photos\RenditionRules;
 use App\Services\ProductSearch\Recovery\ProductCardRecoverySupervisor;
 use App\Services\ProductSearch\Research\ResearchSourceRoles;
@@ -3947,6 +3948,25 @@ class ProductImageStorage
         if ($thumbnails->isEmpty()) {
             return;
         }
+        // No rule gave a larger frame: the agent learns where this site keeps them
+        // (RenditionRuleLearner), and the rule it learned is tried on the same frames.
+        if ($this->tryRenditions($draft, $thumbnails, null, $urls, $candidates, $checksums, $decodedPixels, $decodedPixelBudget,
+            $sourcePagesByUrl, $sourceContextsByUrl, $telegramUpdateId) === 0
+            && ($ruleId = $this->learnRenditionRule($draft, $thumbnails, $sourcePagesByUrl, $telegramUpdateId)) !== null) {
+            $this->tryRenditions($draft, $thumbnails, $ruleId, $urls, $candidates, $checksums, $decodedPixels, $decodedPixelBudget,
+                $sourcePagesByUrl, $sourceContextsByUrl, $telegramUpdateId);
+        }
+    }
+
+    /**
+     * The rendition rules' guesses for these thumbnails (only one rule's, when given),
+     * downloaded and judged like the frames they stand for.
+     *
+     * @return int how many guesses gave a larger usable frame, new or already among the candidates
+     */
+    private function tryRenditions(ProductDraft $draft, Collection $thumbnails, ?int $onlyRuleId, array $urls, array &$candidates, array &$checksums,
+        int &$decodedPixels, int $decodedPixelBudget, array $sourcePagesByUrl, array $sourceContextsByUrl, ?int $telegramUpdateId): int
+    {
         // By address, not by asset key: a guess is the same asset at another rendition.
         $known = array_fill_keys(array_map([ImageUrls::class, 'normalizeCandidateUrl'], $urls), true);
         $guesses = [];
@@ -3955,7 +3975,7 @@ class ProductImageStorage
             foreach (ImageRenditionProbe::guesses((string) $thumbnail['url'], 6,
                 (int) ($thumbnail['width'] ?? 0) ?: null, (int) ($thumbnail['height'] ?? 0) ?: null) as $guess => $ruleId) {
                 $key = ImageUrls::normalizeCandidateUrl($guess);
-                if (! isset($known[$key])) {
+                if (! isset($known[$key]) && ($onlyRuleId === null || $ruleId === $onlyRuleId)) {
                     $known[$key] = true;
                     $guesses[$guess] = (string) $thumbnail['url'];
                     $ruleOf[$guess] = $ruleId;
@@ -3963,7 +3983,7 @@ class ProductImageStorage
             }
         }
         if ($guesses === []) {
-            return;
+            return 0;
         }
         $referers = [];
         foreach ($guesses as $guess => $original) {
@@ -4024,9 +4044,30 @@ class ProductImageStorage
             'product_url' => (string) ($sourcePagesByUrl[(string) $thumbnails->first()['url']] ?? ''),
             'actor' => 'downloader', 'phase' => 'image_download', 'action' => 'probe_larger_renditions',
             'status' => $found === [] ? 'failed' : 'completed', 'decision' => $found === [] ? 'none_larger' : 'larger_renditions_found',
-            'input' => ['thumbnails' => $thumbnails->count(), 'guesses' => count($guesses)],
+            'input' => ['thumbnails' => $thumbnails->count(), 'guesses' => count($guesses), 'learned_rule_id' => $onlyRuleId],
             'output' => ['found' => count($found), 'examples' => array_slice($found, 0, 3, true)],
         ]);
+
+        return count($larger);
+    }
+
+    /**
+     * The image host most of the unenlarged thumbnails come from, learned by the agent:
+     * the id of the rule it measured there, or null (once a day per host, within the
+     * search's budget - RenditionRuleLearner).
+     */
+    private function learnRenditionRule(ProductDraft $draft, Collection $thumbnails, array $sourcePagesByUrl, ?int $telegramUpdateId): ?int
+    {
+        $byHost = $thumbnails->groupBy(fn (array $thumbnail): string => strtolower((string) parse_url((string) $thumbnail['url'], PHP_URL_HOST)));
+        $host = (string) $byHost->sortByDesc(fn (Collection $frames): int => $frames->count())->keys()->first();
+        $frames = $byHost->get($host, collect());
+        if ($host === '' || $frames->count() < 2) {
+            return null;
+        }
+
+        return app(RenditionRuleLearner::class)->learn($host, $frames->map(fn (array $frame): array => ['url' => (string) $frame['url'],
+            'width' => (int) ($frame['width'] ?? 0), 'height' => (int) ($frame['height'] ?? 0)])->values()->all(),
+            $this->requiredImageWidth($draft), $sourcePagesByUrl[(string) $frames->first()['url']] ?? null, $telegramUpdateId, $draft->id)?->id;
     }
 
     /** A frame the browser confirmed as part of the slider, or one a code-matched record lists as its gallery. */
