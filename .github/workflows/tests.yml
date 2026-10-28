@@ -47,6 +47,10 @@ jobs:
       - name: Install node dependencies
         run: npm ci --ignore-scripts
 
+      # The catalog pages' tests render views that read the Vite manifest.
+      - name: Build assets
+        run: npm run build
+
       # Every machine runs with a .env; the suite reads it too (ADMIN_PASSWORD
       # for seeding, price settings). The example's placeholders are enough.
       - name: Test environment
