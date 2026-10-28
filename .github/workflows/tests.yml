@@ -24,7 +24,8 @@ jobs:
 
       - uses: shivammathur/setup-php@v2
         with:
-          php-version: '8.3'
+          # The machines run 8.5 and the lock file resolves for it.
+          php-version: '8.5'
           extensions: gd, sqlite3, pdo_sqlite, zip, intl, exif, bcmath
           coverage: none
 
