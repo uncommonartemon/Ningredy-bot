@@ -31,7 +31,8 @@ jobs:
         with:
           # The machines run 8.5 and the lock file resolves for it.
           php-version: '8.5'
-          extensions: gd, sqlite3, pdo_sqlite, zip, intl, exif, bcmath
+          # fileinfo and curl ship disabled in Windows PHP builds.
+          extensions: gd, sqlite3, pdo_sqlite, zip, intl, exif, bcmath, fileinfo, curl
           coverage: none
 
       - name: Install Composer dependencies
