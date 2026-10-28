@@ -14,8 +14,13 @@ concurrency:
 
 jobs:
   php:
-    runs-on: ubuntu-latest
-    timeout-minutes: 40
+    # The bot runs on Windows, and so does the suite: on ubuntu 91 tests fail
+    # on environment differences no installation ever meets.
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
     env:
       # A key for the test run only; the real one lives in each machine's .env.
       APP_KEY: 'base64:sn47gE0aHoQZq1U14BAxiydJnK8pisJnZBvUXjxbcwM='
