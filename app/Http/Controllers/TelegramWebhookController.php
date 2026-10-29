@@ -14,6 +14,7 @@ use App\Jobs\ProcessDraftPhotoActions;
 use App\Jobs\ProcessTelegramMessage;
 use App\Jobs\ProposeTelegramDraftEdit;
 use App\Jobs\RestageDraftGalleryPhotos;
+use App\Jobs\SendDiagnosticReport;
 use App\Jobs\TopUpDraftGalleryPhotos;
 use App\Jobs\TrainDraftGalleryRecipe;
 use App\Jobs\TranscribeTelegramPhoto;
@@ -350,6 +351,19 @@ class TelegramWebhookController extends Controller
                 $update->update(['payload' => [...$update->payload, '_new_context_cleared' => true]]);
             }
             $this->telegram->sendMessage($chatId, 'Контекст диалога очищен. Начинаем с чистого листа.', $this->mainKeyboard());
+            $this->markCommandProcessed($update);
+
+            return true;
+        }
+
+        // Operator, 2026-10-29: the bot is handed to a person; what went wrong there
+        // reaches the developer as one file, with no terminal and no server access.
+        if (preg_match('/^\/report(?:@\w+)?$/iu', $text) === 1) {
+            if (! data_get($update->payload, '_report_queued')) {
+                SendDiagnosticReport::dispatch($chatId);
+                $update->update(['payload' => [...$update->payload, '_report_queued' => true]]);
+            }
+            $this->telegram->sendMessage($chatId, 'Собираю отчёт для разработчика за 7 дней: журнал поисков, вызовы AI, карточки, выученные правила сайтов, лог ошибок — без ключей и паролей. Пришлю файлом через минуту-две.', $this->mainKeyboard());
             $this->markCommandProcessed($update);
 
             return true;
@@ -1745,6 +1759,7 @@ class TelegramWebhookController extends Controller
             /errors — ошибки
             /new — очистить контекст диалога
             /reset — отменить зависшие запросы и очистить контекст (если поиск завис, например когда воркер очереди был выключен)
+            /report — отчёт для разработчика одним файлом: журнал поисков, ошибки, выученные правила сайтов за 7 дней (без ключей)
             TEXT;
     }
 

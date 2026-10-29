@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Jobs\ProcessTelegramMessage;
 use App\Jobs\ProcessTelegramProductUpload;
+use App\Jobs\SendDiagnosticReport;
 use App\Jobs\TranscribeTelegramPhoto;
 use App\Jobs\TranscribeTelegramVoice;
 use App\Models\TelegramChatState;
@@ -218,6 +219,23 @@ class TelegramWebhookTest extends TestCase
         $this->assertNull($otherChat->refresh()->processed_at);
         $this->assertDatabaseMissing('telegram_chat_states', ['chat_id' => '98765']);
         Queue::assertNothingPushed();
+    }
+
+    public function test_report_command_queues_the_diagnostic_archive_for_the_chat(): void
+    {
+        // Operator, 2026-10-29: the person the bot was handed to sends /report and the
+        // developer gets one file; the webhook answers at once, the archive follows.
+        Queue::fake();
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => ['message_id' => 1]])]);
+        $payload = $this->messagePayload(updateId: 5010);
+        $payload['message']['text'] = '/report';
+
+        $this->postJson('/api/telegram/webhook', $payload, ['X-Telegram-Bot-Api-Secret-Token' => 'test-secret'])
+            ->assertOk()->assertJson(['ok' => true]);
+
+        Queue::assertPushed(SendDiagnosticReport::class, fn (SendDiagnosticReport $job): bool => $job->chatId === '98765');
+        Http::assertSent(fn ($request): bool => str_ends_with($request->url(), '/sendMessage') && str_contains((string) ($request['text'] ?? ''), 'отчёт'));
+        $this->assertNotNull(TelegramUpdate::query()->where('update_id', 5010)->sole()->processed_at);
     }
 
     public function test_a_copied_progress_line_is_stripped_down_to_the_query(): void

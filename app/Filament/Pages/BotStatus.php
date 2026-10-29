@@ -4,6 +4,7 @@ namespace App\Filament\Pages;
 
 use App\Filament\Pages\LocalizedPage as Page;
 use App\Services\BotHealth;
+use App\Services\Support\DiagnosticReport;
 use BackedEnum;
 use Filament\Actions\Action;
 use Filament\Infolists\Components\TextEntry;
@@ -83,6 +84,17 @@ class BotStatus extends Page
                 ->icon(Heroicon::OutlinedArrowPath)
                 ->color('gray')
                 ->action(fn () => $this->refreshChecks()),
+            // The same archive /report sends in Telegram, for the developer who reaches
+            // this panel over the tunnel (operator, 2026-10-29).
+            Action::make('report')
+                ->label(__('Скачать отчёт'))
+                ->icon(Heroicon::OutlinedArrowDownTray)
+                ->color('gray')
+                ->action(function () {
+                    $path = app(DiagnosticReport::class)->build();
+
+                    return response()->download($path, basename($path))->deleteFileAfterSend();
+                }),
             Action::make('smoke')
                 ->label(__('Полная проверка'))
                 ->icon(Heroicon::OutlinedBeaker)
