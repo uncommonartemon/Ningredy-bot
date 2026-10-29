@@ -209,5 +209,38 @@
         "also": [
             "https://dlcdnwebimgs.asus.com/gain/2323a5ef-f5e6-48ed-b731-493e988e38c4"
         ]
+    },
+    {
+        "name": "cloudflare image resizing in the path (official docs)",
+        "thumbnail": "https://shop.example/cdn-cgi/image/width=300,height=300,fit=cover/images/products/laptop-front.jpg",
+        "first": "https://shop.example/images/products/laptop-front.jpg"
+    },
+    {
+        "name": "wix media transformation (official docs)",
+        "thumbnail": "https://static.wixstatic.com/media/11062b_58a1e9635ec6423f98b2f3407ccea943~mv2.jpeg/v1/fill/w_640,h_640/file.jpg",
+        "first": "https://static.wixstatic.com/media/11062b_58a1e9635ec6423f98b2f3407ccea943~mv2.jpeg"
+    },
+    {
+        "name": "liipimagine filter cache, sylius originals (official docs)",
+        "thumbnail": "https://shop.example/media/cache/sylius_shop_product_large_thumbnail/ab/cd/laptop.jpg",
+        "first": "https://shop.example/ab/cd/laptop.jpg",
+        "also": [
+            "https://shop.example/media/image/ab/cd/laptop.jpg"
+        ]
+    },
+    {
+        "name": "opencart image cache (source code)",
+        "thumbnail": "https://shop.example/image/cache/catalog/laptops/acer-swift-500x500.jpg",
+        "first": "https://shop.example/image/catalog/laptops/acer-swift.jpg"
+    },
+    {
+        "name": "shopware 6 thumbnail (official docs)",
+        "thumbnail": "https://shop.example/thumbnail/ff/c1/1d/1672934242/example-image_400x400.jpg",
+        "first": "https://shop.example/media/ff/c1/1d/1672934242/example-image.jpg"
+    },
+    {
+        "name": "shopware 6 remote thumbnail",
+        "thumbnail": "https://shop.example/thumbnail/800/media/ab/cd/ef/product.jpg?ts=1672934242",
+        "first": "https://shop.example/media/ab/cd/ef/product.jpg?ts=1672934242"
     }
 ]
