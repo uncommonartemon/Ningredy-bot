@@ -2429,6 +2429,8 @@ class ProductImageStorageTest extends TestCase
         $this->assertTrue($media->every(fn ($item): bool => str_starts_with((string) $item->source_url, 'https://93.184.216.36/')));
         $this->assertSame('complete', $draft->fresh()->gallery_status);
         $this->assertDatabaseHas('product_source_attempts', ['product_draft_id' => $draft->id, 'action' => 'prefer_official_source']);
+        // The thin complete set is the card; no fallback search follows the maker's page.
+        $this->assertDatabaseMissing('product_source_attempts', ['product_draft_id' => $draft->id, 'phase' => 'fallback_image_download']);
     }
 
     /**
