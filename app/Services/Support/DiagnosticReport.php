@@ -13,7 +13,9 @@ use App\Services\ProductSearch\SearchJournal;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Artisan;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\File;
+use PDO;
 use RuntimeException;
 use Throwable;
 use ZipArchive;
@@ -33,10 +35,15 @@ final class DiagnosticReport
 
     private const LOG_TAIL_BYTES = 2_097_152;
 
-    /** @return string the absolute path of the zip that was written */
-    public function build(int $days = 7, int $maxRequests = 80): string
+    /**
+     * @param  bool  $withDatabase  also a consistent copy of the database with its secrets blanked
+     * @param  string|null  $connection  the connection to copy; the application's by default
+     * @return string the absolute path of the zip that was written
+     */
+    public function build(int $days = 7, int $maxRequests = 80, bool $withDatabase = false, ?string $connection = null): string
     {
         $days = max(1, $days);
+        $snapshot = null;
         $updates = TelegramUpdate::query()->where('created_at', '>=', now()->subDays($days))
             ->orderByDesc('id')->limit(max(1, $maxRequests))->get()->sortBy('id')->values();
         $ids = $updates->pluck('id')->all();
@@ -74,9 +81,38 @@ final class DiagnosticReport
                 $zip->addFromString("logs/{$name}", $tail);
             }
             $zip->addFromString('env.redacted.txt', $this->envShape());
+            if ($withDatabase) {
+                $snapshot = $this->databaseSnapshot($connection);
+                $zip->addFile($snapshot, 'database.sqlite');
+            }
         } finally {
             $zip->close();
+            if ($snapshot !== null) {
+                @unlink($snapshot);
+            }
         }
+
+        return $path;
+    }
+
+    /**
+     * A consistent copy of the database with its secrets blanked: the developer's
+     * own tools run against it as against a live one (operator, 2026-10-29: "бд
+     * просто подойдёт?"). Keys, tokens and proxy addresses stay on the machine.
+     */
+    private function databaseSnapshot(?string $connection = null): string
+    {
+        $path = storage_path('app/reports/snapshot-'.now()->format('Ymd-His').'-'.bin2hex(random_bytes(3)).'.sqlite');
+        // SQLite refuses VACUUM inside a transaction; the job, the admin button and
+        // bot:report run outside one.
+        DB::connection($connection)->statement('VACUUM INTO ?', [$path]);
+        $copy = new PDO('sqlite:'.$path);
+        $hasSettings = $copy->query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'app_settings'")?->fetchColumn();
+        if ($hasSettings) {
+            $copy->exec("UPDATE app_settings SET value = '' WHERE key LIKE 'ai.keys.%' OR key LIKE '%token%' OR key LIKE '%secret%'"
+                ." OR key LIKE '%password%' OR key LIKE '%api_key%' OR key LIKE '%proxy%'");
+        }
+        $copy = null;
 
         return $path;
     }
@@ -237,13 +273,39 @@ final class DiagnosticReport
             | JSON_PARTIAL_OUTPUT_ON_ERROR | ($pretty ? JSON_PRETTY_PRINT : 0));
     }
 
+    /** @var list<string>|null */
+    private ?array $secrets = null;
+
+    /**
+     * Every secret this installation holds: the Telegram token, the Icecat account,
+     * the provider keys of config/ai.php and the keys entered in the admin panel.
+     *
+     * @return list<string>
+     */
+    private function secrets(): array
+    {
+        if ($this->secrets !== null) {
+            return $this->secrets;
+        }
+        $values = [config('services.telegram.bot_token'), config('services.icecat.username')];
+        foreach ((array) config('ai.providers', []) as $provider) {
+            $values[] = is_array($provider) ? ($provider['key'] ?? null) : null;
+        }
+        try {
+            $values = [...$values, ...DB::table('app_settings')->where('key', 'like', 'ai.keys.%')->pluck('value')->all()];
+        } catch (Throwable) {
+            // Before the settings table exists the file settings are all there is.
+        }
+
+        return $this->secrets = array_values(array_unique(array_filter($values,
+            fn (mixed $value): bool => is_string($value) && mb_strlen($value) >= 8)));
+    }
+
     /** Tokens and keys the text may carry, whatever wrote them there. */
     private function redact(string $text): string
     {
-        foreach ([config('services.telegram.bot_token'), config('services.openai.key'), config('services.icecat.username')] as $secret) {
-            if (is_string($secret) && mb_strlen($secret) >= 8) {
-                $text = str_replace($secret, '[redacted]', $text);
-            }
+        foreach ($this->secrets() as $secret) {
+            $text = str_replace($secret, '[redacted]', $text);
         }
 
         return (string) preg_replace(['/\b\d{6,}:[A-Za-z0-9_-]{30,}/', '/\bsk-[A-Za-z0-9_-]{16,}/'], '[redacted]', $text);

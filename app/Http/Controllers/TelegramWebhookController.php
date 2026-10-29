@@ -358,12 +358,14 @@ class TelegramWebhookController extends Controller
 
         // Operator, 2026-10-29: the bot is handed to a person; what went wrong there
         // reaches the developer as one file, with no terminal and no server access.
-        if (preg_match('/^\/report(?:@\w+)?$/iu', $text) === 1) {
+        if (preg_match('/^\/report(?:@\w+)?(?:\s+(full|db|база|с\s+базой))?$/iu', $text, $reportMatch) === 1) {
+            $withDatabase = isset($reportMatch[1]);
             if (! data_get($update->payload, '_report_queued')) {
-                SendDiagnosticReport::dispatch($chatId);
+                SendDiagnosticReport::dispatch($chatId, 7, $withDatabase);
                 $update->update(['payload' => [...$update->payload, '_report_queued' => true]]);
             }
-            $this->telegram->sendMessage($chatId, 'Собираю отчёт для разработчика за 7 дней: журнал поисков, вызовы AI, карточки, выученные правила сайтов, лог ошибок — без ключей и паролей. Пришлю файлом через минуту-две.', $this->mainKeyboard());
+            $this->telegram->sendMessage($chatId, 'Собираю отчёт для разработчика за 7 дней: журнал поисков, вызовы AI, карточки, выученные правила сайтов, лог ошибок'
+                .($withDatabase ? ', копия базы' : '').' — без ключей и паролей. Пришлю файлом через минуту-две.', $this->mainKeyboard());
             $this->markCommandProcessed($update);
 
             return true;
@@ -1760,6 +1762,7 @@ class TelegramWebhookController extends Controller
             /new — очистить контекст диалога
             /reset — отменить зависшие запросы и очистить контекст (если поиск завис, например когда воркер очереди был выключен)
             /report — отчёт для разработчика одним файлом: журнал поисков, ошибки, выученные правила сайтов за 7 дней (без ключей)
+            /report full — то же плюс копия базы без ключей (если не влезет в лимит Telegram — скачайте в админке)
             TEXT;
     }
 
