@@ -392,15 +392,16 @@ class ProductSpecificationEvidenceGuard
 
     /**
      * A value as compared with another value. A trailing decimal zero is formatting:
-     * 19.90 mm is 19.9 mm (live #274 lost its card to "confirmed but changed" over it).
-     * Three decimals may be a thousands group ("1.250 g"), and "5.0" stays as written.
-     * Quotes are still matched by text(): they must be the page's own words.
+     * 19.90 mm is 19.9 mm (live #274 lost its card to "confirmed but changed" over it),
+     * and 14.0 inches is 14 inches (live #318, the same way, three times). Three
+     * decimals may be a thousands group ("1.250 g") and stay as written. Quotes are
+     * still matched by text(): they must be the page's own words.
      */
     private function valueText(string $text): string
     {
         $text = $this->text($text);
 
         return preg_replace_callback('/(?<!\p{N}|\p{N}[.,])(\p{N}+)\.(\p{N}{1,2}|\p{N}{4,})(?!\p{N}|[.,]\p{N})/u',
-            fn (array $m): string => rtrim($m[2], '0') === '' ? $m[0] : $m[1].'.'.rtrim($m[2], '0'), $text) ?? $text;
+            fn (array $m): string => rtrim($m[2], '0') === '' ? $m[1] : $m[1].'.'.rtrim($m[2], '0'), $text) ?? $text;
     }
 }
