@@ -2403,6 +2403,77 @@ class ProductImageStorageTest extends TestCase
         $this->assertTrue(ImageRenditionRuleOutcome::query()->where('image_rendition_rule_id', $rule->id)->where('hits', 1)->exists());
     }
 
+    public function test_a_thin_gallery_waits_for_the_maker_s_page_and_the_richer_one_is_the_card(): void
+    {
+        // Operator, 2026-10-29. Live #310: CDW gave 3 of 10, lenovo.com stood next in
+        // the queue with 8 frames and was never opened; #313: coolblue 1, noctua.at 16.
+        [$draft, $retailer, $maker] = $this->thinAndMakerSources(makerImages: 8);
+
+        $this->assertSame(8, app(ProductImageStorage::class)->stage($draft->fresh()));
+
+        $media = $draft->fresh()->media;
+        $this->assertCount(8, $media);
+        $this->assertTrue($media->every(fn ($item): bool => str_starts_with((string) $item->source_url, 'https://93.184.216.37/')));
+        $this->assertDatabaseHas('product_source_attempts', ['product_draft_id' => $draft->id, 'action' => 'prefer_official_source',
+            'decision' => 'try_official_before_thin_gallery', 'product_url' => $maker['url'], 'input->accepted_images' => 3]);
+    }
+
+    public function test_the_thin_set_is_the_card_when_the_maker_s_page_gives_less(): void
+    {
+        [$draft, $retailer] = $this->thinAndMakerSources(makerImages: 1);
+
+        $this->assertSame(3, app(ProductImageStorage::class)->stage($draft->fresh()));
+
+        $media = $draft->fresh()->media;
+        $this->assertCount(3, $media);
+        $this->assertTrue($media->every(fn ($item): bool => str_starts_with((string) $item->source_url, 'https://93.184.216.36/')));
+        $this->assertSame('complete', $draft->fresh()->gallery_status);
+        $this->assertDatabaseHas('product_source_attempts', ['product_draft_id' => $draft->id, 'action' => 'prefer_official_source']);
+    }
+
+    /**
+     * A retailer page with three exact frames first, the maker's page with the given
+     * number of frames behind it; every frame passes Vision.
+     *
+     * @return array{0: ProductDraft, 1: array<string, mixed>, 2: array<string, mixed>}
+     */
+    private function thinAndMakerSources(int $makerImages): array
+    {
+        Storage::fake('public');
+        config()->set('product-images.max_images_by_type.laptop', 10);
+        $title = 'Lenovo ThinkCentre M70q Gen 5 12TD001TUS';
+        $retailerImages = collect(range(1, 3))->map(fn (int $index): string => "https://93.184.216.36/images/m70q-{$index}.jpg")->all();
+        $makerImageUrls = collect(range(1, $makerImages))->map(fn (int $index): string => "https://93.184.216.37/images/m70q-official-{$index}.jpg")->all();
+        Http::fake(function (Request $request) use ($title) {
+            if (! str_contains($request->url(), '/images/')) {
+                return Http::response("<html><h1>{$title}</h1></html>", 200, ['Content-Type' => 'text/html']);
+            }
+            preg_match('/-(\d+)\.jpg/', $request->url(), $matches);
+            $seed = (int) ($matches[1] ?? 1) + (str_contains($request->url(), 'official') ? 20 : 0);
+
+            return Http::response($this->jpeg($seed), 200, ['Content-Type' => 'image/jpeg']);
+        });
+        $browser = $this->mockBrowser();
+        $browser->shouldReceive('extract')->andReturn([]);
+        $browser->shouldReceive('isConfirmedGalleryImage')->andReturn(false);
+        $browser->shouldReceive('isPartialGalleryImage')->andReturn(false);
+        ProductPhotoApplicabilityAgent::fake()->preventStrayPrompts();
+        ProductImageVisionAgent::fake(fn ($prompt, $attachments): array => ['images' => $attachments->keys()->map(fn (int $index): array => [
+            'index' => $index + 1, 'exact_match' => true, 'color_match' => true, 'publishable' => true, 'kind' => 'product',
+            'view' => 'front', 'gallery_rank' => 1, 'score' => 95, 'reason' => 'Product photo.'])->all()]);
+        [, , $draft] = $this->records();
+        $retailer = ['title' => $title.' at a shop', 'url' => 'https://93.184.216.36/p/m70q', 'type' => 'retailer', 'image_urls' => $retailerImages,
+            '_preflight_identity_evidence' => $title, '_preflight_index' => 0];
+        $maker = ['title' => $title.' | Lenovo', 'url' => 'https://93.184.216.37/p/m70q', 'type' => 'manufacturer', 'image_urls' => $makerImageUrls,
+            '_preflight_identity_evidence' => $title, '_preflight_index' => 1];
+        $draft->update(['title' => $title, 'brand' => 'Lenovo', 'model' => '12TD001TUS', 'product_type' => 'laptop',
+            'primary_source_url' => $retailer['url'], 'image_urls' => [], 'sources' => [$retailer, $maker]]);
+        $this->partialMock(SourceQueueBuilder::class)->shouldReceive('buildSourceQueue')->once()
+            ->andReturn([collect([$retailer, $maker]), collect([$retailer, $maker])]);
+
+        return [$draft, $retailer, $maker];
+    }
+
     public function test_a_record_gallery_matched_by_code_is_a_confirmed_gallery_without_a_site_recipe(): void
     {
         // Live #157: the record's page answered with a bot check, the page look replaced
