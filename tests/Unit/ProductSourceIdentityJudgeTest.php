@@ -33,6 +33,7 @@ class ProductSourceIdentityJudgeTest extends TestCase
         ProductSourceIdentityAgent::fake(function (string $prompt) use (&$calls): array {
             $calls++;
             $stage = json_decode($prompt, true)['verification_stage'];
+
             return ['match' => $stage === 'source_eligibility' ? 'confirmed' : 'uncertain',
                 'confidence' => 0.9, 'reason' => 'Конфигурация совпадает; состояние ещё не доказано.'];
         })->preventStrayPrompts();

@@ -1,0 +1,68 @@
+# Every pull request and every push to main runs the PHP suite on GitHub's
+# servers, so a change that slipped past a local run cannot reach main quietly.
+# The node suite stays local: its end-to-end tests drive a real Chromium.
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  php:
+    # The bot runs on Windows, and so does the suite: on ubuntu 91 tests fail
+    # on environment differences no installation ever meets.
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      # A key for the test run only; the real one lives in each machine's .env.
+      APP_KEY: 'base64:sn47gE0aHoQZq1U14BAxiydJnK8pisJnZBvUXjxbcwM='
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          # The machines run 8.5 and the lock file resolves for it.
+          php-version: '8.5'
+          # fileinfo and curl ship disabled in Windows PHP builds.
+          extensions: gd, sqlite3, pdo_sqlite, zip, intl, exif, bcmath, fileinfo, curl
+          coverage: none
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Composer dependencies
+        run: composer install --no-interaction --no-progress --prefer-dist
+
+      # The extractor tests drive the real node scripts, whose imports live in
+      # node_modules. --ignore-scripts skips the Electron panel's postinstall.
+      - name: Install node dependencies
+        run: npm ci --ignore-scripts
+
+      # The catalog pages' tests render views that read the Vite manifest.
+      - name: Build assets
+        run: npm run build
+
+      # Every machine runs with a .env; the suite reads it too (ADMIN_PASSWORD
+      # for seeding, price settings). The example's placeholders mostly serve,
+      # but Telegram senders skip quietly without a token, and the machines
+      # always have one - so the operator-message tests need these two.
+      - name: Test environment
+        run: |
+          cp .env.example .env
+          echo "TELEGRAM_BOT_TOKEN=1234567890:ci-test-token" >> .env
+          echo "TELEGRAM_WEBHOOK_SECRET=ci-test-webhook-secret" >> .env
+
+      - name: Code style
+        run: vendor/bin/pint --test
+
+      - name: Tests
+        run: php artisan test
