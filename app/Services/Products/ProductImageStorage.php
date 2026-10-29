@@ -587,6 +587,9 @@ class ProductImageStorage
         $deferredVisionSets = [];
         $reviewedSourceUrls = [];
         $adoptedOffers = $this->adoptedOfferSources($draft);
+        // The maker's page the search is on its way to after a thin gallery
+        // (detourToOfficialSource): null = no detour, '' = that page was reached.
+        $officialDetour = null;
 
         foreach ($sourceQueue as $sourceIndex => $source) {
             app(ProductSearchCancellation::class)->throwIfCancelled($telegramUpdateId);
@@ -624,6 +627,15 @@ class ProductImageStorage
                 $this->skipDroppedSite($draft, $telegramUpdateId, (string) $source['url'], $dropped, $progress);
 
                 continue;
+            }
+            // On the way to the maker's page the sources before it wait, and
+            // nothing after it is opened: the thin set in reserve or the official
+            // gallery is the card (operator, 2026-10-29).
+            if ($officialDetour !== null) {
+                if ($officialDetour === '' || rtrim((string) $source['url'], '/') !== $officialDetour) {
+                    continue;
+                }
+                $officialDetour = '';
             }
             // The card's own source after it adopted that offer is not more search:
             // it is what was found, checked against the card it became. A standing
@@ -999,8 +1011,15 @@ class ProductImageStorage
                     // These exact-source frames already passed Vision and the
                     // category minimum; do not withhold a usable card merely
                     // to fill the target. A partial traversal stays partial.
+                    // The one exception: a thin set while the maker's page waits.
+                    if ($this->detourToOfficialSource($result, $sourceQueue, $sourceIndex, $reviewedSourceUrls, $officialDetour,
+                        $target, $draft, $telegramUpdateId, $progress)) {
+                        $reserve = $this->keepBestReserve($reserve, $result);
+
+                        continue;
+                    }
                     if ($result->isComplete()) {
-                        $this->destroy($reserve?->candidates ?? []);
+                        $result = $this->completeWinner($result, $reserve);
                         foreach ($deferredVisionSets as $set) {
                             $this->destroy($set['candidates']);
                         }
@@ -1134,6 +1153,16 @@ class ProductImageStorage
                 continue;
             }
 
+            // A thin confirmed gallery while the maker's page waits (operator, 2026-10-29).
+            if ($this->detourToOfficialSource($result, $sourceQueue, $sourceIndex, $reviewedSourceUrls, $officialDetour,
+                $target, $draft, $telegramUpdateId, $progress)) {
+                $this->destroyUnselected($allCandidates, $result->candidates);
+                $reserve = $this->keepBestReserve($reserve, $result);
+
+                continue;
+            }
+            $result = $this->completeWinner($result, $reserve);
+            $reserve = null;
             $selected = $result->candidates;
             $outcome = $result->outcome;
             $progress?->__invoke(($recordGallery
@@ -1160,7 +1189,8 @@ class ProductImageStorage
             $this->destroy($reserve?->candidates ?? []);
             $reserve = null;
             $chosenSource = $result->source ?? [...$source, 'url' => $productPageUrl];
-            $chosenMethod = $recordGallery ? 'record_gallery' : 'playwright';
+            // A richer complete set from the reserve keeps its own method.
+            $chosenMethod = $result->method ?? ($recordGallery ? 'record_gallery' : 'playwright');
             break;
         }
 
@@ -2425,6 +2455,62 @@ class ProductImageStorage
      * frees its own round candidates afterwards, and freeing them here too
      * would destroy the same image twice.
      */
+    /**
+     * A thin set is not the card while the maker's own page waits (operator,
+     * 2026-10-29). Live #310: CDW gave 3 of 10 and lenovo.com, next in the queue
+     * with 8 frames, was never opened; #313: coolblue gave 1, noctua.at held 16.
+     * True when the search should go to that page first: the thin set stays in
+     * reserve, the pages before the maker's wait, nothing after it is opened,
+     * and the richer complete gallery wins (galleries never mix).
+     *
+     * @param  iterable<int, array<string, mixed>>  $queue
+     * @param  array<string, true>  $reviewed
+     */
+    private function detourToOfficialSource(GallerySourceResult $result, iterable $queue, int $afterIndex, array $reviewed,
+        ?string &$detour, int $target, ProductDraft $draft, ?int $telegramUpdateId, ?callable $progress): bool
+    {
+        if ($detour !== null || ! $result->isComplete() || count($result->candidates) >= (int) ceil($target / 2)) {
+            return false;
+        }
+        $official = null;
+        foreach ($queue as $index => $candidate) {
+            if ($index > $afterIndex && is_array($candidate) && ($candidate['type'] ?? null) === 'manufacturer'
+                && ! isset($reviewed[rtrim((string) ($candidate['url'] ?? ''), '/')])
+                && app(SearchProgressSupervisor::class)->siteDropReason($telegramUpdateId, (string) ($candidate['url'] ?? '')) === null) {
+                $official = $candidate;
+                break;
+            }
+        }
+        if ($official === null) {
+            return false;
+        }
+        $detour = rtrim((string) $official['url'], '/');
+        $this->attempts->record([
+            'telegram_update_id' => $telegramUpdateId, 'product_draft_id' => $draft->id, 'product_url' => (string) $official['url'],
+            'actor' => 'server', 'phase' => 'source_selection', 'action' => 'prefer_official_source', 'status' => 'info',
+            'decision' => 'try_official_before_thin_gallery',
+            'input' => ['accepted_images' => count($result->candidates), 'target' => $target,
+                'thin_source_url' => (string) ($result->source['url'] ?? '')],
+        ]);
+        $progress?->__invoke(sprintf('Источник дал %d фото при цели %d; дальше в очереди страница производителя — пробую её один раз, в карточку пойдёт более богатая галерея.',
+            count($result->candidates), $target));
+
+        return true;
+    }
+
+    /** Of two complete galleries the richer one; the other's frames are released. */
+    private function completeWinner(GallerySourceResult $result, ?GallerySourceResult $reserve): GallerySourceResult
+    {
+        if ($reserve === null || ! $reserve->isComplete() || count($reserve->candidates) <= count($result->candidates)) {
+            $this->destroy($reserve?->candidates ?? []);
+
+            return $result;
+        }
+        $this->destroy($result->candidates);
+
+        return $reserve;
+    }
+
     private function keepBestReserve(?GallerySourceResult $reserve, GallerySourceResult $candidate): ?GallerySourceResult
     {
         if (! $candidate->isBetterReserveThan($reserve)) {
