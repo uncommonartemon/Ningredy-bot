@@ -1219,6 +1219,17 @@ class ProductImageStorage
         // However the loop ended, nothing is held past this point.
         $this->timeBudget->holdForCheck($telegramUpdateId, 0, 0);
 
+        // The maker's page was tried after a thin gallery (detourToOfficialSource) and
+        // gave nothing richer: the thin complete set is the card, not a reason for the
+        // fallback search (live #349: three more shops were opened after that page).
+        if ($selected === [] && $officialDetour === '' && $reserve?->isComplete()) {
+            $selected = $reserve->candidates;
+            $chosenSource = $reserve->source;
+            $chosenMethod = $reserve->method;
+            $outcome = $reserve->outcome;
+            $reserve = null;
+        }
+
         if (
             $selected === []
             && $this->settings->fallbackSourcesEnabled()
