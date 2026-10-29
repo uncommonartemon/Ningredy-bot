@@ -804,8 +804,13 @@ class ProductImageStorage
 
             // Browser/DOM gallery URLs are more reliable than AI-provided thumbnails.
             // An official gallery's own photos stay ahead of what its page adds (live #454).
-            $urls = array_values(array_unique(($source['_official_gallery'] ?? false) === true
-                ? [...$urls, ...$resolvedUrls] : [...$resolvedUrls, ...$urls]));
+            // A record matched by code has its gallery from the database itself; its page
+            // adds nothing (live #332: icecat.biz answered with a bot-check page, and the
+            // check's two mascot pictures went into the card as photos 1 and 2).
+            $urls = SourceIdentityProvenance::confirmedByCode($source)
+                ? array_values(array_unique($this->cleanUrls($source['image_urls'] ?? [])))
+                : array_values(array_unique(($source['_official_gallery'] ?? false) === true
+                    ? [...$urls, ...$resolvedUrls] : [...$resolvedUrls, ...$urls]));
             // A code-matched record's own frames are its gallery: downloaded whole and
             // held like a confirmed slider's frames, whatever its page showed.
             $this->recordGalleryImageKeys = SourceIdentityProvenance::confirmedByCode($source)

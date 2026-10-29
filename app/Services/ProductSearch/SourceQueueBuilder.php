@@ -204,14 +204,21 @@ class SourceQueueBuilder
                             ? ($source['title'] ?? null) : null,
                         // An official gallery's own frames come before whatever the page
                         // scrape adds (live #454: 48 thumbnails and logos pushed eight
-                        // 2000px datasheet photos out of the download window).
-                        'image_urls' => array_values(array_unique(($source['_official_gallery'] ?? false) === true ? [
-                            ...$this->candidateUrls->cleanUrls($source['image_urls'] ?? []),
-                            ...$this->candidateUrls->cleanUrls($preflight['static_image_urls'] ?? []),
-                        ] : [
-                            ...$this->candidateUrls->cleanUrls($preflight['static_image_urls'] ?? []),
-                            ...$this->candidateUrls->cleanUrls($source['image_urls'] ?? []),
-                        ])),
+                        // 2000px datasheet photos out of the download window). A record
+                        // matched by code has its gallery from the database itself and its
+                        // page adds nothing (live #332: icecat.biz answered with a bot-check
+                        // page whose two mascot pictures became the card's photos 1 and 2).
+                        'image_urls' => array_values(array_unique(match (true) {
+                            SourceIdentityProvenance::confirmedByCode($source) => $this->candidateUrls->cleanUrls($source['image_urls'] ?? []),
+                            ($source['_official_gallery'] ?? false) === true => [
+                                ...$this->candidateUrls->cleanUrls($source['image_urls'] ?? []),
+                                ...$this->candidateUrls->cleanUrls($preflight['static_image_urls'] ?? []),
+                            ],
+                            default => [
+                                ...$this->candidateUrls->cleanUrls($preflight['static_image_urls'] ?? []),
+                                ...$this->candidateUrls->cleanUrls($source['image_urls'] ?? []),
+                            ],
+                        })),
                         '_preflight_blocked' => (bool) ($preflight['blocked'] ?? false),
                         '_preflight_unavailable' => (bool) ($preflight['unavailable'] ?? false),
                         '_preflight_active_recipe' => (bool) ($preflight['active_recipe'] ?? false),

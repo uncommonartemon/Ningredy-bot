@@ -2485,13 +2485,16 @@ class ProductImageStorageTest extends TestCase
         config()->set('product-images.max_images_by_type.laptop', 10);
         $gallery = collect(range(1, 6))->map(fn (int $index): string => 'https://93.184.216.36/gallery-'.$index.'.jpg')->all();
         Http::fake(function (Request $request) {
-            if (! str_contains($request->url(), '/gallery-')) {
-                return Http::response("<html><title>Making sure you're not a bot!</title><body><h1>Making sure you're not a bot!</h1></body></html>",
+            // Live #332: the bot check's own pictures (Anubis' mascot) sat in the page as
+            // full-size images, and the record's page scrape carried them into the card.
+            if (! str_contains($request->url(), '/gallery-') && ! str_contains($request->url(), '/mascot-')) {
+                return Http::response("<html><title>Making sure you're not a bot!</title><body><h1>Making sure you're not a bot!</h1>"
+                    .'<img src="https://93.184.216.36/static/mascot-pensive.jpg"><img src="https://93.184.216.36/static/mascot-happy.jpg"></body></html>',
                     200, ['Content-Type' => 'text/html']);
             }
-            preg_match('/gallery-(\d+)/', $request->url(), $matches);
+            preg_match('/(?:gallery|mascot)-(\w+)/', $request->url(), $matches);
 
-            return Http::response($this->jpeg((int) ($matches[1] ?? 1)), 200, ['Content-Type' => 'image/jpeg']);
+            return Http::response($this->jpeg(crc32((string) ($matches[1] ?? 1)) % 50), 200, ['Content-Type' => 'image/jpeg']);
         });
         $browser = $this->mockBrowser();
         $browser->shouldReceive('extract')->andReturn([]);
@@ -2517,6 +2520,8 @@ class ProductImageStorageTest extends TestCase
 
         $media = $draft->fresh()->media;
         $this->assertCount(6, $media);
+        // The record's gallery is the database's; nothing its page shows joins it.
+        $this->assertTrue($media->every(fn ($item): bool => str_contains((string) $item->source_url, '/gallery-')));
         // Frames of a confirmed gallery carry the gallery's status, as a slider's do.
         $this->assertTrue($media->every(fn ($item): bool => $item->verification_status === 'source_verified' && $item->gallery_traversal_complete));
         // Operator, 2026-10-29: a record's official frames are not judged by Vision at all.

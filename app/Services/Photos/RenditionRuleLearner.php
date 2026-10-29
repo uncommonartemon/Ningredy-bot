@@ -74,7 +74,16 @@ final class RenditionRuleLearner
         $proposal = ['find' => (string) ($answer['find'] ?? ''), 'flags' => (string) ($answer['flags'] ?? ''), 'replace' => (string) ($answer['replace'] ?? '')];
         $verified = ($answer['decision'] ?? null) === 'rule' && RenditionRules::valid($proposal['find'], $proposal['flags'])
             ? $this->verify($proposal, $thumbnails, $minimumWidth, $pageUrl) : [];
-        $rule = count(array_unique($verified)) >= 2
+        // Two frames prove a rule - or every frame it applies to, when it applies to
+        // fewer (live #328 sintsec.ru: one product thumbnail beside an icon, the
+        // agent measured the rule, and "two" threw away the only photo there was).
+        $applicable = count(array_filter($thumbnails, function (array $thumbnail) use ($proposal): bool {
+            $path = (string) parse_url((string) $thumbnail['url'], PHP_URL_PATH);
+            $rewritten = RenditionRules::apply($proposal, $path);
+
+            return $rewritten !== null && $rewritten !== $path;
+        }));
+        $rule = count(array_unique($verified)) >= min(2, max(1, $applicable))
             ? RenditionRules::learn($host, $proposal['find'], $proposal['flags'], $proposal['replace'], (string) ($answer['reason'] ?? ''),
                 (string) array_key_first($verified), (string) $verified[array_key_first($verified)])
             : null;

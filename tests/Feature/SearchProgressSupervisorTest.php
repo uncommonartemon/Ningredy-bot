@@ -207,6 +207,20 @@ class SearchProgressSupervisorTest extends TestCase
         $this->assertSame(['shop.example' => 'Сайт отказывает в доступе.'], $supervisor->droppedSites($draft->telegram_update_id));
     }
 
+    public function test_frames_the_browser_took_lift_the_drop_of_that_site(): void
+    {
+        // Live #328: dns-shop.ru answered the quick check with 401, the watcher dropped the
+        // site, the browser then confirmed 24 frames, and the drop threw them away.
+        $supervisor = app(SearchProgressSupervisor::class);
+        $supervisor->dropSite(77, 'https://www.dns-shop.ru/product/laptop', 'Сайт отказал в доступе (HTTP 401).');
+        $this->assertNotNull($supervisor->siteDropReason(77, 'https://dns-shop.ru/other-page'));
+
+        $this->assertTrue($supervisor->liftSiteDrop(77, 'https://dns-shop.ru/product/laptop'));
+
+        $this->assertNull($supervisor->siteDropReason(77, 'https://www.dns-shop.ru/product/laptop'));
+        $this->assertFalse($supervisor->liftSiteDrop(77, 'https://never-dropped.example/'));
+    }
+
     public function test_inside_the_search_it_looks_again_only_after_a_new_step_and_a_pause(): void
     {
         $draft = $this->draft(minutesAgo: 9);

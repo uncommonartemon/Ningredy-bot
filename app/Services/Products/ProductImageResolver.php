@@ -7,6 +7,7 @@ use App\Services\Ai\AiSettings;
 use App\Services\Ai\ProductSearchCostBudget;
 use App\Services\Ai\ProductSearchTimeBudget;
 use App\Services\Photos\ImageUrls;
+use App\Services\ProductSearch\Supervision\SearchProgressSupervisor;
 use DOMDocument;
 use DOMXPath;
 use Illuminate\Http\Client\RequestException;
@@ -707,6 +708,14 @@ class ProductImageResolver
             }
             if ($browserImages !== []) {
                 $this->metrics->recordExtraction($sourceUrl, count($browserImages));
+                // Frames in hand outrank a drop the agent gave for a refused quick check.
+                if (app(SearchProgressSupervisor::class)->liftSiteDrop($telegramUpdateId, $sourceUrl)) {
+                    $this->attempts->record([
+                        'telegram_update_id' => $telegramUpdateId, 'product_url' => $sourceUrl, 'actor' => 'server',
+                        'phase' => 'source_selection', 'action' => 'lift_site_drop', 'status' => 'info',
+                        'decision' => 'browser_took_frames', 'output' => ['browser_count' => count($browserImages)],
+                    ]);
+                }
             } elseif ($sourceImageCount === 0) {
                 $this->metrics->recordExtraction($sourceUrl, 0, $failureKind ?: 'empty_gallery');
             }
