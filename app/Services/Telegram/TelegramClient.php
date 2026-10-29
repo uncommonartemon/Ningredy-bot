@@ -108,6 +108,31 @@ class TelegramClient
             fn (): array => $this->deliverPhotoFile($chatId, $path, $caption, $replyMarkup));
     }
 
+    /** A local file as a Telegram document (the diagnostic report), as it is, no image preparation. */
+    public function sendDocumentFile(string $chatId, string $path, ?string $caption = null): array
+    {
+        return TelegramWebhookDelivery::send('sendDocumentFile', compact('chatId', 'path', 'caption'), function () use ($chatId, $path, $caption): array {
+            if (! is_file($path) || ! is_readable($path)) {
+                throw new RuntimeException('Local Telegram document is not readable.');
+            }
+            $token = (string) config('services.telegram.bot_token');
+            $handle = fopen($path, 'rb');
+            if ($handle === false) {
+                throw new RuntimeException("Could not open Telegram document: {$path}");
+            }
+            try {
+                return $this->multipartRequest()->attach('document', $handle, basename($path))
+                    ->post('sendDocument', ['chat_id' => $chatId, 'caption' => mb_substr((string) $caption, 0, 1024)])->throw()->json();
+            } catch (Throwable $exception) {
+                throw new RuntimeException($token === '' ? $exception->getMessage() : str_replace($token, '[redacted]', $exception->getMessage()), (int) $exception->getCode());
+            } finally {
+                if (is_resource($handle)) {
+                    fclose($handle);
+                }
+            }
+        });
+    }
+
     private function deliverPhotoFile(string $chatId, string $path, ?string $caption, ?array $replyMarkup): array
     {
         if (! is_file($path) || ! is_readable($path)) {
@@ -333,6 +358,7 @@ class TelegramClient
                 ['command' => 'errors', 'description' => 'Последние ошибки'],
                 ['command' => 'new', 'description' => 'Очистить контекст'],
                 ['command' => 'reset', 'description' => 'Отменить зависшие запросы'],
+                ['command' => 'report', 'description' => 'Отчёт для разработчика файлом'],
                 ['command' => 'help', 'description' => 'Помощь'],
             ],
         ]);
