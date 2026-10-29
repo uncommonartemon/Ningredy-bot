@@ -885,6 +885,14 @@ class ResearchProduct implements Tool
                 .' The same holds for a visible requirement such as a colour name that no page of the observed model shows:'
                 .' select the closest observed configuration of that model, keep what the pages show in color and the other fields,'
                 .' and list each difference in request_differences with the requested and the found value.'
+                // Live #317/#323: Framework sells the Laptop 13 only through a configurator, the page
+                // offered two processors and said "refurbished", and three honest "unresolved" answers
+                // ended in no draft. One chosen configuration is the product; what differs is listed.
+                .' A product its maker sells only through a configurator, with no catalog code for the whole machine, is not unresolved either:'
+                .' return found for one concrete configuration the page offers (basis=configured_product, model_scope=single_product,'
+                .' observed_model the line as the page names it, model the line plus the chosen processor, memory and storage,'
+                .' those options in specifications as installed values), and put what the page says about condition or what is not'
+                .' included (refurbished only, memory not included) into request_differences and research_notes.'
                 .' Keep unresolved only when no concrete product of the requested model was observed at all.']);
         }
 
