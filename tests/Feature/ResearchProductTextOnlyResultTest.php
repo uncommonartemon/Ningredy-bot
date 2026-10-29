@@ -270,6 +270,11 @@ class ResearchProductTextOnlyResultTest extends TestCase
         $this->assertSame($notes, $result['agent_comment']);
         $this->assertStringContainsString('не означает, что товар не найден', $result['message']);
         $this->assertSame(0, ProductDraft::query()->count());
+        // The repair guidance names every way out of "unresolved", the configurator one
+        // included (live #317/#323: Framework, three honest "unresolved" answers, no draft).
+        $guidance = json_encode(ProductSourceAttempt::query()->where('action', 'repair_response')->latest('id')->first()?->output ?? []);
+        $this->assertStringContainsString('configured_product', $guidance);
+        $this->assertStringContainsString('sibling configuration of the same model line', $guidance);
     }
 
     public function test_quotations_from_a_compatible_photo_only_page_never_become_selected_product_evidence(): void
