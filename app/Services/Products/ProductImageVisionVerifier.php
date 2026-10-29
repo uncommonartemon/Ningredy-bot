@@ -195,6 +195,10 @@ class ProductImageVisionVerifier
                 || (! $this->identityMatcher->conflictsSource($draft, $pageContext)
                     && $this->identityMatcher->confirmsExactIdentifier($draft, $pageContext))
             );
+            // A page whose text names the line with nothing conflicting (operator,
+            // 2026-10-29): Vision no longer has to prove the exact suffix from pixels.
+            $pageLinePlausible = $pageContext !== null
+                && ProductPhotoApplicability::isPlausibleLine($draft, $pageContext, $pageContext['_photo_applicability'] ?? []);
 
             return [
                 ...$candidate,
@@ -202,6 +206,7 @@ class ProductImageVisionVerifier
                     ?? ($pageContext['url'] ?? $candidate['page_source_url'] ?? null),
                 'source_identity_confirmed' => (bool) ($candidate['source_identity_confirmed'] ?? false)
                     || $pageIdentityConfirmed,
+                'source_line_plausible' => (bool) ($candidate['source_line_plausible'] ?? false) || $pageLinePlausible,
             ];
         }, $candidates);
         $settings = app(AiSettings::class);
@@ -305,6 +310,7 @@ class ProductImageVisionVerifier
                     'hero' => $review['kind'] === 'product'
                         && in_array($review['view'], ['front', 'angle'], true),
                     'source_supported' => (bool) ($candidate['source_identity_confirmed'] ?? false)
+                        || (bool) ($candidate['source_line_plausible'] ?? false)
                         || $this->identityMatcher->supports($draft, (string) ($candidate['source_url'] ?? '')),
                 ];
             });

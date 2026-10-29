@@ -178,6 +178,21 @@ class ProductPhotoApplicability
             && self::isBoundTo($draft, $source, $assessment);
     }
 
+    /**
+     * The page's text names this product line and nothing on it conflicts, even
+     * where the exact suffix or the colour is not proven in words. Operator,
+     * 2026-10-29: memory and storage are invisible in a photograph, so Vision does
+     * not judge the exact model of a frame from such a page - what it still judges
+     * is that the product is the subject, the colour asked for, and the text on it.
+     * Live #318: ~60 frames of a rare Dynabook from pages like these were refused.
+     */
+    public static function isPlausibleLine(ProductDraft $draft, array $source, array $assessment): bool
+    {
+        return in_array($assessment['verdict'] ?? null, ['exact', 'compatible', 'uncertain'], true)
+            && (bool) ($assessment['plausible_target'] ?? false)
+            && self::isBoundTo($draft, $source, $assessment);
+    }
+
     private static function isBoundTo(ProductDraft $draft, array $source, array $assessment): bool
     {
         return self::matchesTarget($draft, $assessment)

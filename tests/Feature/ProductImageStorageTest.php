@@ -2448,8 +2448,11 @@ class ProductImageStorageTest extends TestCase
         $this->assertCount(6, $media);
         // Frames of a confirmed gallery carry the gallery's status, as a slider's do.
         $this->assertTrue($media->every(fn ($item): bool => $item->verification_status === 'source_verified' && $item->gallery_traversal_complete));
+        // Operator, 2026-10-29: a record's official frames are not judged by Vision at all.
         $this->assertDatabaseHas('product_source_attempts', ['product_draft_id' => $draft->id,
-            'action' => 'check_frame_content_and_language', 'decision' => 'accept_all_frames']);
+            'action' => 'check_frame_content_and_language', 'decision' => 'trusted_record_without_vision']);
+        ProductImageVisionAgent::assertNeverPrompted();
+        GalleryFrameReviewAgent::assertNeverPrompted();
         $this->assertStringStartsWith('ASUS ROG Strix Scar 15 G533QS-DS76 Part number: G533QS-DS76',
             (string) ($media->first()->photo_source_context['_preflight_identity_evidence'] ?? ''));
         $this->assertSame($source['url'], $media->first()->photo_source_context['url'] ?? null);
