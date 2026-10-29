@@ -12,6 +12,48 @@
         "note": "A CMS image cache run (Magento \"/media/catalog/product/cache/<hash>/\"): the uploaded original at the same path without it (live #273 jtfcorp.com: 600x600 cached, 900x515 original)."
     },
     {
+        "find": "^/cdn-cgi/image/[^/]+/",
+        "flags": "i",
+        "replace": "/",
+        "note": "Cloudflare image resizing in the path (\"/cdn-cgi/image/width=300,fit=cover/<source>\"): the source image without it. Source: developers.cloudflare.com, Images - Transform via URL (2026-10-29)."
+    },
+    {
+        "find": "^(/media/[^/]+)/v1/(?:fill|fit|crop)/[^/]+/[^/]+$",
+        "flags": "i",
+        "replace": "{1}",
+        "note": "A Wix media transformation (\"/media/<id>~mv2.jpeg/v1/fill/w_640,h_640/file.jpg\"): the media file itself is the original. Source: dev.wix.com, URL-Based Image Transformation Reference (2026-10-29)."
+    },
+    {
+        "find": "^/media/cache/(?:resolve/)?[a-z0-9_.-]+/",
+        "flags": "i",
+        "replace": "/",
+        "note": "A LiipImagine filter cache (Symfony, Sylius: \"/media/cache/<filter>/<original path>\"): the original at its own path. Source: symfony.com, LiipImagineBundle basic usage (2026-10-29)."
+    },
+    {
+        "find": "^/media/cache/(?:resolve/)?[a-z0-9_.-]+/",
+        "flags": "i",
+        "replace": "/media/image/",
+        "note": "The same cache as Sylius serves it, with the originals under /media/image/."
+    },
+    {
+        "find": "^/image/cache/(.+)-\\d{2,4}x\\d{2,4}(\\.[a-z0-9]{3,4})$",
+        "flags": "i",
+        "replace": "/image/{1}{2}",
+        "note": "An OpenCart image cache (\"/image/cache/catalog/photo-500x500.jpg\"): the original under /image/ without the size. Source: opencart/opencart, catalog/model/tool/image.php (2026-10-29)."
+    },
+    {
+        "find": "^/thumbnail/(.+)_\\d{2,4}x\\d{2,4}(\\.[a-z0-9]{3,4})$",
+        "flags": "i",
+        "replace": "/media/{1}{2}",
+        "note": "A Shopware 6 thumbnail (\"/thumbnail/<a>/<b>/<c>/<ts>/name_400x400.jpg\"): the original under /media/ without the size. Source: developer.shopware.com, Use media thumbnails (2026-10-29)."
+    },
+    {
+        "find": "^/thumbnail/\\d{2,4}(/media/.+)$",
+        "flags": "i",
+        "replace": "{1}",
+        "note": "A Shopware 6 remote thumbnail (\"/thumbnail/800/media/<path>\"): the original path after the width."
+    },
+    {
         "find": "/(\\d+)-[a-z0-9]+(?:[-_][a-z0-9]+)*_default/",
         "flags": "i",
         "replace": "/{1}/",

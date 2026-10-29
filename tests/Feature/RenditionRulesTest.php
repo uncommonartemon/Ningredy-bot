@@ -31,6 +31,26 @@ class RenditionRulesTest extends TestCase
             ImageRenditionProbe::largerRenditions('https://cdn.any-shop.test/files/photo_300x.jpg')[0]);
     }
 
+    public function test_seeds_the_file_gained_reach_an_installation_that_already_has_the_table(): void
+    {
+        // The seeds grow (2026-10-29: Cloudflare, Wix, LiipImagine, OpenCart, Shopware from
+        // their official documentation); an installation migrated before that must get
+        // them, in the file's order, without touching learned rules or outcomes.
+        $seeds = RenditionRules::seeds();
+        ImageRenditionRule::query()->where('origin', 'seed')->where('find', $seeds[2]['find'])->where('replace', $seeds[2]['replace'])->sole()->delete();
+        $moved = ImageRenditionRule::query()->where('origin', 'seed')->where('find', $seeds[0]['find'])->where('replace', $seeds[0]['replace'])->sole();
+        $moved->update(['position' => 999]);
+        $learned = RenditionRules::learn('media.shop.test', '/th/(.+)$', '', '/{1}', null, 'https://a.test/th/x.jpg', 'https://a.test/x.jpg');
+
+        (require database_path('migrations/2026_10_29_120000_sync_rendition_rule_seeds.php'))->up();
+        RenditionRules::forget();
+
+        $this->assertSame(count($seeds), ImageRenditionRule::query()->where('origin', 'seed')->count());
+        $this->assertSame(10, $moved->fresh()->position);
+        $this->assertSame(array_column($seeds, 'find'), array_column(RenditionRules::forHost('cdn.any-shop.test'), 'find'));
+        $this->assertSame(5, $learned->fresh()->position);
+    }
+
     public function test_a_rule_that_keeps_missing_on_a_host_stops_there_and_nowhere_else(): void
     {
         config(['product-images.rendition_probe.disable_after_misses' => 3]);
