@@ -246,6 +246,20 @@ class ProductSpecificationEvidenceGuardTest extends TestCase
         $this->addToAssertionCount(1);
     }
 
+    public function test_a_whole_number_written_with_a_zero_decimal_is_the_same_value(): void
+    {
+        // Live #318: "14.0 inches" against "14 inches" was "confirmed but changed" three
+        // times, and the card went out unreconciled over a screen size nobody disputed.
+        $page = ['url' => 'https://shop.example/tecra', 'specification_text' => 'Screen size: 14 inches'];
+        $fact = ['key' => 'screen_size', 'name' => 'Screen size', 'value' => '14.0 inches',
+            'source_url' => 'https://maker.example/tecra', 'source_excerpt' => 'Display: 14.0 inches'];
+        $candidate = [...$fact, 'evidence' => 'confirmed', 'value' => '14 inches',
+            'source_url' => 'https://shop.example/tecra', 'source_excerpt' => 'Screen size: 14 inches'];
+
+        (new ProductSpecificationEvidenceGuard)->validate([$fact], [$candidate], [], [$page]);
+        $this->addToAssertionCount(1);
+    }
+
     public function test_a_reformatted_number_labelled_corrected_is_not_unchanged(): void
     {
         // The other label for the #274 case: "19.9" to "19.90" is the same value, so
