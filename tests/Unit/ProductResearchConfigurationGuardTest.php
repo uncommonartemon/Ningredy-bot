@@ -74,6 +74,43 @@ class ProductResearchConfigurationGuardTest extends TestCase
         $this->assertSame([], $issues);
     }
 
+    public function test_a_configure_to_order_line_is_one_product_once_a_configuration_is_chosen(): void
+    {
+        // Live #317: Framework sells the Laptop 13 only through its configurator - no
+        // code, no suffix for the whole machine. The research named the line and the
+        // configurator three times, was asked for a full model three times, and the
+        // request died without a draft.
+        $line = 'Framework Laptop 13 (AMD Ryzen 7040 Series)';
+        $page = 'https://maker.example/laptop-13/configure';
+        $answer = [
+            'status' => 'found',
+            'model' => $line.' - Ryzen 7 7840U, 32 GB DDR5, 1 TB SSD',
+            'primary_source_url' => $page,
+            'sources' => [['url' => $page, 'type' => 'manufacturer', 'roles' => ['facts', 'exact_photo']]],
+            'selected_identity' => ['basis' => 'configured_product', 'model_scope' => 'single_product', 'observed_model' => $line,
+                'source_url' => $page, 'source_excerpt' => 'Framework Laptop 13 (AMD Ryzen 7040 Series) - configure your laptop: processor, memory, storage',
+                'reason' => 'Configure-to-order: the page names the line and offers these options; no catalog code exists for the whole machine.'],
+            'specifications' => [
+                ['key' => 'cpu', 'value' => 'AMD Ryzen 7 7840U'],
+                ['key' => 'ram', 'value' => '32 GB DDR5-5600'],
+                ['key' => 'storage', 'value' => '1 TB NVMe SSD'],
+            ],
+        ];
+
+        $this->assertSame([], app(ProductResearchConfigurationGuard::class)->issues($answer));
+
+        // The line alone, without the options that pin one configuration, is still a family.
+        $family = [...$answer, 'model' => $line, 'specifications' => []];
+        $issues = app(ProductResearchConfigurationGuard::class)->issues($family);
+        $this->assertCount(1, $issues);
+        $this->assertStringContainsString('The selected identity is unresolved', $issues[0]);
+        $this->assertStringContainsString('configured_product', $issues[0]);
+
+        // And the page must name the line it is said to name.
+        $unproven = [...$answer, 'selected_identity' => [...$answer['selected_identity'], 'source_excerpt' => 'Configure your laptop']];
+        $this->assertCount(1, app(ProductResearchConfigurationGuard::class)->issues($unproven));
+    }
+
     public function test_a_sibling_configuration_lends_its_page_but_not_its_codes(): void
     {
         // Live #206: the label said 14-fm0001nn / B2VK4EA#BED, no page showed them,

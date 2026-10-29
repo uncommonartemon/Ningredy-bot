@@ -830,7 +830,7 @@ class ResearchProduct implements Tool
             'request_differences.*.found' => ['required', 'string', 'max:255'],
             'request_differences.*.evidence' => ['nullable', 'string', 'max:800'],
             'selected_identity' => ['sometimes', 'nullable', 'array:basis,model_scope,observed_model,source_url,source_excerpt,reason'],
-            'selected_identity.basis' => ['required_with:selected_identity', 'in:commercial_code,full_model'],
+            'selected_identity.basis' => ['required_with:selected_identity', 'in:commercial_code,full_model,configured_product'],
             'selected_identity.model_scope' => ['required_with:selected_identity', 'in:single_product,product_family,unknown'],
             'selected_identity.observed_model' => ['required_with:selected_identity', 'string', 'max:255'],
             'selected_identity.source_url' => ['required_with:selected_identity', 'url:http,https', 'max:2048'],
