@@ -1114,7 +1114,7 @@ class ProductImageStorage
                 [...$source, 'url' => $productPageUrl],
                 $recordGallery ? 'record_gallery' : 'playwright',
                 $recordGallery
-                    ? 'Official database record matched by part number/GTIN; current frames passed content and language review.'
+                    ? 'Official database record matched by part number/GTIN; its frames are taken as they are, without Vision (operator, 2026-10-29).'
                     : 'Complete gallery traversal; current frames passed catalog quality, physical appearance, colour, keyboard and language review.',
                 $progress,
             );
@@ -2464,7 +2464,12 @@ class ProductImageStorage
         string $notes,
         ?callable $progress,
     ): GallerySourceResult {
-        $checked = $this->checkedGalleryFrames($frames, $draft, $telegramUpdateId, $minimum, $progress);
+        // A record matched by part number/GTIN is the product, and its official
+        // frames are not judged by Vision at all (operator, 2026-10-29: "на Icecat
+        // вообще отключаем"); the code established what they show.
+        $checked = $method === 'record_gallery'
+            ? $this->trustedRecordFrames($frames, $draft, $telegramUpdateId)
+            : $this->checkedGalleryFrames($frames, $draft, $telegramUpdateId, $minimum, $progress);
         if ($checked !== null && $checked !== [] && $source !== null) {
             $source = $this->sourceAfterPixelReview($draft, $source, $checked);
             // A colour unknown in text needs positive pixel evidence. Views
@@ -2674,6 +2679,31 @@ class ProductImageStorage
         $review = $batches->review($batch, $draft, $candidates, $this->visionVerifier, $telegramUpdateId);
 
         return $review->isComplete() ? $review->accepted : null;
+    }
+
+    /**
+     * The official frames of a record matched by part number/GTIN, taken as they
+     * are: no content, colour or language review (operator, 2026-10-29). Journaled
+     * where the review would have been, so an audit sees the choice, not a gap.
+     *
+     * @param  array<int, array<string, mixed>>  $frames
+     * @return array<int, array<string, mixed>>
+     */
+    private function trustedRecordFrames(array $frames, ProductDraft $draft, ?int $telegramUpdateId): array
+    {
+        $this->attempts->record([
+            'telegram_update_id' => $telegramUpdateId,
+            'product_draft_id' => $draft->id,
+            'actor' => 'server',
+            'phase' => 'image_verification',
+            'action' => 'check_frame_content_and_language',
+            'status' => 'completed',
+            'decision' => 'trusted_record_without_vision',
+            'input' => ['frames' => count($frames)],
+            'output' => ['removed' => 0, 'kept' => count($frames)],
+        ]);
+
+        return array_values($frames);
     }
 
     private function checkedGalleryFrames(
@@ -3910,6 +3940,8 @@ class ProductImageStorage
                 ?? $this->candidateDiscovery->sourcePageForImage($url),
             'page_source_context' => $pageContext,
             'source_identity_confirmed' => $pageIdentityConfirmed,
+            'source_line_plausible' => is_array($pageContext)
+                && ProductPhotoApplicability::isPlausibleLine($draft, $pageContext, $pageContext['_photo_applicability'] ?? []),
             'image' => $image,
         ];
     }

@@ -11,6 +11,7 @@ use App\Models\TelegramUpdate;
 use App\Services\Ai\OpenAiHeavyOperationGate;
 use App\Services\Ai\ProductSearchTimeBudget;
 use App\Services\Products\ProductImageVisionVerifier;
+use App\Services\Products\ProductPhotoApplicability;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
@@ -427,6 +428,48 @@ class ProductImageVisionVerifierTest extends TestCase
             $selected,
             'A shared chassis code alone must not stand in for source_identity_confirmed here - the candidate has no other way to qualify.',
         );
+    }
+
+    public function test_a_page_whose_text_names_the_line_lets_vision_skip_the_exact_suffix(): void
+    {
+        // Operator, 2026-10-29: memory and storage are invisible in a photograph.
+        // Live #318: six shops named the Tecra A40-K line with nothing conflicting,
+        // the scout could not prove the exact suffix, and Vision refused ~60 frames.
+        $update = TelegramUpdate::query()->create([
+            'update_id' => 460002, 'telegram_user_id' => '1', 'chat_id' => '1',
+            'payload' => [], 'status' => 'completed', 'text' => 'Dynabook Tecra A40-K',
+        ]);
+        $draft = new ProductDraft([
+            'telegram_update_id' => $update->id, 'title' => 'Dynabook Tecra A40-K', 'brand' => 'Dynabook',
+            'model' => 'Tecra A40-K', 'color' => 'Mystic Blue',
+            'specifications' => [['key' => 'sku', 'name' => 'SKU', 'value' => 'A40-K-14M']],
+        ]);
+        $draft->setRelation('telegramUpdate', $update);
+        $page = ['title' => 'Dynabook Tecra A40-K 14" Mystic Blue', 'url' => 'https://shop.example/tecra-a40-k'];
+        $plausible = ProductPhotoApplicability::bind($draft, $page, [
+            'verdict' => 'uncertain', 'plausible_target' => true, 'reason' => 'The page sells the Tecra A40-K line in Mystic Blue; the exact configuration is not stated.',
+        ]);
+        ProductImageVisionAgent::fake(fn (string $prompt, $attachments): array => [
+            'images' => $attachments->keys()->map(fn (int $index): array => [
+                'index' => $index + 1, 'exact_match' => false, 'color_match' => true, 'publishable' => true,
+                'kind' => 'product', 'view' => 'front', 'gallery_rank' => $index + 1, 'score' => 90,
+                'reason' => 'The laptop is the subject; the suffix cannot be read from the picture.',
+            ])->all(),
+        ])->preventStrayPrompts();
+
+        $selected = app(ProductImageVisionVerifier::class)->select($draft, [[
+            'image' => $this->jpeg(), 'source_url' => 'https://shop.example/tecra-front.jpg',
+            'page_source_context' => [...$page, '_photo_applicability' => $plausible],
+        ]], 4);
+
+        $this->assertCount(1, $selected);
+
+        // The same frame from a page whose verdict is "conflicting" still needs Vision's exact match.
+        $conflicting = ProductPhotoApplicability::bind($draft, $page, ['verdict' => 'conflicting', 'plausible_target' => true, 'reason' => 'Another chassis.']);
+        $this->assertSame([], app(ProductImageVisionVerifier::class)->select($draft, [[
+            'image' => $this->jpeg(), 'source_url' => 'https://shop.example/tecra-front.jpg',
+            'page_source_context' => [...$page, '_photo_applicability' => $conflicting],
+        ]], 4));
     }
 
     public function test_repair_can_reject_the_image_and_does_not_force_a_positive_answer(): void
