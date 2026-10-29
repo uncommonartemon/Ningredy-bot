@@ -36,8 +36,8 @@ class ProductResearchConfigurationGuard
             ->first(fn (string $value): bool => $value !== '' && ! $this->ambiguous($value));
         $issues = [];
 
-        if (! $identity && ! $this->hasObservedFullModel($data)) {
-            $issues[] = 'The selected identity is unresolved: provide an observed reusable SKU/MPN/GTIN or selected_identity with the full model, single_product scope, observed source URL and verbatim excerpt. A family title, source publisher type, or letters and digits alone cannot identify one configuration. Keep useful sources and facts; missing identity evidence is not not_found.';
+        if (! $identity && ! $this->hasObservedFullModel($data) && ! $this->hasObservedConfiguredProduct($data)) {
+            $issues[] = 'The selected identity is unresolved: provide an observed reusable SKU/MPN/GTIN or selected_identity with the full model, single_product scope, observed source URL and verbatim excerpt. A family title, source publisher type, or letters and digits alone cannot identify one configuration. Keep useful sources and facts; missing identity evidence is not not_found. A product its maker sells only through a configurator, with no code for the whole machine, is selected as one concrete configuration: basis=configured_product, observed_model the line as the page names it, model the line plus the chosen processor, memory and storage, and those options in specifications as installed values.';
         }
         // With a code already identifying the product, an honestly family-scoped
         // observation is provenance, not a second blocker (live #430: operator
@@ -137,41 +137,86 @@ class ProductResearchConfigurationGuard
             || trim((string) ($identity['reason'] ?? '')) === '') {
             return false;
         }
-        $url = trim((string) ($identity['source_url'] ?? ''));
-        $source = collect($data['sources'] ?? [])->first(
-            fn (mixed $source): bool => is_array($source)
-                && self::samePage((string) ($source['url'] ?? ''), $url)
-                && ResearchSourceRoles::mayIdentifySelectedProduct($source),
-        );
-        $text = static fn (string $value): string => Str::lower(Str::squish($value));
-        $needle = $text($model);
-        $observed = $text((string) ($identity['observed_model'] ?? ''));
-        $excerpt = $text((string) ($identity['source_excerpt'] ?? ''));
-        // Shops spell one model with different punctuation and spacing ("XPS 13-9340",
-        // "XPS13 9340", live #237: "Dell XPS 13- 9340"): the model is its run of
-        // letter and digit tokens, compared whole-token and in order.
-        $tokens = static fn (string $value): array => preg_split('/[^\p{L}\p{N}]+|(?<=\p{L})(?=\p{N})|(?<=\p{N})(?=\p{L})/u',
-            $value, -1, PREG_SPLIT_NO_EMPTY) ?: [];
-        $needleTokens = $tokens($needle);
-        $contains = static function (string $haystack) use ($tokens, $needleTokens): bool {
-            $haystackTokens = $tokens($haystack);
-            $length = count($needleTokens);
-            for ($start = 0; $length > 0 && $start + $length <= count($haystackTokens); $start++) {
-                if (array_slice($haystackTokens, $start, $length) === $needleTokens) {
-                    return true;
-                }
-            }
-
-            return false;
-        };
+        $needle = self::comparable($model);
+        $observed = self::comparable((string) ($identity['observed_model'] ?? ''));
+        $excerpt = self::comparable((string) ($identity['source_excerpt'] ?? ''));
 
         // The page must prove the WHOLE selected model: a verbatim excerpt that
         // contains it. A page naming more ("Brand Family MODEL-123 Silver")
         // proves "MODEL-123"; a page naming only the family does not prove a
         // longer model. Retained Web Search evidence admits a candidate; it does
         // not create a browser observation, verified fact or photo verdict.
-        return is_array($source) && $excerpt !== '' && ! $this->ambiguous($excerpt)
-            && $contains($excerpt) && ($observed === $needle || $contains($observed));
+        return is_array(self::identitySource($data, $identity)) && $excerpt !== '' && ! $this->ambiguous($excerpt)
+            && self::containsTokens($excerpt, $needle) && ($observed === $needle || self::containsTokens($observed, $needle));
+    }
+
+    /**
+     * A product its maker sells only through a configurator has no code and no
+     * model suffix for the whole machine (live #317: Framework Laptop 13 - the page
+     * names the line, the buyer picks processor, memory and storage; the research
+     * named the line three times, was asked for a full model three times, and the
+     * request died). One chosen configuration is the honest single product: the
+     * page proves the LINE, the model adds the options that pin the choice, and
+     * the specifications hold at least two of those options as installed values.
+     */
+    private function hasObservedConfiguredProduct(array $data): bool
+    {
+        $model = trim((string) ($data['model'] ?? ''));
+        $identity = $data['selected_identity'] ?? null;
+        if ($model === '' || $this->ambiguous($model) || ! is_array($identity)
+            || ($identity['basis'] ?? null) !== 'configured_product' || ($identity['model_scope'] ?? null) !== 'single_product'
+            || trim((string) ($identity['reason'] ?? '')) === '') {
+            return false;
+        }
+        $line = self::comparable((string) ($identity['observed_model'] ?? ''));
+        $excerpt = self::comparable((string) ($identity['source_excerpt'] ?? ''));
+        $specifications = collect($data['specifications'] ?? [])->filter(fn (mixed $item): bool => is_array($item))->keyBy('key');
+        $options = collect(self::CONFIGURATION_KEYS)
+            ->map(fn (string $key): string => trim((string) data_get($specifications->get($key), 'value', '')))
+            ->filter(fn (string $value): bool => $value !== '' && ! $this->ambiguous($value));
+
+        return is_array(self::identitySource($data, $identity)) && $line !== '' && $excerpt !== '' && ! $this->ambiguous($excerpt)
+            && self::containsTokens($excerpt, $line)
+            && self::comparable($model) !== $line && self::containsTokens(self::comparable($model), $line)
+            && $options->count() >= 2;
+    }
+
+    /** The source the identity cites, when it may identify the selected product. */
+    private static function identitySource(array $data, array $identity): ?array
+    {
+        $url = trim((string) ($identity['source_url'] ?? ''));
+
+        return collect($data['sources'] ?? [])->first(
+            fn (mixed $source): bool => is_array($source)
+                && self::samePage((string) ($source['url'] ?? ''), $url)
+                && ResearchSourceRoles::mayIdentifySelectedProduct($source),
+        );
+    }
+
+    private static function comparable(string $value): string
+    {
+        return Str::lower(Str::squish($value));
+    }
+
+    /**
+     * Shops spell one model with different punctuation and spacing ("XPS 13-9340",
+     * "XPS13 9340", live #237: "Dell XPS 13- 9340"): the model is its run of
+     * letter and digit tokens, compared whole-token and in order.
+     */
+    private static function containsTokens(string $haystack, string $needle): bool
+    {
+        $tokens = static fn (string $value): array => preg_split('/[^\p{L}\p{N}]+|(?<=\p{L})(?=\p{N})|(?<=\p{N})(?=\p{L})/u',
+            $value, -1, PREG_SPLIT_NO_EMPTY) ?: [];
+        $needleTokens = $tokens($needle);
+        $haystackTokens = $tokens($haystack);
+        $length = count($needleTokens);
+        for ($start = 0; $length > 0 && $start + $length <= count($haystackTokens); $start++) {
+            if (array_slice($haystackTokens, $start, $length) === $needleTokens) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /** Same product page despite scheme, host case, www., fragment or trailing slash. */

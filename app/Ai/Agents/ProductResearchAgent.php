@@ -178,6 +178,14 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
             when a reusable code settles identity and include that code in specifications. Retain uncertain or
             family scope honestly; never invent a quotation to pass validation. No separate code is required
             when the complete model and observed configuration are self-sufficient.
+            A product its maker sells only through a configurator, with no catalog code or model suffix for the
+            whole machine (the buyer picks the processor, memory and storage on the product page), is selected as
+            one concrete configuration the page offers: basis=configured_product, model_scope=single_product,
+            observed_model the product line exactly as the page names it with the verbatim source_excerpt naming
+            that line, model the line plus the options that pin your choice (processor, memory, storage),
+            specifications carrying those options as the installed values rather than alternatives, and the
+            reason saying the product is configure-to-order. That is the honest single product for such a line,
+            not a family verdict.
             An explicit EAN/UPC, SKU or part number from the operator that no observed page shows does not stop the
             search: list it in unconfirmed_operator_codes (the operator is warned at once), select the closest
             observed product whose complete model, configuration and colour match the request, with selected_identity
@@ -319,7 +327,7 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
             ])->withoutAdditionalProperties())->required()
                 ->description('Operator requirements that no observed page of the selected model shows, with what the pages show instead; empty when the pages show what was asked.'),
             'selected_identity' => $schema->object([
-                'basis' => $schema->string()->enum(['commercial_code', 'full_model'])->required(),
+                'basis' => $schema->string()->enum(['commercial_code', 'full_model', 'configured_product'])->required(),
                 'model_scope' => $schema->string()->enum(['single_product', 'product_family', 'unknown'])->required(),
                 'observed_model' => $schema->string()->max(255)->required(),
                 'source_url' => $schema->string()->max(2048)->required(),
