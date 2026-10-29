@@ -73,6 +73,22 @@ class RenditionRuleLearnerTest extends TestCase
         $this->assertDatabaseHas('product_source_attempts', ['action' => 'learn_rendition_rule', 'decision' => 'no_rule', 'output->verified' => 0]);
     }
 
+    public function test_a_rule_proven_on_the_only_frame_it_applies_to_is_learned(): void
+    {
+        // Live #328 sintsec.ru: one product thumbnail beside a template icon; the agent
+        // measured the rule, and "two frames" threw away the only photo the page had.
+        RenditionRuleAgent::fake(fn (): array => ['decision' => 'rule', 'find' => '/th/(.+)_w\d{2,4}_h\d{2,4}(\.[a-z]{3,4})$', 'flags' => 'i',
+            'replace' => '/{1}{2}', 'reason' => 'The one product thumbnail measures 1600 px without the /th/ folder and the size token.'])->preventStrayPrompts();
+
+        $rule = app(RenditionRuleLearner::class)->learn('93.184.216.37', [
+            ['url' => 'https://93.184.216.37/th/product/acer/gallery-1_w470_h470.jpg', 'width' => 470, 'height' => 470],
+            ['url' => 'https://93.184.216.37/static/template-icon.png', 'width' => 100, 'height' => 100],
+        ], 600, self::PAGE, null);
+
+        $this->assertNotNull($rule);
+        $this->assertDatabaseHas('product_source_attempts', ['action' => 'learn_rendition_rule', 'decision' => 'rule_learned', 'output->verified' => 1]);
+    }
+
     public function test_the_agent_measures_addresses_by_size_within_its_budget(): void
     {
         $tool = new MeasureImageUrls(self::PAGE, budget: 2);

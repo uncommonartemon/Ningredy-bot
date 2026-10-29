@@ -105,6 +105,25 @@ final class SearchProgressSupervisor
         Cache::put(self::DROPPED_KEY.$updateId, [...$this->droppedSites($updateId), $site => $reason], now()->addHours(2));
     }
 
+    /**
+     * The browser just took frames from a page of a site the agent had dropped: the
+     * drop no longer stands (live #328: dns-shop.ru answered the quick check with 401,
+     * the agent dropped the site, the browser then confirmed 24 frames, and the drop
+     * threw them away - the card went out with none). True when a drop was lifted.
+     */
+    public function liftSiteDrop(?int $updateId, string $site): bool
+    {
+        $site = self::site($site);
+        $dropped = $this->droppedSites($updateId);
+        if (! $updateId || $site === '' || ! array_key_exists($site, $dropped)) {
+            return false;
+        }
+        unset($dropped[$site]);
+        Cache::put(self::DROPPED_KEY.$updateId, $dropped, now()->addHours(2));
+
+        return true;
+    }
+
     /** Why the agent dropped the site of this page or host, while that stands. */
     public function siteDropReason(?int $updateId, ?string $urlOrHost): ?string
     {
