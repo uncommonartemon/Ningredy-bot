@@ -41,13 +41,18 @@ class SearchProgressAgent implements Agent, HasStructuredOutput
               The same frames are not "nothing new" when the later round is complete and the earlier one was
               partial or its plan incomplete: that round is the recipe being confirmed, wait for it (live #256:
               lenovo.com's complete fourth round was left four seconds later as "the same set").
-            skip_site: the whole site is a dead end for this product - it refused access (http_403/404/406, an
-              access gate; a quick_check_timeout is not a refusal: the cheap fetch gave up on a slow page and
-              the browser opens it afterwards - judge the site by the browser's result), its downloads were
-              only thumbnails (rejections too_small and nothing
-              accepted), or its pages keep returning the same frames or nothing usable. No more of its pages are
-              opened in this search and its page in work ends. Put the site's host from the journal in site; null
-              means the site of the current page. When only this page is the problem, leave_current_page.
+            skip_site: the whole site is a dead end for this product - its pages do not exist (http_404/410),
+              the browser opened a page of it and was refused or got nothing (extract_page_images http_error or
+              empty after a browser attempt), its downloads were only thumbnails (rejections too_small and nothing
+              accepted), or its pages keep returning the same frames or nothing usable. A refusal of the quick
+              HTTP check alone (check_source_access http_401/403/429, access_gate, quick_check_timeout) is NOT a
+              dead end: that cheap fetch is not a browser, and the real browser often gets through where it was
+              refused (live #310 lenovo.com, #313 noctua.at, #328 dns-shop.ru, #370 frame.work: the maker's own
+              store, 403 on the quick check, dropped before the browser opened a page, and the card went out
+              with one guide photo). Judge such a site by the browser's result; until the browser has opened a
+              page of it, continue. No more pages of a dropped site are opened in this search and its page in
+              work ends. Put the site's host from the journal in site; null means the site of the current page.
+              When only this page is the problem, leave_current_page.
             deliver_now: the photo search ends and the card is assembled from what was found; photos and facts
               already saved are kept. Say it when the card has at least minimum_photos_for_card accepted photos
               and the last two sources added nothing; when two fallback_discovery rounds in a row came back
