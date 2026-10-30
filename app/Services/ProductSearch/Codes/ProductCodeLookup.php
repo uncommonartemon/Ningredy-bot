@@ -84,16 +84,51 @@ final class ProductCodeLookup
     public function icecat(?string $gtin, ?string $brand, ?string $partCode, ?int $updateId, string $caller): array
     {
         $code = $gtin ?? trim((string) $brand).' '.trim((string) $partCode);
+        $query = $gtin !== null ? ['GTIN' => $gtin] : ['Brand' => (string) $brand, 'ProductCode' => (string) $partCode];
+
+        // The code asked matters: Icecat files ASUS GA403UV-G14.R94060 under part 90NR0I02-M003W0 (live #456).
+        return [...$this->icecatQuery($query, $code, $brand, $updateId, $caller), 'queried_part' => $partCode];
+    }
+
+    /**
+     * A datasheet by its own number: the page the research found by name is read
+     * through the API, never fetched (the site answers a plain request with a bot
+     * check). Operator, 2026-10-30: Icecat first for a name without a code too.
+     *
+     * @return array<string, mixed>
+     */
+    public function icecatById(string $id, ?int $updateId, string $caller): array
+    {
+        return $this->icecatQuery(['icecat_id' => $id], 'icecat_id '.$id, null, $updateId, $caller);
+    }
+
+    /** The datasheet number in the address of a page on the catalogue's own site (`…/stealth-14-…-120744916.html`). */
+    public static function icecatIdFromUrl(string $url): ?string
+    {
+        $host = strtolower((string) parse_url($url, PHP_URL_HOST));
+        $site = strtolower(trim((string) config('services.icecat.site', 'icecat.biz')));
+        if ($site === '' || ($host !== $site && ! str_ends_with($host, '.'.$site))) {
+            return null;
+        }
+
+        return preg_match('~-(\d{5,})\.html?$~', (string) parse_url($url, PHP_URL_PATH), $match) === 1 ? $match[1] : null;
+    }
+
+    /**
+     * @param  array<string, string>  $query
+     * @return array<string, mixed>
+     */
+    private function icecatQuery(array $query, string $code, ?string $brand, ?int $updateId, string $caller): array
+    {
         $username = (string) config('services.icecat.username');
         if ($username === '') {
             return $this->outcome('icecat', $code, 'not_configured', [], $updateId, $caller);
         }
-        $query = ['UserName' => $username, 'Language' => 'en', ...($gtin !== null ? ['GTIN' => $gtin]
-            : ['Brand' => (string) $brand, 'ProductCode' => (string) $partCode])];
+        $query = ['UserName' => $username, 'Language' => 'en', ...$query];
         $key = 'code-lookup:icecat:'.md5(json_encode($query));
         $cached = Cache::get($key);
         if (is_array($cached)) {
-            return [...$this->outcome('icecat', $code, $cached['status'], $cached['data'], $updateId, $caller, cached: true, brand: $brand), 'queried_part' => $partCode];
+            return $this->outcome('icecat', $code, $cached['status'], $cached['data'], $updateId, $caller, cached: true, brand: $brand);
         }
         try {
             $response = Http::timeout(20)->acceptJson()->get((string) config('services.icecat.url'), $query);
@@ -113,8 +148,7 @@ final class ProductCodeLookup
             Cache::put($key, ['status' => $status, 'data' => $data], now()->addDays(30));
         }
 
-        // The code asked matters: Icecat files ASUS GA403UV-G14.R94060 under part 90NR0I02-M003W0 (live #456).
-        return [...$this->outcome('icecat', $code, $status, $data, $updateId, $caller, brand: $brand), 'queried_part' => $partCode];
+        return $this->outcome('icecat', $code, $status, $data, $updateId, $caller, brand: $brand);
     }
 
     /** @return array<string, mixed> */

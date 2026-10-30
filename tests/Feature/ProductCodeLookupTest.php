@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Models\ProductSourceAttempt;
 use App\Services\ProductSearch\Codes\ProductCodeLookup;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
@@ -41,6 +42,24 @@ class ProductCodeLookupTest extends TestCase
         $this->assertSame($first['page_url'], $second['page_url']);
         Http::assertSentCount(1);
         $this->assertSame(2, ProductSourceAttempt::query()->where('action', 'lookup_icecat')->where('decision', 'found')->count());
+    }
+
+    public function test_a_datasheet_page_found_by_name_is_read_by_its_number_through_the_api(): void
+    {
+        // Operator, 2026-10-30: Icecat first for a name without a code. The site answers a plain
+        // request with a bot check; the number in the page address is enough for the API.
+        $this->assertSame('120744916', ProductCodeLookup::icecatIdFromUrl('https://icecat.biz/p/msi/stealth14a1091/stealth-14-ai-studio-a1vfg-091us-120744916.html'));
+        $this->assertSame('120744916', ProductCodeLookup::icecatIdFromUrl('https://www.icecat.biz/en/p/msi/stealth-120744916.html'));
+        $this->assertNull(ProductCodeLookup::icecatIdFromUrl('https://shop.example/p/msi/stealth-120744916.html'));
+        $this->assertNull(ProductCodeLookup::icecatIdFromUrl('https://icecat.biz/en/search?keyword=stealth'));
+        Http::fake(['https://live.icecat.biz/*' => Http::response(['data' => $this->datasheet()])]);
+
+        $result = app(ProductCodeLookup::class)->icecatById('145199652', null, 'test');
+
+        $this->assertTrue($result['found']);
+        $this->assertSame('145199652', $result['icecat_id']);
+        Http::assertSent(fn (Request $request): bool => str_contains($request->url(), 'icecat_id=145199652') && ! str_contains($request->url(), 'ProductCode'));
+        $this->assertSame(1, ProductSourceAttempt::query()->where('action', 'lookup_icecat')->where('decision', 'found')->count());
     }
 
     public function test_the_whole_public_gallery_is_offered_however_long_it_is(): void

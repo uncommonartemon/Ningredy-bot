@@ -102,7 +102,7 @@ class SearchStats extends Command
                 ->map(fn (ProductSourceAttempt $attempt): string => (string) parse_url((string) $attempt->product_url, PHP_URL_HOST))
                 ->filter()->unique()->count(),
             'icecat' => match (true) {
-                $lookups->contains(fn ($a): bool => $a->action === 'offer_official_gallery' && $a->decision === 'queued_first') => 'gallery',
+                $lookups->contains(fn ($a): bool => $a->action === 'offer_official_gallery' && str_starts_with((string) $a->decision, 'queued_first')) => 'gallery',
                 $lookups->contains(fn ($a): bool => $a->action === 'lookup_icecat' && $a->decision === 'found') => 'found',
                 $lookups->contains(fn ($a): bool => $a->action === 'lookup_icecat' && $a->decision === 'restricted') => 'closed',
                 $lookups->contains('action', 'lookup_icecat') => 'miss',

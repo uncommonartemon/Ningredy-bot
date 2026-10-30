@@ -41,6 +41,9 @@ return [
     'icecat' => [
         'username' => env('ICECAT_USERNAME'),
         'url' => env('ICECAT_URL', 'https://live.icecat.biz/api/'),
+        // The catalogue's own site: a page of it that the research finds by name is
+        // read through the API by the number in its address, never fetched.
+        'site' => env('ICECAT_SITE', 'icecat.biz'),
     ],
 
     'upcitemdb' => [
