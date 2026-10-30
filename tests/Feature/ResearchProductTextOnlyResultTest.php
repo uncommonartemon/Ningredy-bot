@@ -276,6 +276,8 @@ class ResearchProductTextOnlyResultTest extends TestCase
         $guidance = json_encode(ProductSourceAttempt::query()->where('action', 'repair_response')->latest('id')->first()?->output ?? []);
         $this->assertStringContainsString('configured_product', $guidance);
         $this->assertStringContainsString('sibling configuration of the same model line', $guidance);
+        // Live #368: the only official page sold the product refurbished; the condition of an offer is not identity.
+        $this->assertStringContainsString('requirement=condition', $guidance);
     }
 
     public function test_quotations_from_a_compatible_photo_only_page_never_become_selected_product_evidence(): void

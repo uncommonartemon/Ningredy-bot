@@ -889,6 +889,11 @@ class ResearchProduct implements Tool
                 .' The same holds for a visible requirement such as a colour name that no page of the observed model shows:'
                 .' select the closest observed configuration of that model, keep what the pages show in color and the other fields,'
                 .' and list each difference in request_differences with the requested and the found value.'
+                // Live #368: the only official page of the Framework Laptop 13 DIY was a refurbished
+                // listing; the agent filled request_differences (condition) and still answered unresolved.
+                .' An observed offer\'s condition (new, refurbished, used, open box) is the seller\'s offer, not the product\'s identity:'
+                .' select the product from that page all the same, keep the condition the operator asked for, and list the difference'
+                .' in request_differences with requirement=condition.'
                 // Live #317/#323: Framework sells the Laptop 13 only through a configurator, the page
                 // offered two processors and said "refurbished", and three honest "unresolved" answers
                 // ended in no draft. One chosen configuration is the product; what differs is listed.
