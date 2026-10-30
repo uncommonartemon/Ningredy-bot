@@ -10,6 +10,7 @@ use App\Models\ProductGalleryRecipe;
 use App\Models\ProductSourceAttempt;
 use App\Models\TelegramUpdate;
 use App\Services\ProductSearch\SearchJournal;
+use Illuminate\Database\Connection;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Artisan;
@@ -103,9 +104,14 @@ final class DiagnosticReport
     private function databaseSnapshot(?string $connection = null): string
     {
         $path = storage_path('app/reports/snapshot-'.now()->format('Ymd-His').'-'.bin2hex(random_bytes(3)).'.sqlite');
-        // SQLite refuses VACUUM inside a transaction; the job, the admin button and
-        // bot:report run outside one.
-        DB::connection($connection)->statement('VACUUM INTO ?', [$path]);
+        $source = DB::connection($connection);
+        if ($source->transactionLevel() > 0) {
+            // SQLite refuses VACUUM inside a transaction (a test's, or a caller's):
+            // the copy is then written table by table through PHP.
+            $this->copyThroughPhp($source, $path);
+        } else {
+            $source->statement('VACUUM INTO ?', [$path]);
+        }
         $copy = new PDO('sqlite:'.$path);
         $hasSettings = $copy->query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'app_settings'")?->fetchColumn();
         if ($hasSettings) {
@@ -115,6 +121,35 @@ final class DiagnosticReport
         $copy = null;
 
         return $path;
+    }
+
+    /** Schema and rows, table by table: the slow road, for a copy taken inside a transaction. */
+    private function copyThroughPhp(Connection $source, string $path): void
+    {
+        $copy = new PDO('sqlite:'.$path);
+        $copy->exec('PRAGMA journal_mode = OFF');
+        foreach ($source->select("SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND sql IS NOT NULL") as $table) {
+            $copy->exec((string) $table->sql);
+            $columns = array_map(fn (object $column): string => (string) $column->name, $source->select("PRAGMA table_info('{$table->name}')"));
+            if ($columns === []) {
+                continue;
+            }
+            $insert = $copy->prepare('INSERT INTO "'.$table->name.'" ('.implode(', ', array_map(fn (string $column): string => '"'.$column.'"', $columns)).')'
+                .' VALUES ('.implode(', ', array_fill(0, count($columns), '?')).')');
+            $copy->beginTransaction();
+            foreach ($source->table($table->name)->cursor() as $row) {
+                $insert->execute(array_map(fn (string $column): mixed => $row->{$column} ?? null, $columns));
+            }
+            $copy->commit();
+        }
+        foreach ($source->select("SELECT sql FROM sqlite_master WHERE type = 'index' AND sql IS NOT NULL") as $index) {
+            try {
+                $copy->exec((string) $index->sql);
+            } catch (Throwable) {
+                // An index the copy cannot rebuild is not data.
+            }
+        }
+        $copy = null;
     }
 
     /** @param  Collection<int, TelegramUpdate>  $updates */
