@@ -45,6 +45,7 @@ use App\Services\Telegram\TelegramClient;
 use App\Services\Telegram\TelegramProgressReporter;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
 use Illuminate\Support\Facades\Validator;
+use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 use Laravel\Ai\Contracts\Tool;
@@ -371,7 +372,10 @@ class ResearchProduct implements Tool
                 // The agent may list the same datasheet page itself (it saw it in the hint) as a
                 // facts-only database entry; that entry must not shadow the gallery (live #439).
                 $officialUrl = ProductImageStorage::normalizeCandidateUrl($officialGallery['source']['url']);
-                $data['sources'] = [...array_values(array_filter($data['sources'], fn (array $source): bool => ProductImageStorage::normalizeCandidateUrl((string) ($source['url'] ?? '')) !== $officialUrl)),
+                $officialId = (string) ($officialGallery['icecat_id'] ?? '');
+                $data['sources'] = [...array_values(array_filter($data['sources'], fn (array $source): bool => ProductImageStorage::normalizeCandidateUrl((string) ($source['url'] ?? '')) !== $officialUrl
+                    // The same record under another spelling of its page address: the number in the address says so.
+                    && ($officialId === '' || ProductCodeLookup::icecatIdFromUrl((string) ($source['url'] ?? '')) !== $officialId))),
                     $officialGallery['source']];
             }
             // After Icecat: the brand's catalog by the selected product's own codes.
@@ -968,9 +972,21 @@ class ResearchProduct implements Tool
         $sameGtin = fn (array $result): bool => array_intersect(array_map(fn ($gtin) => ltrim((string) $gtin, '0'), (array) ($result['gtins'] ?? [])),
             array_map(fn ($gtin) => ltrim((string) $gtin, '0'), $gtins)) !== [];
         $matches = fn (array $result): bool => $samePart($result) || $sameGtin($result);
+        // A datasheet the research found by name on the catalogue's own site: its page sits
+        // behind a bot check, its number is in the address, and the record is read by that
+        // number through the API (operator, 2026-10-30: Icecat first for a name without a code).
+        $pageIds = collect($data['sources'] ?? [])
+            ->map(fn (array $source): ?string => ProductCodeLookup::icecatIdFromUrl((string) ($source['url'] ?? '')))
+            ->filter()->unique()->take(2)->values()->all();
         try {
             $found = collect($lookup->lookup($gtins, $data['brand'] ?? null, $codes, $this->update->id, 'official_gallery'))
                 ->filter(fn (array $result): bool => $result['source'] === 'icecat' && $result['found'] && ($result['page_url'] ?? null) !== null);
+            foreach ($pageIds as $pageId) {
+                $byNumber = $lookup->icecatById($pageId, $this->update->id, 'official_gallery');
+                if ($byNumber['found'] && ($byNumber['page_url'] ?? null) !== null) {
+                    $found->push($byNumber);
+                }
+            }
             // The selected part number is the strongest tie. A barcode may belong to
             // another product, so the part code still gets its own look first.
             $match = $found->first($samePart);
@@ -993,29 +1009,67 @@ class ResearchProduct implements Tool
             return null;
         }
         $sameCode = $matches($match);
+        // A record the research itself listed that names the selected brand and model is
+        // the agent's own identification: its gallery is offered first, and its photos are
+        // checked like any page's, not as a code-confirmed record.
+        $namedByResearch = ! $sameCode && in_array((string) ($match['icecat_id'] ?? ''), $pageIds, true)
+            && $this->recordNamesSelectedProduct($match, $data);
         $images = collect($match['images'])->filter(fn (array $image): bool => $image['width'] >= 700 || $image['width'] === 0)
             ->pluck('url')->values()->all();
         app(ProductSourceAttemptRecorder::class)->record(['telegram_update_id' => $this->update->id,
             'product_url' => $match['page_url'], 'actor' => 'server', 'phase' => 'code_lookup', 'action' => 'offer_official_gallery',
-            'status' => $sameCode && $images !== [] ? 'completed' : 'skipped',
-            'decision' => $sameCode ? ($images === [] ? 'no_large_images' : 'queued_first') : 'code_mismatch',
-            'output' => ['part_number' => $match['part_number'], 'gtins' => $match['gtins'], 'images' => count($images), 'selected_codes' => $codes]]);
-        if (! $sameCode || $images === []) {
+            'status' => ($sameCode || $namedByResearch) && $images !== [] ? 'completed' : 'skipped',
+            'decision' => match (true) {
+                ($sameCode || $namedByResearch) && $images === [] => 'no_large_images',
+                $sameCode => 'queued_first',
+                $namedByResearch => 'queued_first_by_name',
+                default => 'code_mismatch',
+            },
+            'output' => ['part_number' => $match['part_number'], 'gtins' => $match['gtins'], 'images' => count($images), 'selected_codes' => $codes,
+                'icecat_id' => $match['icecat_id'] ?? null]]);
+        if ((! $sameCode && ! $namedByResearch) || $images === []) {
             return null;
         }
 
         return ['source' => ['title' => 'Icecat datasheet: '.$match['title'], 'url' => $match['page_url'], 'type' => 'web',
             'image_urls' => $images, 'roles' => ['facts', 'exact_photo'], '_official_gallery' => true,
-            'applicability_reason' => 'Official datasheet (Icecat) for the same part number/GTIN as the selected product.',
+            'applicability_reason' => $sameCode
+                ? 'Official datasheet (Icecat) for the same part number/GTIN as the selected product.'
+                : 'Official datasheet (Icecat) the research found by name; its code is not among the selected product\'s codes, so its photos are checked like any page\'s.',
             // The database record matched by the exact code is this source's identity.
             // Its page may sit behind a bot check: live #14's showed only one, the page
             // look replaced this evidence, and the official gallery lost to 800px shop photos.
             // The provenance mark is what keeps every later page look from doing that again.
-            SourceIdentityProvenance::KEY => SourceIdentityProvenance::codeMatch(
-                'icecat', [(string) $match['part_number'], ...array_map('strval', (array) $match['gtins'])]),
+            SourceIdentityProvenance::KEY => $sameCode
+                ? SourceIdentityProvenance::codeMatch('icecat', [(string) $match['part_number'], ...array_map('strval', (array) $match['gtins'])])
+                : SourceIdentityProvenance::catalogRecord('icecat', (string) ($match['icecat_id'] ?? '')),
             '_preflight_identity_evidence' => trim($match['title'].' Part number: '.$match['part_number']
                 .' GTIN: '.implode(' ', $match['gtins']))],
-            'specification_text' => implode("\n", [$match['title'], ...$match['specifications']])];
+            'specification_text' => implode("\n", [$match['title'], ...$match['specifications']]),
+            'icecat_id' => (string) ($match['icecat_id'] ?? '')];
+    }
+
+    /**
+     * The record names the selected brand and the model whole-token: the research's
+     * own identification of the product it found by name.
+     *
+     * @param  array<string, mixed>  $record
+     * @param  array<string, mixed>  $data
+     */
+    private function recordNamesSelectedProduct(array $record, array $data): bool
+    {
+        $model = trim((string) ($data['model'] ?? ''));
+        $brand = trim((string) ($data['brand'] ?? ''));
+        $title = trim((string) ($record['title'] ?? ''));
+        if ($model === '' || $title === '') {
+            return false;
+        }
+        if ($brand !== '' && filled($record['brand'] ?? null)
+            && Str::lower(Str::squish($brand)) !== Str::lower(Str::squish((string) $record['brand']))) {
+            return false;
+        }
+
+        return ProductResearchConfigurationGuard::containsTokens($title, $model);
     }
 
     private function primarySource(array $sources): ?array

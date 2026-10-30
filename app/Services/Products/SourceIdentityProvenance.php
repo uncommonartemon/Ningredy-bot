@@ -20,6 +20,22 @@ final class SourceIdentityProvenance
 
     public const CODE_MATCH = 'code_match';
 
+    /** A catalogue record the research itself named: read through the API, its photos checked like a page's. */
+    public const CATALOG_RECORD = 'catalog_record';
+
+    /** @return array{kind: string, database: string, id: string} */
+    public static function catalogRecord(string $database, string $id): array
+    {
+        return ['kind' => self::CATALOG_RECORD, 'database' => $database, 'id' => $id];
+    }
+
+    /** Either kind of catalogue record: its evidence, address and gallery come from the record, not its page. @param array<string, mixed> $source */
+    public static function fromCatalog(array $source): bool
+    {
+        return is_array($source[self::KEY] ?? null)
+            && in_array($source[self::KEY]['kind'] ?? null, [self::CODE_MATCH, self::CATALOG_RECORD], true);
+    }
+
     /** @param array<int, string> $codes @return array{kind: string, database: string, codes: array<int, string>} */
     public static function codeMatch(string $database, array $codes): array
     {
@@ -42,7 +58,7 @@ final class SourceIdentityProvenance
      */
     public static function galleryFromRecord(array $source): bool
     {
-        return self::confirmedByCode($source)
+        return self::fromCatalog($source)
             && array_filter((array) ($source['image_urls'] ?? []), fn (mixed $url): bool => is_string($url) && trim($url) !== '') !== [];
     }
 
@@ -57,7 +73,7 @@ final class SourceIdentityProvenance
     {
         $page = trim((string) $pageEvidence);
         $record = trim((string) ($source['_preflight_identity_evidence'] ?? ''));
-        if (! self::confirmedByCode($source) || $record === '') {
+        if (! self::fromCatalog($source) || $record === '') {
             return $page;
         }
 
@@ -72,7 +88,7 @@ final class SourceIdentityProvenance
      */
     public static function pageUrl(array $source, string $observedUrl): string
     {
-        return self::confirmedByCode($source) && is_string($source['url'] ?? null) && $source['url'] !== ''
+        return self::fromCatalog($source) && is_string($source['url'] ?? null) && $source['url'] !== ''
             ? $source['url'] : $observedUrl;
     }
 

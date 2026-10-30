@@ -19,6 +19,7 @@ use App\Services\Products\ProductRequestContext;
 use App\Services\Products\SourceIdentityProvenance;
 use App\Services\ProductSearch\Supervision\SearchProgressSupervisor;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\Client\Request as HttpRequest;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
@@ -398,6 +399,37 @@ class ResearchProductTextOnlyResultTest extends TestCase
                 $this->assertTrue(ProductSourceAttempt::query()->where('action', 'offer_official_gallery')->where('decision', 'code_mismatch')->exists());
             }
         }
+    }
+
+    public function test_a_datasheet_page_the_research_found_by_name_is_read_through_the_api_and_offered_first(): void
+    {
+        // Operator, 2026-10-30: Icecat first for a name without a code. The research's web search
+        // finds the datasheet page by name; its site answers a plain fetch with a bot check, so the
+        // record is read by the number in the address, and the page itself is never a source.
+        config(['services.icecat.username' => 'tester']);
+        Cache::flush();
+        $page = 'https://icecat.biz/p/lenovo/variant-777/lenovo-exact-123-variant-77700777.html';
+        Http::fake(['https://live.icecat.biz/*' => fn (HttpRequest $request) => str_contains($request->url(), 'icecat_id=77700777')
+            ? Http::response(['data' => [
+                'GeneralInfo' => ['Title' => 'Lenovo Exact 123 (variant 777)', 'Brand' => 'Lenovo', 'BrandPartCode' => 'VARIANT-777', 'IcecatId' => '77700777',
+                    'ProductName' => 'Exact 123', 'GTIN' => []],
+                'Gallery' => [['Pic' => 'https://images.icecat.biz/img/gallery/777.jpg', 'PicWidth' => '1600', 'PicHeight' => '1200', 'No' => '1']],
+            ]])
+            : Http::response(['Message' => 'The requested product is not present in the Icecat database'], 404)]);
+
+        $this->research('cost_budget', assembled: false, responseOverrides: ['sources' => [
+            ['title' => 'Exact laptop', 'url' => self::SOURCE, 'type' => 'retailer', 'image_urls' => []],
+            ['title' => 'Lenovo Exact 123 datasheet', 'url' => $page, 'type' => 'web', 'image_urls' => []],
+        ]]);
+
+        $sources = collect(ProductDraft::query()->sole()->sources);
+        $official = $sources->firstWhere('_official_gallery', true);
+        $this->assertSame(['https://images.icecat.biz/img/gallery/777.jpg'], $official['image_urls']);
+        $this->assertSame(['kind' => 'catalog_record', 'database' => 'icecat', 'id' => '77700777'], $official[SourceIdentityProvenance::KEY]);
+        // The page the research listed is the same record: it is not opened as a page of its own.
+        $this->assertNotContains($page, $sources->pluck('url')->all());
+        $this->assertTrue(ProductSourceAttempt::query()->where('action', 'offer_official_gallery')->where('decision', 'queued_first_by_name')->exists());
+        Http::assertSent(fn (HttpRequest $request): bool => str_contains($request->url(), 'icecat_id=77700777'));
     }
 
     public function test_a_datasheet_found_by_the_selected_code_matches_even_under_another_part_number(): void

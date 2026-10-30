@@ -48,6 +48,19 @@ class SourceIdentityProvenanceTest extends TestCase
             'image_urls' => ['https://shop.example/a.jpg']]));
     }
 
+    public function test_a_record_the_research_named_is_read_from_the_catalogue_but_is_not_a_code_match(): void
+    {
+        // Operator, 2026-10-30: a datasheet found by name is read by its number; its photos are checked like a page's.
+        $named = [...$this->record(), SourceIdentityProvenance::KEY => SourceIdentityProvenance::catalogRecord('icecat', '777')];
+
+        $this->assertFalse(SourceIdentityProvenance::confirmedByCode($named));
+        $this->assertTrue(SourceIdentityProvenance::fromCatalog($named));
+        $this->assertTrue(SourceIdentityProvenance::galleryFromRecord($named));
+        $this->assertSame(self::RECORD, SourceIdentityProvenance::mergeEvidence($named, ''));
+        $this->assertSame($named['url'], SourceIdentityProvenance::pageUrl($named, 'https://icecat.biz/.within.website/?redir=x'));
+        $this->assertFalse(SourceIdentityProvenance::fromCatalog(['url' => 'https://shop.example/990-pro', '_official_gallery' => true]));
+    }
+
     private function record(): array
     {
         return ['url' => 'https://icecat.biz/p/samsung/mz-v9p2t0bw/990-pro-1.html', 'title' => 'Icecat datasheet: Samsung 990 PRO 2 TB',
