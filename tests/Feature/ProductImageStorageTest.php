@@ -2537,6 +2537,11 @@ class ProductImageStorageTest extends TestCase
         $this->assertDatabaseHas('product_source_attempts', ['product_draft_id' => $draft->id,
             'action' => 'verify_gallery', 'decision' => 'accept_code_confirmed_record_gallery']);
         ProductPhotoApplicabilityAgent::assertNeverPrompted();
+        // Operator, 2026-10-30: the record comes through the API; its page is never opened.
+        Http::assertNotSent(fn (Request $request): bool => str_contains($request->url(), '/p/asus/'));
+        $this->assertDatabaseHas('product_source_attempts', ['product_draft_id' => $draft->id,
+            'action' => 'use_record_gallery', 'decision' => 'page_not_opened']);
+        $this->assertDatabaseMissing('product_source_attempts', ['product_draft_id' => $draft->id, 'action' => 'extract_page_images']);
     }
 
     public function test_deferred_recipe_metadata_never_substitutes_for_current_pixel_review(): void

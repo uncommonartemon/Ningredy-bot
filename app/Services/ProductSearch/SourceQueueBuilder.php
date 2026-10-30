@@ -189,7 +189,14 @@ class SourceQueueBuilder
                     $attemptCheckpoint = ProductSourceAttempt::query()->max('id') ?? 0;
 
                     try {
-                        $preflight = $this->resolver->preflightSource($source, $telegramUpdateId);
+                        // A record matched by code carries its gallery from the catalogue's
+                        // API; its page has nothing to add and may answer with a bot check
+                        // (live #359: icecat.biz served Anubis to the look that followed a
+                        // found record). Operator, 2026-10-30: the record comes through the
+                        // API, the page is not the source.
+                        $preflight = SourceIdentityProvenance::galleryFromRecord($source)
+                            ? $this->recordGalleryPreflight($source, $telegramUpdateId)
+                            : $this->resolver->preflightSource($source, $telegramUpdateId);
                     } finally {
                         $this->attempts->associateWithDraftSince($draft, $telegramUpdateId, $attemptCheckpoint);
                     }
@@ -352,6 +359,25 @@ class SourceQueueBuilder
         [$compatible, $unknown] = $others->partition(fn (array $source): bool => $source['_preflight_known_recipe_domain']);
 
         return $exact->concat($compatible)->concat($unknown)->values();
+    }
+
+    /**
+     * The preflight of a record read from its catalogue: nothing is fetched, the
+     * journal says so, and the record keeps its own address and evidence.
+     *
+     * @param  array<string, mixed>  $source
+     * @return array<string, mixed>
+     */
+    private function recordGalleryPreflight(array $source, ?int $telegramUpdateId): array
+    {
+        $this->attempts->record([
+            'telegram_update_id' => $telegramUpdateId, 'product_url' => (string) ($source['url'] ?? ''), 'actor' => 'server',
+            'phase' => 'gallery_preflight', 'action' => 'use_record_gallery', 'status' => 'completed', 'decision' => 'page_not_opened',
+            'input' => ['database' => $source[SourceIdentityProvenance::KEY]['database'] ?? null,
+                'gallery_images' => count($this->candidateUrls->cleanUrls($source['image_urls'] ?? []))],
+        ]);
+
+        return [];
     }
 
     /** Explicit locale mirrors stay available, but are not independent first attempts. */

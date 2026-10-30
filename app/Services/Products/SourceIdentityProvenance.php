@@ -34,6 +34,19 @@ final class SourceIdentityProvenance
     }
 
     /**
+     * A record matched by code that carries its own gallery is read from the
+     * catalogue it came from; its page is never opened (operator, 2026-10-30:
+     * the record comes through the API, the page is not the source).
+     *
+     * @param  array<string, mixed>  $source
+     */
+    public static function galleryFromRecord(array $source): bool
+    {
+        return self::confirmedByCode($source)
+            && array_filter((array) ($source['image_urls'] ?? []), fn (mixed $url): bool => is_string($url) && trim($url) !== '') !== [];
+    }
+
+    /**
      * The identity evidence after a page look: a code-matched record's own
      * evidence first, the page's observations after it; anything else keeps
      * only what the page showed, as before.
