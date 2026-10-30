@@ -122,6 +122,12 @@ class ProductResearchConfigurationGuardTest extends TestCase
                 ['key' => 'display', 'value' => '2.8K matte display'], ['key' => 'ram', 'value' => 'Not included']]];
         $this->assertSame([], app(ProductResearchConfigurationGuard::class)->issues($chosen));
 
+        // Live #370: the page's line starts with the offer's own word ("Refurbished …"); the
+        // model rightly leaves it out and begins with the line from its second token.
+        $offerWord = [...$chosen, 'model' => 'Framework Laptop 13 DIY Edition (AMD Ryzen 7040 Series), Ryzen 7 7840U, 2.8K display',
+            'selected_identity' => [...$chosen['selected_identity'], 'observed_model' => 'Refurbished '.$refurbishedLine]];
+        $this->assertSame([], app(ProductResearchConfigurationGuard::class)->issues($offerWord));
+
         // A model of another family under the same line is still unresolved.
         $otherFamily = [...$chosen, 'model' => 'Framework Laptop 16 (AMD Ryzen 7 7840HS, 2.5K display)'];
         $this->assertCount(1, app(ProductResearchConfigurationGuard::class)->issues($otherFamily));

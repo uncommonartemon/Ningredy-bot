@@ -62,6 +62,18 @@ class ProductCodeLookupTest extends TestCase
         $this->assertSame(1, ProductSourceAttempt::query()->where('action', 'lookup_icecat')->where('decision', 'found')->count());
     }
 
+    public function test_a_phrase_is_not_sent_to_the_catalogue_as_a_code(): void
+    {
+        // Live #370: the configured model "Framework Laptop 13 DIY Edition (AMD Ryzen 7040 Series), Ryzen 7 7840U, 2.8K display"
+        // went out as ProductCode and the API answered "Exceed max string length".
+        Http::fake();
+
+        app(ProductCodeLookup::class)->lookup([], 'Framework', ['Framework Laptop 13 DIY Edition (AMD Ryzen 7040 Series), Ryzen 7 7840U, 2.8K display', 'FRANDG0007R'], null, 'test');
+
+        Http::assertSentCount(1);
+        Http::assertSent(fn (Request $request): bool => str_contains($request->url(), 'ProductCode=FRANDG0007R'));
+    }
+
     public function test_the_whole_public_gallery_is_offered_however_long_it_is(): void
     {
         // 35 live searches, 2026-10-25: a cap of twelve left 49 official frames never downloaded.

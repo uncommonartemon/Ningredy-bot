@@ -68,6 +68,9 @@ final class ProductCodeLookup
             // part of the datasheet's code, so the base code is asked too.
             $parts = collect($partCodes)->filter(fn ($code): bool => is_string($code) && trim($code) !== '')
                 ->flatMap(fn (string $code): array => str_contains($code, '#') ? [$code, trim((string) strstr($code, '#', true))] : [$code])
+                // A phrase is not a code (live #370: a configured model went out as ProductCode and
+                // the API answered "Exceed max string length").
+                ->filter(fn (string $code): bool => mb_strlen(trim($code)) <= 40)
                 ->filter()->unique()->take(4)->values()->all();
             foreach ($parts as $part) {
                 if (collect($results)->contains(fn (array $result): bool => $result['found'] && $result['source'] === 'icecat')) {
