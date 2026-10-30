@@ -38,6 +38,16 @@ class SourceIdentityProvenanceTest extends TestCase
         $this->assertSame(['MZ-V9P2T0BW', '8806094215038'], SourceIdentityProvenance::codeMatch('icecat', ['MZ-V9P2T0BW', '', '8806094215038'])['codes']);
     }
 
+    public function test_a_record_with_its_own_gallery_is_read_from_the_catalogue_not_from_its_page(): void
+    {
+        // Operator, 2026-10-30: the record comes through the API; the page is not the source.
+        $this->assertTrue(SourceIdentityProvenance::galleryFromRecord($this->record()));
+        $this->assertFalse(SourceIdentityProvenance::galleryFromRecord([...$this->record(), 'image_urls' => []]));
+        $this->assertFalse(SourceIdentityProvenance::galleryFromRecord([...$this->record(), 'image_urls' => ['', ' ']]));
+        $this->assertFalse(SourceIdentityProvenance::galleryFromRecord(['url' => 'https://shop.example/990-pro', '_official_gallery' => true,
+            'image_urls' => ['https://shop.example/a.jpg']]));
+    }
+
     private function record(): array
     {
         return ['url' => 'https://icecat.biz/p/samsung/mz-v9p2t0bw/990-pro-1.html', 'title' => 'Icecat datasheet: Samsung 990 PRO 2 TB',

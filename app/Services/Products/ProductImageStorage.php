@@ -723,21 +723,28 @@ class ProductImageStorage
             $attemptCheckpoint = ProductSourceAttempt::query()->max('id') ?? 0;
 
             try {
-                $resolvedUrls = $this->resolver->resolve(
-                    [$source],
-                    max(8, $target * 2),
-                    function (string $level, string $message) use (&$sourceBlocked, &$sourceFailureReported, $progress): void {
-                        $sourceFailureReported = $sourceFailureReported || in_array($level, ['warning', 'error', 'blocked'], true);
-                        if ($level === 'blocked') {
-                            $sourceBlocked = true;
-                        }
-                        if ($progress) {
-                            $progress($message);
-                        }
-                    },
-                    $telegramUpdateId,
-                    activeRecipeOnly: $reuseOnly,
-                );
+                // A record matched by code carries its gallery from the catalogue's API; its
+                // page has nothing to add and may answer with a bot check (live #359: icecat.biz
+                // served Anubis to the look that followed a found record, and the check's two
+                // mascot pictures were the look's "static images"). Operator, 2026-10-30: the
+                // record comes through the API, the page is not the source.
+                $resolvedUrls = SourceIdentityProvenance::galleryFromRecord($source)
+                    ? $this->useRecordGallery($source, $draft, $telegramUpdateId, $progress)
+                    : $this->resolver->resolve(
+                        [$source],
+                        max(8, $target * 2),
+                        function (string $level, string $message) use (&$sourceBlocked, &$sourceFailureReported, $progress): void {
+                            $sourceFailureReported = $sourceFailureReported || in_array($level, ['warning', 'error', 'blocked'], true);
+                            if ($level === 'blocked') {
+                                $sourceBlocked = true;
+                            }
+                            if ($progress) {
+                                $progress($message);
+                            }
+                        },
+                        $telegramUpdateId,
+                        activeRecipeOnly: $reuseOnly,
+                    );
             } finally {
                 $this->associateAttemptsWithDraftSince($draft, $telegramUpdateId, $attemptCheckpoint);
             }
@@ -2512,6 +2519,26 @@ class ProductImageStorage
             count($result->candidates), $target));
 
         return true;
+    }
+
+    /**
+     * A record matched by its code is read from the catalogue it came from: the
+     * gallery is the record's, the page is not opened (operator, 2026-10-30).
+     *
+     * @param  array<string, mixed>  $source
+     * @return array<int, string>
+     */
+    private function useRecordGallery(array $source, ProductDraft $draft, ?int $telegramUpdateId, ?callable $progress): array
+    {
+        $this->attempts->record([
+            'telegram_update_id' => $telegramUpdateId, 'product_draft_id' => $draft->id, 'product_url' => (string) $source['url'],
+            'actor' => 'server', 'phase' => 'source_resolution', 'action' => 'use_record_gallery', 'status' => 'completed',
+            'decision' => 'page_not_opened', 'input' => ['database' => $source[SourceIdentityProvenance::KEY]['database'] ?? null,
+                'gallery_images' => count($this->cleanUrls($source['image_urls'] ?? []))],
+        ]);
+        $progress?->__invoke('Запись каталога совпала по коду: беру её галерею напрямую, страницу не открываю.');
+
+        return [];
     }
 
     /** Of two complete galleries the richer one; the other's frames are released. */

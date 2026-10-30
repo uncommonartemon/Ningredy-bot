@@ -9,6 +9,7 @@ use App\Services\Products\ProductSourcePageMetadata;
 use App\Services\Products\SourceIdentityProvenance;
 use App\Services\ProductSearch\SourceQueueBuilder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
 
@@ -93,6 +94,9 @@ class ObservedSourceQueueTest extends TestCase
         $this->assertStringStartsWith($record, $first['_preflight_identity_evidence']);
         $this->assertSame('Icecat datasheet: Samsung 990 PRO 2 TB', $first['title']);
         $this->assertSame(['https://93.184.216.42/img/gallery/a.jpg'], $first['image_urls']);
+        // Operator, 2026-10-30: the record comes through the API; its page is not fetched at all.
+        Http::assertNotSent(fn (Request $request): bool => $request->url() === $official);
+        $this->assertDatabaseHas('product_source_attempts', ['product_url' => $official, 'action' => 'use_record_gallery', 'decision' => 'page_not_opened']);
     }
 
     public function test_a_facts_only_page_still_reaches_photo_checks_after_photo_hinted_pages(): void
