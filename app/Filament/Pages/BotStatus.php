@@ -95,6 +95,17 @@ class BotStatus extends Page
 
                     return response()->download($path, basename($path))->deleteFileAfterSend();
                 }),
+            // With a copy of the database, its secrets blanked: the developer's own
+            // tools run against it. No Telegram size limit here.
+            Action::make('report_with_database')
+                ->label(__('Отчёт с базой'))
+                ->icon(Heroicon::OutlinedCircleStack)
+                ->color('gray')
+                ->action(function () {
+                    $path = app(DiagnosticReport::class)->build(withDatabase: true);
+
+                    return response()->download($path, basename($path))->deleteFileAfterSend();
+                }),
             Action::make('smoke')
                 ->label(__('Полная проверка'))
                 ->icon(Heroicon::OutlinedBeaker)

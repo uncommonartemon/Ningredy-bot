@@ -10,6 +10,8 @@ use App\Services\Support\DiagnosticReport;
 use App\Services\Telegram\TelegramClient;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
 use ZipArchive;
@@ -58,11 +60,54 @@ class DiagnosticReportTest extends TestCase
     {
         config(['services.telegram.bot_token' => '1234567890:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA']);
         Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => ['message_id' => 7]])]);
+        array_map('unlink', glob(storage_path('app/reports/ningredy-report-*.zip')) ?: []);
 
         (new SendDiagnosticReport('98765', 3))->handle(app(DiagnosticReport::class), app(TelegramClient::class));
 
         // The multipart body is not re-read here: its file handle is closed once the request is out.
         Http::assertSent(fn (Request $request): bool => str_ends_with($request->url(), '/sendDocument') && $request->hasFile('document'));
         $this->assertSame([], glob(storage_path('app/reports/ningredy-report-*.zip')) ?: []);
+    }
+
+    public function test_the_full_report_carries_a_copy_of_the_database_with_its_secrets_blanked(): void
+    {
+        // Operator, 2026-10-29: "бд просто подойдёт?" - a copy the developer's own tools
+        // can open, with keys, tokens and proxy addresses blanked before it leaves. The
+        // copy is taken on a file connection of its own: SQLite refuses VACUUM inside
+        // the transaction a test runs in, and the live callers never are inside one.
+        $file = storage_path('app/reports/live-like.sqlite');
+        @unlink($file);
+        File::ensureDirectoryExists(dirname($file));
+        touch($file);
+        config(['database.connections.live_like' => ['driver' => 'sqlite', 'database' => $file, 'prefix' => '', 'foreign_key_constraints' => false]]);
+        $live = DB::connection('live_like');
+        $live->statement('CREATE TABLE app_settings (id INTEGER PRIMARY KEY, key TEXT, value TEXT)');
+        $live->statement('CREATE TABLE telegram_updates (id INTEGER PRIMARY KEY, text TEXT)');
+        $live->table('app_settings')->insert([
+            ['key' => 'ai.keys.openai', 'value' => 'sk-live-key-that-must-not-travel'],
+            ['key' => 'telegram.proxy_url', 'value' => 'http://user:pass@proxy.example:3128'],
+            ['key' => 'ai.global.model', 'value' => 'gpt-test'],
+        ]);
+        $live->table('telegram_updates')->insert(['id' => 5, 'text' => 'LG gram 17']);
+
+        $path = app(DiagnosticReport::class)->build(days: 7, withDatabase: true, connection: 'live_like');
+
+        $zip = new ZipArchive;
+        $this->assertTrue($zip->open($path) === true);
+        $copy = storage_path('app/reports/test-copy.sqlite');
+        file_put_contents($copy, (string) $zip->getFromName('database.sqlite'));
+        $zip->close();
+        $pdo = new \PDO('sqlite:'.$copy);
+        $settings = $pdo->query('SELECT key, value FROM app_settings ORDER BY key')->fetchAll(\PDO::FETCH_KEY_PAIR);
+        $this->assertSame('', $settings['ai.keys.openai']);
+        $this->assertSame('', $settings['telegram.proxy_url']);
+        $this->assertSame('gpt-test', $settings['ai.global.model']);
+        $this->assertSame('LG gram 17', $pdo->query('SELECT text FROM telegram_updates WHERE id = 5')->fetchColumn());
+        $pdo = null;
+        $live->disconnect();
+        @unlink($copy);
+        @unlink($path);
+        @unlink($file);
+        $this->assertSame([], glob(storage_path('app/reports/snapshot-*.sqlite')) ?: []);
     }
 }
