@@ -177,7 +177,7 @@ class ProductResearchConfigurationGuard
 
         return is_array(self::identitySource($data, $identity)) && $line !== '' && $excerpt !== '' && ! $this->ambiguous($excerpt)
             && self::containsTokens($excerpt, $line)
-            && self::comparable($model) !== $line && self::containsTokens(self::comparable($model), $line)
+            && self::extendsLine(self::comparable($model), $line)
             && $options->count() >= 2;
     }
 
@@ -205,10 +205,8 @@ class ProductResearchConfigurationGuard
      */
     public static function containsTokens(string $haystack, string $needle): bool
     {
-        $tokens = static fn (string $value): array => preg_split('/[^\p{L}\p{N}]+|(?<=\p{L})(?=\p{N})|(?<=\p{N})(?=\p{L})/u',
-            $value, -1, PREG_SPLIT_NO_EMPTY) ?: [];
-        $needleTokens = $tokens($needle);
-        $haystackTokens = $tokens($haystack);
+        $needleTokens = self::tokens($needle);
+        $haystackTokens = self::tokens($haystack);
         $length = count($needleTokens);
         for ($start = 0; $length > 0 && $start + $length <= count($haystackTokens); $start++) {
             if (array_slice($haystackTokens, $start, $length) === $needleTokens) {
@@ -217,6 +215,35 @@ class ProductResearchConfigurationGuard
         }
 
         return false;
+    }
+
+    /** @return array<int, string> */
+    private static function tokens(string $value): array
+    {
+        return preg_split('/[^\p{L}\p{N}]+|(?<=\p{L})(?=\p{N})|(?<=\p{N})(?=\p{L})/u', $value, -1, PREG_SPLIT_NO_EMPTY) ?: [];
+    }
+
+    /**
+     * The model of a configured product starts with the observed line and goes on
+     * to name the chosen options. Live #369: the line read "Framework Laptop 13 DIY
+     * Edition (AMD Ryzen™ 7040 Series)" and the model named the concrete "Ryzen 7
+     * 7840U" where the line said "7040 Series"; demanding the line's every token in
+     * the model refused that honest answer three times and left no card. The line's
+     * last three tokens are where its platform options sit; everything before them
+     * is the family the page proves (at least three tokens: maker, series, size),
+     * and the options the model adds are proven by the specifications.
+     */
+    private static function extendsLine(string $model, string $line): bool
+    {
+        $modelTokens = self::tokens($model);
+        $lineTokens = self::tokens($line);
+        $shared = 0;
+        while ($shared < count($modelTokens) && $shared < count($lineTokens) && $modelTokens[$shared] === $lineTokens[$shared]) {
+            $shared++;
+        }
+        $required = max(min(3, count($lineTokens)), count($lineTokens) - 3);
+
+        return $lineTokens !== [] && $shared >= $required && count($modelTokens) > $shared;
     }
 
     /** Same product page despite scheme, host case, www., fragment or trailing slash. */
