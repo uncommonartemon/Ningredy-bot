@@ -232,6 +232,10 @@ final class SearchProgressSupervisor
             $verdict = [...$verdict, 'decision' => 'continue', 'site' => null,
                 'reason' => 'Рано сворачивать: '.$premature.'. '.$verdict['reason']];
         }
+        if ($verdict['decision'] === 'skip_site' && $this->browserUntried($updateId, (string) $verdict['site'])) {
+            $verdict = [...$verdict, 'decision' => 'continue', 'site' => null,
+                'reason' => 'Рано исключать сайт '.self::site((string) $verdict['site']).': быстрая проверка получила отказ, а браузер его ещё не открывал. '.$verdict['reason']];
+        }
 
         $this->record($draft, $updateId, $current, 'completed', $verdict['decision'], $verdict['reason'], $verdict, $mark);
         if ($verdict['decision'] === 'skip_site') {
@@ -273,6 +277,30 @@ final class SearchProgressSupervisor
         }
 
         return "фото {$photos} из {$minimum}, а резервный поиск новых магазинов ещё не запускался";
+    }
+
+    /**
+     * A site whose only failure so far is a refusal of the quick HTTP check (401/403/429,
+     * a detected access gate, a timeout) has not been tried by the browser, which often
+     * gets through where that cheap fetch was refused (live #310 lenovo.com, #313 noctua.at,
+     * #328 dns-shop.ru, #370 frame.work: the maker's own store, 403 on the quick check,
+     * dropped before the browser opened a page; the card went out with one guide photo).
+     * Dropping it is premature until the browser has opened a page of it. The watcher
+     * judges; like tooEarlyToEnd, this is a line it may not cross.
+     */
+    public function browserUntried(?int $updateId, string $site): bool
+    {
+        $site = self::site($site);
+        if (! $updateId || $site === '') {
+            return false;
+        }
+        $rows = ProductSourceAttempt::query()->where('telegram_update_id', $updateId)->get(['domain', 'phase', 'action', 'decision'])
+            ->filter(fn (ProductSourceAttempt $row): bool => self::site((string) $row->domain) === $site);
+        $refused = $rows->contains(fn (ProductSourceAttempt $row): bool => $row->action === 'check_source_access'
+            && (preg_match('/^http_(?:401|403|429)$/', (string) $row->decision) === 1 || in_array($row->decision, ['access_gate', 'quick_check_timeout', 'http_error'], true)));
+        $opened = $rows->contains(fn (ProductSourceAttempt $row): bool => $row->action === 'extract_page_images' || $row->phase === 'gallery_training');
+
+        return $refused && ! $opened;
     }
 
     /** @return array{decision: string, reason: string, operator_note: ?string, site: ?string} */

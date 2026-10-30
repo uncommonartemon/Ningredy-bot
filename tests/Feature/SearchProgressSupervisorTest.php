@@ -221,6 +221,34 @@ class SearchProgressSupervisorTest extends TestCase
         $this->assertFalse($supervisor->liftSiteDrop(77, 'https://never-dropped.example/'));
     }
 
+    public function test_a_site_refused_on_the_quick_check_is_not_dropped_before_the_browser_tried_it(): void
+    {
+        // Live #370: frame.work, the maker's own store, answered the quick check with 403; the
+        // watcher dropped the site before the browser opened a page of it, and the card went
+        // out with one guide photo (#310 lenovo.com, #313 noctua.at, #328 dns-shop.ru the same).
+        $draft = $this->draft(minutesAgo: 9);
+        $this->round($draft, self::PAGE, []);
+        $frameWork = fn (string $phase, string $action, string $decision, string $actor) => app(ProductSourceAttemptRecorder::class)->record([
+            'telegram_update_id' => $draft->telegram_update_id, 'product_draft_id' => $draft->id, 'product_url' => 'https://frame.work/products/laptop-13',
+            'actor' => $actor, 'phase' => $phase, 'action' => $action, 'status' => 'failed', 'decision' => $decision]);
+        $frameWork('gallery_preflight', 'check_source_access', 'http_403', 'http_preflight');
+        SearchProgressAgent::fake(fn (): array => ['decision' => 'skip_site', 'reason' => 'frame.work ответил HTTP 403.', 'operator_note' => null, 'site' => 'frame.work'])
+            ->preventStrayPrompts();
+        $supervisor = app(SearchProgressSupervisor::class);
+
+        $verdict = $this->review($draft);
+
+        $this->assertSame('continue', $verdict['decision']);
+        $this->assertStringStartsWith('Рано исключать сайт frame.work', $verdict['reason']);
+        $this->assertSame([], $supervisor->droppedSites($draft->telegram_update_id));
+
+        // The browser opened a page of the site and got nothing: now the site may be dropped.
+        $frameWork('source_resolution', 'extract_page_images', 'http_error', 'playwright');
+        $this->travel(2)->minutes();
+        $this->assertSame('skip_site', $this->review($draft)['decision']);
+        $this->assertSame(['frame.work' => 'frame.work ответил HTTP 403.'], $supervisor->droppedSites($draft->telegram_update_id));
+    }
+
     public function test_inside_the_search_it_looks_again_only_after_a_new_step_and_a_pause(): void
     {
         $draft = $this->draft(minutesAgo: 9);
