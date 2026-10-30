@@ -109,6 +109,22 @@ class ProductResearchConfigurationGuardTest extends TestCase
         // And the page must name the line it is said to name.
         $unproven = [...$answer, 'selected_identity' => [...$answer['selected_identity'], 'source_excerpt' => 'Configure your laptop']];
         $this->assertCount(1, app(ProductResearchConfigurationGuard::class)->issues($unproven));
+
+        // Live #369: the line's platform words name a series ("AMD Ryzen™ 7040 Series"); the
+        // chosen configuration names the concrete processor in their place. The family before
+        // them is what the page proves; the options are proven by the specifications.
+        $refurbishedLine = 'Framework Laptop 13 DIY Edition (AMD Ryzen™ 7040 Series)';
+        $chosen = [...$answer,
+            'model' => 'Framework Laptop 13 DIY Edition (AMD Ryzen 7 7840U, 2.8K display, RAM not included, storage not included)',
+            'selected_identity' => [...$answer['selected_identity'], 'observed_model' => $refurbishedLine,
+                'source_excerpt' => 'Refurbished '.$refurbishedLine],
+            'specifications' => [['key' => 'cpu', 'value' => 'AMD Ryzen 7 7840U'], ['key' => 'gpu', 'value' => 'AMD Radeon 780M integrated graphics'],
+                ['key' => 'display', 'value' => '2.8K matte display'], ['key' => 'ram', 'value' => 'Not included']]];
+        $this->assertSame([], app(ProductResearchConfigurationGuard::class)->issues($chosen));
+
+        // A model of another family under the same line is still unresolved.
+        $otherFamily = [...$chosen, 'model' => 'Framework Laptop 16 (AMD Ryzen 7 7840HS, 2.5K display)'];
+        $this->assertCount(1, app(ProductResearchConfigurationGuard::class)->issues($otherFamily));
     }
 
     public function test_a_sibling_configuration_lends_its_page_but_not_its_codes(): void
