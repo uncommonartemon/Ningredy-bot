@@ -237,11 +237,18 @@ class ProductResearchConfigurationGuard
     {
         $modelTokens = self::tokens($model);
         $lineTokens = self::tokens($line);
-        $shared = 0;
-        while ($shared < count($modelTokens) && $shared < count($lineTokens) && $modelTokens[$shared] === $lineTokens[$shared]) {
-            $shared++;
-        }
         $required = max(min(3, count($lineTokens)), count($lineTokens) - 3);
+        // The line as the page shows it may start with the offer's own words (live #370:
+        // "Refurbished Framework Laptop 13 DIY Edition …"), which the model rightly leaves
+        // out: the model may begin with the line from any of its tokens on.
+        $shared = 0;
+        foreach (array_keys($lineTokens) as $offset) {
+            $run = 0;
+            while ($run < count($modelTokens) && $offset + $run < count($lineTokens) && $modelTokens[$run] === $lineTokens[$offset + $run]) {
+                $run++;
+            }
+            $shared = max($shared, $run);
+        }
 
         return $lineTokens !== [] && $shared >= $required && count($modelTokens) > $shared;
     }
