@@ -206,6 +206,13 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
             the requested value belongs to another model, name that model in the evidence. The operator sees every
             difference beside the add button and decides. Leave request_differences empty when the pages show what
             was asked.
+            The condition of an observed offer - new, refurbished, renewed, used, open box - is the seller's offer,
+            not the product's identity. When the only observed page of the requested product sells it refurbished
+            or used (live #317/#323/#368: Framework's own page of the Laptop 13 DIY Edition was a refurbished
+            listing, and three "unresolved" answers left no card), select the product from that page all the same,
+            keep condition as the operator asked (new unless they said otherwise), list the difference in
+            request_differences with requirement=condition, and say so in research_notes. Never answer unresolved
+            because the observed offer's condition differs from the request.
 
             The prompt may name the brand's own catalog (the manufacturer's reference: where it is, a web search that
             finds a code there, addresses that open it). Look the exact code up there before shops: a page found there
