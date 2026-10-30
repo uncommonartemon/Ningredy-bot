@@ -125,6 +125,20 @@ class ProductImageVisionAgent implements Agent, HasStructuredOutput
             meaningful details. Prefer a useful, source-supported close match over returning nothing,
             but never accept a visibly conflicting model or a non-product graphic.
 
+            publishable judges the frame itself: quality, content, text policy and duplicates. It is not an
+            identity verdict. When your only doubt is whether the pictured unit is the exact requested SKU or
+            suffix, and the body, colour and product type do not visibly conflict, keep publishable=true, set
+            exact_match=false and physical_match=match or not_observable, and give kind and score as for any
+            catalog photo: the server decides from the page evidence whether that doubt matters (memory and
+            storage sizes are not visible in a photograph). Whenever you set publishable=false, name the main
+            reason in rejection_reason: quality (blurry, tiny, thumbnail, distorted, heavy watermark),
+            not_product (product absent or too small, unrelated item, accessory only), graphic (logo, banner,
+            chart, screenshot, advertising composition, infographic), text (prominent text in a disallowed
+            language), used_item (user-generated, auction, worn, damaged, improvised phone shot), duplicate
+            (another frame of the same group is kept), color (visible colour conflict), body (visibly different
+            body, family, revision or keyboard layout), identity (only the exact SKU or suffix is unconfirmed,
+            nothing visible conflicts). Use none when publishable=true.
+
             Also classify the camera view of each image: front (straight-on hero shot of the whole
             product), angle (three-quarter view), side, back (rear panel, ports, connectors,
             interface diagrams), detail (close-up of a part), packaging, or other.
@@ -156,6 +170,9 @@ class ProductImageVisionAgent implements Agent, HasStructuredOutput
                 'keyboard_layout_note' => $schema->string()->max(500)->required(),
                 'configuration_marking' => $schema->string()->max(100)->required(),
                 'publishable' => $schema->boolean()->required(),
+                'rejection_reason' => $schema->string()->enum([
+                    'none', 'quality', 'not_product', 'graphic', 'text', 'used_item', 'duplicate', 'color', 'body', 'identity',
+                ])->required(),
                 'kind' => $schema->string()->enum([
                     'product', 'packaging', 'detail', 'logo', 'banner', 'screenshot', 'unrelated', 'uncertain',
                 ])->required(),

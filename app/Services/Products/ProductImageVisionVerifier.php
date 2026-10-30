@@ -304,14 +304,26 @@ class ProductImageVisionVerifier
         $reviewed = collect($data['images'])
             ->map(function (array $review) use ($draft, $candidates): array {
                 $candidate = $candidates[$review['index'] - 1] ?? [];
+                $sourceSupported = (bool) ($candidate['source_identity_confirmed'] ?? false)
+                    || (bool) ($candidate['source_line_plausible'] ?? false)
+                    || $this->identityMatcher->supports($draft, (string) ($candidate['source_url'] ?? ''));
+                // Operator, 2026-10-29: Vision does not judge model exactness from pixels. A frame
+                // refused only for an unconfirmed SKU or suffix, with nothing visible against it, is
+                // the page's call: when the page names the line, the frame stands (live #362: four
+                // clean silver CB514-4HT frames went out as "applicability to -375Z unconfirmed"
+                // and the card ended with one photo). The doubt arrives as data, never parsed from prose.
+                $identityDoubtOnly = ! $review['publishable']
+                    && ($review['rejection_reason'] ?? null) === 'identity'
+                    && $sourceSupported && $review['color_match']
+                    && ($review['physical_match'] ?? null) !== 'conflicting';
 
                 return [
                     ...$review,
+                    'publishable' => $review['publishable'] || $identityDoubtOnly,
+                    'identity_doubt_overruled' => $identityDoubtOnly,
                     'hero' => $review['kind'] === 'product'
                         && in_array($review['view'], ['front', 'angle'], true),
-                    'source_supported' => (bool) ($candidate['source_identity_confirmed'] ?? false)
-                        || (bool) ($candidate['source_line_plausible'] ?? false)
-                        || $this->identityMatcher->supports($draft, (string) ($candidate['source_url'] ?? '')),
+                    'source_supported' => $sourceSupported,
                 ];
             });
 
@@ -356,9 +368,12 @@ class ProductImageVisionVerifier
                 ...$candidates[$review['index'] - 1],
                 'vision_kind' => $review['kind'],
                 'vision_score' => $review['score'],
-                'vision_reason' => $review['source_supported'] && ! $review['exact_match']
-                    ? 'Exact identity is supported by the source URL. '.$review['reason']
-                    : $review['reason'],
+                'vision_reason' => match (true) {
+                    (bool) ($review['identity_doubt_overruled'] ?? false) => 'Принят по странице-источнику: она называет эту линейку, '
+                        .'а Vision сомневался только в точном суффиксе модели. '.$review['reason'],
+                    $review['source_supported'] && ! $review['exact_match'] => 'Exact identity is supported by the source URL. '.$review['reason'],
+                    default => $review['reason'],
+                },
                 'vision_model' => $model,
                 'photo_visual_review' => [
                     'color_match' => $review['color_match'],
@@ -459,6 +474,7 @@ class ProductImageVisionVerifier
                     'images.*.keyboard_layout_note' => ['sometimes', 'nullable', 'string', 'max:500'],
                     'images.*.configuration_marking' => ['sometimes', 'nullable', 'string', 'max:100'],
                     'images.*.publishable' => ['required', 'boolean'],
+                    'images.*.rejection_reason' => ['sometimes', 'nullable', 'in:none,quality,not_product,graphic,text,used_item,duplicate,color,body,identity'],
                     'images.*.kind' => ['required', 'in:product,packaging,detail,logo,banner,screenshot,unrelated,uncertain'],
                     'images.*.view' => ['required', 'in:front,angle,side,back,detail,packaging,other'],
                     // Equal ranks are a tie, not a failed visual examination.
