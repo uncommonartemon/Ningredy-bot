@@ -472,6 +472,44 @@ class ProductImageVisionVerifierTest extends TestCase
         ]], 4));
     }
 
+    public function test_vision_doubt_about_the_suffix_alone_does_not_refuse_a_frame_of_a_page_that_names_the_line(): void
+    {
+        // Live #362: pcnation sold the CB514-4HT line; Vision found four clean silver frames with
+        // nothing visible against them and still set publishable=false, "applicability to -375Z
+        // unconfirmed". The card ended with one photo. The doubt now arrives as data
+        // (rejection_reason=identity) and the page's evidence decides it; every other refusal stands.
+        $update = TelegramUpdate::query()->create(['update_id' => 460003, 'telegram_user_id' => '1', 'chat_id' => '1',
+            'payload' => [], 'status' => 'completed', 'text' => 'Acer Chromebook Plus 514 CB514-4HT']);
+        $draft = new ProductDraft(['telegram_update_id' => $update->id, 'title' => 'Acer Chromebook Plus 514 CB514-4HT-375Z',
+            'brand' => 'Acer', 'model' => 'CB514-4HT-375Z', 'color' => 'Silver']);
+        $draft->setRelation('telegramUpdate', $update);
+        $page = ['title' => 'Acer Chromebook Plus 514 CB514-4HT-359X Silver', 'url' => 'https://shop.example/cb514-4ht'];
+        $plausible = ProductPhotoApplicability::bind($draft, $page, ['verdict' => 'uncertain', 'plausible_target' => true,
+            'reason' => 'The page sells another configuration of the CB514-4HT line; nothing conflicts.']);
+        $review = fn (int $index, string $rejection, string $physical = 'not_observable', bool $color = true): array => [
+            'index' => $index, 'exact_match' => false, 'color_match' => $color, 'physical_match' => $physical, 'publishable' => false,
+            'rejection_reason' => $rejection, 'kind' => 'product', 'view' => 'angle', 'gallery_rank' => $index, 'score' => 88,
+            'reason' => 'Clean frame of the CB514-4HT; the exact suffix is not confirmed by the picture.'];
+        ProductImageVisionAgent::fake(fn (): array => ['images' => [
+            $review(1, 'identity'), // the doubt alone: the page decides, the frame stands
+            $review(2, 'quality'), // a real quality refusal stays a refusal
+            $review(3, 'identity', 'conflicting'), // a visible body conflict is never overruled
+            $review(4, 'identity', 'not_observable', false), // nor a colour conflict
+        ]])->preventStrayPrompts();
+        $frame = fn (int $i): array => ['image' => $this->jpeg(), 'source_url' => 'https://shop.example/cb514-'.$i.'.jpg',
+            'page_source_context' => [...$page, '_photo_applicability' => $plausible]];
+
+        $selected = app(ProductImageVisionVerifier::class)->select($draft, [$frame(1), $frame(2), $frame(3), $frame(4)], 4);
+
+        $this->assertSame(['https://shop.example/cb514-1.jpg'], array_column($selected, 'source_url'));
+        $this->assertStringStartsWith('Принят по странице-источнику', (string) $selected[0]['vision_reason']);
+
+        // Without the page's word for the line, the same doubt still refuses the frame.
+        $unsupported = ProductPhotoApplicability::bind($draft, $page, ['verdict' => 'uncertain', 'plausible_target' => false, 'reason' => 'Unclear page.']);
+        $this->assertSame([], app(ProductImageVisionVerifier::class)->select($draft, [[...$frame(1),
+            'page_source_context' => [...$page, '_photo_applicability' => $unsupported]]], 4));
+    }
+
     public function test_repair_can_reject_the_image_and_does_not_force_a_positive_answer(): void
     {
         $calls = 0;
