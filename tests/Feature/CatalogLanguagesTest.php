@@ -84,6 +84,24 @@ class CatalogLanguagesTest extends TestCase
         Http::assertSent(fn (Request $request): bool => str_contains((string) $request['text'], 'Verified English description.'));
     }
 
+    public function test_the_telegram_card_itself_is_in_the_chosen_language(): void
+    {
+        // Operator, 2026-11-01: «если выбран укр, то телеграм на укр слать». The card with its
+        // title, description and characteristics, not only the summary under it.
+        Http::fake(fn () => Http::response(['ok' => true, 'result' => ['message_id' => 72]]));
+        $draft = $this->draft(['uk' => ['title' => 'Ноутбук Lenovo ThinkPad E14', 'description' => 'Перевірений опис.',
+            'specifications' => [['key' => 'cpu', 'name' => 'Процесор', 'value' => 'Intel Core i5-1335U']]]],
+            [['key' => 'cpu', 'name' => 'Processor', 'value' => 'Intel Core i5-1335U',
+                'source_url' => 'https://shop.example/e14', 'source_excerpt' => 'Intel Core i5-1335U']]);
+
+        app(DraftTelegramPresenter::class)->sendReview(app(TelegramClient::class), '98765', $draft->fresh());
+
+        Http::assertSent(fn (Request $request): bool => str_ends_with($request->url(), '/sendMessage')
+            && str_contains((string) $request['text'], '🏷 Ноутбук Lenovo ThinkPad E14')
+            && str_contains((string) $request['text'], 'Перевірений опис.')
+            && str_contains((string) $request['text'], 'Процесор: Intel Core i5-1335U'));
+    }
+
     public function test_the_storefront_receives_its_languages(): void
     {
         $this->get('/')->assertOk()->assertInertia(fn (Assert $page) => $page
@@ -192,7 +210,7 @@ class CatalogLanguagesTest extends TestCase
         return $product;
     }
 
-    private function draft(array $translations): ProductDraft
+    private function draft(array $translations, array $specifications = []): ProductDraft
     {
         $update = TelegramUpdate::create(['update_id' => 910315, 'chat_id' => '98765', 'telegram_user_id' => '12345',
             'text' => 'Lenovo ThinkPad E14', 'payload' => [], 'status' => 'received']);
@@ -203,7 +221,7 @@ class CatalogLanguagesTest extends TestCase
             'requested_by_telegram_user_id' => '12345', 'title' => 'Lenovo ThinkPad E14', 'brand' => 'Lenovo', 'model' => 'ThinkPad E14',
             'description' => 'Verified English description.', 'translations' => $translations,
             'status' => 'pending_review', 'category' => 'laptops', 'product_type' => 'laptop', 'condition' => 'new',
-            'specifications' => [], 'sources' => [['url' => 'https://shop.example/e14', 'title' => 'E14']], 'image_urls' => [],
+            'specifications' => $specifications, 'sources' => [['url' => 'https://shop.example/e14', 'title' => 'E14']], 'image_urls' => [],
             'primary_source_url' => 'https://shop.example/e14', 'specifications_reconciled_source_url' => 'https://shop.example/e14',
             'gallery_status' => 'complete', 'images_staged_at' => now()]);
     }
