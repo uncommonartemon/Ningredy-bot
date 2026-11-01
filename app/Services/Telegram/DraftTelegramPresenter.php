@@ -562,13 +562,22 @@ class DraftTelegramPresenter
 
     private function caption(ProductDraft $draft, string $usageFootnote): string
     {
+        // The card's own text - title, description, characteristics - is shown in the
+        // language the admin chose for Telegram (operator, 2026-11-01); the bot's own
+        // words around it stay the operator's.
+        $locale = CatalogLocales::telegramCardLocale();
+        $translated = CatalogLocales::specificationTranslations($draft->translations)[$locale] ?? [];
+        $title = CatalogLocales::cardText($draft->translations, 'title', $draft->title, $locale);
         $specifications = implode("\n", AttributePresentation::lines(
-            AttributePresentation::specifications($draft->specifications ?? [])->take(6),
+            AttributePresentation::specifications($draft->specifications ?? [])->take(6)
+                ->map(fn (array $item): array => [...$item,
+                    'group' => isset($item['group']['name']) && filled($item['group']['translations'][$locale] ?? null)
+                        ? [...$item['group'], 'name' => $item['group']['translations'][$locale]] : $item['group'] ?? null]),
             fn (array $item): string => sprintf(
                 '%s %s: %s',
                 SpecificationEmoji::for((string) ($item['key'] ?? $item['name'] ?? '')),
-                $item['name'],
-                $item['value'],
+                $translated[$item['key'] ?? '']['name'] ?? $item['name'],
+                $translated[$item['key'] ?? '']['value'] ?? $item['value'],
             )));
         $galleryCount = $draft->media()->count();
         $primarySourceUrl = trim((string) $draft->primary_source_url);
@@ -596,7 +605,7 @@ class DraftTelegramPresenter
             $reconciliationPending
                 ? "⏸ Черновик #{$draft->id}: сверка не завершена"
                 : "🆕 Черновик #{$draft->id} готов к добавлению",
-            "🏷 {$draft->title}",
+            "🏷 {$title}",
             '📦 '.(ProductCondition::options()[$draft->condition ?? 'new'] ?? $draft->condition),
             implode(' · ', array_filter([$draft->brand, $draft->model, $draft->color])),
         ]));
@@ -606,7 +615,7 @@ class DraftTelegramPresenter
             $header = (($intake['status'] ?? '') === 'ready'
                 ? "📥 Черновик #{$draft->id}: проверьте перед сохранением"
                 : "📝 Черновик #{$draft->id}: нужны уточнения")
-                ."\n🏷 {$draft->title}"
+                ."\n🏷 {$title}"
                 ."\n📦 ".(ProductCondition::options()[$draft->condition ?? ''] ?? 'Состояние не указано');
             if (($commercial['price_amount'] ?? null) !== null) {
                 $header .= "\n💰 ".$commercial['price_amount'].' '.($commercial['currency'] ?? '');
@@ -633,7 +642,7 @@ class DraftTelegramPresenter
 
         if (! $draft->isManualUpload() && $galleryCount === 0 && ! $searchInterrupted && ! $reconciliationPending) {
             $header = "📋 Черновик #{$draft->id}\nИнформация собрана; фото не найдены.\n"
-                ."🏷 {$draft->title}\n"
+                ."🏷 {$title}\n"
                 .implode(' / ', array_filter([$draft->brand, $draft->model, $draft->color]));
             $usageFootnote = "\n".match ($draft->gallery_search_stop_reason) {
                 'cost_budget' => 'Денежный лимит поиска достигнут. Продолжить поиск фото можно новым бюджетным циклом.',
@@ -643,7 +652,7 @@ class DraftTelegramPresenter
             }.' Без фото добавление в каталог недоступно.'.$usageFootnote;
         } elseif (! $draft->isManualUpload() && ($searchPaused || $searchInterrupted) && $galleryCount === 0) {
             $header = "⏸ Черновик #{$draft->id}: поиск фотографий приостановлен\n"
-                ."🏷 {$draft->title}\n"
+                ."🏷 {$title}\n"
                 .implode(' / ', array_filter([$draft->brand, $draft->model, $draft->color]));
             $usageFootnote = "\n".match (true) {
                 $searchInterrupted => 'Поиск фотографий прервался технической ошибкой и не успел завершиться штатно. Будет повторён автоматически.',
@@ -655,7 +664,7 @@ class DraftTelegramPresenter
         $fixed = $header."\n\n".$footer.$usageFootnote;
         $available = max(0, 1024 - mb_strlen($fixed) - 8);
         $body = implode("\n\n", array_filter([
-            $this->clip((string) $draft->description, (int) floor($available * 0.55)),
+            $this->clip(CatalogLocales::cardText($draft->translations, 'description', $draft->description, $locale), (int) floor($available * 0.55)),
             $specifications !== '' ? "⚙️ Характеристики:\n".$specifications : null,
         ]));
 
