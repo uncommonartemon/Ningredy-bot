@@ -151,7 +151,7 @@ try {
     Invoke-Checked $php @('artisan', 'migrate', '--force') '5/6 — Применяю миграции базы'
     # Reference data arrives on every machine: these seeders only add what is
     # missing (shop hints, brand catalogs) and never change what was edited.
-    foreach ($seeder in @('ProductSourceDomainHintSeeder', 'BrandCatalogSeeder')) {
+    foreach ($seeder in @('StarterCatalogSeeder', 'ProductSourceDomainHintSeeder', 'BrandCatalogSeeder')) {
         if (Test-Path -LiteralPath (Join-Path $root "database\seeders\$seeder.php") -PathType Leaf) {
             Invoke-Checked $php @('artisan', 'db:seed', "--class=Database\Seeders\$seeder", '--force') "Дополняю справочные данные: $seeder"
         }

@@ -766,6 +766,11 @@ class ResearchProduct implements Tool
                 'completed_at' => now(),
             ]);
 
+            if ($exception instanceof InvalidResearchResponse && $exception->reason === 'provider_unread') {
+                return $this->json(['ok' => false, 'status' => 'research_interrupted', 'retryable' => false,
+                    'reason' => $exception->reason, 'blocked_by' => [], 'agent_comment' => null,
+                    'message' => AiErrorPresenter::PROVIDER_UNREAD.' Передай оператору именно эту причину своими словами, без догадок и без предложения повторить поиск.']);
+            }
             if ($exception instanceof InvalidResearchResponse) {
                 $notes = $exception->evidence['result']['research_notes'] ?? null;
 

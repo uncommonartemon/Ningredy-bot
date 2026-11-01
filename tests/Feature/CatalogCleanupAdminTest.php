@@ -139,8 +139,9 @@ class CatalogCleanupAdminTest extends TestCase
 
         $this->assertDatabaseMissing('attribute_groups', ['id' => $group->id]);
         $this->assertDatabaseMissing('product_gallery_recipes', ['id' => $recipe->id]);
-        $this->assertSame(0, Category::count());
-        $this->assertSame(0, AttributeDefinition::count());
+        // The deleted dictionaries are gone; the starter set is back at once (live 2026-11-01).
+        $this->assertSame(4, Category::count());
+        $this->assertSame(7, AttributeDefinition::count());
         $this->assertDatabaseHas('users', ['id' => $this->admin->id]);
     }
 

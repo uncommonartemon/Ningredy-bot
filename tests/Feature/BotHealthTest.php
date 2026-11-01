@@ -85,6 +85,20 @@ class BotHealthTest extends TestCase
         $this->assertStringContainsString('queue:work', $worker['hint']);
     }
 
+    public function test_no_active_category_is_reported_with_what_to_do(): void
+    {
+        // Live 2026-11-01: after a cleanup of the dictionaries every product search died in
+        // one second and the status page was green.
+        $this->assertSame('up', $this->checkNamed('dictionaries')['state']);
+
+        DB::table('categories')->update(['is_active' => false]);
+
+        $check = $this->checkNamed('dictionaries');
+        $this->assertSame('down', $check['state']);
+        $this->assertStringContainsString('поиск товара не сможет', $check['detail']);
+        $this->assertStringContainsString('update-and-start.bat', $check['hint']);
+    }
+
     public function test_a_quiet_queue_is_not_a_dead_worker(): void
     {
         Http::fake(['*' => Http::response('', 403)]);

@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\AiRun;
+use App\Models\Category;
 use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
 use App\Services\Telegram\TelegramClient;
@@ -33,7 +34,25 @@ class BotHealth
             $this->worker(),
             $this->webhook(),
             $this->lastSearch(),
+            $this->dictionaries(),
         ];
+    }
+
+    /**
+     * The product search sorts every product into an active category; with none
+     * it cannot answer at all (live 2026-11-01: after a cleanup of the dictionaries
+     * every search on another machine died in one second, and nothing said why).
+     *
+     * @return array{key: string, label: string, state: string, detail: string, hint: string}
+     */
+    private function dictionaries(): array
+    {
+        $active = Category::query()->where('is_active', true)->count();
+
+        return $active === 0
+            ? $this->result('dictionaries', 'Справочники', 'down', 'Нет ни одной активной категории: поиск товара не сможет вернуть ответ.',
+                'Запустите update-and-start.bat — стартовые категории создадутся сами, или создайте категорию в разделе «Категории».')
+            : $this->result('dictionaries', 'Справочники', 'up', 'Активных категорий: '.$active.'.', '');
     }
 
     /** @return array{key: string, label: string, state: string, detail: string, hint: string} */

@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Ai\Agents\ProductResearchAgent;
 use App\Services\Ai\ActivityAwareOpenAiGateway;
+use App\Services\Ai\AiErrorPresenter;
 use App\Services\Ai\ProductResearchIdleTimeoutException;
 use App\Services\Ai\StreamingProductResearch;
 use App\Services\ProductSearch\Research\InvalidResearchResponse;
@@ -71,6 +72,40 @@ class StreamingProductResearchTest extends TestCase
             $this->assertSame('stream_incomplete', $error->reason);
             $this->assertSame('max_output_tokens', $error->evidence['incomplete_reason']);
             $this->assertSame(120, $error->usage['prompt_tokens']);
+        }
+    }
+
+    public function test_a_response_closed_without_reading_the_request_is_named_and_not_repaired(): void
+    {
+        // Live 2026-11-01 (another machine): every research call came back in one second as
+        // "incomplete, max_output_tokens" with no input token and nothing streamed; the repair
+        // got the same, and the operator was told "the reason is not in the journal".
+        config(['ai.providers.openai.key' => 'test-key']);
+        Http::preventStrayRequests();
+        $sse = implode('', array_map(fn ($event) => 'data: '.json_encode($event)."\n\n", [
+            ['type' => 'response.created', 'response' => ['id' => 'resp_unread', 'model' => 'gpt-5-mini']],
+            ['type' => 'response.incomplete', 'response' => ['id' => 'resp_unread', 'model' => 'gpt-5-mini', 'status' => 'incomplete',
+                'incomplete_details' => ['reason' => 'max_output_tokens'], 'usage' => ['input_tokens' => 0, 'output_tokens' => 0], 'output' => []]],
+        ]));
+        Http::fake(['api.openai.com/*' => Http::response($sse, 200, ['Content-Type' => 'text/event-stream'])]);
+
+        try {
+            $this->realPrompt();
+            $this->fail('A response the provider never read must not pass as a result.');
+        } catch (InvalidResearchResponse $error) {
+            $this->assertSame('provider_unread', $error->reason);
+            $this->assertFalse($error->recoverable);
+            $this->assertStringContainsString('не прочитав', app(AiErrorPresenter::class)->present($error)['message']);
+            $this->assertFalse(app(AiErrorPresenter::class)->present($error)['retryable']);
+        }
+
+        // A token-limited answer that did read the request still goes to repair.
+        $this->fakeStream('{"status":', 'incomplete');
+        try {
+            $this->realPrompt();
+        } catch (InvalidResearchResponse $error) {
+            $this->assertSame('stream_incomplete', $error->reason);
+            $this->assertTrue($error->recoverable);
         }
     }
 

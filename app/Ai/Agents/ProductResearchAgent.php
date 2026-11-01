@@ -9,6 +9,7 @@ use App\Services\Products\ProductCondition;
 use App\Services\Products\ProductSourceTypes;
 use App\Services\Products\ProductTextEvidenceContract;
 use App\Services\ProductSearch\Research\ResearchSourceRoles;
+use Database\Seeders\StarterCatalogSeeder;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
 use Laravel\Ai\Attributes\MaxTokens;
 use Laravel\Ai\Attributes\Strict;
@@ -273,7 +274,9 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
     /** @return array<int, string> */
     private function categorySlugs(): array
     {
-        return Category::query()->where('is_active', true)->pluck('slug')->all();
+        // An empty list is a schema no answer can satisfy: the provider closes the
+        // request unread (live 2026-11-01, after a cleanup removed every category).
+        return Category::query()->where('is_active', true)->pluck('slug')->all() ?: array_keys(StarterCatalogSeeder::CATEGORIES);
     }
 
     /**
