@@ -13,6 +13,9 @@ class ProductVariant extends Model
 {
     use InvalidatesStaleTextTranslations;
 
+    /** The name a card's only configuration gets when nothing names it (no colour). */
+    public const DEFAULT_NAME = 'Базовая конфигурация';
+
     protected $fillable = [
         'translations',
         'product_id', 'fingerprint', 'name', 'sku', 'mpn', 'gtin', 'color', 'condition',

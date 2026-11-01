@@ -304,7 +304,7 @@ class ProductDraftWorkflow
             && (! $targetVariantId || (int) $commercial['quantity'] !== (int) $variant->quantity);
 
         $variant->fill([
-            'name' => $targetVariantId ? $variant->name : ($draft->color ?: 'Базовая конфигурация'),
+            'name' => $targetVariantId ? $variant->name : ($draft->color ?: ProductVariant::DEFAULT_NAME),
             'sku' => $identifiers->get('sku') ?? ($keepCodes ? $variant->sku : null),
             'mpn' => $identifiers->get('mpn') ?? ($keepCodes ? $variant->mpn : null),
             'gtin' => ($identifiers->get('gtin') ?: $identifiers->get('ean') ?: $identifiers->get('upc')) ?: ($keepCodes ? $variant->gtin : null),

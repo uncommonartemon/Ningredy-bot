@@ -216,10 +216,15 @@ const translatedValue = (translations) => {
     return null;
 };
 
-// A card's translation map ({cs: {title, description}, …}): one field of it.
+// A card's translation map ({cs: {title, description}, …}), or several in priority order
+// (a variant's, then its product's): one field, language first - the visitor's language
+// from any of them before the main shop language from any of them.
 const translatedText = (translations, field) => {
+    const maps = Array.isArray(translations) ? translations : [translations];
     for (const code of contentChain.value) {
-        if (translations?.[code]?.[field]) return translations[code][field];
+        for (const map of maps) {
+            if (map?.[code]?.[field]) return map[code][field];
+        }
     }
     return null;
 };
