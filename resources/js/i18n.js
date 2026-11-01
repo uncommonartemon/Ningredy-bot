@@ -145,16 +145,28 @@ const messages = {
     },
 };
 
-const supportedLocales = ['cs', 'uk', 'en'];
+// The shop's languages and the languages product text is translated into come from
+// the server (App\Services\Products\CatalogLocales, admin «Языки каталога»); these
+// are only the values before the first page arrives.
+const shop = ref({ storefront: ['cs', 'uk'], content: ['cs', 'uk'] });
 const savedLocale = typeof window !== 'undefined' ? window.localStorage.getItem('catalog_locale') : null;
-const locale = ref(supportedLocales.includes(savedLocale) ? savedLocale : 'cs');
+const locale = ref(messages[savedLocale] ? savedLocale : 'cs');
+const storefrontLocales = computed(() => shop.value.storefront);
+
+const configureCatalogLocales = (catalogLocales) => {
+    if (! catalogLocales) return;
+    const storefront = (catalogLocales.storefront || []).filter((code) => messages[code]);
+    shop.value = { storefront: storefront.length ? storefront : ['cs'], content: catalogLocales.content || [] };
+    if (! shop.value.storefront.includes(locale.value)) locale.value = shop.value.storefront[0];
+    if (typeof document !== 'undefined') document.documentElement.lang = locale.value;
+};
 
 const read = (source, path) => path.split('.').reduce((value, key) => value?.[key], source);
 
 const t = (key, fallback = key) => read(messages[locale.value], key) ?? fallback;
 
 const setLocale = (nextLocale) => {
-    if (! messages[nextLocale]) return;
+    if (! messages[nextLocale] || ! shop.value.storefront.includes(nextLocale)) return;
     locale.value = nextLocale;
 
     if (typeof window !== 'undefined') {
@@ -188,31 +200,49 @@ const productCount = (count) => {
 
 const localeTag = computed(() => ({ cs: 'cs-CZ', uk: 'uk-UA', en: 'en-US' })[locale.value] || 'en-US');
 
-// A product's own text is written in English and translated into Czech only
-// (App\Services\Products\CatalogLocales). Any other interface language shows
-// the English text, never another language's translation.
-const contentLocales = ['cs'];
-const contentLocale = computed(() => (contentLocales.includes(locale.value) ? locale.value : 'en'));
+// A product's own text is written in English and translated into the languages the
+// admin chose (operator, 2026-11-01: Czech and Ukrainian). The shown language is the
+// interface's own when the bot translates into it; a field without that translation
+// falls back to the shop's main language, and only then to the English source.
+const mainContentLocale = computed(() => shop.value.storefront.find((code) => shop.value.content.includes(code)) || 'en');
+const contentLocale = computed(() => (shop.value.content.includes(locale.value) ? locale.value : mainContentLocale.value));
+const contentChain = computed(() => [...new Set([contentLocale.value, mainContentLocale.value])].filter((code) => code !== 'en'));
 
-const attributeLabel = (attribute) => attribute?.label_translations?.[contentLocale.value]
+// A flat translation map ({cs: '…', uk: '…'}): labels and values.
+const translatedValue = (translations) => {
+    for (const code of contentChain.value) {
+        if (translations?.[code]) return translations[code];
+    }
+    return null;
+};
+
+// A card's translation map ({cs: {title, description}, …}): one field of it.
+const translatedText = (translations, field) => {
+    for (const code of contentChain.value) {
+        if (translations?.[code]?.[field]) return translations[code][field];
+    }
+    return null;
+};
+
+const attributeLabel = (attribute) => translatedValue(attribute?.label_translations)
     || read(messages[contentLocale.value], `attributes.${attribute?.key}`)
     || attribute?.label_translations?.en
     || attribute?.label;
 
-const attributeValue = (attribute) => attribute?.translations?.[contentLocale.value] || attribute?.value;
+const attributeValue = (attribute) => translatedValue(attribute?.translations) || attribute?.value;
 
 // A filter is named like its attribute: the stored translation for this
 // language, then the interface's own label, then the English name. Before,
 // only the definition's single label was sent, so most Czech filters stayed English.
 const facetLabel = (facet) => facet?.label_translations?.[locale.value]
     || read(messages[locale.value], `attributes.${facet?.key}`)
-    || facet?.label_translations?.[contentLocale.value]
+    || translatedValue(facet?.label_translations)
     || facet?.label_translations?.en
     || facet?.label
     || facet?.key;
 
-const facetOptionLabel = (option) => option?.translations?.[contentLocale.value] || option?.label;
-const attributeGroupName = (group) => group?.translations?.[contentLocale.value] || group?.name || '';
+const facetOptionLabel = (option) => translatedValue(option?.translations) || option?.label;
+const attributeGroupName = (group) => translatedValue(group?.translations) || group?.name || '';
 
 // "15,6 inch" is spelled out in the value already; a unit is added only to a
 // bare number, so a value is never followed by its own unit twice.
@@ -222,7 +252,9 @@ const attributeUnit = (attribute) => (attribute?.unit && /^[\d\s.,]+$/.test(Stri
 
 if (typeof document !== 'undefined') document.documentElement.lang = locale.value;
 
+export { configureCatalogLocales };
+
 export const useI18n = () => ({
-    locale, localeTag, setLocale, t, productCount, categoryName,
-    contentLocale, attributeLabel, attributeValue, attributeUnit, attributeGroupName, facetLabel, facetOptionLabel,
+    locale, localeTag, setLocale, t, productCount, categoryName, storefrontLocales,
+    contentLocale, translatedText, attributeLabel, attributeValue, attributeUnit, attributeGroupName, facetLabel, facetOptionLabel,
 });

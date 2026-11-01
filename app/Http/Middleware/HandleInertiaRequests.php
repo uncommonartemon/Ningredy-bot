@@ -2,6 +2,7 @@
 
 namespace App\Http\Middleware;
 
+use App\Services\Products\CatalogLocales;
 use Illuminate\Http\Request;
 use Inertia\Middleware;
 
@@ -19,6 +20,12 @@ class HandleInertiaRequests extends Middleware
         return [
             ...parent::share($request),
             'appName' => config('app.name'),
+            // The shop's languages and the ones product text is translated into; a
+            // missing translation falls back to the first shop language, then English.
+            'catalogLocales' => fn (): array => [
+                'storefront' => CatalogLocales::storefrontLocales(),
+                'content' => array_keys(CatalogLocales::contentTranslations()),
+            ],
         ];
     }
 }

@@ -548,7 +548,8 @@ class ProductSpecificationReconciler
         $specifications = CatalogLocales::specificationTranslations($translations);
         $card = [];
 
-        foreach (CatalogLocales::textTranslations($translations) ?? [] as $locale => $text) {
+        // A new card keeps the languages the bot makes now; an extra language in the answer is not stored.
+        foreach (array_intersect_key(CatalogLocales::textTranslations($translations) ?? [], CatalogLocales::contentTranslations()) as $locale => $text) {
             $card[$locale] = [
                 ...$text,
                 'specifications' => collect($specifications[$locale] ?? [])

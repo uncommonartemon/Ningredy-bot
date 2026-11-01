@@ -85,7 +85,7 @@ class ManualProductAttributes
         ];
         if (array_key_exists('translations', $data)) {
             $normalized['translations'] = [];
-            foreach (array_keys(CatalogLocales::CONTENT_TRANSLATIONS) as $locale) {
+            foreach (array_keys(CatalogLocales::TRANSLATION_OPTIONS) as $locale) {
                 $translation = $data['translations'][$locale] ?? null;
                 // A legacy flat value is kept: saving a form must not erase data it does not edit.
                 if (is_string($translation) && $translation !== '' && mb_strlen($translation) <= 2000) {

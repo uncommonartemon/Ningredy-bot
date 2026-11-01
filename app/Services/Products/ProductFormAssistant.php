@@ -350,7 +350,7 @@ class ProductFormAssistant
     private function allowedPath(string $path, array $base, string $mode): bool
     {
         $parts = explode('.', $path);
-        $locales = array_keys(CatalogLocales::CONTENT_TRANSLATIONS);
+        $locales = array_keys(CatalogLocales::contentTranslations());
         if (count($parts) === 3 && $parts[0] === 'translations') {
             return in_array($parts[1], $locales, true) && in_array($parts[2], ['title', 'description'], true);
         }

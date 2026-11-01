@@ -46,7 +46,7 @@ final class ProductVariantFormState
 
     private static function emptyTranslations(): array
     {
-        return array_fill_keys(array_keys(CatalogLocales::CONTENT_TRANSLATIONS), ['title' => null, 'description' => null]);
+        return array_fill_keys(array_keys(CatalogLocales::contentTranslations()), ['title' => null, 'description' => null]);
     }
 
     /** Keep a usable primary offer when the previous primary row is removed. */

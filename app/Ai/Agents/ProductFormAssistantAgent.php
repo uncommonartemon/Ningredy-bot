@@ -27,7 +27,7 @@ class ProductFormAssistantAgent implements Agent, HasProviderOptions, HasStructu
 
     public function instructions(): string
     {
-        $locales = json_encode(CatalogLocales::CONTENT_TRANSLATIONS, JSON_UNESCAPED_UNICODE);
+        $locales = json_encode(CatalogLocales::contentTranslations(), JSON_UNESCAPED_UNICODE);
 
         return <<<PROMPT
             You assist an administrator editing an UNSAVED product form. Reply in the operator's interface language.

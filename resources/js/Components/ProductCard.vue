@@ -5,8 +5,8 @@ import ProductVisual from './ProductVisual.vue';
 import { useI18n } from '../i18n';
 import { orderedAttributes } from '../attributeGroups';
 const props = defineProps({ product: { type: Object, required: true }, view: { type: String, default: 'grid' } });
-const { localeTag, t, categoryName, contentLocale, attributeLabel, attributeValue, attributeUnit } = useI18n();
-const title = computed(() => props.product.translations?.[contentLocale.value]?.title || props.product.title);
+const { localeTag, t, categoryName, translatedText, attributeLabel, attributeValue, attributeUnit } = useI18n();
+const title = computed(() => translatedText(props.product.translations, 'title') || props.product.title);
 const highlights = computed(() => orderedAttributes(props.product.attributes || []).slice(0, 4));
 const formatPrice = (value, currency) => {
     if (value === null || value === undefined) return t('priceUnavailable');
