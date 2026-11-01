@@ -28,6 +28,14 @@ class StarterCatalogSeeder extends Seeder
             'minimum_verified_images' => 3, 'product_search_hint' => null, 'minimum_image_width' => null, 'product_type_affinity' => 'other'],
     ];
 
+    /** The starter categories in the shop's languages (operator, 2026-11-01: the shop speaks Czech and Ukrainian). */
+    private const CATEGORY_NAMES = [
+        'laptops' => ['cs' => 'Notebooky', 'uk' => 'Ноутбуки', 'en' => 'Laptops'],
+        'computers' => ['cs' => 'Počítače', 'uk' => 'Комп’ютери', 'en' => 'Computers'],
+        'components' => ['cs' => 'Komponenty', 'uk' => 'Комплектуючі', 'en' => 'Components'],
+        'other-tech' => ['cs' => 'Ostatní technika', 'uk' => 'Інша техніка', 'en' => 'Other electronics'],
+    ];
+
     /** Attribute key => the starter definition (create_product_attributes_table). */
     private const ATTRIBUTES = [
         'cpu' => ['label' => 'Процессор', 'data_type' => 'text', 'default_unit' => null, 'sort_order' => 10],
@@ -53,6 +61,17 @@ class StarterCatalogSeeder extends Seeder
             $columns = array_filter($row, fn (string $column): bool => Schema::hasColumn('categories', $column), ARRAY_FILTER_USE_KEY);
             $createdCategories[$slug] = DB::table('categories')->insertGetId([...$columns, 'slug' => $slug, 'is_active' => true,
                 'created_at' => $now, 'updated_at' => $now]);
+        }
+        if (Schema::hasTable('category_translations')) {
+            foreach (self::CATEGORY_NAMES as $slug => $names) {
+                $categoryId = DB::table('categories')->where('slug', $slug)->value('id');
+                foreach ($categoryId === null ? [] : $names as $locale => $name) {
+                    if (! DB::table('category_translations')->where('category_id', $categoryId)->where('locale', $locale)->exists()) {
+                        DB::table('category_translations')->insert(['category_id' => $categoryId, 'locale' => $locale, 'name' => $name,
+                            'created_at' => $now, 'updated_at' => $now]);
+                    }
+                }
+            }
         }
         if (! Schema::hasTable('attribute_definitions')) {
             return;

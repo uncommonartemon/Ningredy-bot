@@ -47,7 +47,14 @@ class ProductSpecificationReconciliationAgent implements Agent, HasStructuredOut
 
     public function instructions(): Stringable|string
     {
-        return <<<'PROMPT'
+        $languages = CatalogLocales::contentTranslations();
+        $translations = $languages === []
+            ? 'Return an empty translations object: no translation language is configured.'
+            : 'Return translations for each of these languages: '.implode(', ', array_map(fn (string $locale, string $label): string => "translations.{$locale} ({$label})",
+                array_keys($languages), $languages)).'. Each is a translation of the title, the description and every retained specification '
+                .'(same key, translated name and value), based ONLY on the assembled facts.';
+
+        return str_replace('{{TRANSLATIONS}}', $translations, <<<'PROMPT'
             Finish the selected product card before operator approval. Photos belong to ONE selected gallery,
             but text facts may come from several verified sources about this same exact configuration.
             original_operator_request contains the user's binding requirements; current_* is the researcher's
@@ -151,25 +158,24 @@ class ProductSpecificationReconciliationAgent implements Agent, HasStructuredOut
             documented benefits and use cases with restrained emojis, no invented superlatives, stock,
             warranty or features. Remove unsupported specific claims from prose too.
             The card is written in English: title, model, color, description and every specification name
-            and value. Return translations.cs, a Czech translation of the title, the description and every
-            retained specification (same key, translated name and value), based ONLY on the assembled facts.
+            and value. {{TRANSLATIONS}}
             Translate wording only: keep model codes, part numbers, numbers, units and qualifications exactly,
             and never add or drop a fact. Keep each description concise, about 600-1000 characters.
             Translations do not require another web search.
             Return reconciled when the whole card concerns the requested product, its explicit requirements
             are supported, and the gallery is exact or separately confirmed compatible. Do not restart photo
             search to settle an unrelated text fact. Otherwise explain not_ready in Russian summary.
-            summary is read by the operator and is always Russian, for reconciled cards too; Czech belongs only in
-            translations.cs (live #609 wrote its summary in Czech).
+            summary is read by the operator and is always Russian, for reconciled cards too; any other language
+            belongs only in translations (live #609 wrote its summary in Czech).
             For previous_assembly_feedback.repair_context.failure_kind=response_format, fix the response
             structure using retained evidence; additional web searches do not repair truncated/invalid JSON.
-            PROMPT."\n\n".AiAttributeGroups::instructions();
+            PROMPT)."\n\n".AiAttributeGroups::instructions();
     }
 
     public function schema(JsonSchema $schema): array
     {
         $translations = [];
-        foreach (array_keys(CatalogLocales::CONTENT_TRANSLATIONS) as $locale) {
+        foreach (array_keys(CatalogLocales::contentTranslations()) as $locale) {
             $translations[$locale] = $schema->object([
                 'title' => $schema->string()->max(255)->required(),
                 'description' => $schema->string()->max(2000)->required(),

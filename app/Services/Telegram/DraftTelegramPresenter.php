@@ -12,6 +12,7 @@ use App\Services\Ai\AiSettings;
 use App\Services\Ai\ProductSearchCancellation;
 use App\Services\Ai\ProductSearchCostBudget;
 use App\Services\Catalog\AttributePresentation;
+use App\Services\Products\CatalogLocales;
 use App\Services\Products\PhotoSourceNotice;
 use App\Services\Products\ProductCatalogIdentity;
 use App\Services\Products\ProductCondition;
@@ -167,9 +168,10 @@ class DraftTelegramPresenter
 
     public function sendControls(TelegramClient $telegram, string $chatId, ProductDraft $draft): array
     {
-        // The card is written in English (CatalogLocales::CONTENT_SOURCE);
-        // there is no Russian translation to prefer any more.
-        $description = trim((string) $draft->description);
+        // The card is written in English (CatalogLocales::CONTENT_SOURCE) and shown in the
+        // language the admin chose for Telegram when the bot made that translation
+        // (operator, 2026-11-01: English is the source, not what the operator reads).
+        $description = trim(CatalogLocales::cardText($draft->translations, 'description', $draft->description, CatalogLocales::telegramCardLocale()));
         // Truncate raw text before escaping; never cut an HTML entity/tag.
         $description = mb_substr($description, 0, 1800);
         while (strlen(htmlspecialchars($description, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8')) > 3500) {
@@ -697,7 +699,8 @@ class DraftTelegramPresenter
 
     public function sendDetails(TelegramClient $telegram, string $chatId, ProductDraft $draft): void
     {
-        $lines = ["📋 Черновик #{$draft->id}: {$draft->title}", (string) $draft->description];
+        $lines = ["📋 Черновик #{$draft->id}: {$draft->title}",
+            CatalogLocales::cardText($draft->translations, 'description', $draft->description, CatalogLocales::telegramCardLocale())];
         if (($photoNotice = $this->photoNotice($draft, false)) !== '') {
             $lines[] = 'ℹ️ '.$photoNotice;
         }

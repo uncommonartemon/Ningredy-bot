@@ -513,7 +513,7 @@ class DatabaseOperatorService
         }
         if (isset($values['translations'])) {
             foreach ($values['translations'] as $locale => $translation) {
-                $this->assert(array_key_exists($locale, CatalogLocales::CONTENT_TRANSLATIONS), 'translations', 'Язык перевода не поддерживается каталогом.');
+                $this->assert(array_key_exists($locale, CatalogLocales::TRANSLATION_OPTIONS), 'translations', 'Язык перевода не поддерживается каталогом.');
                 if (in_array($table, ['attribute_groups', 'attribute_definitions', 'attribute_values'], true)) {
                     $this->assert(is_string($translation), 'translations', 'Перевод названия/значения должен быть строкой.');
                 } else {

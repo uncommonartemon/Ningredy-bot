@@ -54,7 +54,7 @@ class TelegramCatalogEditor
                     }
                 }
                 $translations = $variant?->translations ?: ($product->translations ?? []);
-                foreach (array_keys(CatalogLocales::CONTENT_TRANSLATIONS) as $locale) {
+                foreach (array_keys(CatalogLocales::TRANSLATION_OPTIONS) as $locale) {
                     $translated = $attributes->filter(fn (AttributeValue $value): bool => filled(($value->translations ?? [])[$locale] ?? null))
                         ->map(fn (AttributeValue $value): array => [
                             'key' => $value->definition->key,

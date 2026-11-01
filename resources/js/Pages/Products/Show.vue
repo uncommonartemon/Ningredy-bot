@@ -9,7 +9,7 @@ import { backToCatalog } from '../../navigationTransitions';
 import '../../../css/product.css';
 
 const props = defineProps({ product: { type: Object, required: true } });
-const { locale, localeTag, t, categoryName, contentLocale, attributeLabel, attributeValue, attributeUnit, attributeGroupName } = useI18n();
+const { locale, localeTag, t, categoryName, translatedText, attributeLabel, attributeValue, attributeUnit, attributeGroupName } = useI18n();
 const requestedVariant = props.product.variants.findIndex((item) => item.id === props.product.selected_variant_id);
 const selectedVariant = ref(requestedVariant >= 0 ? requestedVariant : Math.max(0, props.product.variants.findIndex((item) => item.is_default)));
 const productCopy = {
@@ -37,10 +37,9 @@ const productCopy = {
 };
 const copy = computed(() => productCopy[locale.value] || productCopy.en);
 const variant = computed(() => props.product.variants[selectedVariant.value] || null);
-const translated = computed(() => ({ ...props.product.translations?.[contentLocale.value],
-    ...Object.fromEntries(Object.entries(variant.value?.translations?.[contentLocale.value] || {}).filter(([, value]) => value)) }));
-const title = computed(() => translated.value.title || props.product.title);
-const description = computed(() => translated.value.description || props.product.description);
+// A variant's own translation wins; then the product's; then the English source.
+const title = computed(() => translatedText(variant.value?.translations, 'title') || translatedText(props.product.translations, 'title') || props.product.title);
+const description = computed(() => translatedText(variant.value?.translations, 'description') || translatedText(props.product.translations, 'description') || props.product.description);
 const paragraphs = computed(() => (description.value || '').split(/\n\s*\n/).filter((part) => part.trim()));
 const conditionLabel = computed(() => variant.value?.condition ? t(`condition.${variant.value.condition}`, variant.value.condition) : null);
 const gallery = computed(() => {

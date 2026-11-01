@@ -3,6 +3,7 @@
 namespace App\Services\ProductSearch\Recovery;
 
 use App\Models\ProductDraft;
+use App\Services\Products\CatalogLocales;
 use App\Services\Products\ProductInputContext;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Validator;
@@ -258,17 +259,20 @@ final class CardRepairPatch
             return [];
         }
         $result = [];
-        $translated = $repair['base']['translations']['cs']['specifications'] ?? [];
-        foreach ($keys as $key) {
-            $index = array_search($key, array_column($translated, 'key'), true);
-            if ($index === false) {
-                $index = count($translated);
-                $translated[] = ['key' => $key];
+        $locales = array_keys(CatalogLocales::contentTranslations());
+        foreach ($locales as $locale) {
+            $translated = $repair['base']['translations'][$locale]['specifications'] ?? [];
+            foreach ($keys as $key) {
+                $index = array_search($key, array_column($translated, 'key'), true);
+                if ($index === false) {
+                    $index = count($translated);
+                    $translated[] = ['key' => $key];
+                }
+                $result["translations.{$locale}.specifications.".$key] = ['keys' => [$key], 'specification_key' => $key,
+                    'segments' => ['translations', $locale, 'specifications', $index]];
             }
-            $result['translations.cs.specifications.'.$key] = ['keys' => [$key], 'specification_key' => $key,
-                'segments' => ['translations', 'cs', 'specifications', $index]];
         }
-        foreach (['description', 'translations.cs.description'] as $path) {
+        foreach (['description', ...array_map(fn (string $locale): string => "translations.{$locale}.description", $locales)] as $path) {
             $result[$path] = ['keys' => $keys, 'kind' => 'prose', 'segments' => explode('.', $path),
                 'current_text' => data_get($repair['base'], $path)];
         }
