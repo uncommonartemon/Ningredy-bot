@@ -122,9 +122,10 @@ final class CatalogTextTranslator
         $items = [];
         $add = function (string $id, string $kind, ?string $text, array $missing, mixed $target) use (&$items): void {
             $text = trim((string) $text);
-            // A number with its unit ("16 GB", "2.8K") reads the same in every language: only a
-            // text with a word of three letters or more is sent.
-            if ($text !== '' && $missing !== [] && preg_match('/\p{L}{3,}/u', $text) === 1) {
+            // A number with its unit ("16 GB", "4400 MT/s", "CL46") reads the same in every
+            // language and is not sent; a text with a word in it is ("Up to 4400 MT/s", "No",
+            // "Supported" - live 2026-11-01 left "Up to" English on a Ukrainian page).
+            if ($text !== '' && $missing !== [] && preg_match('/\p{Ll}{2,}|\p{L}{4,}|\p{Lu}\p{Ll}/u', $text) === 1) {
                 $items[$id] = ['id' => $id, 'kind' => $kind, 'text' => $text, 'locales' => array_values($missing), 'target' => $target];
             }
         };

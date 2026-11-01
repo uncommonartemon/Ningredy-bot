@@ -160,7 +160,10 @@ class ProductSpecificationReconciliationAgent implements Agent, HasStructuredOut
             The card is written in English: title, model, color, description and every specification name
             and value. {{TRANSLATIONS}}
             Translate wording only: keep model codes, part numbers, numbers, units and qualifications exactly,
-            and never add or drop a fact. Keep each description concise, about 600-1000 characters.
+            and never add or drop a fact. Generic words inside a value are wording and are translated too
+            ("Supported", "Up to 4400 MT/s", "Yes", "Integrated" - live 2026-11-01 left them English on a
+            Czech page); brand and model names, codes and units are not. Keep each description concise,
+            about 600-1000 characters.
             Translations do not require another web search.
             Return reconciled when the whole card concerns the requested product, its explicit requirements
             are supported, and the gallery is exact or separately confirmed compatible. Do not restart photo
