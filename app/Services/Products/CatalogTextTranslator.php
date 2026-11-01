@@ -33,7 +33,9 @@ final class CatalogTextTranslator
         }
 
         return Product::query()->with(['variants.attributes.definition', 'attributes.definition'])->orderBy('id')->get()
-            ->filter(fn (Product $product): bool => $this->items($product, $locales) !== [])
+            ->filter(fn (Product $product): bool => $this->items($product, $locales) !== []
+                || $product->variants->contains(fn ($variant): bool => collect($locales)->contains(fn (string $locale): bool => collect(['title', 'description'])
+                    ->contains(fn (string $field): bool => filled($product->translations[$locale][$field] ?? null) && ! filled($variant->translations[$locale][$field] ?? null)))))
             ->pluck('id')->values()->all();
     }
 
@@ -44,7 +46,7 @@ final class CatalogTextTranslator
         $product->loadMissing(['variants.attributes.definition', 'attributes.definition']);
         $items = $this->items($product, array_keys($languages));
         if ($items === []) {
-            return 0;
+            return $this->mirrorIntoVariants($product, array_keys($languages));
         }
         $run = AiRun::query()->create([
             'provider' => $this->settings->providerFor('server_assistant'), 'model' => $this->settings->modelFor('server_assistant'),
@@ -74,7 +76,38 @@ final class CatalogTextTranslator
             }
         }
 
-        return $this->write($product, $items, $translated);
+        return $this->write($product, $items, $translated) + $this->mirrorIntoVariants($product->fresh(['variants']), array_keys($languages));
+    }
+
+    /**
+     * A variant's translations are the product's own text for that variant (the draft
+     * workflow copies the card's translations there; the storefront shows them over the
+     * product's). A variant missing a language takes the product's text in it - never a
+     * translation of its configuration name (live 2026-11-01: «Base configuration»
+     * translated into the title made every Ukrainian catalog card read «Базова конфігурація»).
+     *
+     * @param  array<int, string>  $locales
+     */
+    private function mirrorIntoVariants(Product $product, array $locales): int
+    {
+        $filled = 0;
+        foreach ($product->variants as $variant) {
+            $translations = $variant->translations ?? [];
+            foreach ($locales as $locale) {
+                foreach (['title', 'description'] as $field) {
+                    $text = $product->translations[$locale][$field] ?? null;
+                    if (filled($text) && ! filled($translations[$locale][$field] ?? null)) {
+                        $translations[$locale][$field] = $text;
+                        $filled++;
+                    }
+                }
+            }
+            if ($translations !== ($variant->translations ?? [])) {
+                $variant->update(['translations' => $translations]);
+            }
+        }
+
+        return $filled;
     }
 
     /**
@@ -99,9 +132,7 @@ final class CatalogTextTranslator
             fn (string $locale): bool => ! filled($translations[$locale][$field] ?? null)));
         $add('product.title', 'title', $product->title, $missingIn($product->translations, 'title'), $product);
         $add('product.description', 'description', $product->description, $missingIn($product->translations, 'description'), $product);
-        foreach ($product->variants as $variant) {
-            $add("variant.{$variant->id}.title", 'title', $variant->name, $missingIn($variant->translations, 'title'), $variant);
-        }
+
         /** @var Collection<int, AttributeValue> $values */
         $values = $product->attributes->concat($product->variants->flatMap->attributes);
         foreach ($values as $value) {
@@ -135,16 +166,7 @@ final class CatalogTextTranslator
         if ($productTranslations !== ($product->translations ?? [])) {
             $product->update(['translations' => $productTranslations]);
         }
-        foreach ($product->variants as $variant) {
-            $variantTranslations = $variant->translations ?? [];
-            foreach ($translated["variant.{$variant->id}.title"] ?? [] as $locale => $text) {
-                $variantTranslations[$locale]['title'] = $text;
-                $filled++;
-            }
-            if ($variantTranslations !== ($variant->translations ?? [])) {
-                $variant->update(['translations' => $variantTranslations]);
-            }
-        }
+
         foreach ($items as $id => $item) {
             if (! str_starts_with($id, 'value.') && ! str_starts_with($id, 'label.')) {
                 continue;

@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\Product;
 use App\Models\ProductMedia;
+use App\Models\ProductVariant;
 use App\Services\Catalog\AttributePresentation;
 use App\Services\Products\PhotoSourceNotice;
 use Illuminate\Http\Request;
@@ -66,6 +67,8 @@ class ProductController extends Controller
                 'variants' => $product->variants->map(fn ($variant) => [
                     'id' => $variant->id,
                     'name' => $variant->name,
+                    // The default configuration's stored name is Russian; the shop names it in its own language.
+                    'is_base_configuration' => $variant->name === ProductVariant::DEFAULT_NAME,
                     'sku' => $variant->sku,
                     'mpn' => $variant->mpn,
                     'gtin' => $variant->gtin,

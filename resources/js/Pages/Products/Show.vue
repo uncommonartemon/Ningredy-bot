@@ -17,29 +17,32 @@ const productCopy = {
         back: 'До каталогу', details: 'Дані товару', specifications: 'Характеристики', description: 'Про товар',
         model: 'Модель', category: 'Категорія', type: 'Тип', country: 'Країна бренду', color: 'Колір',
         condition: 'Стан', warranty: 'Гарантія', months: 'міс.', quantity: 'Кількість',
-        configuration: 'Комплектація', highlights: 'Коротко про головне', allSpecs: 'Усі характеристики',
+        configuration: 'Комплектація', baseConfiguration: 'Базова комплектація', highlights: 'Коротко про головне', allSpecs: 'Усі характеристики',
         onPage: 'На цій сторінці', skip: 'До інформації про товар',
     },
     cs: {
         back: 'Zpět do katalogu', details: 'Údaje o produktu', specifications: 'Specifikace', description: 'O produktu',
         model: 'Model', category: 'Kategorie', type: 'Typ', country: 'Země značky', color: 'Barva',
         condition: 'Stav', warranty: 'Záruka', months: 'měs.', quantity: 'Množství',
-        configuration: 'Konfigurace', highlights: 'To nejdůležitější', allSpecs: 'Všechny specifikace',
+        configuration: 'Konfigurace', baseConfiguration: 'Základní konfigurace', highlights: 'To nejdůležitější', allSpecs: 'Všechny specifikace',
         onPage: 'Na této stránce', skip: 'Přejít k informacím o produktu',
     },
     en: {
         back: 'Back to catalog', details: 'Product details', specifications: 'Specifications', description: 'About this product',
         model: 'Model', category: 'Category', type: 'Type', country: 'Brand country', color: 'Color',
         condition: 'Condition', warranty: 'Warranty', months: 'months', quantity: 'Quantity',
-        configuration: 'Configuration', highlights: 'At a glance', allSpecs: 'All specifications',
+        configuration: 'Configuration', baseConfiguration: 'Base configuration', highlights: 'At a glance', allSpecs: 'All specifications',
         onPage: 'On this page', skip: 'Skip to product information',
     },
 };
 const copy = computed(() => productCopy[locale.value] || productCopy.en);
 const variant = computed(() => props.product.variants[selectedVariant.value] || null);
-// A variant's own translation wins; then the product's; then the English source.
-const title = computed(() => translatedText(variant.value?.translations, 'title') || translatedText(props.product.translations, 'title') || props.product.title);
-const description = computed(() => translatedText(variant.value?.translations, 'description') || translatedText(props.product.translations, 'description') || props.product.description);
+// The visitor's language from the variant or the product, then the main shop language
+// from either, then the English source.
+const title = computed(() => translatedText([variant.value?.translations, props.product.translations], 'title') || props.product.title);
+const description = computed(() => translatedText([variant.value?.translations, props.product.translations], 'description') || props.product.description);
+// The default configuration has no name of its own: it is named in the visitor's language.
+const variantName = (item) => (item?.is_base_configuration ? copy.value.baseConfiguration : item?.name);
 const paragraphs = computed(() => (description.value || '').split(/\n\s*\n/).filter((part) => part.trim()));
 const conditionLabel = computed(() => variant.value?.condition ? t(`condition.${variant.value.condition}`, variant.value.condition) : null);
 const gallery = computed(() => {
@@ -131,10 +134,10 @@ const jumpTo = (id) => {
                         <legend>{{ copy.configuration }}</legend>
                         <label v-for="(item, index) in product.variants" :key="item.id" :class="{ active: selectedVariant === index }">
                             <input v-model="selectedVariant" type="radio" name="product-variant" :value="index" @change="selectVariant" />
-                            <span>{{ item.name || item.sku || item.color || `#${item.id}` }}</span><span class="product-show__variant-check" aria-hidden="true">✓</span>
+                            <span>{{ variantName(item) || item.sku || item.color || `#${item.id}` }}</span><span class="product-show__variant-check" aria-hidden="true">✓</span>
                         </label>
                     </fieldset>
-                    <div v-else-if="variant?.name" class="product-show__configuration"><span>{{ copy.configuration }}</span><strong>{{ variant.name }}</strong></div>
+                    <div v-else-if="variantName(variant)" class="product-show__configuration"><span>{{ copy.configuration }}</span><strong>{{ variantName(variant) }}</strong></div>
                     <div v-if="variant?.sku || variant?.warranty_months" class="product-show__offer-meta"><span v-if="variant?.sku">SKU <b>{{ variant.sku }}</b></span><span v-if="variant?.warranty_months">{{ copy.warranty }} <b>{{ variant.warranty_months }} {{ copy.months }}</b></span></div>
                 </section>
                 <section v-if="highlights.length" class="product-show__highlights" :aria-label="copy.highlights">

@@ -11,6 +11,7 @@ use App\Models\AttributeDefinition;
 use App\Models\Category;
 use App\Models\Product;
 use App\Models\ProductDraft;
+use App\Models\ProductVariant;
 use App\Models\TelegramUpdate;
 use App\Models\User;
 use App\Services\Products\CatalogLocales;
@@ -91,6 +92,15 @@ class CatalogLanguagesTest extends TestCase
             ->etc());
     }
 
+    public function test_the_default_configuration_is_named_by_the_shop_not_by_its_stored_russian_name(): void
+    {
+        $product = $this->product();
+
+        $this->get(route('products.show', $product))->assertOk()->assertInertia(fn (Assert $page) => $page
+            ->where('product.variants.0.is_base_configuration', true)
+            ->etc());
+    }
+
     public function test_missing_translations_are_filled_and_existing_ones_are_kept(): void
     {
         $product = $this->product();
@@ -122,6 +132,14 @@ class CatalogLanguagesTest extends TestCase
         $this->assertNotContains('value.'.$product->attributes()->where('value', '16 GB')->value('id'), $ids);
         $this->assertGreaterThan(0, $filled);
         $this->assertDatabaseHas('ai_runs', ['status' => 'completed']);
+
+        // Live 2026-11-01: a variant's translations are the product's text for that variant, never a
+        // translation of its configuration name (every Ukrainian card read «Базова конфігурація»).
+        $variant = $product->variants()->sole();
+        $this->assertSame('UK: Lenovo ThinkPad E14 laptop', $variant->translations['uk']['title']);
+        $this->assertSame('Ruční název', $variant->translations['cs']['title']);
+        $this->assertSame('CS: Fast laptop for work.', $variant->translations['cs']['description']);
+        $this->assertNotContains('variant.'.$variant->id.'.title', $ids);
 
         // Nothing is missing any more: no second paid call.
         $this->assertSame([], app(CatalogTextTranslator::class)->pendingProductIds());
@@ -167,6 +185,9 @@ class CatalogLanguagesTest extends TestCase
         $ram = AttributeDefinition::query()->where('key', 'ram')->firstOrFail();
         $product->attributes()->create(['attribute_definition_id' => $cpu->id, 'value' => 'Intel Core i5', 'normalized_value' => 'intel core i5']);
         $product->attributes()->create(['attribute_definition_id' => $ram->id, 'value' => '16 GB', 'normalized_value' => '16 gb']);
+        // The draft workflow gives a card's only configuration this name and the card's own translations.
+        $product->variants()->create(['name' => ProductVariant::DEFAULT_NAME, 'currency' => 'CZK', 'is_default' => true, 'is_active' => true,
+            'translations' => ['cs' => ['title' => 'Ruční název']]]);
 
         return $product;
     }
