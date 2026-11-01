@@ -8,6 +8,11 @@ use Throwable;
 
 class AiErrorPresenter
 {
+    /** The provider closed the request without reading it: the truth, and the one step that can change it. */
+    public const PROVIDER_UNREAD = 'OpenAI закрыл запрос поиска, не прочитав его: 0 токенов, пустой ответ. Товар тут ни при чём, и повтор не поможет — '
+        .'причина на стороне аккаунта OpenAI (уровень доступа, лимиты, веб-поиск) или сети этого компьютера. '
+        .'Проверьте ключ и лимиты в админке: «Настройки → AI», или попробуйте другой ключ.';
+
     public function present(Throwable|string|null $error, ?int $reference = null): array
     {
         $raw = mb_strtolower($error instanceof Throwable ? $error->getMessage() : (string) $error);
@@ -22,6 +27,10 @@ class AiErrorPresenter
         $classificationText = trim($raw.' '.mb_strtolower($providerDetail));
 
         return match (true) {
+            str_contains($raw, 'provider_unread') => [
+                'kind' => 'provider_unread',
+                'retryable' => false, 'message' => self::PROVIDER_UNREAD.$suffix,
+            ],
             str_contains($classificationText, 'insufficient_quota'), str_contains($classificationText, 'billing'), str_contains($classificationText, 'credit'), str_contains($classificationText, 'quota') => [
                 'kind' => 'provider_quota',
                 'retryable' => false, 'message' => 'У AI-провайдера закончилась квота или средства. Пополните баланс/лимит и повторите запрос.'.$suffix,

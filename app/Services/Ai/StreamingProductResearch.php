@@ -147,6 +147,16 @@ class StreamingProductResearch
         if (($evidence['response_status'] ?? '') === 'failed') {
             throw new InvalidResearchResponse('provider_failed', $evidence, $usage, $invocationId, recoverable: false);
         }
+        // The provider closed the response without reading the request: no input token, no
+        // output, nothing streamed. A repair asks the same of the same account and gets the
+        // same (live, 2026-11-01: four searches on another machine, eight identical one-second
+        // "incomplete" answers; the same prompt ran in 75 s on our account). The product is
+        // not the cause, and the operator is told so instead of "the reason is not logged".
+        if (($evidence['response_status'] ?? 'completed') !== 'completed' && is_array($usage)
+            && (int) ($usage['prompt_tokens'] ?? -1) === 0 && (int) ($usage['completion_tokens'] ?? -1) === 0
+            && trim($text) === '' && ($evidence['output_items'] ?? []) === []) {
+            throw new InvalidResearchResponse('provider_unread', $evidence, $usage, $invocationId, recoverable: false);
+        }
         if (! $step instanceof StepResponse
             || $step->finishReason !== FinishReason::Stop
             || (array_key_exists('response_status', $evidence) && $evidence['response_status'] !== 'completed')) {
