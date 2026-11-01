@@ -20,6 +20,7 @@ use App\Models\ProductSourceDomain;
 use App\Models\TelegramUpdate;
 use App\Models\User;
 use App\Services\Maintenance\CatalogCleanupService;
+use Database\Seeders\StarterCatalogSeeder;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Cache;
@@ -175,14 +176,36 @@ class CatalogCleanupServiceTest extends TestCase
         $this->assertSame(1, $plan['counts']['product_gallery_recipes']);
         $this->assertSame(1, $plan['effects']['preserved_blocked_domains']);
         $this->service()->execute($plan, $actor);
-        foreach (['attribute_values', 'attribute_definitions', 'attribute_groups', 'categories', 'brands', 'product_gallery_recipe_versions'] as $table) {
+        foreach (['attribute_values', 'attribute_groups', 'brands', 'product_gallery_recipe_versions'] as $table) {
             $this->assertDatabaseCount($table, 0);
         }
+        // Live 2026-11-01: a cleanup that left no category made every product search die in
+        // one second. The starter categories and characteristics come back at once, and
+        // nothing of what was deleted survives under its old identity.
+        $this->assertSame(array_keys(StarterCatalogSeeder::CATEGORIES), Category::query()->orderBy('sort_order')->pluck('slug')->all());
+        $this->assertSame(0, Category::query()->whereIn('id', $plan['tables']['categories']['ids'] ?? [])->count());
+        $this->assertSame(7, AttributeDefinition::query()->count());
         $this->assertModelExists($blocked);
         $this->assertTrue($blocked->fresh()->source_blocked);
         $this->assertModelExists($data['attempt']);
         $this->assertNull($data['attempt']->fresh()->product_gallery_recipe_version_id);
         $this->assertModelExists($data['run']);
+    }
+
+    public function test_the_starter_catalog_adds_only_what_is_missing_and_never_edits(): void
+    {
+        Category::query()->where('slug', 'laptops')->update(['name' => 'Ноутбуки (наши)', 'minimum_verified_images' => 5]);
+        Category::query()->where('slug', 'other-tech')->delete();
+        $before = Category::query()->count();
+
+        app(StarterCatalogSeeder::class)->run();
+        app(StarterCatalogSeeder::class)->run();
+
+        $this->assertSame($before + 1, Category::query()->count());
+        $this->assertDatabaseHas('categories', ['slug' => 'laptops', 'name' => 'Ноутбуки (наши)', 'minimum_verified_images' => 5]);
+        $this->assertDatabaseHas('categories', ['slug' => 'other-tech', 'is_active' => true, 'product_type_affinity' => 'other']);
+        $otherTech = Category::query()->where('slug', 'other-tech')->value('id');
+        $this->assertSame(7, DB::table('attribute_definition_category')->where('category_id', $otherTech)->count());
     }
 
     public function test_attribute_and_group_presets_have_distinct_explicit_effects(): void

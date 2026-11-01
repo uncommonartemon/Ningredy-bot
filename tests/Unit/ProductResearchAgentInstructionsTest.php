@@ -77,6 +77,17 @@ class ProductResearchAgentInstructionsTest extends TestCase
         );
     }
 
+    public function test_the_category_list_of_the_schema_is_never_empty(): void
+    {
+        // Live 2026-11-01: a cleanup removed every category; the schema's category enum was
+        // empty, no answer could satisfy it, and OpenAI closed every search unread.
+        Category::query()->update(['is_active' => false]);
+
+        $schema = app(ProductResearchAgent::class)->schema(new JsonSchemaTypeFactory);
+
+        $this->assertSame(['laptops', 'computers', 'components', 'other-tech'], $schema['category']->toArray()['enum']);
+    }
+
     public function test_category_prompt_and_schema_use_only_current_active_categories(): void
     {
         Category::query()->create([

@@ -74,7 +74,7 @@ class CatalogMaintenance extends LocalizedPage implements HasForms
                 ->description(__('Эти параметры действуют только для кнопки «Общая очистка для тестов». Состав будет показан перед удалением.'))
                 ->schema([
                     Checkbox::make('dictionaries')->label(__('Очистить также справочники'))
-                        ->helperText(__('Определения и группы характеристик, категории и бренды.'))->default(false)->live(),
+                        ->helperText(__('Определения и группы характеристик, категории и бренды. Стартовые категории и характеристики сразу создаются заново: без категорий поиск товара не работает.'))->default(false)->live(),
                     Checkbox::make('recipes_history')->label(__('Очистить также обучение источников'))
                         ->hintIcon('heroicon-o-question-mark-circle', tooltip: __('Рецепты, версии, статистика и автоматические правила страниц. Блокировки источников и аудит сохраняются.'))->default(false)->live(),
                 ]),

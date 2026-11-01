@@ -24,6 +24,7 @@ use App\Models\ProductSourceStat;
 use App\Models\ProductVariant;
 use App\Models\TelegramUpdate;
 use App\Models\User;
+use Database\Seeders\StarterCatalogSeeder;
 use Filament\Facades\Filament;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Support\Facades\Cache;
@@ -156,6 +157,12 @@ class CatalogCleanupService
                     foreach ($this->deleteTables($plan['preset'], $plan['options']) as $table) {
                         $ids = $plan['tables'][$table]['ids'] ?? [];
                         $deleted[$table] = $this->deleteRows($table, $ids);
+                    }
+                    // A clean catalog still sorts products into categories: without one the
+                    // product search cannot answer at all (live 2026-11-01). The starter
+                    // categories and characteristics come back in the same transaction.
+                    if ($plan['options']['dictionaries'] ?? false) {
+                        app(StarterCatalogSeeder::class)->run();
                     }
                     $result = ['status' => 'completed', 'operation_id' => $operation->id, 'preset' => $plan['preset'],
                         'deleted' => $deleted, 'preserved' => self::PRESERVED, 'effects' => $plan['effects']];

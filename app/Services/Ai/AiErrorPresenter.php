@@ -9,9 +9,8 @@ use Throwable;
 class AiErrorPresenter
 {
     /** The provider closed the request without reading it: the truth, and the one step that can change it. */
-    public const PROVIDER_UNREAD = 'OpenAI закрыл запрос поиска, не прочитав его: 0 токенов, пустой ответ. Товар тут ни при чём, и повтор не поможет — '
-        .'причина на стороне аккаунта OpenAI (уровень доступа, лимиты, веб-поиск) или сети этого компьютера. '
-        .'Проверьте ключ и лимиты в админке: «Настройки → AI», или попробуйте другой ключ.';
+    public const PROVIDER_UNREAD = 'OpenAI закрыл запрос поиска, не прочитав его: 0 токенов, пустой ответ. Товар тут ни при чём, и повтор не поможет. '
+        .'Откройте в админке «Состояние»: там видно, чего не хватает этому компьютеру — справочников (категорий), ключа OpenAI или связи.';
 
     public function present(Throwable|string|null $error, ?int $reference = null): array
     {
