@@ -123,7 +123,8 @@ final class ProductCodeLookup
      */
     private function icecatQuery(array $query, string $code, ?string $brand, ?int $updateId, string $caller): array
     {
-        $username = (string) config('services.icecat.username');
+        // The admin's login outranks ICECAT_USERNAME in .env («Настройки → Базы по кодам»).
+        $username = (string) CodeDatabases::icecatUsername();
         if ($username === '') {
             return $this->outcome('icecat', $code, 'not_configured', [], $updateId, $caller);
         }

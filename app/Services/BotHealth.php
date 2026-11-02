@@ -6,6 +6,7 @@ use App\Models\AiRun;
 use App\Models\Category;
 use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
+use App\Services\ProductSearch\Codes\CodeDatabases;
 use App\Services\Telegram\TelegramClient;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
@@ -35,7 +36,30 @@ class BotHealth
             $this->webhook(),
             $this->lastSearch(),
             $this->dictionaries(),
+            $this->codeDatabases(),
         ];
+    }
+
+    /**
+     * Icecat answers most product lookups by code for free; without its login the bot
+     * silently searches the web for what one call would give (live 2026-11-02: another
+     * machine had never had ICECAT_USERNAME, and every lookup said "not configured").
+     *
+     * @return array{key: string, label: string, state: string, detail: string, hint: string}
+     */
+    private function codeDatabases(): array
+    {
+        $source = CodeDatabases::icecatUsernameSource();
+        if ($source === null) {
+            return $this->result('code_databases', 'Базы по кодам', 'down',
+                'Icecat не подключён: бот ищет по кодам только в интернете, без бесплатной базы характеристик и фото.',
+                'Зарегистрируйтесь бесплатно в Open Icecat и впишите логин: «Настройки → Базы по кодам».');
+        }
+        $found = (int) (CodeDatabases::stats()['icecat']['found'] ?? 0);
+        $total = array_sum(CodeDatabases::stats()['icecat'] ?? []);
+
+        return $this->result('code_databases', 'Базы по кодам', 'up',
+            'Icecat подключён (логин '.($source === 'admin' ? 'из админки' : 'из .env').'). За 7 дней найдено '.$found.' из '.$total.' запросов.', '');
     }
 
     /**
