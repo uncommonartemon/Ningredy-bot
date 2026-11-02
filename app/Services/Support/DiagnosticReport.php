@@ -9,6 +9,7 @@ use App\Models\ProductDraft;
 use App\Models\ProductGalleryRecipe;
 use App\Models\ProductSourceAttempt;
 use App\Models\TelegramUpdate;
+use App\Services\ProductSearch\Codes\CodeDatabases;
 use App\Services\ProductSearch\SearchJournal;
 use Illuminate\Database\Connection;
 use Illuminate\Database\Eloquent\Builder;
@@ -116,7 +117,7 @@ final class DiagnosticReport
         $hasSettings = $copy->query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'app_settings'")?->fetchColumn();
         if ($hasSettings) {
             $copy->exec("UPDATE app_settings SET value = '' WHERE key LIKE 'ai.keys.%' OR key LIKE '%token%' OR key LIKE '%secret%'"
-                ." OR key LIKE '%password%' OR key LIKE '%api_key%' OR key LIKE '%proxy%'");
+                ." OR key LIKE '%password%' OR key LIKE '%api_key%' OR key LIKE '%proxy%' OR key LIKE '%username%'");
         }
         $copy = null;
 
@@ -322,7 +323,7 @@ final class DiagnosticReport
         if ($this->secrets !== null) {
             return $this->secrets;
         }
-        $values = [config('services.telegram.bot_token'), config('services.icecat.username')];
+        $values = [config('services.telegram.bot_token'), config('services.icecat.username'), CodeDatabases::icecatUsername()];
         foreach ((array) config('ai.providers', []) as $provider) {
             $values[] = is_array($provider) ? ($provider['key'] ?? null) : null;
         }
