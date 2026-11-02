@@ -8,8 +8,10 @@ use App\Models\AttributeDefinition;
 use App\Models\AttributeGroup;
 use App\Models\AttributeValue;
 use App\Models\Brand;
+use App\Models\BrandCatalog;
 use App\Models\Category;
 use App\Models\CategoryTranslation;
+use App\Models\ImageRenditionRule;
 use App\Models\Product;
 use App\Models\ProductDraft;
 use App\Models\ProductDraftMedia;
@@ -23,6 +25,7 @@ use App\Models\ProductSourcePageEvidence;
 use App\Models\ProductSourcePageRule;
 use App\Models\ProductSourceStat;
 use App\Models\ProductVariant;
+use App\Models\ReferenceSite;
 use App\Models\TelegramUpdate;
 use App\Services\Products\CatalogEditRevision;
 use App\Services\Products\CatalogLocales;
@@ -123,6 +126,25 @@ class DatabaseOperatorService
             'product_source_domains' => ['model' => ProductSourceDomain::class, 'writable' => [
                 'domain' => 'required|string|max:255', 'agent_hint' => 'nullable|string|max:20000',
             ]],
+            // The search's reference data is the operator's to change from the chat as well
+            // (operator, 2026-11-02: «сделать гибким бота в телеграме, чтобы он всё мог делать с бд по запросу»).
+            'reference_sites' => ['model' => ReferenceSite::class, 'writable' => [
+                'domain' => 'required|string|max:255', 'applies_to' => 'required|string|max:500',
+                'use_for_facts' => $bool, 'use_for_photos' => $bool, 'access' => [Rule::in(ReferenceSite::ACCESS)],
+                'search_hint' => 'nullable|string|max:500', 'link_template' => 'nullable|string|max:1024',
+                'instructions' => 'nullable|string|max:2000', 'sort_order' => $order, 'enabled' => $bool,
+            ]],
+            'brand_catalogs' => ['model' => BrandCatalog::class, 'writable' => [
+                'brand' => 'required|string|max:100', 'aliases' => 'nullable|array', 'catalog_url' => 'nullable|url:http,https|max:1024',
+                'search_hint' => 'nullable|string|max:500', 'lookup_template' => 'nullable|string|max:1024',
+                'api_template' => 'nullable|string|max:1024', 'response_map' => 'nullable|array',
+                'instructions' => 'nullable|string|max:2000', 'enabled' => $bool,
+            ]],
+            // A rule is a regular expression the agent learns and checks on examples:
+            // the chat switches it on or off and annotates it, never rewrites it.
+            'image_rendition_rules' => ['model' => ImageRenditionRule::class, 'create' => false, 'delete' => false,
+                'action_reason' => 'Правила фото создаёт и проверяет агент по примерам; из чата их можно включать, выключать, переставлять и подписывать.',
+                'writable' => ['status' => 'in:active,disabled', 'position' => $order, 'note' => 'nullable|string|max:2000']],
         ];
         foreach ([
             'product_gallery_recipes' => ProductGalleryRecipe::class,
@@ -219,7 +241,7 @@ class DatabaseOperatorService
             $this->assert(is_string($table) && in_array($action, ['create', 'update', 'delete'], true), 'commands', 'Неизвестная таблица или действие.');
             $entry = $this->entry($table);
             $this->assert($entry['writable'] !== [], 'table', $entry['reason'] ?? self::SYSTEM_REASON);
-            $this->assert(($entry[$action] ?? true) !== false, 'action', 'Создание фотографий выполняется инструментом загрузки/поиска с проверкой файла.');
+            $this->assert(($entry[$action] ?? true) !== false, 'action', $entry['action_reason'] ?? 'Создание фотографий выполняется инструментом загрузки/поиска с проверкой файла.');
             $values = $command['values'] ?? [];
             $this->assert(is_array($values) && ($values === [] || ! array_is_list($values)), 'values', 'values должен быть объектом полей.');
             $this->assert($action !== 'delete' || $values === [], 'values', 'Удаление не принимает значения полей.');
@@ -502,6 +524,7 @@ class DatabaseOperatorService
                 'category_translations' => ['category_id', 'locale', 'name'],
                 'attribute_definitions' => ['label'], 'attribute_groups', 'categories', 'brands' => ['name'],
                 'product_sources' => ['product_id', 'title', 'url'], 'product_source_domains' => ['domain'], 'product_drafts' => ['title'],
+                'reference_sites' => ['domain', 'applies_to'], 'brand_catalogs' => ['brand'],
                 default => [],
             };
             foreach ($required as $column) {

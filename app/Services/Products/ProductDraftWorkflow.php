@@ -52,6 +52,22 @@ class ProductDraftWorkflow
         }
     }
 
+    /**
+     * Specifications added to a published product (the assistant's «допиши в
+     * товар», operator 2026-11-02): written the way an approved card writes them,
+     * shared by the product's configurations unless the key belongs to one.
+     * Leaving out what the product already has is the caller's decision.
+     *
+     * @param  list<array{key: string, name: string, value: string}>  $specifications
+     */
+    public function addSpecifications(Product $product, array $specifications): void
+    {
+        $variant = $product->defaultVariant()->first() ?? $product->variants()->orderBy('id')->first();
+        $category = $product->category()->first();
+        throw_if($variant === null || $category === null, \RuntimeException::class, 'У товара нет конфигурации или категории.');
+        $this->syncAttributes($product, $variant, $category, $specifications);
+    }
+
     private function assertReadyForApproval(ProductDraft $draft, bool $acceptUnreconciled = false): void
     {
         throw_unless($draft->status === 'pending_review', \RuntimeException::class, 'Черновик уже обработан.');

@@ -7,7 +7,9 @@ use App\Ai\Tools\Concerns\RecordsOperations;
 use App\Jobs\ContinueDraftGallerySearch;
 use App\Models\AiRun;
 use App\Models\AttributeDefinition;
+use App\Models\AttributeValue;
 use App\Models\Category;
+use App\Models\Product;
 use App\Models\ProductDraft;
 use App\Models\ProductSourceAttempt;
 use App\Models\ProductSourcePageEvidence;
@@ -34,6 +36,7 @@ use App\Services\Products\ProductSourcePriority;
 use App\Services\Products\ProductTextEvidenceContract;
 use App\Services\Products\SourceIdentityProvenance;
 use App\Services\ProductSearch\Catalogs\BrandCatalogs;
+use App\Services\ProductSearch\Catalogs\ReferenceSites;
 use App\Services\ProductSearch\Codes\ProductCodeLookup;
 use App\Services\ProductSearch\Research\InvalidResearchResponse;
 use App\Services\ProductSearch\Research\RecoverableProductResearch;
@@ -190,6 +193,9 @@ class ResearchProduct implements Tool
         // how a code is found there. Icecat, when it answered, keeps its priority.
         $brandCatalogs = app(BrandCatalogs::class);
         $catalogHints = $brandCatalogs->hints($brandCatalogs->forText($query), BrandCatalogs::codesIn($query));
+        // The operator's reference sites per kind of product: the agent decides which fit.
+        $referenceSites = app(ReferenceSites::class);
+        $referenceHints = $referenceSites->hints(BrandCatalogs::codesIn($query));
         $researchPrompt = $query
             .PHP_EOL.'Input provenance and prioritized search alternatives (observations are not additional mandatory requirements): '
             .json_encode($inputContext, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
@@ -208,6 +214,11 @@ class ResearchProduct implements Tool
                 .json_encode($catalogHints, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
                 .'. Look the exact code up there first, with the search given, and list the page you find among the sources'
                 .' as the manufacturer\'s page; structured database results above, when present, still come first.')
+            .($referenceHints === [] ? '' : PHP_EOL.'Reference sites the operator keeps for particular kinds of products ("for" says which, "take" what they may supply): '
+                .json_encode($referenceHints, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
+                .'. When the product is of a listed kind, look its exact code or model up on those sites with the search given, and list each page'
+                .' you find among the sources with only the roles "take" allows: a facts-only site never supplies photos. A page there must still'
+                .' show the selected code or full model like any source. Report every listed site you considered in reference_site_results.')
             .($vocabulary === '' ? '' : PHP_EOL.'Specification keys this catalog already uses: '.$vocabulary
                 .'. Give a specification one of these keys when it means the same thing; a new snake_case key only'
                 .' for a concept not on the list. Two keys for one thing split the storefront filter in two.');
@@ -367,6 +378,9 @@ class ResearchProduct implements Tool
                 $codeLookup->recordVerdict($this->update->id, (string) ($data['code_lookup_verdict']['decision'] ?? ''),
                     (string) ($data['code_lookup_verdict']['reason'] ?? ''), 'product_research');
             }
+            if ($referenceHints !== []) {
+                $referenceSites->record(array_values((array) ($data['reference_site_results'] ?? [])), $this->update->id);
+            }
             $officialGallery = $data['status'] === 'found' ? $this->officialGallery($codeLookup, $data, $queryGtins) : null;
             if ($officialGallery !== null) {
                 // The agent may list the same datasheet page itself (it saw it in the hint) as a
@@ -513,12 +527,20 @@ class ResearchProduct implements Tool
                     report($exception);
                 }
 
+                // Live 2026-11-02: research found an SSD's speeds, the product already
+                // existed, and the found facts were dropped here; the operator who had
+                // asked for exactly those speeds was told the page had no numbers.
+                $foundSpecifications = $this->specificationsMissingFrom($existingProduct, $data['specifications'] ?? []);
+
                 return $this->json([
                     'ok' => true,
                     'status' => 'already_in_catalog',
                     'product_id' => $existingProduct->id,
                     'title' => $existingProduct->title,
                     'active' => $existingProduct->is_active,
+                    'found_specifications' => $foundSpecifications,
+                    ...($foundSpecifications === [] ? [] : ['message' => 'found_specifications — характеристики со страниц, которых в товаре нет.'
+                        .' Если оператор просил их дописать, передай нужные в AddProductSpecifications (facts_json, как есть): повторный поиск не нужен.']),
                 ]);
             }
 
@@ -831,6 +853,9 @@ class ResearchProduct implements Tool
             'code_lookup_verdict' => ['sometimes', 'nullable', 'array'],
             'code_lookup_verdict.decision' => ['required_with:code_lookup_verdict', 'in:used,ignored,not_applicable'],
             'code_lookup_verdict.reason' => ['required_with:code_lookup_verdict', 'string', 'max:500'],
+            'reference_site_results' => ['sometimes', 'array', 'max:20'],
+            'reference_site_results.*.site' => ['required', 'string', 'max:255'],
+            'reference_site_results.*.result' => ['required', 'in:found,not_found,not_applicable'],
             'unconfirmed_operator_codes.*' => ['string', 'max:100'],
             'request_differences' => ['sometimes', 'array', 'max:10'],
             'request_differences.*' => ['array:requirement,requested,found,evidence'],
@@ -875,6 +900,11 @@ class ResearchProduct implements Tool
                 throw ValidationException::withMessages(["sources.{$index}.roles" => 'A photo candidate cannot be both exact and a different potentially compatible configuration. Keep the observed source and choose its actual candidate role; neither role verifies the gallery.']);
             }
         }
+        // What the operator's reference sites forbid is kept by the server, not left to the prompt:
+        // a facts-only site gives no photos, a site only a person opens is not queued at all.
+        $referenceSites = app(ReferenceSites::class);
+        $data['sources'] = $referenceSites->restrictRoles($data['sources']);
+        $data['image_urls'] = array_values(array_filter($data['image_urls'], fn (string $url): bool => $referenceSites->allowsPhotos($url)));
 
         if ($data['status'] === 'unresolved') {
             // Live #197: the operator's label code was on no page, sibling regional
@@ -1080,6 +1110,26 @@ class ResearchProduct implements Tool
         }
 
         return ProductResearchConfigurationGuard::containsTokens($title, $model);
+    }
+
+    /**
+     * Researched specifications the catalog product does not have yet, each with the
+     * page and quotation it came from.
+     *
+     * @param  list<array<string, mixed>>  $specifications
+     * @return list<array<string, mixed>>
+     */
+    private function specificationsMissingFrom(Product $product, array $specifications): array
+    {
+        $known = AttributeValue::query()
+            ->where(fn ($query) => $query->where('product_id', $product->id)->orWhereIn('product_variant_id', $product->variants()->pluck('id')))
+            ->with('definition:id,key')->get()->pluck('definition.key')->filter()->all();
+
+        return collect($specifications)
+            ->filter(fn (mixed $spec): bool => is_array($spec) && filled($spec['source_url'] ?? null) && filled($spec['source_excerpt'] ?? null)
+                && ! in_array($spec['key'] ?? null, $known, true))
+            ->map(fn (array $spec): array => array_intersect_key($spec, array_flip(['key', 'name', 'value', 'source_url', 'source_excerpt'])))
+            ->take(40)->values()->all();
     }
 
     private function primarySource(array $sources): ?array

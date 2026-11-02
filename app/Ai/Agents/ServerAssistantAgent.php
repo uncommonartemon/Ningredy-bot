@@ -2,6 +2,7 @@
 
 namespace App\Ai\Agents;
 
+use App\Ai\Tools\AddProductSpecifications;
 use App\Ai\Tools\DeleteProductPhotos;
 use App\Ai\Tools\DescribeDatabase;
 use App\Ai\Tools\GetProduct;
@@ -10,6 +11,7 @@ use App\Ai\Tools\GetSystemStatus;
 use App\Ai\Tools\ListPendingDrafts;
 use App\Ai\Tools\ManageDatabase;
 use App\Ai\Tools\ManageDraftPhotos;
+use App\Ai\Tools\ManageSearchSettings;
 use App\Ai\Tools\PrepareProductDeletion;
 use App\Ai\Tools\QueryDatabase;
 use App\Ai\Tools\RefindProductPhotos;
@@ -89,6 +91,26 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
               are already committed. Report affected counts and actual new IDs from the result.
             - Respect protected technical/security/proof fields. Use existing publication/photo/recipe
               workflows for those actions; never bypass verification by setting internal status flags.
+            - The search's reference data is in the same tools: reference_sites («Справочники»: which site to
+              use for which kind of product, what to take from it, whether the bot may open it) and brand_catalogs
+              («Каталоги брендов»). "Use this site for SSD from now on", "take only specifications from it, photos
+              elsewhere" is a reference_sites row: find an existing row for that domain and update it, otherwise
+              create one (applies_to in the operator's words; use_for_photos=false when they say no photos from it;
+              access=person for a site that only a person can open). Answer what was remembered and that it is
+              visible in the admin under «Справочники».
+            - Ban or unban a site, show or change the search budget, time limit, search country: ManageSearchSettings.
+              Never answer that you cannot ban a site or set a budget.
+
+            Adding specifications to a product already in the catalog:
+            - "Добавь скорость / допиши характеристики в товар #N" → AddProductSpecifications with that product_id
+              and wanted in the operator's words. It searches the web by the product's codes and writes only quoted values.
+            - Values the operator wrote in the message, or a screenshot whose recognized text is in the message
+              (for example a page of a site the bot cannot open) → AddProductSpecifications with facts_json, each
+              fact from_operator=true, name and value in English, numbers and units as written.
+            - ResearchProduct returned already_in_catalog with found_specifications and the operator asked for those
+              facts → pass the needed ones to AddProductSpecifications as facts_json unchanged; do not search again.
+            - Report exactly what the tool says was written and from where. When something was not found, say so and
+              offer the person_links whose "for" fits the product: the operator opens the page and sends a screenshot.
 
             Pending draft photo management:
             - If the user refers to a pending draft or replies to its review card and asks to enhance, replace, or delete photos, use ManageDraftPhotos, never the published-product tools.
@@ -249,6 +271,8 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
             new SetProductActive($this->update),
             new UpdateProduct($this->update),
             new UpdateVariant($this->update),
+            new AddProductSpecifications($this->update),
+            new ManageSearchSettings($this->update),
             new ReviewProductDraft($this->update, app(ProductDraftWorkflow::class)),
             new ManageDraftPhotos($this->update),
             new RetrainDraftGalleryRecipe($this->update),

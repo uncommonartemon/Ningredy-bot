@@ -224,6 +224,12 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
             and product agree with the request, ignore them when they describe something else. Either way say so
             in code_lookup_verdict (used, ignored or not_applicable, with a short reason); the search continues on
             the web either way.
+            The prompt may list reference sites the operator keeps for particular kinds of products (SSD and HDD,
+            processors, memory...). You decide which fit the product: for each fitting one, look the exact code or
+            model up there with the search given; a page found there supplies only what the row allows (a
+            facts-only site never supplies photos), and it must still show the selected code or full model. Report
+            each listed site in reference_site_results: found, not_found, or not_applicable when the product is
+            not of its kind.
 
             status is a commitment, not a guess: return found only when you are also returning a non-empty title,
             at least one entry in sources, and a primary_source_url pointing at one of those sources. If any of
@@ -327,6 +333,11 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
                 'decision' => $schema->string()->enum(['used', 'ignored', 'not_applicable'])->required(),
                 'reason' => $schema->string()->max(500)->required(),
             ])->required()->description('Your decision about structured product database results in the prompt.'),
+            'reference_site_results' => $schema->array()->max(20)->items($schema->object([
+                'site' => $schema->string()->max(255)->required(),
+                'result' => $schema->string()->enum(['found', 'not_found', 'not_applicable'])->required(),
+            ])->withoutAdditionalProperties())->required()
+                ->description('One entry per reference site listed in the prompt: found, not_found, or not_applicable when the product is not of its kind. Empty when the prompt lists none.'),
             'unconfirmed_operator_codes' => $schema->array()->max(10)->items($schema->string()->max(100))->required()
                 ->description('Operator-supplied EAN/UPC, SKU or part numbers that no observed page shows; empty when all were observed.'),
             'request_differences' => $schema->array()->max(10)->items($schema->object([
