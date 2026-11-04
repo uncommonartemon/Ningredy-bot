@@ -138,10 +138,30 @@ class AddProductSpecificationsTest extends TestCase
 
         $refused = json_decode($tool->handle(new ToolRequest(['action' => 'set', 'setting' => 'openai_api_key', 'value' => 'sk-x'])), true);
         $this->assertFalse($refused['ok']);
+        // A switch without a value is not switched off (audit 2026-11-04, C8).
+        $noValue = json_decode($tool->handle(new ToolRequest(['action' => 'set', 'setting' => 'fallback_sources_enabled'])), true);
+        $this->assertFalse($noValue['ok']);
+        $this->assertStringContainsString('Не указано значение', $noValue['error']);
+        $this->assertFalse(app(AiSettings::class)->fallbackSourcesEnabled());
 
         json_decode($tool->handle(new ToolRequest(['action' => 'unblock_site', 'site' => 'bad-shop.example'])), true);
         app()->forgetInstance(ProductSourcePriority::class);
         $this->assertFalse(app(ProductSourcePriority::class)->isBlockedUrl('https://bad-shop.example/other'));
+    }
+
+    /** The quotation check reads numbers with their units, not bare digits (audit 2026-11-04, C1). */
+    public function test_a_value_is_quoted_only_as_a_whole_number_with_its_unit_or_as_whole_words(): void
+    {
+        $quotes = fn (string $value, string $text): bool => AddProductSpecifications::quotes($value, $text);
+        $this->assertTrue($quotes('2,138 MB/s', 'Sequential Read 2,138 MBytes/Sec'));
+        $this->assertTrue($quotes('2200 MB/s', 'up to 2 200 MB/s read'));
+        $this->assertTrue($quotes('DDR4-3200', 'память DDR4 3200 MHz SO-DIMM'));
+        $this->assertTrue($quotes('Samsung Phoenix', 'Controller: Samsung Phoenix'));
+        $this->assertFalse($quotes('16 GB', 'Windows 11 Pro, 16 cores, 8 GB DDR4'));
+        $this->assertFalse($quotes('PCIe 4.0 x4', 'Interface: PCIe 3.0 x4, length 40 mm'));
+        $this->assertFalse($quotes('No', 'Nominal capacity 512 GB'));
+        $this->assertFalse($quotes('15 W', 'Добавь в #15 TDP'));
+        $this->assertFalse($quotes('16', 'part 160 of 1600'));
     }
 
     private function ssd(): Product

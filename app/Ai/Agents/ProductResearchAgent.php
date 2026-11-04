@@ -8,6 +8,7 @@ use App\Services\Products\AiAttributeGroups;
 use App\Services\Products\ProductCondition;
 use App\Services\Products\ProductSourceTypes;
 use App\Services\Products\ProductTextEvidenceContract;
+use App\Services\ProductSearch\Catalogs\ReferenceSites;
 use App\Services\ProductSearch\Research\ResearchSourceRoles;
 use Database\Seeders\StarterCatalogSeeder;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
@@ -333,7 +334,7 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
                 'decision' => $schema->string()->enum(['used', 'ignored', 'not_applicable'])->required(),
                 'reason' => $schema->string()->max(500)->required(),
             ])->required()->description('Your decision about structured product database results in the prompt.'),
-            'reference_site_results' => $schema->array()->max(20)->items($schema->object([
+            'reference_site_results' => $schema->array()->max(ReferenceSites::MAX_HINTS)->items($schema->object([
                 'site' => $schema->string()->max(255)->required(),
                 'result' => $schema->string()->enum(['found', 'not_found', 'not_applicable'])->required(),
             ])->withoutAdditionalProperties())->required()

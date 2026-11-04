@@ -106,7 +106,8 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
               and wanted in the operator's words. It searches the web by the product's codes and writes only quoted values.
             - Values the operator wrote in the message, or a screenshot whose recognized text is in the message
               (for example a page of a site the bot cannot open) → AddProductSpecifications with facts_json, each
-              fact from_operator=true, name and value in English, numbers and units as written.
+              fact from_operator=true: key and name in English, the value exactly as the operator wrote it (numbers,
+              units and words unchanged - the server accepts only a value that is literally in their message).
             - ResearchProduct returned already_in_catalog with found_specifications and the operator asked for those
               facts → pass the needed ones to AddProductSpecifications as facts_json unchanged; do not search again.
             - Report exactly what the tool says was written and from where. When something was not found, say so and
@@ -213,7 +214,9 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
               не найдена; draft_id обязательно null.
             - Если ResearchProduct вернул status=already_in_catalog — товар уже есть, новый черновик
               не создан. Не предлагай кнопку добавления: сообщи ID товара и кратко, что он уже в
-              каталоге (активен/скрыт), предложи посмотреть/изменить его.
+              каталоге (активен/скрыт), предложи посмотреть/изменить его. Если при этом есть
+              found_specifications и оператор просил именно эти характеристики — передай их в
+              AddProductSpecifications (facts_json как есть) и доложи, что записано.
             - Если в сообщении есть слова про фото — «фото», номер фото, «апскейль», «улучши»,
               «замени», «переставь», «удали» — это почти всегда правка уже добавленного товара, а не
               новый поиск. Не запускай ResearchProduct, даже если человек заодно продублировал название

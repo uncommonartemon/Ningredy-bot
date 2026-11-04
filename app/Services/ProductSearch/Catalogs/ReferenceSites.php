@@ -19,6 +19,9 @@ final class ReferenceSites
     /** A site that missed this often without a single hit is switched off with a note. */
     private const int AUTO_DISABLE_MISSES = 15;
 
+    /** The research answer reports one line per listed site; its schema is bounded by this. */
+    public const int MAX_HINTS = 20;
+
     public function __construct(private readonly ProductSourceAttemptRecorder $attempts) {}
 
     /**
@@ -29,7 +32,7 @@ final class ReferenceSites
      */
     public function hints(array $codes, ?string $model = null, ?string $brand = null): array
     {
-        return $this->enabled()->where('access', ReferenceSite::ACCESS_BOT)
+        return $this->enabled()->where('access', ReferenceSite::ACCESS_BOT)->take(self::MAX_HINTS)
             ->map(fn (ReferenceSite $site): array => array_filter([
                 'site' => $site->domain,
                 'for' => $site->applies_to,
@@ -80,9 +83,13 @@ final class ReferenceSites
             if ($rows->every(fn (ReferenceSite $site): bool => $site->access === ReferenceSite::ACCESS_PERSON)) {
                 continue;
             }
-            if ($rows->contains(fn (ReferenceSite $site): bool => $site->use_for_photos)) {
+            if ($rows->contains(fn (ReferenceSite $site): bool => $site->access === ReferenceSite::ACCESS_BOT && $site->use_for_photos)) {
                 $restricted[] = $source;
 
+                continue;
+            }
+            // A page kept only as a photo candidate has nothing left to give on a facts-only site.
+            if (! in_array('facts', (array) ($source['roles'] ?? ['facts']), true)) {
                 continue;
             }
             $restricted[] = [...$source, 'roles' => ['facts'], 'image_urls' => []];

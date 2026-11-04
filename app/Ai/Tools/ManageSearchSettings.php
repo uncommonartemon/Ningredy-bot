@@ -79,9 +79,15 @@ class ManageSearchSettings implements Tool
         }
         $value = is_string($value) ? trim($value) : $value;
         $rule = self::SETTINGS[$setting][0];
+        if ($value === null || $value === '') {
+            return ['ok' => false, 'error' => 'Не указано значение для '.$setting.': '.self::SETTINGS[$setting][1]];
+        }
         if ($rule === 'boolean') {
             // The model writes "true"/"false"; the boolean rule itself reads only 1/0.
             $value = is_bool($value) ? $value : filter_var($value, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE);
+            if ($value === null) {
+                return ['ok' => false, 'error' => 'Для '.$setting.' нужно значение true или false (включить или выключить).'];
+            }
             $rule = 'required|boolean';
         } elseif (is_string($value) && str_starts_with($rule, 'numeric')) {
             $value = str_replace(',', '.', $value);
@@ -117,8 +123,13 @@ class ManageSearchSettings implements Tool
                 $action === 'block_site'
                     ? $router->blockDomain($host, 'Заблокировано оператором в чате Telegram'.($reason !== '' ? ': '.$reason : '.'))
                     : $router->unblockDomain($host);
+                // The real state after the write, not the intent: a site blocked by several
+                // of its own path rows stays blocked when there is no domain row to lift.
+                $banned = app()->make(ProductSourcePriority::class)->isBlockedUrl('https://'.$host);
 
-                return ['site' => $host, 'banned' => $action === 'block_site'];
+                return ['site' => $host, 'banned' => $banned, 'message' => $banned === ($action === 'block_site')
+                    ? ($banned ? 'Сайт заблокирован для всех будущих поисков.' : 'Блокировка снята.')
+                    : 'Сайт остаётся заблокированным: его блокируют отдельные страницы, а не весь домен. Скажи это оператору; снять такие блокировки можно в админке, в рецептах галерей.'];
             });
     }
 

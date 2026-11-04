@@ -52,6 +52,8 @@ class ReferenceSitesTest extends TestCase
             ['url' => 'https://www.techpowerup.com/ssd-specs/samsung-pm991-512-gb.d200', 'roles' => ['facts'], 'image_urls' => []],
             ['url' => 'https://semiconductor.samsung.com/ssd/pc-ssd/pm991/', 'roles' => ['facts', 'exact_photo'], 'image_urls' => []],
             ['url' => 'https://www.samsung.com/cz/memory-storage/x/', 'roles' => ['exact_photo'], 'image_urls' => []],
+            // A photo-only candidate on a facts-only site has nothing left to give (audit 2026-11-04, C7).
+            ['url' => 'https://www.harddrivebenchmark.net/hdd.php?hdd=sibling', 'roles' => ['compatible_photo_candidate'], 'image_urls' => []],
         ]);
 
         $this->assertCount(3, $sources);

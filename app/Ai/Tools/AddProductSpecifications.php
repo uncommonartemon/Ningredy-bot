@@ -172,20 +172,61 @@ class AddProductSpecifications implements Tool
     }
 
     /**
-     * The text says this value: every number of it appears there (2,200 MB/s and
-     * 2200 MB/s are one number), or, with no number, the value itself does.
+     * The text says this value: every number of it stands in the text as a whole
+     * number (2,200 MB/s and 2200 MB/s are one number; 16 is not part of 160) with
+     * the same unit after it ("16 GB" is not "16 cores"), or, with no number, every
+     * word of it stands there as a whole word.
      */
     public static function quotes(string $value, string $text): bool
     {
-        $numbers = fn (string $subject): array => preg_match_all('/\d+(?:[.,\x{00A0}\x{202F}\' ]\d+)*/u', $subject, $matches)
-            ? array_map(fn (string $number): string => (string) preg_replace('/\D/', '', $number), $matches[0]) : [];
-        $wanted = $numbers($value);
-        if ($wanted !== []) {
-            return array_diff($wanted, $numbers($text)) === [];
+        $valueTokens = self::tokens($value);
+        $textTokens = self::tokens($text);
+        if ($valueTokens === [] || $textTokens === []) {
+            return false;
         }
-        $plain = fn (string $subject): string => (string) preg_replace('/[^\p{L}\p{N}]+/u', '', mb_strtolower($subject));
+        $numeric = fn (string $token): bool => preg_match('/^\d+(?:\.\d+)?$/', $token) === 1;
+        $numbers = array_keys(array_filter($valueTokens, $numeric));
+        if ($numbers === []) {
+            $words = array_filter($valueTokens, fn (string $token): bool => mb_strlen($token) >= 3) ?: $valueTokens;
+            $lower = array_map('mb_strtolower', $textTokens);
 
-        return $plain($value) !== '' && str_contains($plain($text), $plain($value));
+            return collect($words)->every(fn (string $word): bool => in_array(mb_strtolower($word), $lower, true));
+        }
+        foreach ($numbers as $index) {
+            $unit = isset($valueTokens[$index + 1]) && ! $numeric($valueTokens[$index + 1])
+                ? mb_strtolower(mb_substr($valueTokens[$index + 1], 0, 2)) : null;
+            $found = false;
+            foreach (array_keys($textTokens, $valueTokens[$index], true) as $position) {
+                $next = isset($textTokens[$position + 1]) ? mb_strtolower(mb_substr($textTokens[$position + 1], 0, 2)) : null;
+                if ($unit === null || $next === $unit) {
+                    $found = true;
+                    break;
+                }
+            }
+            if (! $found) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Words and numbers of a text: thousands groups joined (2,138 / 2 138 → 2138), a
+     * decimal comma made a dot, a whole decimal shortened (4.0 → 4).
+     *
+     * @return list<string>
+     */
+    private static function tokens(string $text): array
+    {
+        $text = (string) preg_replace('/(\d)[ \x{00A0}\x{202F}\'](\d{3})(?!\d)/u', '$1$2', $text);
+        $text = (string) preg_replace('/(\d),(\d{3})(?!\d)/u', '$1$2', $text);
+        $text = (string) preg_replace('/(\d),(\d)/u', '$1.$2', $text);
+
+        return array_values(array_map(
+            fn (string $token): string => preg_match('/^\d+\.\d+$/', $token) === 1 ? rtrim(rtrim($token, '0'), '.') : $token,
+            preg_split('/[^\p{L}\p{N}.]+|(?<!\d)\.|\.(?!\d)/u', $text, -1, PREG_SPLIT_NO_EMPTY) ?: [],
+        ));
     }
 
     private static function sameValue(string $left, string $right): bool

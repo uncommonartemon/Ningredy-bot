@@ -853,7 +853,7 @@ class ResearchProduct implements Tool
             'code_lookup_verdict' => ['sometimes', 'nullable', 'array'],
             'code_lookup_verdict.decision' => ['required_with:code_lookup_verdict', 'in:used,ignored,not_applicable'],
             'code_lookup_verdict.reason' => ['required_with:code_lookup_verdict', 'string', 'max:500'],
-            'reference_site_results' => ['sometimes', 'array', 'max:20'],
+            'reference_site_results' => ['sometimes', 'array', 'max:'.ReferenceSites::MAX_HINTS],
             'reference_site_results.*.site' => ['required', 'string', 'max:255'],
             'reference_site_results.*.result' => ['required', 'in:found,not_found,not_applicable'],
             'unconfirmed_operator_codes.*' => ['string', 'max:100'],
