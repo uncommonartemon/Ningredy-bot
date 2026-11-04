@@ -207,8 +207,19 @@ class ProductImageVisionVerifier
                 'source_identity_confirmed' => (bool) ($candidate['source_identity_confirmed'] ?? false)
                     || $pageIdentityConfirmed,
                 'source_line_plausible' => (bool) ($candidate['source_line_plausible'] ?? false) || $pageLinePlausible,
+                // The maker's own page or a record matched by code shows the product it names;
+                // a reseller's page shows whatever picture the reseller had.
+                'maker_page' => $pageContext !== null && (SourceIdentityProvenance::confirmedByCode($pageContext)
+                    || SourceIdentityProvenance::fromCatalog($pageContext)
+                    || (bool) ($pageContext['_brand_catalog'] ?? false)
+                    || ($pageContext['type'] ?? null) === 'manufacturer'),
             ];
         }, $candidates);
+        // Operator, 2026-11-04: a component is identified by the markings on it, not by
+        // the page it was pictured on. Live #379: a BC501 request published a PC801 drive
+        // from a reseller page whose address carried the BC501 code; #380/#384: modules
+        // and drives of other models came from "related products" of pages judged exact.
+        $labelIdentity = ProductPhotoIdentity::fromLabel($draft);
         $settings = app(AiSettings::class);
         $timeBudget = app(ProductSearchTimeBudget::class);
 
@@ -229,12 +240,13 @@ class ProductImageVisionVerifier
         $categoryHint = trim((string) Category::query()
             ->where('slug', trim((string) $draft->category))
             ->value('product_search_hint'));
-        $prompt = $this->prompt($draft, $candidates, $categoryHint, $galleryFramePolicy);
+        $prompt = $this->prompt($draft, $candidates, $categoryHint, $galleryFramePolicy, $labelIdentity);
+        // A label is read only on a frame large and detailed enough to read it.
         $attachments = array_map(fn (array $candidate, int $index) => app(VisionImagePreparer::class)->thumbnail(
             $candidate['image'],
             'candidate-'.($index + 1).'.webp',
-            $galleryFramePolicy ? 'high' : (string) config('product-images.vision_detail', 'low'),
-            $galleryFramePolicy ? 2048 : 640,
+            $galleryFramePolicy || $labelIdentity ? 'high' : (string) config('product-images.vision_detail', 'low'),
+            $galleryFramePolicy ? 2048 : ($labelIdentity ? 1600 : 640),
         ), $candidates, array_keys($candidates));
 
         // The mini model occasionally returns a structurally invalid batch -
@@ -302,7 +314,7 @@ class ProductImageVisionVerifier
         }
 
         $reviewed = collect($data['images'])
-            ->map(function (array $review) use ($draft, $candidates): array {
+            ->map(function (array $review) use ($draft, $candidates, $labelIdentity): array {
                 $candidate = $candidates[$review['index'] - 1] ?? [];
                 $sourceSupported = (bool) ($candidate['source_identity_confirmed'] ?? false)
                     || (bool) ($candidate['source_line_plausible'] ?? false)
@@ -312,18 +324,32 @@ class ProductImageVisionVerifier
                 // the page's call: when the page names the line, the frame stands (live #362: four
                 // clean silver CB514-4HT frames went out as "applicability to -375Z unconfirmed"
                 // and the card ended with one photo). The doubt arrives as data, never parsed from prose.
-                $identityDoubtOnly = ! $review['publishable']
+                $identityDoubtOnly = ! $labelIdentity && ! $review['publishable']
                     && ($review['rejection_reason'] ?? null) === 'identity'
                     && $sourceSupported && $review['color_match']
                     && ($review['physical_match'] ?? null) !== 'conflicting';
+                // What the label in the frame says is compared on the server, by code, not
+                // by the reviewer's feeling: another code is another product (live #379).
+                $observedMarking = trim((string) ($review['observed_marking'] ?? ''));
+                $markingVerdict = $labelIdentity ? ProductPhotoIdentity::markingVerdict($draft, $observedMarking) : 'none';
+                $exactMatch = match ($markingVerdict) {
+                    'conflict' => false,
+                    'match' => true,
+                    default => (bool) $review['exact_match'],
+                };
 
                 return [
                     ...$review,
-                    'publishable' => $review['publishable'] || $identityDoubtOnly,
+                    'exact_match' => $exactMatch,
+                    'publishable' => $markingVerdict === 'conflict' ? false : ($review['publishable'] || $identityDoubtOnly),
+                    'rejection_reason' => $markingVerdict === 'conflict' ? 'identity' : ($review['rejection_reason'] ?? 'none'),
                     'identity_doubt_overruled' => $identityDoubtOnly,
                     'hero' => $review['kind'] === 'product'
                         && in_array($review['view'], ['front', 'angle'], true),
                     'source_supported' => $sourceSupported,
+                    'observed_marking' => $observedMarking,
+                    'marking_verdict' => $markingVerdict,
+                    'maker_page' => (bool) ($candidate['maker_page'] ?? false),
                 ];
             });
 
@@ -342,7 +368,11 @@ class ProductImageVisionVerifier
             && (! filled($draft->color) || $review['color_match'])
             && in_array($review['kind'], $allowedKinds, true)
             && ($galleryFramePolicy || $review['score'] >= $minimumScore)
-            && ($review['exact_match'] || $review['source_supported']);
+            // A component is proven by its own marking, or shown by its maker's own page or
+            // record; a reseller's page only supports a frame whose label could be read.
+            && ($labelIdentity
+                ? ($review['exact_match'] || $review['marking_verdict'] === 'sibling' || ($review['source_supported'] && $review['maker_page']))
+                : ($review['exact_match'] || $review['source_supported']));
 
         if ($forbidsPackaging) {
             $this->rememberHintBlockedCandidate(
@@ -356,6 +386,18 @@ class ProductImageVisionVerifier
 
         $reviews = $this->rankReviews($reviewed->filter(fn (array $review): bool => $qualifies($review)
             && ! ($forbidsPackaging && $review['kind'] === 'packaging')));
+        // A card with no photo is a failure for the operator. When no frame of a component
+        // proved its identity, the best clean frame from a page with the exact code goes
+        // out as the one unproven photo, said so in its reason - a readable other code
+        // never does (that frame was refused above).
+        if ($labelIdentity && $reviews->isEmpty()) {
+            $reviews = $this->rankReviews($reviewed->filter(fn (array $review): bool => $review['publishable']
+                && ($review['catalog_photo'] ?? true) && ($review['physical_match'] ?? null) !== 'conflicting'
+                && $review['source_supported'] && $review['marking_verdict'] === 'none'
+                && in_array($review['kind'], $allowedKinds, true) && ($galleryFramePolicy || $review['score'] >= $minimumScore)
+                && ! ($forbidsPackaging && $review['kind'] === 'packaging')))
+                ->take(1)->map(fn (array $review): array => [...$review, 'identity_unproven' => true]);
+        }
 
         // Missing or invalid entries are unresolved, not negative reviews.
         // Keep explicit verdicts separate from the selected array so a later
@@ -371,6 +413,12 @@ class ProductImageVisionVerifier
                 'vision_reason' => match (true) {
                     (bool) ($review['identity_doubt_overruled'] ?? false) => 'Принят по странице-источнику: она называет эту линейку, '
                         .'а Vision сомневался только в точном суффиксе модели. '.$review['reason'],
+                    (bool) ($review['identity_unproven'] ?? false) => 'Единственное фото без прочитанного кода: взято со страницы с точным кодом, '
+                        .'потому что ни один кадр не подтвердил деталь по наклейке. '.$review['reason'],
+                    ($review['marking_verdict'] ?? 'none') === 'match' => 'Код на наклейке совпадает с запрошенным: '.$review['observed_marking'].'. '.$review['reason'],
+                    ($review['marking_verdict'] ?? 'none') === 'sibling' => 'На наклейке родственный код '.$review['observed_marking']
+                        .' (та же модель, другая партия или суффикс). '.$review['reason'],
+                    $review['source_supported'] && ! $review['exact_match'] && ($review['maker_page'] ?? false) => 'Фото со страницы производителя или из записи по коду; код на фото не прочитан. '.$review['reason'],
                     $review['source_supported'] && ! $review['exact_match'] => 'Exact identity is supported by the source URL. '.$review['reason'],
                     default => $review['reason'],
                 },
@@ -386,6 +434,9 @@ class ProductImageVisionVerifier
                     'keyboard_layout' => $review['keyboard_layout'] ?? '',
                     'keyboard_layout_note' => $review['keyboard_layout_note'] ?? '',
                     'configuration_marking' => trim((string) ($review['configuration_marking'] ?? '')),
+                    'observed_marking' => $review['observed_marking'] ?? '',
+                    'marking_verdict' => $review['marking_verdict'] ?? 'none',
+                    'identity_unproven' => (bool) ($review['identity_unproven'] ?? false),
                     'source_url' => $candidates[$review['index'] - 1]['source_url'] ?? null,
                 ],
             ];
@@ -473,6 +524,7 @@ class ProductImageVisionVerifier
                     'images.*.keyboard_layout' => ['sometimes', 'nullable', 'string', 'max:100'],
                     'images.*.keyboard_layout_note' => ['sometimes', 'nullable', 'string', 'max:500'],
                     'images.*.configuration_marking' => ['sometimes', 'nullable', 'string', 'max:100'],
+                    'images.*.observed_marking' => ['sometimes', 'nullable', 'string', 'max:120'],
                     'images.*.publishable' => ['required', 'boolean'],
                     'images.*.rejection_reason' => ['sometimes', 'nullable', 'in:none,quality,not_product,graphic,text,used_item,duplicate,color,body,identity'],
                     'images.*.kind' => ['required', 'in:product,packaging,detail,logo,banner,screenshot,unrelated,uncertain'],
@@ -612,9 +664,15 @@ class ProductImageVisionVerifier
     }
 
     /** @param array<int, array<string, mixed>> $candidates */
-    private function prompt(ProductDraft $draft, array $candidates, string $categoryHint, bool $galleryFramePolicy = false): string
+    private function prompt(ProductDraft $draft, array $candidates, string $categoryHint, bool $galleryFramePolicy = false, bool $labelIdentity = false): string
     {
         $count = count($candidates);
+        $identityPolicy = $labelIdentity
+            ? 'IDENTITY FROM MARKINGS: the requested product is itself the thing photographed. Requested codes: '
+                .implode(', ', ProductPhotoIdentity::codes($draft) ?: ['none'])
+                .'. Read the label and copy its part number or model marking into observed_marking; another code or capacity on the label is another product.'
+                .' What is visible on such a product: '.(ProductPhotoIdentity::hint($draft) ?: 'the label with the part number and capacity, the form factor.')
+            : 'Invisible RAM/SSD/clock differences do not disqualify photographs.';
         $specifications = collect($draft->specifications ?? [])->map(function (array $item): string {
             return trim(($item['name'] ?? '').': '.($item['value'] ?? ''), ': ');
         })->filter()->take(12)->implode('; ');
@@ -697,7 +755,7 @@ class ProductImageVisionVerifier
             {$confirmedFramePolicy}
             A candidate marked exact_page_identity=yes has confirmed source identity or separately assessed photo
             applicability. A compatible verdict means another SKU may illustrate this target because its physical
-            appearance matches. Invisible RAM/SSD/clock differences do not disqualify photographs. Preserve and
+            appearance matches. {$identityPolicy} Preserve and
             report any known keyboard-layout difference, without pretending the source is the target's exact offer.
             Record keyboard_visibility and keyboard_layout_match explicitly. A permitted, positively observed
             regional keyboard difference needs a factual Russian note. Not-visible keyboards never prove a layout.
@@ -829,6 +887,20 @@ class ProductImageVisionVerifier
         }
         if ($cover !== null && $cover > 0) {
             array_unshift($accepted, ...array_splice($accepted, $cover, 1));
+        }
+        // A component's gallery frames are checked for what their labels say as well:
+        // a reseller's own slider can hold another drive (live #379). Interruption stays
+        // interruption; a frame refused by its label is simply not in the gallery.
+        if ($accepted !== [] && ProductPhotoIdentity::fromLabel($draft) && ProductPhotoIdentity::codes($draft) !== []) {
+            try {
+                $accepted = $this->selectGalleryFrames($draft, $accepted, count($accepted), $telegramUpdateId);
+            } catch (ProductSearchCancelled $exception) {
+                throw $exception;
+            } catch (Throwable $exception) {
+                report($exception);
+
+                return null;
+            }
         }
 
         return $accepted;

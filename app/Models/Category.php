@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use App\Models\Concerns\GeneratesCatalogCode;
+use App\Services\Products\ProductPhotoIdentity;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
@@ -20,8 +21,12 @@ class Category extends Model
 
     public const GALLERY_SEARCH_PLAYWRIGHT_FIRST = 'playwright_first';
 
+    /** What is visible on a component, for the agents that judge its photos (seeded into component categories). */
+    public const COMPONENT_PHOTO_IDENTITY_HINT = 'На самой детали есть наклейка с её кодом (P/N, model) и объёмом; виден форм-фактор: длина платы M.2 (2230/2242/2280), SO-DIMM или DIMM, 2.5" или 3.5", сокет процессора. Код на наклейке — это и есть товар: другой код или объём на наклейке — другой товар, даже если адрес страницы содержит нужный код.';
+
     protected $fillable = [
         'parent_id', 'name', 'slug', 'product_type_affinity', 'icon', 'sort_order', 'is_active', 'gallery_search_strategy',
+        'photo_identity', 'photo_identity_hint',
         'minimum_verified_images', 'product_search_hint', 'minimum_image_width', 'minimum_image_height',
     ];
 
@@ -103,6 +108,14 @@ class Category extends Model
             self::GALLERY_SEARCH_VISION_FIRST,
             self::GALLERY_SEARCH_PLAYWRIGHT_FIRST,
         ];
+    }
+
+    /** What identifies a product of this category in a photograph: its page and body, or its own markings. */
+    public function photoIdentity(): string
+    {
+        return in_array($this->photo_identity, ProductPhotoIdentity::OPTIONS, true)
+            ? $this->photo_identity
+            : ProductPhotoIdentity::PAGE;
     }
 
     public function minimumVerifiedImages(): int

@@ -2,6 +2,7 @@
 
 namespace Database\Seeders;
 
+use App\Models\Category;
 use Illuminate\Database\Seeder;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
@@ -22,8 +23,9 @@ class StarterCatalogSeeder extends Seeder
             'minimum_verified_images' => 3, 'product_search_hint' => null, 'minimum_image_width' => null, 'product_type_affinity' => 'laptop'],
         'computers' => ['name' => 'Компьютеры', 'icon' => 'computer', 'sort_order' => 2, 'gallery_search_strategy' => 'playwright_first',
             'minimum_verified_images' => 3, 'product_search_hint' => null, 'minimum_image_width' => null, 'product_type_affinity' => 'desktop'],
-        'components' => ['name' => 'Комплектующие', 'icon' => 'component', 'sort_order' => 3, 'gallery_search_strategy' => 'vision_first',
-            'minimum_verified_images' => 1, 'product_search_hint' => 'Без фото коробки', 'minimum_image_width' => 500, 'product_type_affinity' => 'component'],
+        'components' => ['name' => 'Комплектующие', 'icon' => 'component', 'sort_order' => 3, 'gallery_search_strategy' => 'playwright_first',
+            'minimum_verified_images' => 1, 'product_search_hint' => 'Без фото коробки', 'minimum_image_width' => 500, 'product_type_affinity' => 'component',
+            'photo_identity' => 'label', 'photo_identity_hint' => Category::COMPONENT_PHOTO_IDENTITY_HINT],
         'other-tech' => ['name' => 'Другая техника', 'icon' => 'devices', 'sort_order' => 4, 'gallery_search_strategy' => 'auto',
             'minimum_verified_images' => 3, 'product_search_hint' => null, 'minimum_image_width' => null, 'product_type_affinity' => 'other'],
     ];

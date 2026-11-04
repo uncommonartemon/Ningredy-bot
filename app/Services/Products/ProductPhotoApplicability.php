@@ -234,7 +234,9 @@ class ProductPhotoApplicability
         } elseif (in_array($data['verdict'], ['exact', 'compatible'], true)) {
             $evidencePresent = collect($data['evidence'])->contains(fn (string $item): bool => trim($item) !== '');
             $allPhysicalConfirmed = $checks->every($positive);
-            $colorConfirmed = $positive($data['physical_checks']['color']);
+            // A component has no colour to prove: its markings identify it (operator, 2026-11-04).
+            $colorConfirmed = $positive($data['physical_checks']['color'])
+                || (trim((string) $draft->color) === '' && ProductPhotoIdentity::fromLabel($draft));
             if (! $data['plausible_target'] || ! $evidencePresent || trim($data['source_model']) === ''
                 || ! $colorConfirmed || ($data['verdict'] === 'compatible' && ! $allPhysicalConfirmed)) {
                 $data['verdict'] = 'uncertain';

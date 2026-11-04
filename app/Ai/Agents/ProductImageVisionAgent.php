@@ -77,6 +77,19 @@ class ProductImageVisionAgent implements Agent, HasStructuredOutput
             (for example "Intel Core i7") so the operator and the buyer are told stickers may differ; leave it empty
             when there is none or it matches the card.
 
+            IDENTITY FROM MARKINGS: when the prompt says the requested product is itself the thing photographed
+            (a memory module, a drive, a processor, a card), the rules above about invisible CPU/RAM/SSD differences
+            do not apply - its capacity, speed and part number are printed on it. Read every label, sticker and
+            silkscreen in the frame and copy the product's own part number or model marking into observed_marking
+            (not serial numbers, dates, firmware or certification codes; empty when nothing is readable). A readable
+            marking naming another part number, model or capacity than the requested product makes the frame another
+            product: exact_match=false, physical_match=conflicting, publishable=false, rejection_reason=identity. The
+            visible form factor must match the requested one (board length 2230/2242/2280, SO-DIMM or DIMM, 2.5 or
+            3.5 inch, socket): a different one is physical_match=conflicting, rejection_reason=body. A readable
+            marking that matches the requested code is exact_match=true. A frame with no readable marking and a
+            matching form factor is identity-unproven: exact_match=false, publishable judged by quality alone. A page
+            address or a shop's title never outweighs a readable marking.
+
             Record color_observability separately: clear only when the actual body color is visible,
             not_visible for packaging or detail views that cannot establish it, uncertain for ambiguous pixels.
             catalog_photo must be false for user-generated auction/used-item photos, worn or damaged units,
@@ -169,6 +182,8 @@ class ProductImageVisionAgent implements Agent, HasStructuredOutput
                 'keyboard_layout' => $schema->string()->max(100)->required(),
                 'keyboard_layout_note' => $schema->string()->max(500)->required(),
                 'configuration_marking' => $schema->string()->max(100)->required(),
+                'observed_marking' => $schema->string()->max(120)->required()
+                    ->description('The product\'s own part number or model marking readable in the frame; empty when none.'),
                 'publishable' => $schema->boolean()->required(),
                 'rejection_reason' => $schema->string()->enum([
                     'none', 'quality', 'not_product', 'graphic', 'text', 'used_item', 'duplicate', 'color', 'body', 'identity',
