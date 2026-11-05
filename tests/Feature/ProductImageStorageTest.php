@@ -3778,6 +3778,9 @@ class ProductImageStorageTest extends TestCase
     public function test_component_category_uses_vision_first_and_only_allows_active_recipes(): void
     {
         Storage::fake('public');
+        // The Vision-first mode under test; the starter component category itself is
+        // Playwright-first since module 68 (operator, 2026-11-04).
+        \App\Models\Category::query()->where('slug', 'components')->update(['gallery_search_strategy' => \App\Models\Category::GALLERY_SEARCH_VISION_FIRST]);
         AppSetting::put('ai.fallback_sources_enabled', '0');
         ProductImageVisionAgent::fake(fn (string $prompt, $attachments): array => [
             'images' => $attachments->keys()->map(fn (int $index): array => [
