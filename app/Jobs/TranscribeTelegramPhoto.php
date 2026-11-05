@@ -4,6 +4,7 @@ namespace App\Jobs;
 
 use App\Models\TelegramUpdate;
 use App\Services\Ai\AiErrorPresenter;
+use App\Services\Ai\AiSettings;
 use App\Services\Products\ProductInputContext;
 use App\Services\Products\ProductSearchIntentDetector;
 use App\Services\Telegram\TelegramClient;
@@ -37,12 +38,14 @@ class TranscribeTelegramPhoto implements ShouldQueue
             return;
         }
         $caption = trim((string) data_get($update->payload, 'message.caption', ''));
-        // Descriptions/albums remain manual material. A standalone labelled
-        // photo explicitly asking for search uses the same OCR path as a bare
+        $detector = app(ProductSearchIntentDetector::class);
+        $routing = app(AiSettings::class)->photoCaptionRouting();
+        // Albums, a refusal to search and the operator's own offer remain manual
+        // material. A standalone labelled photo uses the same OCR path as a bare
         // label; its caption remains the human request, not extracted evidence.
         if (data_get($update->payload, '_manual_product_upload')
             || data_get($update->payload, 'message.media_group_id')
-            || ($caption !== '' && ! app(ProductSearchIntentDetector::class)->hasExplicitSearchRequest($caption))) {
+            || $detector->photoCaptionIsManual($caption, $routing)) {
             app(TelegramProductUploadIntake::class)->queue($update);
 
             return;
@@ -83,6 +86,16 @@ class TranscribeTelegramPhoto implements ShouldQueue
             );
             $text = trim((string) ($data['text'] ?? ''));
             throw_if($text === '', RuntimeException::class, 'Photo text extraction is empty.');
+            // Module 71: with a caption that neither asks for a search nor refuses one,
+            // the photo decides - a label with a part number or model is a search (the
+            // colleague's #140), a picture with no code and a description is the
+            // operator's own product, uploaded as before.
+            if ($caption !== '' && ! $detector->hasExplicitSearchRequest($caption)
+                && $routing === AiSettings::PHOTO_CAPTION_LABEL && ! self::showsAProductCode($data)) {
+                app(TelegramProductUploadIntake::class)->queue($update, $caption);
+
+                return;
+            }
 
             if ($caption !== '') {
                 $text = "{$text}\n{$caption}";
@@ -125,6 +138,30 @@ class TranscribeTelegramPhoto implements ShouldQueue
             $telegram->sendMessage($update->chat_id, 'Не удалось распознать фото. '.$presented['message']);
             $update->update(['processed_at' => now()]);
         }
+    }
+
+    /**
+     * The read photo names a product: an identifier that is not a brand, family,
+     * serial or regulatory code, or - from a provider that returns only text - a
+     * code-like token of letters and digits.
+     *
+     * @param  array<string, mixed>  $data
+     */
+    private static function showsAProductCode(array $data): bool
+    {
+        if (($data['has_text'] ?? false) !== true) {
+            return false;
+        }
+        foreach (is_array($data['identifiers'] ?? null) ? $data['identifiers'] : [] as $item) {
+            $kind = mb_strtolower(trim((string) ($item['kind'] ?? '')));
+            $value = trim((string) ($item['value'] ?? ''));
+            if ($value !== '' && preg_match('/\d/', $value) === 1
+                && ! in_array($kind, ['brand', 'family', 'serial', 'regulatory model', 'regulatory', 'other'], true)) {
+                return true;
+            }
+        }
+
+        return preg_match('/\b(?=[A-Z0-9\/-]*\d)(?=[A-Z0-9\/-]*[A-Z])[A-Z0-9\/-]{6,}\b/i', (string) ($data['text'] ?? '')) === 1;
     }
 
     public function failed(?Throwable $exception): void

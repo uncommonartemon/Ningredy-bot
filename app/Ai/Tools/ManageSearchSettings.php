@@ -31,6 +31,8 @@ class ManageSearchSettings implements Tool
         'product_search_country' => ['nullable|regex:/^[A-Za-z]{2}$/', 'Страна веб-поиска, две буквы (CZ, UA, DE); пусто — весь мир.'],
         'fallback_sources_enabled' => ['boolean', 'Резервный платный AI веб-поиск по новым магазинам, когда известные не дали фото.'],
         'stronger_model_enabled' => ['boolean', 'Более сильная модель для сложных шагов.'],
+        'photo_caption_routing' => ['in:label,manual,search', 'Фото с подписью без слова «найди»: label — бот сначала читает фото, наклейка с кодом = поиск, иначе ручная загрузка; '
+            .'manual — всегда ручная загрузка; search — всегда поиск. Подпись с ценой, состоянием («б/у») или «не ищи» всегда означает свой товар.'],
     ];
 
     public function __construct(private readonly TelegramUpdate $update) {}
@@ -38,7 +40,7 @@ class ManageSearchSettings implements Tool
     public function description(): Stringable|string
     {
         return 'Search settings and banned sites, from the chat. action=show returns the current values and every banned site; '
-            .'action=set changes one setting (max_search_cost_usd, search_max_seconds, product_search_country, fallback_sources_enabled, stronger_model_enabled); '
+            .'action=set changes one setting (max_search_cost_usd, search_max_seconds, product_search_country, fallback_sources_enabled, stronger_model_enabled, photo_caption_routing); '
             .'action=block_site bans a site from every future search (no page, photo or fact from it), action=unblock_site lifts the ban. '
             .'API keys and logins are not here: they are changed only in the admin.';
     }
@@ -68,6 +70,7 @@ class ManageSearchSettings implements Tool
             'product_search_country' => $settings->productSearchCountry(),
             'fallback_sources_enabled' => $settings->fallbackSourcesEnabled(),
             'stronger_model_enabled' => $settings->strongerModelEnabled(),
+            'photo_caption_routing' => $settings->photoCaptionRouting(),
         ], 'meaning' => array_map(fn (array $setting): string => $setting[1], self::SETTINGS),
             'banned_sites' => app(ProductSourcePriority::class)->blockedDomains()];
     }
@@ -104,6 +107,7 @@ class ManageSearchSettings implements Tool
                     'product_search_country' => $settings->saveProductSearchCountry((string) $value),
                     'fallback_sources_enabled' => $settings->saveFallbackSourcesEnabled(filter_var($value, FILTER_VALIDATE_BOOLEAN)),
                     'stronger_model_enabled' => $settings->saveStrongerModelEnabled(filter_var($value, FILTER_VALIDATE_BOOLEAN)),
+                    'photo_caption_routing' => $settings->savePhotoCaptionRouting((string) $value),
                 };
 
                 return ['setting' => $setting, 'before' => $before, 'after' => $this->show()['settings'][$setting]];

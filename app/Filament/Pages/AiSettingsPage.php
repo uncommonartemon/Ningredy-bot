@@ -61,6 +61,7 @@ class AiSettingsPage extends Page implements HasForms
             'browser_headless' => $settings->browserHeadless(),
             'gallery_agent_write_tools_enabled' => $settings->galleryAgentWriteToolsEnabled(),
             'product_search_country' => $settings->productSearchCountry(),
+            'photo_caption_routing' => $settings->photoCaptionRouting(),
             'source_identity_agent_enabled' => $settings->sourceIdentityAgentEnabled(),
             'specification_reconciliation_enabled' => $settings->specificationReconciliationEnabled(),
             'max_search_cost_usd' => $settings->maxSearchCostUsd(),
@@ -203,6 +204,16 @@ class AiSettingsPage extends Page implements HasForms
                                             ->hintIcon('heroicon-o-question-mark-circle', tooltip: __('Было жёстко зашито "US", из-за чего в кандидаты попадали одни и те же американские магазины — те самые, что потом блокируют нас по репутации IP, — а европейские, которые отдали бы фото, не всплывали вовсе. Пусто = поиск без страновой подсказки. Место магазина само по себе никогда не было поводом его отклонить: единственное языковое правило касается текста на самих фотографиях, и его проверяет Vision.'))
                                             ->rule('regex:/^[A-Za-z]{2}$/')
                                             ->nullable(),
+                                        Select::make('photo_caption_routing')
+                                            ->label(__('Фото с подписью без слова «найди»'))
+                                            ->options([
+                                                AiSettings::PHOTO_CAPTION_LABEL => __('По содержимому: наклейка с кодом — поиск, иначе ручная загрузка'),
+                                                AiSettings::PHOTO_CAPTION_MANUAL => __('Всегда ручная загрузка'),
+                                                AiSettings::PHOTO_CAPTION_SEARCH => __('Всегда поиск'),
+                                            ])
+                                            ->hintIcon('heroicon-o-question-mark-circle', tooltip: __('Подпись с ценой, состоянием («б/у») или словами «не ищи» всегда означает свой товар. Остальное решает это правило: по умолчанию бот сначала читает фото и ищет деталь, если на ней есть код.'))
+                                            ->default(AiSettings::PHOTO_CAPTION_LABEL)
+                                            ->required(),
                                         Toggle::make('specification_reconciliation_enabled')
                                             ->label(__('Сборка карточки перед подтверждением'))
                                             ->hintIcon('heroicon-o-question-mark-circle', tooltip: __('Обязательный этап готовой карточки. Выключение приостанавливает новые интернет-поиски, но не разрешает публикацию непроверенных данных. Каталог остаётся доступен.'))
@@ -425,6 +436,7 @@ class AiSettingsPage extends Page implements HasForms
         $settings->saveBrowserHeadless((bool) ($data['browser_headless'] ?? true));
         $settings->saveGalleryAgentWriteToolsEnabled((bool) ($data['gallery_agent_write_tools_enabled'] ?? false));
         $settings->saveProductSearchCountry($data['product_search_country'] ?? null);
+        $settings->savePhotoCaptionRouting($data['photo_caption_routing'] ?? null);
         $settings->saveSourceIdentityAgentEnabled((bool) ($data['source_identity_agent_enabled'] ?? false));
         $settings->saveSpecificationReconciliationEnabled((bool) ($data['specification_reconciliation_enabled'] ?? true));
         $settings->saveMaxSearchCostUsd(

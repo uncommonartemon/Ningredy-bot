@@ -620,5 +620,10 @@
     "Что видно на таком товаре": "What is visible on such a product",
     "Подсказка для проверки фото: где на товаре код и объём, какой форм-фактор виден. Бот видит её, когда судит кадры.": "A hint for the photo check: where the code and capacity are on the product, which form factor is visible. The bot sees it when it judges frames.",
     "Обязательные характеристики": "Required characteristics",
-    "Что должно быть в карточке товара этой категории. Исследование ищет их по ключам; чего не нашло — карточка честно перечислит.": "What a product card of this category must carry. Research looks for them by key; what it did not find, the card lists honestly."
+    "Что должно быть в карточке товара этой категории. Исследование ищет их по ключам; чего не нашло — карточка честно перечислит.": "What a product card of this category must carry. Research looks for them by key; what it did not find, the card lists honestly.",
+    "Фото с подписью без слова «найди»": "A photo with a caption that does not say \"find\"",
+    "По содержимому: наклейка с кодом — поиск, иначе ручная загрузка": "By content: a label with a code is a search, anything else a manual upload",
+    "Всегда ручная загрузка": "Always a manual upload",
+    "Всегда поиск": "Always a search",
+    "Подпись с ценой, состоянием («б/у») или словами «не ищи» всегда означает свой товар. Остальное решает это правило: по умолчанию бот сначала читает фото и ищет деталь, если на ней есть код.": "A caption with a price, a condition (\"used\") or the words \"do not search\" always means your own product. This rule decides the rest: by default the bot reads the photo first and searches for the part when it carries a code."
 }

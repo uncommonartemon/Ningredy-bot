@@ -25,6 +25,7 @@ use App\Models\Product;
 use App\Models\ProductDraft;
 use App\Models\ProductDraftMedia;
 use App\Models\TelegramUpdate;
+use App\Services\Ai\AiSettings;
 use App\Services\Products\ProductDraftWorkflow;
 use App\Services\Products\ProductGalleryRecipeRouter;
 use App\Services\Products\ProductSearchIntentDetector;
@@ -193,8 +194,11 @@ class TelegramWebhookController extends Controller
 
                 return response()->json(['ok' => true, 'upload' => true]);
             }
+            // A photographed label is a search (module 71): only a caption that refuses
+            // the search, names the operator's own offer, or the setting «всегда ручная
+            // загрузка» sends a single photo to the manual intake before it is read.
             if (Cache::has($createKey) || $hasImageDocument || filled(data_get($payload, 'message.media_group_id'))
-                || ($caption !== '' && ! app(ProductSearchIntentDetector::class)->hasExplicitSearchRequest($caption))) {
+                || app(ProductSearchIntentDetector::class)->photoCaptionIsManual($caption, app(AiSettings::class)->photoCaptionRouting())) {
                 $this->clearManualCreate((string) $chatId, (string) $telegramUserId);
                 app(TelegramProductUploadIntake::class)->queue($update, $caption);
 

@@ -2,16 +2,52 @@
 
 namespace App\Services\Products;
 
+use App\Services\Ai\AiSettings;
 use Illuminate\Support\Str;
 
 class ProductSearchIntentDetector
 {
+    /** The caption says not to search: /add, «не ищи», «без поиска», "don't search". */
+    public function refusesSearch(?string $message): bool
+    {
+        $text = mb_strtolower(trim((string) $message));
+
+        return $text !== '' && (preg_match('/^\/add(?:@\w+)?(?:\s|$)/u', $text) === 1
+            || preg_match('/\b(?:не\s+(?:(?:надо|нужно|треба)\s+)?(?:ищи\w*|искать|шукай\w*|шукати)|без\s+(?:поиск\w*|пошук\w*|интернет\w*|інтернет\w*)|(?:do\s+not|don[\x{2019}\x{0027}]?t|without|no)\s+(?:search\w*|research\w*|internet|web|look\s+up))\b/u', $text) === 1);
+    }
+
+    /**
+     * The caption describes the operator's own offer - a price, a condition - and
+     * not a product to look up (module 71: a photographed label is a search).
+     */
+    public function describesOwnOffer(?string $message): bool
+    {
+        $text = mb_strtolower(trim((string) $message));
+
+        return $text !== '' && (preg_match('/\d\s*(?:kč|czk|eur|usd|грн|uah|руб|крон\w*|гривен\w*|€|₴|₽|\$)/u', $text) === 1
+            || preg_match('/\b(?:цена|ціна|cena|price|б\/у|бу|used|použit\w*|восстановл\w*|відновлен\w*|refurb\w*|состояни\w*|стан|stav|в упаковке|з коробк\w*|с коробк\w*)\b/u', $text) === 1);
+    }
+
+    /**
+     * Whether a single photo with this caption is the operator's own product to
+     * upload, by the caption alone: a refusal to search or an offer of their own
+     * always is; a neutral caption is what the setting says, and with the setting
+     * that reads the photo first it is the photo's content that decides later.
+     */
+    public function photoCaptionIsManual(string $caption, string $routing): bool
+    {
+        if (trim($caption) === '' || $this->hasExplicitSearchRequest($caption)) {
+            return false;
+        }
+
+        return $this->refusesSearch($caption) || $this->describesOwnOffer($caption) || $routing === AiSettings::PHOTO_CAPTION_MANUAL;
+    }
+
     /** A caption must ask for search explicitly; a model/specification list is upload material. */
     public function hasExplicitSearchRequest(?string $message): bool
     {
         $text = mb_strtolower(trim((string) $message));
-        if ($text === '' || preg_match('/^\/add(?:@\w+)?(?:\s|$)/u', $text)
-            || preg_match('/\b(?:не\s+(?:(?:надо|нужно|треба)\s+)?(?:ищи\w*|искать|шукай\w*|шукати)|без\s+(?:поиск\w*|пошук\w*|интернет\w*|інтернет\w*)|(?:do\s+not|don[\x{2019}\x{0027}]?t|without|no)\s+(?:search\w*|research\w*|internet|web|look\s+up))\b/u', $text)) {
+        if ($text === '' || $this->refusesSearch($text)) {
             return false;
         }
 

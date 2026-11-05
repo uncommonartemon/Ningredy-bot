@@ -620,5 +620,10 @@
     "Что видно на таком товаре": "Co je na takovém zboží vidět",
     "Подсказка для проверки фото: где на товаре код и объём, какой форм-фактор виден. Бот видит её, когда судит кадры.": "Nápověda pro kontrolu fotek: kde je na zboží kód a kapacita, jaký formát je vidět. Bot ji vidí, když posuzuje snímky.",
     "Обязательные характеристики": "Povinné charakteristiky",
-    "Что должно быть в карточке товара этой категории. Исследование ищет их по ключам; чего не нашло — карточка честно перечислит.": "Co musí karta zboží této kategorie obsahovat. Výzkum je hledá podle klíčů; co nenašel, karta poctivě vyjmenuje."
+    "Что должно быть в карточке товара этой категории. Исследование ищет их по ключам; чего не нашло — карточка честно перечислит.": "Co musí karta zboží této kategorie obsahovat. Výzkum je hledá podle klíčů; co nenašel, karta poctivě vyjmenuje.",
+    "Фото с подписью без слова «найди»": "Fotka s popiskem bez slova „najdi“",
+    "По содержимому: наклейка с кодом — поиск, иначе ручная загрузка": "Podle obsahu: štítek s kódem = hledání, jinak ruční nahrání",
+    "Всегда ручная загрузка": "Vždy ruční nahrání",
+    "Всегда поиск": "Vždy hledání",
+    "Подпись с ценой, состоянием («б/у») или словами «не ищи» всегда означает свой товар. Остальное решает это правило: по умолчанию бот сначала читает фото и ищет деталь, если на ней есть код.": "Popisek s cenou, stavem („použité“) nebo slovy „nehledej“ vždy znamená vlastní zboží. O zbytku rozhoduje toto pravidlo: ve výchozím nastavení bot fotku nejdřív přečte a hledá díl, pokud je na něm kód."
 }
