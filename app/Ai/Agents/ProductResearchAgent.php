@@ -59,7 +59,10 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
             part is product_type=component, so its category must be whichever entry above is for components or
             parts, never one meant for complete laptops or complete desktop computers. Decide product_type first
             using its explicit rule below, then choose the category consistent with that decision - do not pick
-            category independently and risk it disagreeing with product_type.
+            category independently and risk it disagreeing with product_type. When a category is listed as a
+            kind of another (an SSD under components), choose the kind. A category may list required
+            specifications: write each one you find under exactly that key; one you cannot find on any page
+            is left out, never guessed or filled from a similar product - the card will say it is missing.
 
             {$this->researchInstructions()}
 
@@ -273,7 +276,8 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
         return Category::query()
             ->where('is_active', true)
             ->orderBy('sort_order')
-            ->get(['slug', 'name', 'product_search_hint'])
+            ->with(['parent:id,slug', 'requiredAttributeDefinitions'])
+            ->get(['id', 'parent_id', 'slug', 'name', 'product_type_affinity', 'product_search_hint'])
             ->map->productSearchPromptLine()
             ->implode("\n            ");
     }

@@ -48,6 +48,7 @@ class CatalogFacetBuilder
 
             return [
                 'label' => $category->name, 'value' => $category->slug,
+                'parent' => $category->parent_id === null ? null : $this->categories()->firstWhere('id', (int) $category->parent_id)?->slug,
                 'count' => $this->products($candidate)->count(),
                 'translations' => $category->translations->pluck('name', 'locale')->all(),
             ];
@@ -132,11 +133,11 @@ class CatalogFacetBuilder
     /** @return array<string, int> distinct visible products carrying each filterable attribute */
     private function productsPerAttribute(string $category): array
     {
-        $categoryId = $category === '' ? null : $this->categories()->firstWhere('slug', $category)?->id;
+        $categoryIds = $category === '' ? null : $this->treeIds($category);
 
         return $this->effectiveAttributes()
             ->join('products', 'products.id', '=', 'product_variants.product_id')
-            ->when($categoryId !== null, fn (QueryBuilder $query) => $query->where('products.category_id', $categoryId))
+            ->when($categoryIds !== null, fn (QueryBuilder $query) => $query->whereIn('products.category_id', $categoryIds))
             ->groupBy('attribute_definitions.key')
             ->selectRaw('attribute_definitions.key as attribute_key, COUNT(DISTINCT product_variants.product_id) as products')
             ->pluck('products', 'attribute_key')->map(fn ($count): int => (int) $count)->all();
@@ -164,7 +165,7 @@ class CatalogFacetBuilder
     private function categories(): Collection
     {
         return $this->categoryRows ??= Category::query()->where('is_active', true)
-            ->with('translations:id,category_id,locale,name')->orderBy('sort_order')->orderBy('id')->get(['id', 'name', 'slug']);
+            ->with('translations:id,category_id,locale,name')->orderBy('sort_order')->orderBy('id')->get(['id', 'name', 'slug', 'parent_id']);
     }
 
     private function scopedAttributes(string $category): Collection
@@ -180,9 +181,30 @@ class CatalogFacetBuilder
         if ($category === '') {
             return $rows;
         }
-        $categoryId = $this->categories()->firstWhere('slug', $category)?->id;
 
-        return $categoryId === null ? collect() : $rows->where('category_id', $categoryId);
+        return $rows->whereIn('category_id', $this->treeIds($category));
+    }
+
+    /**
+     * The category and the active kinds under it, by slug; unknown slugs scope to nothing.
+     *
+     * @return list<int>
+     */
+    private function treeIds(string $slug): array
+    {
+        $root = $this->categories()->firstWhere('slug', $slug);
+        if ($root === null) {
+            return [];
+        }
+        $ids = [(int) $root->id];
+        $frontier = $ids;
+        while ($frontier !== []) {
+            $frontier = $this->categories()->whereIn('parent_id', $frontier)->pluck('id')
+                ->map(fn ($id): int => (int) $id)->reject(fn (int $id): bool => in_array($id, $ids, true))->values()->all();
+            $ids = [...$ids, ...$frontier];
+        }
+
+        return $ids;
     }
 
     private function effectiveAttributes(): QueryBuilder

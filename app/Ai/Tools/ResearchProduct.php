@@ -34,6 +34,7 @@ use App\Services\Products\ProductResearchResponseNormalizer;
 use App\Services\Products\ProductSourceAttemptRecorder;
 use App\Services\Products\ProductSourcePriority;
 use App\Services\Products\ProductTextEvidenceContract;
+use App\Services\Products\RequiredSpecifications;
 use App\Services\Products\SourceIdentityProvenance;
 use App\Services\ProductSearch\Catalogs\BrandCatalogs;
 use App\Services\ProductSearch\Catalogs\ReferenceSites;
@@ -602,6 +603,9 @@ class ResearchProduct implements Tool
                         'description' => $draft->description,
                         'research_notes' => $draft->research_notes,
                         'specifications' => $draft->specifications,
+                        // The category's required characteristics research did not find: the card
+                        // names them; the assistant may say so too, but never asks mid-search.
+                        'missing_required_specifications' => RequiredSpecifications::forDraft($draft),
                         'sources' => $draft->sources,
                         'primary_source_url' => $draft->primary_source_url,
                         'official_source_url' => $draft->official_source_url,
