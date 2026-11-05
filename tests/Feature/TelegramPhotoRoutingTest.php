@@ -63,8 +63,10 @@ class TelegramPhotoRoutingTest extends TestCase
         app(AiSettings::class)->savePhotoCaptionRouting(AiSettings::PHOTO_CAPTION_MANUAL);
         $this->photo(7004, 'Micron 16GB DDR5')->assertJson(['upload' => true]);
         app(AiSettings::class)->savePhotoCaptionRouting(AiSettings::PHOTO_CAPTION_SEARCH);
-        $this->photo(7005, 'ThinkPad T480 б/у 8/256')->assertJson(['photo' => true]);
+        $this->photo(7005, 'Micron 16GB DDR5')->assertJson(['photo' => true]);
+        // A price, a condition or a refusal always means the operator's own product, whatever the setting says.
         $this->photo(7006, 'Не ищи в интернете, добавь по описанию')->assertJson(['upload' => true]);
+        $this->photo(7007, 'ThinkPad T480 б/у 8/256')->assertJson(['upload' => true]);
     }
 
     public function test_the_read_photo_decides_between_search_and_upload_by_what_it_shows(): void
