@@ -18,6 +18,7 @@ use App\Models\ProductDraft;
 use App\Models\ProductGalleryRecipe;
 use App\Models\TelegramUpdate;
 use App\Models\User;
+use Database\Seeders\StarterCatalogSeeder;
 use Filament\Facades\Filament;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Queue;
@@ -139,9 +140,10 @@ class CatalogCleanupAdminTest extends TestCase
 
         $this->assertDatabaseMissing('attribute_groups', ['id' => $group->id]);
         $this->assertDatabaseMissing('product_gallery_recipes', ['id' => $recipe->id]);
-        // The deleted dictionaries are gone; the starter set is back at once (live 2026-11-01).
-        $this->assertSame(4, Category::count());
-        $this->assertSame(7, AttributeDefinition::count());
+        // The deleted dictionaries are gone; the starter set is back at once (live 2026-11-01),
+        // the kinds of components and their characteristics with it (module 69).
+        $this->assertSame(count(StarterCatalogSeeder::CATEGORIES) + count(StarterCatalogSeeder::COMPONENT_KINDS), Category::count());
+        $this->assertSame(7 + count(StarterCatalogSeeder::COMPONENT_ATTRIBUTES), AttributeDefinition::count());
         $this->assertDatabaseHas('users', ['id' => $this->admin->id]);
     }
 
