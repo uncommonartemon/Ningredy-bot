@@ -28,6 +28,12 @@ class TelegramPhotoRoutingTest extends TestCase
 {
     use RefreshDatabase;
 
+    protected function setUp(): void
+    {
+        parent::setUp();
+        config(['services.telegram.webhook_secret' => 'test-secret', 'services.telegram.allowed_user_ids' => ['12345']]);
+    }
+
     public function test_a_caption_that_names_a_price_or_condition_describes_the_operators_own_offer(): void
     {
         $detector = app(ProductSearchIntentDetector::class);
