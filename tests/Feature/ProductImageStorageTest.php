@@ -3792,6 +3792,8 @@ class ProductImageStorageTest extends TestCase
                 'view' => $index === 0 ? 'front' : 'detail',
                 'gallery_rank' => $index + 1,
                 'score' => 98 - $index,
+                // A component is proven by the code read on it (module 68/70), not by the reviewer's word.
+                'observed_marking' => 'CMP-1000',
                 'reason' => 'Exact component image.',
             ])->all(),
         ])->preventStrayPrompts();
@@ -3823,6 +3825,7 @@ class ProductImageStorageTest extends TestCase
         $draft->update([
             'category' => 'components',
             'product_type' => 'component',
+            'model' => 'CMP-1000',
             'primary_source_url' => 'https://93.184.216.34/component-card',
             'sources' => [[
                 'title' => 'Exact component card',
