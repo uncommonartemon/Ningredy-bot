@@ -110,6 +110,9 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
               units and words unchanged - the server accepts only a value that is literally in their message).
             - ResearchProduct returned already_in_catalog with found_specifications and the operator asked for those
               facts → pass the needed ones to AddProductSpecifications as facts_json unchanged; do not search again.
+            - The operator names one configuration of a product that has several («для версии 1 ТБ», a colour, a SKU)
+              → pass product_variant_id of that configuration (its id from the catalog tools); the values become that
+              configuration's own. Without a named configuration, omit it.
             - Report exactly what the tool says was written and from where. When something was not found, say so and
               offer the person_links whose "for" fits the product: the operator opens the page and sends a screenshot.
 

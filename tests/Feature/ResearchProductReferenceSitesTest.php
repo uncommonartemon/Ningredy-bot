@@ -42,7 +42,9 @@ class ResearchProductReferenceSitesTest extends TestCase
         ProductResearchAgent::fake(function (string $prompt): array {
             $this->assertStringContainsString('"site":"harddrivebenchmark.net"', $prompt);
             $this->assertStringContainsString('site:harddrivebenchmark.net PM991', $prompt);
-            $this->assertStringNotContainsString('techpowerup', $prompt);
+            $this->assertStringNotContainsString('"site":"techpowerup.com"', $prompt);
+            $this->assertStringContainsString('Sites only a person opens', $prompt);
+            $this->assertStringContainsString('techpowerup.com. Do not search them', $prompt);
 
             return ['status' => 'found', 'title' => 'Samsung PM991 512GB', 'brand' => 'Samsung', 'model' => 'PM991',
                 'category' => 'components', 'product_type' => 'component', 'color' => null, 'condition' => 'new',
@@ -80,5 +82,40 @@ class ResearchProductReferenceSitesTest extends TestCase
         $site = ReferenceSite::query()->where('domain', 'harddrivebenchmark.net')->firstOrFail();
         $this->assertSame([1, 0], [$site->hits, $site->misses]);
         $this->assertSame(0, ReferenceSite::query()->where('domain', 'intel.com')->firstOrFail()->misses);
+    }
+
+    public function test_a_found_answer_whose_only_page_is_a_persons_site_is_told_the_cause_not_a_false_no_source(): void
+    {
+        // Audit 2026-11-04, C3: the page was dropped on the server and the agent was told
+        // «no unblocked source», so it kept resubmitting the same page until recovery ran out.
+        $techpowerup = 'https://www.techpowerup.com/ssd-specs/samsung-pm991-512-gb.d200';
+        $calls = [];
+        ProductResearchAgent::fake(function (string $prompt) use (&$calls, $techpowerup): array {
+            $calls[] = $prompt;
+            if (count($calls) > 1) {
+                return ['status' => 'unresolved', 'title' => null, 'brand' => 'Samsung', 'model' => 'PM991', 'category' => null, 'product_type' => 'component',
+                    'color' => null, 'condition' => 'new', 'description' => null, 'specifications' => [], 'sources' => [], 'image_urls' => [],
+                    'primary_source_url' => null, 'official_source_url' => null, 'confidence' => 0.2,
+                    'research_notes' => 'Only the TechPowerUp database page described this drive; no page the bot opens was observed.'];
+            }
+
+            return ['status' => 'found', 'title' => 'Samsung PM991 512GB', 'brand' => 'Samsung', 'model' => 'PM991',
+                'category' => 'components', 'product_type' => 'component', 'color' => null, 'condition' => 'new',
+                'description' => 'An M.2 NVMe SSD.', 'research_notes' => null, 'confidence' => 0.8, 'specifications' => [],
+                'sources' => [['title' => 'TechPowerUp PM991', 'url' => $techpowerup, 'type' => 'database', 'roles' => ['facts'],
+                    'applicability_reason' => 'The database entry of this drive.', 'image_urls' => []]],
+                'primary_source_url' => $techpowerup, 'official_source_url' => null, 'image_urls' => [],
+                'selected_identity' => $this->observedIdentity('PM991', $techpowerup)];
+        });
+        $update = TelegramUpdate::query()->create(['update_id' => random_int(2000, 9000), 'telegram_user_id' => '12345', 'chat_id' => '98765',
+            'message_id' => 55, 'text' => 'Samsung PM991 512GB', 'payload' => [], 'status' => 'received']);
+
+        $result = json_decode((new ResearchProduct($update, $this->mock(ProductImageResolver::class)))
+            ->handle(new Request(['query' => 'Samsung PM991 512GB SSD'])), true, flags: JSON_THROW_ON_ERROR);
+
+        $this->assertGreaterThanOrEqual(2, count($calls));
+        $this->assertStringContainsString('techpowerup.com belong to reference sites only a person opens', $calls[1]);
+        $this->assertStringNotContainsString('no unblocked source', $calls[1]);
+        $this->assertNotSame('found', $result['status']);
     }
 }

@@ -114,6 +114,42 @@ class ProductPhotoIdentityTest extends TestCase
         $this->assertStringContainsString('без прочитанного кода', $lastResort[0]['vision_reason']);
     }
 
+    public function test_a_reviewers_exact_without_a_readable_code_is_not_exact_unless_a_gallery_neighbour_carries_the_code(): void
+    {
+        // Live #390: «источник подтверждает модель, видимых противоречий нет» with an empty
+        // marking went out as the exact photo of a memory module from a reseller's page.
+        $draft = $this->componentDraft();
+        ProductImageVisionAgent::fake(fn (): array => ['images' => [
+            $this->review(1, exactMatch: true, marking: '', reason: 'The page confirms the model; nothing visible contradicts it.')]])
+            ->preventStrayPrompts();
+        $reseller = ['title' => 'BC501 512GB', 'url' => 'https://reseller.example/bc501', 'type' => 'retailer'];
+        $exact = ProductPhotoApplicability::bind($draft, $reseller, ['verdict' => 'exact', 'plausible_target' => true, 'reason' => 'Exact.']);
+
+        $selected = app(ProductImageVisionVerifier::class)->select($draft, [
+            $this->frame('https://reseller.example/a.jpg', [...$reseller, '_photo_applicability' => $exact]),
+        ], 4);
+
+        $this->assertCount(1, $selected);
+        $this->assertTrue($selected[0]['photo_visual_review']['identity_unproven']);
+        $this->assertStringContainsString('без прочитанного кода', $selected[0]['vision_reason']);
+
+        // The product's own gallery shows one item from several sides: the frame without a
+        // readable code next to a frame whose code matched is that item.
+        GalleryFrameReviewAgent::fake(fn (): array => ['non_product_frames' => [], 'uncertain_content_frames' => [], 'foreign_text_frames' => [], 'reason' => 'Clean'])
+            ->preventStrayPrompts();
+        ProductImageVisionAgent::fake(fn (): array => ['images' => [
+            $this->review(1, exactMatch: true, marking: 'HFM512GDJTNG-8310A', reason: 'The label side.'),
+            $this->review(2, exactMatch: true, marking: '', reason: 'The connector side of the same drive.'),
+        ]])->preventStrayPrompts();
+        $frames = [$this->frame('https://reseller.example/g1.jpg', $reseller), $this->frame('https://reseller.example/g2.jpg', $reseller)];
+
+        $checked = app(ProductImageVisionVerifier::class)->checkedGalleryFrames($frames, $draft);
+
+        $this->assertSame(['https://reseller.example/g1.jpg', 'https://reseller.example/g2.jpg'], array_column($checked, 'source_url'));
+        $this->assertStringContainsString('в той же галерее товара есть кадр с совпавшим кодом', $checked[1]['vision_reason']);
+        $this->assertTrue($checked[1]['photo_visual_review']['labelled_neighbour']);
+    }
+
     public function test_a_sibling_suffix_on_the_label_is_kept_with_a_notice(): void
     {
         $draft = $this->componentDraft('SDBPNPZ-256G-1002', 'WD PC SN530 256GB');

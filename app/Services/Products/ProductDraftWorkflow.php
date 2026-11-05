@@ -58,14 +58,18 @@ class ProductDraftWorkflow
      * shared by the product's configurations unless the key belongs to one.
      * Leaving out what the product already has is the caller's decision.
      *
+     * A configuration named by the operator («для версии 1 ТБ») takes every value
+     * as its own (audit 2026-11-04, C5).
+     *
      * @param  list<array{key: string, name: string, value: string}>  $specifications
      */
-    public function addSpecifications(Product $product, array $specifications): void
+    public function addSpecifications(Product $product, array $specifications, ?ProductVariant $configuration = null): void
     {
-        $variant = $product->defaultVariant()->first() ?? $product->variants()->orderBy('id')->first();
+        $variant = $configuration ?? $product->defaultVariant()->first() ?? $product->variants()->orderBy('id')->first();
         $category = $product->category()->first();
         throw_if($variant === null || $category === null, \RuntimeException::class, 'У товара нет конфигурации или категории.');
-        $this->syncAttributes($product, $variant, $category, $specifications);
+        throw_if($configuration !== null && (int) $configuration->product_id !== (int) $product->id, \RuntimeException::class, 'Конфигурация принадлежит другому товару.');
+        $this->syncAttributes($product, $variant, $category, $specifications, variantScoped: $configuration !== null);
     }
 
     private function assertReadyForApproval(ProductDraft $draft, bool $acceptUnreconciled = false): void
