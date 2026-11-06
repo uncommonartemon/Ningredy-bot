@@ -57,6 +57,31 @@ class AddProductSpecificationsTest extends TestCase
         Queue::assertPushed(TranslateProductText::class, fn (TranslateProductText $job): bool => $job->productId === $product->id);
     }
 
+    public function test_a_named_configuration_takes_the_values_as_its_own_and_another_configurations_value_never_blocks_it(): void
+    {
+        // Audit 2026-11-04, C5: every configuration's values counted as «already in the product».
+        $product = $this->ssd();
+        $small = $product->variants()->sole();
+        $large = ProductVariant::query()->create(['product_id' => $product->id, 'fingerprint' => 'pm991-1tb', 'name' => '1 TB',
+            'sku' => 'MZALQ1T0HBLB-000L1', 'is_default' => false, 'is_active' => true]);
+        $read = AttributeDefinition::query()->firstOrCreate(['key' => 'sequential_read_speed'], ['label' => 'Sequential read speed', 'data_type' => 'text']);
+        AttributeValue::query()->create(['attribute_definition_id' => $read->id, 'product_variant_id' => $small->id, 'value' => '2200 MB/s']);
+        $tool = new AddProductSpecifications($this->update('Для версии 1 ТБ товара #'.$product->id.': Sequential read 3100 MB/s'));
+
+        $result = json_decode($tool->handle(new ToolRequest(['product_id' => $product->id, 'product_variant_id' => $large->id, 'wanted' => 'скорость',
+            'facts_json' => json_encode([['name' => 'Sequential read speed', 'value' => '3100 MB/s', 'key' => 'sequential_read_speed', 'from_operator' => true]])])), true);
+
+        $this->assertTrue($result['ok']);
+        $this->assertSame(['id' => $large->id, 'name' => '1 TB', 'sku' => 'MZALQ1T0HBLB-000L1'], $result['configuration']);
+        $this->assertSame([], $result['already_in_product']);
+        $this->assertSame('3100 MB/s', AttributeValue::query()->where('attribute_definition_id', $read->id)->where('product_variant_id', $large->id)->value('value'));
+        $this->assertSame('2200 MB/s', AttributeValue::query()->where('attribute_definition_id', $read->id)->where('product_variant_id', $small->id)->value('value'));
+
+        $other = json_decode($tool->handle(new ToolRequest(['product_id' => $product->id, 'product_variant_id' => 999999, 'wanted' => 'скорость'])), true);
+        $this->assertFalse($other['ok']);
+        $this->assertSame([$small->id, $large->id], array_column($other['configurations'], 'id'));
+    }
+
     public function test_a_value_the_product_already_has_is_kept_unless_the_operator_asked_to_correct_it(): void
     {
         $product = $this->ssd();

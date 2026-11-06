@@ -64,23 +64,31 @@ class ReferenceSitesTest extends TestCase
         $this->assertSame(['exact_photo'], $sources[2]['roles']);
         $this->assertFalse($sites->allowsPhotos('https://www.harddrivebenchmark.net/x.png'));
         $this->assertTrue($sites->allowsPhotos('https://shop.example/x.png'));
+        // The page dropped for being a person's site is named, not lost in silence (audit 2026-11-04, C3).
+        $this->assertSame(['techpowerup.com'], $sites->personOnlyHosts([
+            ['url' => 'https://www.techpowerup.com/ssd-specs/samsung-pm991-512-gb.d200'], ['url' => 'https://shop.example/pm991']]));
+        $this->assertSame(['techpowerup.com'], $sites->personSites());
     }
 
-    public function test_the_agents_word_on_each_site_counts_and_a_site_that_never_finds_anything_switches_off(): void
+    public function test_the_agents_word_on_each_site_counts_however_it_names_the_site_and_a_site_that_never_finds_anything_gets_a_warning(): void
     {
         $sites = app(ReferenceSites::class);
-        $sites->record([['site' => 'www.harddrivebenchmark.net', 'result' => 'found'], ['site' => 'notebookcheck.net', 'result' => 'not_applicable']], null);
+        $sites->record([['site' => 'www.harddrivebenchmark.net', 'result' => 'found'], ['site' => 'notebookcheck.net', 'result' => 'not_applicable'],
+            // The agent names a site as it likes (audit 2026-11-04, C6): the row is still found.
+            ['site' => 'PassMark harddrivebenchmark', 'result' => 'found'], ['site' => 'SK hynix product pages', 'result' => 'not_found']], null);
 
-        $this->assertSame(1, ReferenceSite::query()->where('domain', 'harddrivebenchmark.net')->firstOrFail()->hits);
+        $this->assertSame(2, ReferenceSite::query()->where('domain', 'harddrivebenchmark.net')->firstOrFail()->hits);
         $this->assertSame(0, ReferenceSite::query()->where('domain', 'notebookcheck.net')->firstOrFail()->misses);
+        $this->assertSame(1, ReferenceSite::query()->where('domain', 'skhynix.com')->firstOrFail()->misses);
         $this->assertTrue(ProductSourceAttempt::query()->where('phase', 'reference_site')->where('decision', 'found')->exists());
 
+        // Four requests in five are laptops: misses alone never switch a site off, they warn.
         for ($miss = 0; $miss < 15; $miss++) {
             $sites->record([['site' => 'notebookcheck.net', 'result' => 'not_found']], null);
         }
         $notebookcheck = ReferenceSite::query()->where('domain', 'notebookcheck.net')->firstOrFail();
-        $this->assertFalse($notebookcheck->enabled);
-        $this->assertStringStartsWith('Отключён автоматически', $notebookcheck->last_result);
+        $this->assertTrue($notebookcheck->enabled);
+        $this->assertStringStartsWith('Ни одного попадания за 15 промахов', $notebookcheck->last_result);
     }
 
     public function test_the_admin_lists_the_sites_and_opens_the_form(): void

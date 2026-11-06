@@ -332,15 +332,21 @@ class ProductImageVisionVerifier
                 // by the reviewer's feeling: another code is another product (live #379).
                 $observedMarking = trim((string) ($review['observed_marking'] ?? ''));
                 $markingVerdict = $labelIdentity ? ProductPhotoIdentity::markingVerdict($draft, $observedMarking) : 'none';
+                // With no code read, a component frame is not exact however sure the reviewer
+                // felt from the page (live #390: «источник подтверждает модель» with an empty
+                // marking went out as exact); it is the maker's page, a labelled gallery
+                // neighbour or the last resort that may still carry it.
                 $exactMatch = match ($markingVerdict) {
                     'conflict' => false,
                     'match' => true,
-                    default => (bool) $review['exact_match'],
+                    // A logo carries no label by nature; the component logo policy judges it by brand.
+                    default => (! $labelIdentity || ($review['kind'] ?? '') === 'logo') && (bool) $review['exact_match'],
                 };
 
                 return [
                     ...$review,
                     'exact_match' => $exactMatch,
+                    'reviewer_exact_match' => (bool) $review['exact_match'],
                     'publishable' => $markingVerdict === 'conflict' ? false : ($review['publishable'] || $identityDoubtOnly),
                     'rejection_reason' => $markingVerdict === 'conflict' ? 'identity' : ($review['rejection_reason'] ?? 'none'),
                     'identity_doubt_overruled' => $identityDoubtOnly,
@@ -352,6 +358,20 @@ class ProductImageVisionVerifier
                     'maker_page' => (bool) ($candidate['maker_page'] ?? false),
                 ];
             });
+        if ($labelIdentity && $galleryFramePolicy) {
+            // A product's own gallery shows one item from several sides: the frame without a
+            // readable code next to a frame whose code matched (the drive from its connector
+            // side) is that item. A page's static pictures get no such support - the pictures
+            // of «related products» live on the same page (live #380, #384).
+            $pageOf = fn (array $review): string => (string) ($candidates[$review['index'] - 1]['page_source_context']['url'] ?? '');
+            $labelledPages = $reviewed
+                ->filter(fn (array $review): bool => in_array($review['marking_verdict'], ['match', 'sibling'], true))
+                ->map($pageOf)->filter()->unique();
+            $reviewed = $reviewed->map(fn (array $review): array => $review['marking_verdict'] === 'none' && $review['reviewer_exact_match']
+                && $review['publishable'] && $pageOf($review) !== '' && $labelledPages->contains($pageOf($review))
+                    ? [...$review, 'exact_match' => true, 'labelled_neighbour' => true]
+                    : $review);
+        }
 
         $allowedKinds = $galleryFramePolicy
             ? ['product', 'packaging', 'detail', 'banner']
@@ -418,6 +438,7 @@ class ProductImageVisionVerifier
                     ($review['marking_verdict'] ?? 'none') === 'match' => 'Код на наклейке совпадает с запрошенным: '.$review['observed_marking'].'. '.$review['reason'],
                     ($review['marking_verdict'] ?? 'none') === 'sibling' => 'На наклейке родственный код '.$review['observed_marking']
                         .' (та же модель, другая партия или суффикс). '.$review['reason'],
+                    (bool) ($review['labelled_neighbour'] ?? false) => 'Код на этом кадре не прочитан, но в той же галерее товара есть кадр с совпавшим кодом. '.$review['reason'],
                     $review['source_supported'] && ! $review['exact_match'] && ($review['maker_page'] ?? false) => 'Фото со страницы производителя или из записи по коду; код на фото не прочитан. '.$review['reason'],
                     $review['source_supported'] && ! $review['exact_match'] => 'Exact identity is supported by the source URL. '.$review['reason'],
                     default => $review['reason'],
@@ -437,6 +458,7 @@ class ProductImageVisionVerifier
                     'observed_marking' => $review['observed_marking'] ?? '',
                     'marking_verdict' => $review['marking_verdict'] ?? 'none',
                     'identity_unproven' => (bool) ($review['identity_unproven'] ?? false),
+                    'labelled_neighbour' => (bool) ($review['labelled_neighbour'] ?? false),
                     'source_url' => $candidates[$review['index'] - 1]['source_url'] ?? null,
                 ],
             ];

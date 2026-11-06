@@ -16,8 +16,13 @@ use Throwable;
  */
 final class ReferenceSites
 {
-    /** A site that missed this often without a single hit is switched off with a note. */
-    private const int AUTO_DISABLE_MISSES = 15;
+    /**
+     * A site that missed this often without a single hit gets a warning in its
+     * last result; it is not switched off by itself (audit 2026-11-04, C6: four
+     * requests in five are laptops, and a miss reported for the wrong kind of
+     * product would have switched the component references off one by one).
+     */
+    private const int WARN_MISSES = 15;
 
     /** The research answer reports one line per listed site; its schema is bounded by this. */
     public const int MAX_HINTS = 20;
@@ -56,6 +61,40 @@ final class ReferenceSites
             ->map(fn (ReferenceSite $site): array => ['site' => $site->domain, 'for' => $site->applies_to,
                 'link' => CodeTemplate::fill($site->link_template, $codes, $model, $brand, encode: true)[0] ?? 'https://'.$site->domain])
             ->values()->all();
+    }
+
+    /**
+     * The sites only a person opens, for the research prompt: the bot never
+     * returns their pages as a source, so the agent must hear which they are.
+     *
+     * @return list<string>
+     */
+    public function personSites(): array
+    {
+        return $this->enabled()->where('access', ReferenceSite::ACCESS_PERSON)->pluck('domain')->unique()->values()->all();
+    }
+
+    /**
+     * The hosts of sources restrictRoles() drops because only a person opens
+     * them: named to the agent instead of a silent loss (audit 2026-11-04, C3 —
+     * a found answer whose only page was such a site failed as «no source»).
+     *
+     * @param  list<array<string, mixed>>  $sources
+     * @return list<string>
+     */
+    public function personOnlyHosts(array $sources): array
+    {
+        $sites = $this->enabled();
+        $hosts = [];
+        foreach ($sources as $source) {
+            $host = ProductSourcePriority::host((string) ($source['url'] ?? ''));
+            $rows = $sites->filter(fn (ReferenceSite $site): bool => self::covers($site->domain, $host));
+            if ($rows->isNotEmpty() && $rows->every(fn (ReferenceSite $site): bool => $site->access === ReferenceSite::ACCESS_PERSON)) {
+                $hosts[] = $host;
+            }
+        }
+
+        return array_values(array_unique($hosts));
     }
 
     /**
@@ -117,21 +156,49 @@ final class ReferenceSites
     {
         $sites = $this->enabled()->where('access', ReferenceSite::ACCESS_BOT);
         foreach ($results as $result) {
-            $domain = ReferenceSite::normalizeDomain((string) ($result['site'] ?? ''));
+            $reported = trim((string) ($result['site'] ?? ''));
             $decision = (string) ($result['result'] ?? '');
-            if ($domain === '' || ! in_array($decision, ['found', 'not_found'], true)) {
+            if ($reported === '' || ! in_array($decision, ['found', 'not_found'], true)) {
                 continue;
             }
-            $matching = $sites->filter(fn (ReferenceSite $site): bool => self::covers($site->domain, $domain));
+            $matching = self::matching($sites, $reported);
             foreach ($matching as $site) {
                 $this->note($site, $decision === 'found', $decision === 'found' ? 'Нашёл товар' : 'Товара не нашёл');
             }
             if ($matching->isNotEmpty()) {
+                $domain = $matching->first()->domain;
                 $this->attempts->record(['telegram_update_id' => $updateId, 'product_url' => 'https://'.$domain, 'actor' => 'web_search',
                     'phase' => 'reference_site', 'action' => 'look_up_reference_site', 'status' => 'completed',
-                    'decision' => $decision, 'output' => ['site' => $domain, 'asked_by' => $phase]]);
+                    'decision' => $decision, 'output' => ['site' => $domain, 'reported_as' => $reported, 'asked_by' => $phase]]);
             }
         }
+    }
+
+    /**
+     * The rows the agent meant by a site it names: by host (with subdomains),
+     * else by the site's own name written anyhow («PassMark harddrivebenchmark»,
+     * «notebookcheck») — a word of the reported text equal to the domain's label.
+     *
+     * @param  Collection<int, ReferenceSite>  $sites
+     * @return Collection<int, ReferenceSite>
+     */
+    private static function matching(Collection $sites, string $reported): Collection
+    {
+        $host = ReferenceSite::normalizeDomain($reported);
+        $byHost = $sites->filter(fn (ReferenceSite $site): bool => self::covers($site->domain, $host));
+        if ($byHost->isNotEmpty()) {
+            return $byHost;
+        }
+        $lower = mb_strtolower($reported);
+        $words = preg_split('/[^a-z0-9-]+/', $lower) ?: [];
+        // «SK hynix» for skhynix.com: the name without its spaces, for labels long enough to be nobody else's.
+        $compact = (string) preg_replace('/[^a-z0-9]+/', '', $lower);
+
+        return $sites->filter(function (ReferenceSite $site) use ($words, $compact): bool {
+            $label = explode('.', $site->domain)[0];
+
+            return $label !== '' && (in_array($label, $words, true) || (strlen($label) >= 6 && str_contains($compact, $label)));
+        });
     }
 
     /**
@@ -162,9 +229,9 @@ final class ReferenceSites
             'last_used_at' => now(),
             'last_result' => mb_substr($result, 0, 255),
         ]);
-        if (! $hit && $site->hits === 0 && $site->misses >= self::AUTO_DISABLE_MISSES) {
-            $site->forceFill(['enabled' => false,
-                'last_result' => mb_substr('Отключён автоматически: '.$site->misses.' промахов без попаданий. '.$result, 0, 255)]);
+        if (! $hit && $site->hits === 0 && $site->misses >= self::WARN_MISSES) {
+            $site->forceFill(['last_result' => mb_substr('Ни одного попадания за '.$site->misses.' промахов — проверьте шаблон ссылки и подсказку поиска. '
+                .$result, 0, 255)]);
         }
         $site->save();
     }

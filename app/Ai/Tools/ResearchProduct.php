@@ -197,6 +197,7 @@ class ResearchProduct implements Tool
         // The operator's reference sites per kind of product: the agent decides which fit.
         $referenceSites = app(ReferenceSites::class);
         $referenceHints = $referenceSites->hints(BrandCatalogs::codesIn($query));
+        $personSites = $referenceSites->personSites();
         $researchPrompt = $query
             .PHP_EOL.'Input provenance and prioritized search alternatives (observations are not additional mandatory requirements): '
             .json_encode($inputContext, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
@@ -220,6 +221,8 @@ class ResearchProduct implements Tool
                 .'. When the product is of a listed kind, look its exact code or model up on those sites with the search given, and list each page'
                 .' you find among the sources with only the roles "take" allows: a facts-only site never supplies photos. A page there must still'
                 .' show the selected code or full model like any source. Report every listed site you considered in reference_site_results.')
+            .($personSites === [] ? '' : PHP_EOL.'Sites only a person opens (the operator gets their links; the bot never uses their pages as a source'
+                .' or a photo page): '.implode(', ', $personSites).'. Do not search them and never return their pages among the sources.')
             .($vocabulary === '' ? '' : PHP_EOL.'Specification keys this catalog already uses: '.$vocabulary
                 .'. Give a specification one of these keys when it means the same thing; a new snake_case key only'
                 .' for a concept not on the list. Two keys for one thing split the storefront filter in two.');
@@ -907,6 +910,7 @@ class ResearchProduct implements Tool
         // What the operator's reference sites forbid is kept by the server, not left to the prompt:
         // a facts-only site gives no photos, a site only a person opens is not queued at all.
         $referenceSites = app(ReferenceSites::class);
+        $personHosts = $referenceSites->personOnlyHosts($data['sources']);
         $data['sources'] = $referenceSites->restrictRoles($data['sources']);
         $data['image_urls'] = array_values(array_filter($data['image_urls'], fn (string $url): bool => $referenceSites->allowsPhotos($url)));
 
@@ -945,12 +949,20 @@ class ResearchProduct implements Tool
         }
 
         if ($data['status'] === 'found') {
+            $sources = app(ProductSourcePriority::class)->sortSources($data['sources'], $data['brand'] ?? null);
+            // A page on a site only a person opens was dropped above: the agent is
+            // told that cause, not a false «no source» (audit 2026-11-04, C3).
+            if ($personHosts !== [] && $this->primarySource($sources) === null) {
+                throw ValidationException::withMessages(['sources' => 'The page(s) on '.implode(', ', $personHosts)
+                    .' belong to reference sites only a person opens: the bot never uses them as a source or a photo page (the operator gets their links).'
+                    .' Keep the facts you read there as specifications with their source_url, and name a page the bot can open that shows this exact product (a shop, the maker, a database record) as the source;'
+                    .' with none observed, answer unresolved and say so in research_notes.']);
+            }
             Validator::make($data, [
                 'title' => ['required', 'string'],
                 'sources' => ['required', 'array', 'min:1'],
                 'primary_source_url' => ['required', 'url:http,https'],
             ])->validate();
-            $sources = app(ProductSourcePriority::class)->sortSources($data['sources'], $data['brand'] ?? null);
             Validator::make(['primary_source' => $this->primarySource($sources)], [
                 'primary_source' => ['required', 'array'],
             ], ['primary_source.required' => 'The found result has no unblocked source that identifies the exact product. Keep observed URLs and facts and add the page or record that shows this exact product; do not invent or relabel its source type.'])->validate();

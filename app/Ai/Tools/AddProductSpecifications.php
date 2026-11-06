@@ -9,6 +9,7 @@ use App\Models\AiRun;
 use App\Models\AttributeDefinition;
 use App\Models\AttributeValue;
 use App\Models\Product;
+use App\Models\ProductVariant;
 use App\Models\TelegramUpdate;
 use App\Services\Ai\AiErrorPresenter;
 use App\Services\Ai\AiSettings;
@@ -63,8 +64,18 @@ class AddProductSpecifications implements Tool
             return $this->json(['ok' => false, 'error' => 'Product not found.']);
         }
         $wanted = trim((string) $request->string('wanted'));
-        $codes = $this->codes($product);
-        $existing = $this->existing($product);
+        // The configuration the operator named, when the product has several: its own
+        // codes lead the search and the values become its own (audit 2026-11-04, C5).
+        $configuration = null;
+        if ($request->integer('product_variant_id') > 0) {
+            $configuration = $product->variants->firstWhere('id', $request->integer('product_variant_id'));
+            if ($configuration === null) {
+                return $this->json(['ok' => false, 'product_id' => $product->id, 'error' => 'product_variant_id is not a configuration of this product.',
+                    'configurations' => $product->variants->sortBy('id')->map(fn ($variant): array => ['id' => $variant->id, 'name' => $variant->name, 'sku' => $variant->sku])->values()->all()]);
+            }
+        }
+        $codes = $this->codes($product, $configuration);
+        $existing = $this->existing($product, $configuration);
         $referenceSites = app(ReferenceSites::class);
         $personLinks = $referenceSites->personLinks($codes, $product->model, $product->brand?->name);
         try {
@@ -102,11 +113,11 @@ class AddProductSpecifications implements Tool
         if ($added !== []) {
             try {
                 $result = $this->recordOperation($this->update, class_basename(self::class), 'add_product_specifications',
-                    ['product_id' => $product->id, 'facts' => $added], function () use ($product, $added): array {
+                    ['product_id' => $product->id, 'product_variant_id' => $configuration?->id, 'facts' => $added], function () use ($product, $configuration, $added): array {
                         app(ProductDraftWorkflow::class)->addSpecifications($product, array_map(
-                            fn (array $fact): array => ['key' => $fact['key'], 'name' => $fact['name'], 'value' => $fact['value']], $added));
+                            fn (array $fact): array => ['key' => $fact['key'], 'name' => $fact['name'], 'value' => $fact['value']], $added), $configuration);
                         foreach (collect($added)->whereNotNull('source_url')->unique('source_url') as $fact) {
-                            $product->sources()->firstOrCreate(['url' => $fact['source_url'], 'product_variant_id' => null], [
+                            $product->sources()->firstOrCreate(['url' => $fact['source_url'], 'product_variant_id' => $configuration?->id], [
                                 'title' => (string) (parse_url($fact['source_url'], PHP_URL_HOST) ?: 'Источник'),
                                 'domain' => parse_url($fact['source_url'], PHP_URL_HOST) ?: null,
                                 'source_type' => in_array($fact['source_type'] ?? null, ProductSourceTypes::VALUES, true) ? $fact['source_type'] : 'web',
@@ -130,6 +141,7 @@ class AddProductSpecifications implements Tool
         return $this->json([
             'ok' => true,
             'product_id' => $product->id,
+            'configuration' => $configuration === null ? null : ['id' => $configuration->id, 'name' => $configuration->name, 'sku' => $configuration->sku],
             'operation_id' => $result['operation_id'] ?? null,
             'added' => array_map(fn (array $fact): array => ['name' => $fact['name'], 'value' => $fact['value'],
                 'source' => $fact['from_operator'] ? 'operator' : $fact['source_url']], $added),
@@ -348,19 +360,32 @@ class AddProductSpecifications implements Tool
             'facts' => array_map(fn (array $fact): array => self::fact($fact, false), $data['facts'])];
     }
 
-    /** @return list<string> the product's own codes: its configurations' SKU, MPN and GTIN, and its model */
-    private function codes(Product $product): array
+    /**
+     * The product's own codes: the named configuration's SKU, MPN and GTIN (else every configuration's) and its model.
+     *
+     * @return list<string>
+     */
+    private function codes(Product $product, ?ProductVariant $configuration = null): array
     {
-        return $product->variants->flatMap(fn ($variant): array => [$variant->sku, $variant->mpn, $variant->gtin])
+        return ($configuration === null ? $product->variants : collect([$configuration]))
+            ->flatMap(fn ($variant): array => [$variant->sku, $variant->mpn, $variant->gtin])
             ->push($product->model)->filter(fn (mixed $code): bool => is_string($code) && trim($code) !== '')
             ->map(fn (string $code): string => trim($code))->unique()->values()->all();
     }
 
-    /** @return array<string, array{name: string, value: string}> key => what the product already says */
-    private function existing(Product $product): array
+    /**
+     * What the product already says: its shared values and those of the named
+     * configuration (else of its default one) - another configuration's value
+     * never blocks this one's.
+     *
+     * @return array<string, array{name: string, value: string}> key => name and value
+     */
+    private function existing(Product $product, ?ProductVariant $configuration = null): array
     {
+        $variant = $configuration ?? $product->variants->firstWhere('is_default', true) ?? $product->variants->sortBy('id')->first();
+
         return AttributeValue::query()->with('definition')
-            ->where(fn ($query) => $query->where('product_id', $product->id)->orWhereIn('product_variant_id', $product->variants->modelKeys()))
+            ->where(fn ($query) => $query->where('product_id', $product->id)->orWhere('product_variant_id', $variant?->id ?? 0))
             ->get()->filter(fn (AttributeValue $value): bool => $value->definition !== null)
             ->mapWithKeys(fn (AttributeValue $value): array => [$value->definition->key => [
                 'name' => (string) ($value->definition->translations['en'] ?? $value->definition->label), 'value' => (string) $value->value]])
@@ -375,6 +400,7 @@ class AddProductSpecifications implements Tool
             'facts_json' => $schema->string()->max(50000)->description('Optional JSON array of facts to write: [{"name":"Sequential read speed","value":"2200 MB/s","key":"sequential_read_speed","source_url":"https://…","source_excerpt":"…"}] '
                 .'or, for values the operator wrote, [{"name":"…","value":"…","from_operator":true}]. Name and value in English; numbers and units as given. Omit to search the web.'),
             'replace_existing' => $schema->boolean()->description('true only when the operator asked to correct a value the product already has.'),
+            'product_variant_id' => $schema->integer()->description('The configuration (variant) the operator named when the product has several, for example "для версии 1 ТБ": its id from the catalog tools. Omit for the product as a whole.'),
         ];
     }
 }
