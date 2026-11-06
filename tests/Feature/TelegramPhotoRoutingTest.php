@@ -22,7 +22,9 @@ use Tests\TestCase;
 /**
  * Module 71: a photographed label is a search. The colleague's #140 (2026-11-02): a
  * label photo with a few words of caption went to the manual upload intake and
- * came back as an empty card with no photo in twenty seconds.
+ * came back as an empty card with no photo in twenty seconds. The reader that
+ * transcribes the photo also says what the operator wants, seeing the caption and
+ * the picture together; word lists decide nothing but explicit instructions.
  */
 class TelegramPhotoRoutingTest extends TestCase
 {
@@ -34,42 +36,43 @@ class TelegramPhotoRoutingTest extends TestCase
         config(['services.telegram.webhook_secret' => 'test-secret', 'services.telegram.allowed_user_ids' => ['12345']]);
     }
 
-    public function test_a_caption_that_names_a_price_or_condition_describes_the_operators_own_offer(): void
+    public function test_only_an_explicit_refusal_or_the_always_manual_setting_skips_reading_the_photo(): void
     {
         $detector = app(ProductSearchIntentDetector::class);
 
-        foreach (['Dell Latitude 5450, used, 16 GB RAM', 'ThinkPad T480 б/у 8/256', 'Lenovo IdeaPad 12 500 Kč', 'HP 250 G8 cena 9 990 Kč', 'SSD 512, стан відмінний'] as $caption) {
-            $this->assertTrue($detector->describesOwnOffer($caption), $caption);
+        foreach (['Не ищи в интернете, добавь по описанию', '/add Dell Latitude', "Don't search, add as is"] as $caption) {
+            $this->assertTrue($detector->photoIsManualBeforeReading($caption, AiSettings::PHOTO_CAPTION_LABEL), $caption);
         }
-        foreach (['Micron 16GB DDR5', 'KVR32S22S8/16', 'что это за диск', ''] as $caption) {
-            $this->assertFalse($detector->describesOwnOffer($caption), $caption);
+        // A price, a condition or a description is not an instruction: the reader sees it with the picture.
+        foreach (['Dell Latitude 5450, used, 16 GB RAM', 'ThinkPad T480 б/у 8/256', 'Lenovo IdeaPad 12 500 Kč', 'Micron 16GB DDR5', ''] as $caption) {
+            $this->assertFalse($detector->photoIsManualBeforeReading($caption, AiSettings::PHOTO_CAPTION_LABEL), $caption);
         }
-        $this->assertTrue($detector->refusesSearch('Не ищи в интернете, добавь по описанию'));
-        $this->assertTrue($detector->refusesSearch('/add Dell Latitude'));
-        $this->assertFalse($detector->refusesSearch('Micron 16GB DDR5'));
+        $this->assertTrue($detector->photoIsManualBeforeReading('Micron 16GB DDR5', AiSettings::PHOTO_CAPTION_MANUAL));
+        $this->assertFalse($detector->photoIsManualBeforeReading('найди Micron 16GB DDR5', AiSettings::PHOTO_CAPTION_MANUAL));
+        $this->assertFalse($detector->photoIsManualBeforeReading('', AiSettings::PHOTO_CAPTION_MANUAL));
     }
 
-    public function test_a_photo_with_a_neutral_caption_is_read_first_by_default_and_uploaded_only_when_the_caption_or_setting_says_so(): void
+    public function test_a_single_photo_is_read_first_unless_the_caption_refuses_or_the_setting_says_always_manual(): void
     {
         Queue::fake();
         $this->assertSame(AiSettings::PHOTO_CAPTION_LABEL, app(AiSettings::class)->photoCaptionRouting());
 
         $this->photo(7001, 'Micron 16GB DDR5')->assertJson(['photo' => true]);
-        $this->photo(7002, 'ThinkPad T480 б/у 8/256')->assertJson(['upload' => true]);
+        $this->photo(7002, 'ThinkPad T480 б/у 8/256')->assertJson(['photo' => true]);
         $this->photo(7003, 'Не ищи в интернете, добавь по описанию')->assertJson(['upload' => true]);
-        Queue::assertPushed(TranscribeTelegramPhoto::class, 1);
-        Queue::assertPushed(ProcessTelegramProductUpload::class, 2);
+        Queue::assertPushed(TranscribeTelegramPhoto::class, 2);
+        Queue::assertPushed(ProcessTelegramProductUpload::class, 1);
 
         app(AiSettings::class)->savePhotoCaptionRouting(AiSettings::PHOTO_CAPTION_MANUAL);
         $this->photo(7004, 'Micron 16GB DDR5')->assertJson(['upload' => true]);
+        $this->photo(7005, 'найди Micron 16GB DDR5')->assertJson(['photo' => true]);
         app(AiSettings::class)->savePhotoCaptionRouting(AiSettings::PHOTO_CAPTION_SEARCH);
-        $this->photo(7005, 'Micron 16GB DDR5')->assertJson(['photo' => true]);
-        // A price, a condition or a refusal always means the operator's own product, whatever the setting says.
-        $this->photo(7006, 'Не ищи в интернете, добавь по описанию')->assertJson(['upload' => true]);
-        $this->photo(7007, 'ThinkPad T480 б/у 8/256')->assertJson(['upload' => true]);
+        $this->photo(7006, 'Micron 16GB DDR5')->assertJson(['photo' => true]);
+        // An explicit refusal means the operator's own product whatever the setting says.
+        $this->photo(7007, '/add ThinkPad T480 б/у 8/256')->assertJson(['upload' => true]);
     }
 
-    public function test_the_read_photo_decides_between_search_and_upload_by_what_it_shows(): void
+    public function test_the_reader_says_what_the_operator_wants_and_explicit_words_or_the_setting_outrank_it(): void
     {
         config(['services.telegram.bot_token' => 'test-token']);
         Queue::fake();
@@ -83,25 +86,54 @@ class TelegramPhotoRoutingTest extends TestCase
 
             return Http::response(['ok' => true, 'result' => []]);
         });
+        $prompts = [];
 
-        // A label with a part number: a search, the caption stays the operator's words.
-        TelegramPhotoTextAgent::fake(fn (): array => ['text' => 'Micron MTC8C1084S1SC48BA1 16GB DDR5-4800 SO-DIMM', 'has_text' => true,
-            'identifiers' => [['kind' => 'mpn', 'value' => 'MTC8C1084S1SC48BA1', 'raw_value' => 'MTC8C1084S1SC48BA1', 'source_excerpt' => 'MTC8C1084S1SC48BA1',
-                'confidence' => 'high', 'uncertain_characters' => null, 'source_kind' => 'photo_label']], 'observations' => []])->preventStrayPrompts();
+        // A label with a part number and a neutral caption: the reader says search; the caption stays the operator's words.
+        TelegramPhotoTextAgent::fake(function (string $prompt) use (&$prompts): array {
+            $prompts[] = $prompt;
+
+            return [...$this->label(), 'operator_intent' => 'search', 'intent_reason' => 'На наклейке код детали.'];
+        })->preventStrayPrompts();
         $label = $this->update(8001, 'Micron 16GB');
         (new TranscribeTelegramPhoto($label->id))->handle(app(TelegramClient::class), app(AiErrorPresenter::class));
         $this->assertSame('transcribed', $label->fresh()->status);
         $this->assertStringContainsString('MTC8C1084S1SC48BA1', (string) $label->fresh()->text);
+        $this->assertStringContainsString('«Micron 16GB»', (string) end($prompts));
         Queue::assertPushed(ProcessTelegramMessage::class, fn ($job) => $job->telegramUpdateId === $label->id);
 
-        // A plain picture of a laptop with a description: the operator's own product, uploaded.
-        TelegramPhotoTextAgent::fake(fn (): array => ['text' => 'Серебристый ноутбук на столе.', 'has_text' => false, 'identifiers' => [], 'observations' => []])
+        // A picture with a price: the reader says own product, and the operator hears why.
+        TelegramPhotoTextAgent::fake(fn (): array => [...$this->picture(), 'operator_intent' => 'own_product', 'intent_reason' => 'В подписи указана цена.'])
             ->preventStrayPrompts();
-        $picture = $this->update(8002, 'ThinkPad T480 8/256');
-        (new TranscribeTelegramPhoto($picture->id))->handle(app(TelegramClient::class), app(AiErrorPresenter::class));
-        Queue::assertPushed(ProcessTelegramProductUpload::class, fn ($job) => $job->telegramUpdateId === $picture->id);
-        $this->assertTrue((bool) data_get($picture->fresh()->payload, '_manual_product_upload'));
-        Queue::assertNotPushed(ProcessTelegramMessage::class, fn ($job) => $job->telegramUpdateId === $picture->id);
+        $offer = $this->update(8002, 'ThinkPad T480 8/256, 4500 грн');
+        (new TranscribeTelegramPhoto($offer->id))->handle(app(TelegramClient::class), app(AiErrorPresenter::class));
+        Queue::assertPushed(ProcessTelegramProductUpload::class, fn ($job) => $job->telegramUpdateId === $offer->id);
+        $this->assertTrue((bool) data_get($offer->fresh()->payload, '_manual_product_upload'));
+        Queue::assertNotPushed(ProcessTelegramMessage::class, fn ($job) => $job->telegramUpdateId === $offer->id);
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/sendMessage')
+            && str_contains((string) $request['text'], 'Принял как свой товар: В подписи указана цена.'));
+
+        // The reader unsure: a product code on the picture is a search, none is the operator's own item.
+        TelegramPhotoTextAgent::fake(fn (): array => [...$this->label(), 'operator_intent' => 'unclear', 'intent_reason' => 'Подпись не говорит, чего хочет оператор.'])
+            ->preventStrayPrompts();
+        $unsureLabel = $this->update(8003, 'Micron 16GB');
+        (new TranscribeTelegramPhoto($unsureLabel->id))->handle(app(TelegramClient::class), app(AiErrorPresenter::class));
+        Queue::assertPushed(ProcessTelegramMessage::class, fn ($job) => $job->telegramUpdateId === $unsureLabel->id);
+        TelegramPhotoTextAgent::fake(fn (): array => [...$this->picture(), 'operator_intent' => 'unclear', 'intent_reason' => 'Подпись не говорит, чего хочет оператор.'])
+            ->preventStrayPrompts();
+        $unsurePicture = $this->update(8004, 'ThinkPad T480 8/256');
+        (new TranscribeTelegramPhoto($unsurePicture->id))->handle(app(TelegramClient::class), app(AiErrorPresenter::class));
+        Queue::assertPushed(ProcessTelegramProductUpload::class, fn ($job) => $job->telegramUpdateId === $unsurePicture->id);
+
+        // «найди» in the caption, or the setting «всегда поиск», is a search whatever the reader thinks.
+        TelegramPhotoTextAgent::fake(fn (): array => [...$this->picture(), 'operator_intent' => 'own_product', 'intent_reason' => 'Похоже на свой товар.'])
+            ->preventStrayPrompts();
+        $asked = $this->update(8005, 'найди ThinkPad T480 8/256');
+        (new TranscribeTelegramPhoto($asked->id))->handle(app(TelegramClient::class), app(AiErrorPresenter::class));
+        Queue::assertPushed(ProcessTelegramMessage::class, fn ($job) => $job->telegramUpdateId === $asked->id);
+        app(AiSettings::class)->savePhotoCaptionRouting(AiSettings::PHOTO_CAPTION_SEARCH);
+        $forced = $this->update(8006, 'ThinkPad T480 8/256');
+        (new TranscribeTelegramPhoto($forced->id))->handle(app(TelegramClient::class), app(AiErrorPresenter::class));
+        Queue::assertPushed(ProcessTelegramMessage::class, fn ($job) => $job->telegramUpdateId === $forced->id);
     }
 
     public function test_the_routing_is_a_setting_the_chat_can_show_and_change(): void
@@ -117,6 +149,20 @@ class TelegramPhotoRoutingTest extends TestCase
         $this->assertTrue($set['ok']);
         $this->assertSame('search', app(AiSettings::class)->photoCaptionRouting());
         $this->assertFalse(json_decode($tool->handle(new ToolRequest(['action' => 'set', 'setting' => 'photo_caption_routing', 'value' => 'sometimes'])), true)['ok']);
+    }
+
+    /** @return array<string, mixed> */
+    private function label(): array
+    {
+        return ['text' => 'Micron MTC8C1084S1SC48BA1 16GB DDR5-4800 SO-DIMM', 'has_text' => true,
+            'identifiers' => [['kind' => 'mpn', 'value' => 'MTC8C1084S1SC48BA1', 'raw_value' => 'MTC8C1084S1SC48BA1', 'source_excerpt' => 'MTC8C1084S1SC48BA1',
+                'confidence' => 0.95, 'uncertain_characters' => null, 'source_kind' => 'photo_label']], 'observations' => []];
+    }
+
+    /** @return array<string, mixed> */
+    private function picture(): array
+    {
+        return ['text' => 'Серебристый ноутбук на столе.', 'has_text' => false, 'identifiers' => [], 'observations' => []];
     }
 
     private function photo(int $updateId, string $caption): TestResponse

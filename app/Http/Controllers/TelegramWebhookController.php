@@ -194,11 +194,12 @@ class TelegramWebhookController extends Controller
 
                 return response()->json(['ok' => true, 'upload' => true]);
             }
-            // A photographed label is a search (module 71): only a caption that refuses
-            // the search, names the operator's own offer, or the setting «всегда ручная
-            // загрузка» sends a single photo to the manual intake before it is read.
+            // A photographed label is a search (module 71): a single photo goes to the
+            // manual intake unread only when the caption refuses the search (/add, «не
+            // ищи») or the setting says «всегда ручная загрузка»; otherwise it is read
+            // first and the reader says what the operator wants.
             if (Cache::has($createKey) || $hasImageDocument || filled(data_get($payload, 'message.media_group_id'))
-                || app(ProductSearchIntentDetector::class)->photoCaptionIsManual($caption, app(AiSettings::class)->photoCaptionRouting())) {
+                || app(ProductSearchIntentDetector::class)->photoIsManualBeforeReading($caption, app(AiSettings::class)->photoCaptionRouting())) {
                 $this->clearManualCreate((string) $chatId, (string) $telegramUserId);
                 app(TelegramProductUploadIntake::class)->queue($update, $caption);
 

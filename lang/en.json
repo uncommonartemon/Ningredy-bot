@@ -622,8 +622,8 @@
     "Обязательные характеристики": "Required characteristics",
     "Что должно быть в карточке товара этой категории. Исследование ищет их по ключам; чего не нашло — карточка честно перечислит.": "What a product card of this category must carry. Research looks for them by key; what it did not find, the card lists honestly.",
     "Фото с подписью без слова «найди»": "A photo with a caption that does not say \"find\"",
-    "По содержимому: наклейка с кодом — поиск, иначе ручная загрузка": "By content: a label with a code is a search, anything else a manual upload",
+    "Бот решает по фото и подписи: код или модель — поиск, свой товар — ручная загрузка": "The bot decides by the photo and the caption: a code or a model is a search, your own product a manual upload",
     "Всегда ручная загрузка": "Always a manual upload",
     "Всегда поиск": "Always a search",
-    "Подпись с ценой, состоянием («б/у») или словами «не ищи» всегда означает свой товар. Остальное решает это правило: по умолчанию бот сначала читает фото и ищет деталь, если на ней есть код.": "A caption with a price, a condition (\"used\") or the words \"do not search\" always means your own product. This rule decides the rest: by default the bot reads the photo first and searches for the part when it carries a code."
+    "Явное «не ищи» или /add всегда означает свой товар. В остальных случаях бот читает фото и, видя подпись и снимок вместе, сам решает: искать товар или принять его как свой; свой выбор и причину он называет в ответе.": "An explicit \"do not search\" or /add always means your own product. Otherwise the bot reads the photo and, seeing the caption and the picture together, decides itself: search for the product or take it as your own; it names its choice and the reason in its reply."
 }

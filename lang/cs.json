@@ -622,8 +622,8 @@
     "Обязательные характеристики": "Povinné charakteristiky",
     "Что должно быть в карточке товара этой категории. Исследование ищет их по ключам; чего не нашло — карточка честно перечислит.": "Co musí karta zboží této kategorie obsahovat. Výzkum je hledá podle klíčů; co nenašel, karta poctivě vyjmenuje.",
     "Фото с подписью без слова «найди»": "Fotka s popiskem bez slova „najdi“",
-    "По содержимому: наклейка с кодом — поиск, иначе ручная загрузка": "Podle obsahu: štítek s kódem = hledání, jinak ruční nahrání",
+    "Бот решает по фото и подписи: код или модель — поиск, свой товар — ручная загрузка": "Bot rozhodne podle fotky a popisku: kód nebo model = hledání, vlastní zboží = ruční nahrání",
     "Всегда ручная загрузка": "Vždy ruční nahrání",
     "Всегда поиск": "Vždy hledání",
-    "Подпись с ценой, состоянием («б/у») или словами «не ищи» всегда означает свой товар. Остальное решает это правило: по умолчанию бот сначала читает фото и ищет деталь, если на ней есть код.": "Popisek s cenou, stavem („použité“) nebo slovy „nehledej“ vždy znamená vlastní zboží. O zbytku rozhoduje toto pravidlo: ve výchozím nastavení bot fotku nejdřív přečte a hledá díl, pokud je na něm kód."
+    "Явное «не ищи» или /add всегда означает свой товар. В остальных случаях бот читает фото и, видя подпись и снимок вместе, сам решает: искать товар или принять его как свой; свой выбор и причину он называет в ответе.": "Výslovné „nehledej“ nebo /add vždy znamená vlastní zboží. V ostatních případech bot fotku přečte a s popiskem i snímkem před očima sám rozhodne: hledat zboží, nebo ho přijmout jako vlastní; svou volbu a důvod uvede v odpovědi."
 }

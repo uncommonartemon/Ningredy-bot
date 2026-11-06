@@ -207,11 +207,11 @@ class AiSettingsPage extends Page implements HasForms
                                         Select::make('photo_caption_routing')
                                             ->label(__('Фото с подписью без слова «найди»'))
                                             ->options([
-                                                AiSettings::PHOTO_CAPTION_LABEL => __('По содержимому: наклейка с кодом — поиск, иначе ручная загрузка'),
+                                                AiSettings::PHOTO_CAPTION_LABEL => __('Бот решает по фото и подписи: код или модель — поиск, свой товар — ручная загрузка'),
                                                 AiSettings::PHOTO_CAPTION_MANUAL => __('Всегда ручная загрузка'),
                                                 AiSettings::PHOTO_CAPTION_SEARCH => __('Всегда поиск'),
                                             ])
-                                            ->hintIcon('heroicon-o-question-mark-circle', tooltip: __('Подпись с ценой, состоянием («б/у») или словами «не ищи» всегда означает свой товар. Остальное решает это правило: по умолчанию бот сначала читает фото и ищет деталь, если на ней есть код.'))
+                                            ->hintIcon('heroicon-o-question-mark-circle', tooltip: __('Явное «не ищи» или /add всегда означает свой товар. В остальных случаях бот читает фото и, видя подпись и снимок вместе, сам решает: искать товар или принять его как свой; свой выбор и причину он называет в ответе.'))
                                             ->default(AiSettings::PHOTO_CAPTION_LABEL)
                                             ->required(),
                                         Toggle::make('specification_reconciliation_enabled')

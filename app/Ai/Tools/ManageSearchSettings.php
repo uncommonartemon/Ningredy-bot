@@ -31,8 +31,8 @@ class ManageSearchSettings implements Tool
         'product_search_country' => ['nullable|regex:/^[A-Za-z]{2}$/', 'Страна веб-поиска, две буквы (CZ, UA, DE); пусто — весь мир.'],
         'fallback_sources_enabled' => ['boolean', 'Резервный платный AI веб-поиск по новым магазинам, когда известные не дали фото.'],
         'stronger_model_enabled' => ['boolean', 'Более сильная модель для сложных шагов.'],
-        'photo_caption_routing' => ['in:label,manual,search', 'Фото с подписью без слова «найди»: label — бот сначала читает фото, наклейка с кодом = поиск, иначе ручная загрузка; '
-            .'manual — всегда ручная загрузка; search — всегда поиск. Подпись с ценой, состоянием («б/у») или «не ищи» всегда означает свой товар.'],
+        'photo_caption_routing' => ['in:label,manual,search', 'Фото с подписью без слова «найди»: label — бот читает фото и сам решает по подписи и снимку (код или модель — поиск, свой товар — ручная загрузка); '
+            .'manual — всегда ручная загрузка; search — всегда поиск. Явное «не ищи» или /add всегда означает свой товар.'],
     ];
 
     public function __construct(private readonly TelegramUpdate $update) {}

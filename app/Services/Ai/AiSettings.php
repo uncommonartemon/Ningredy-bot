@@ -299,7 +299,7 @@ class AiSettings
         AppSetting::put('ai.product_search_country', strtoupper(trim((string) $country)));
     }
 
-    /** A single photo with a neutral caption is read first: a label with a code is a search, the rest an upload. */
+    /** A single photo with a neutral caption is read first, and its reader - seeing the caption and the picture - says whether it is a search or the operator's own product. */
     public const string PHOTO_CAPTION_LABEL = 'label';
 
     /** A single photo with a neutral caption is the operator's own product (the rule before module 71). */
@@ -313,7 +313,7 @@ class AiSettings
     /**
      * What a single photo with a caption that neither asks for a search nor refuses
      * one means (module 71, the colleague's #140: a label photo with two words of
-     * caption became an empty manual card). A price, a condition or «не ищи» in the
+     * caption became an empty manual card). An explicit «не ищи» or /add in the
      * caption always means the operator's own product, whatever this says.
      */
     public function photoCaptionRouting(): string
