@@ -241,6 +241,22 @@ class TelegramDraftInteractionsTest extends TestCase
         Queue::assertNothingPushed();
     }
 
+    public function test_the_draft_command_opens_one_draft_and_says_what_became_of_a_finished_one(): void
+    {
+        $draft = $this->draft();
+
+        $this->message("/draft {$draft->id}");
+        Http::assertSent(fn (Request $r) => str_contains((string) ($r['text'] ?? ''), "черновик #{$draft->id}"));
+        Queue::assertNothingPushed();
+
+        $this->message('/draft 99999');
+        Http::assertSent(fn (Request $r) => str_contains((string) ($r['text'] ?? ''), 'Черновика #99999 нет в этом чате'));
+
+        $draft->update(['status' => 'rejected', 'rejection_reason' => 'Не тот товар.']);
+        $this->message("/draft {$draft->id}");
+        Http::assertSent(fn (Request $r) => str_contains((string) ($r['text'] ?? ''), "Черновик #{$draft->id} отклонён. Не тот товар."));
+    }
+
     public function test_main_controls_offer_fix_beside_reject_and_never_publish_without_photos(): void
     {
         $draft = $this->draft();
