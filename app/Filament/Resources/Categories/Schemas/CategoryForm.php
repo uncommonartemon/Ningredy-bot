@@ -4,6 +4,7 @@ namespace App\Filament\Resources\Categories\Schemas;
 
 use App\Filament\Schemas\RelatedCatalogForms;
 use App\Models\Category;
+use App\Services\Products\ProductPhotoIdentity;
 use Filament\Forms\Components\Repeater;
 use Filament\Forms\Components\Repeater\TableColumn;
 use Filament\Forms\Components\Select;
@@ -99,6 +100,28 @@ class CategoryForm
                                     ->inline()
                                     ->grouped()
                                     ->required()
+                                    ->columnSpanFull(),
+                                ToggleButtons::make('photo_identity')
+                                    ->label(__('Что подтверждает товар на фото'))
+                                    ->options([
+                                        ProductPhotoIdentity::PAGE => __('Страница и корпус'),
+                                        ProductPhotoIdentity::LABEL => __('Наклейка на самой детали'),
+                                    ])
+                                    ->tooltips([
+                                        ProductPhotoIdentity::PAGE => __('Ноутбуки, компьютеры: память и диск внутри не видны, товар подтверждает страница и корпус.'),
+                                        ProductPhotoIdentity::LABEL => __('Детали: код и объём напечатаны на самой детали. Другой код на наклейке — другой товар, даже если адрес страницы содержит нужный код.'),
+                                    ])
+                                    ->default(ProductPhotoIdentity::PAGE)
+                                    ->inline()
+                                    ->grouped()
+                                    ->required()
+                                    ->columnSpanFull(),
+                                Textarea::make('photo_identity_hint')
+                                    ->label(__('Что видно на таком товаре'))
+                                    ->hintIcon('heroicon-o-question-mark-circle', tooltip: __('Подсказка для проверки фото: где на товаре код и объём, какой форм-фактор виден. Бот видит её, когда судит кадры.'))
+                                    ->rows(2)
+                                    ->autosize()
+                                    ->maxLength(2000)
                                     ->columnSpanFull(),
                                 TextInput::make('minimum_verified_images')
                                     ->label(__('Минимум проверенных фото'))

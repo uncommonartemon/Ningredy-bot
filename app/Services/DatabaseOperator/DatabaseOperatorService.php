@@ -91,6 +91,7 @@ class DatabaseOperatorService
                 'name' => 'required|string|max:255', 'slug' => 'string|max:255', 'parent_id' => $fk('categories'),
                 'product_type_affinity' => 'nullable|in:laptop,desktop,component,other', 'icon' => $text,
                 'sort_order' => $order, 'is_active' => $bool, 'gallery_search_strategy' => 'in:auto,vision_first,playwright_first',
+                'photo_identity' => 'in:page,label', 'photo_identity_hint' => 'nullable|string|max:2000',
                 'minimum_verified_images' => 'integer|min:1|max:10', 'minimum_image_width' => 'nullable|integer|min:100|max:4000',
                 'minimum_image_height' => 'nullable|integer|min:0|max:4000', 'product_search_hint' => 'nullable|string|max:10000',
             ]],

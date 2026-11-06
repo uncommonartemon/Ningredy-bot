@@ -611,5 +611,12 @@
     "Попадания": "Hits",
     "Промахи": "Misses",
     "Последний результат": "Last result",
-    "Использован": "Used"
+    "Использован": "Used",
+    "Что подтверждает товар на фото": "What identifies the product in a photo",
+    "Страница и корпус": "Page and body",
+    "Наклейка на самой детали": "The label on the part itself",
+    "Ноутбуки, компьютеры: память и диск внутри не видны, товар подтверждает страница и корпус.": "Laptops, computers: memory and storage inside are invisible; the page and the body identify the product.",
+    "Детали: код и объём напечатаны на самой детали. Другой код на наклейке — другой товар, даже если адрес страницы содержит нужный код.": "Parts: the code and capacity are printed on the part itself. Another code on the label is another product, even when the page address carries the requested code.",
+    "Что видно на таком товаре": "What is visible on such a product",
+    "Подсказка для проверки фото: где на товаре код и объём, какой форм-фактор виден. Бот видит её, когда судит кадры.": "A hint for the photo check: where the code and capacity are on the product, which form factor is visible. The bot sees it when it judges frames."
 }

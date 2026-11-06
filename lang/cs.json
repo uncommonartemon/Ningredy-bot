@@ -611,5 +611,12 @@
     "Попадания": "Zásahy",
     "Промахи": "Minutí",
     "Последний результат": "Poslední výsledek",
-    "Использован": "Použito"
+    "Использован": "Použito",
+    "Что подтверждает товар на фото": "Co na fotce potvrzuje zboží",
+    "Страница и корпус": "Stránka a tělo",
+    "Наклейка на самой детали": "Štítek na samotném dílu",
+    "Ноутбуки, компьютеры: память и диск внутри не видны, товар подтверждает страница и корпус.": "Notebooky, počítače: paměť a disk uvnitř nejsou vidět, zboží potvrzuje stránka a tělo.",
+    "Детали: код и объём напечатаны на самой детали. Другой код на наклейке — другой товар, даже если адрес страницы содержит нужный код.": "Díly: kód a kapacita jsou vytištěny na samotném dílu. Jiný kód na štítku je jiné zboží, i když adresa stránky obsahuje hledaný kód.",
+    "Что видно на таком товаре": "Co je na takovém zboží vidět",
+    "Подсказка для проверки фото: где на товаре код и объём, какой форм-фактор виден. Бот видит её, когда судит кадры.": "Nápověda pro kontrolu fotek: kde je na zboží kód a kapacita, jaký formát je vidět. Bot ji vidí, když posuzuje snímky."
 }
