@@ -4,11 +4,12 @@ namespace App\Services\ProductSearch\Codes;
 
 use App\Models\AppSetting;
 use App\Models\ProductSourceAttempt;
+use Illuminate\Support\Facades\Cache;
 use Throwable;
 
 /**
  * The databases the bot looks a product up in by its code (Icecat, UPCitemdb):
- * whether they are connected, how they did lately, and what exists for the
+ * whether they are connected and switched on, how they did lately, and what exists for the
  * components they do not cover. Live 2026-11-02: on another machine Icecat had
  * never been connected (no ICECAT_USERNAME in its .env) - every lookup answered
  * "not configured" and nothing anywhere said so.
@@ -19,6 +20,52 @@ final class CodeDatabases
     public const SETTING_ICECAT_USERNAME = 'services.icecat.username';
 
     public const ICECAT_REGISTER_URL = 'https://icecat.biz/register';
+
+    /** Whether the operator left this database on: «Настройки → Сервисы» and the chat. On unless switched off. */
+    public static function enabled(string $source): bool
+    {
+        try {
+            $stored = AppSetting::valueFor("services.{$source}.enabled");
+        } catch (Throwable) {
+            return true;
+        }
+
+        return $stored === null || filter_var($stored, FILTER_VALIDATE_BOOLEAN);
+    }
+
+    public static function setEnabled(string $source, bool $enabled): void
+    {
+        AppSetting::put("services.{$source}.enabled", $enabled ? '1' : '0');
+    }
+
+    /**
+     * Sites whose pages and photos the search leaves alone while their database is off,
+     * so a search with Icecat off really runs on the other sources.
+     *
+     * @return list<string>
+     */
+    public static function switchedOffSites(): array
+    {
+        $site = strtolower(trim((string) config('services.icecat.site', 'icecat.biz')));
+
+        return $site !== '' && ! self::enabled('icecat') ? [$site] : [];
+    }
+
+    /** What Icecat said to its last lookup: a login it does not know answers every lookup the same way. */
+    public static function lastIcecatAnswer(): ?string
+    {
+        try {
+            return ProductSourceAttempt::query()->where('phase', 'code_lookup')->where('action', 'lookup_icecat')
+                ->whereNotIn('decision', ['disabled', 'not_configured'])->latest('id')->value('decision');
+        } catch (Throwable) {
+            return null;
+        }
+    }
+
+    public static function upcitemdbUsedToday(): int
+    {
+        return (int) Cache::get(ProductCodeLookup::upcitemdbQuotaKey(), 0);
+    }
 
     /**
      * What exists for each kind of component, checked 2026-11-02 against Open Icecat
@@ -40,6 +87,9 @@ final class CodeDatabases
         'ram' => ['title' => 'Оперативная память',
             'text' => 'Icecat: Kingston и Samsung есть, Crucial — только в Full Icecat. Серверная и OEM-память (Micron, SK hynix) — '
                 .'по коду на сайтах производителей.'],
+        'ebay' => ['title' => 'eBay Browse API',
+            'text' => 'Живые объявления с фото и кодами деталей, в том числе OEM. Песочница открыта всем, а для рабочего доступа eBay требует заявку и договор; '
+                .'фото принадлежат продавцам. Не подключён: нужно ваше решение и аккаунт разработчика.'],
         'distributors' => ['title' => 'Дистрибьюторы с API (Mouser, DigiKey, Octopart)',
             'text' => 'API с характеристиками и фото есть, бесплатно с лимитами, но это промышленные детали: ноутбучных OEM-дисков и '
                 .'памяти там нет (проверено по кодам PM991a, BC501, Micron RDIMM). Не подключены.'],
