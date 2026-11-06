@@ -79,18 +79,18 @@ class ProductTextRetranslationTest extends TestCase
     public function test_a_batch_that_changes_shown_text_orders_translations_once_per_product(): void
     {
         [$product, $variant] = $this->product();
-        $definition = AttributeDefinition::query()->firstOrCreate(['key' => 'tdp'], ['label' => 'TDP', 'data_type' => 'text']);
-        $value = AttributeValue::query()->create(['attribute_definition_id' => $definition->id, 'product_id' => $product->id, 'value' => '100 W']);
+        $definition = AttributeDefinition::query()->firstOrCreate(['key' => 'cooling_note'], ['label' => 'Cooling note', 'data_type' => 'text']);
+        $value = AttributeValue::query()->create(['attribute_definition_id' => $definition->id, 'product_id' => $product->id, 'value' => 'Two fans']);
         $service = app(DatabaseOperatorService::class);
         $context = $this->ask('Поправь товар');
 
         $plan = $service->prepare([
             ['action' => 'update', 'table' => 'products', 'selection' => ['ids' => [$product->id]], 'values' => ['description' => 'New description']],
-            ['action' => 'update', 'table' => 'attribute_values', 'selection' => ['ids' => [$value->id]], 'values' => ['value' => '115 W']],
+            ['action' => 'update', 'table' => 'attribute_values', 'selection' => ['ids' => [$value->id]], 'values' => ['value' => 'Three fans']],
         ], $context);
         $service->execute($plan, $context);
 
-        $this->assertSame('115 W', $value->fresh()->value);
+        $this->assertSame('Three fans', $value->fresh()->value);
         Queue::assertPushed(TranslateProductText::class, 1);
         Queue::assertPushed(TranslateProductText::class, fn (TranslateProductText $job): bool => $job->productId === $product->id);
     }
