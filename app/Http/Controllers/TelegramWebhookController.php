@@ -33,6 +33,7 @@ use App\Services\Products\ProductSourcePriority;
 use App\Services\ProductSearch\Recovery\RequestGuardian;
 use App\Services\Telegram\CatalogTelegramNavigation;
 use App\Services\Telegram\DraftAccess;
+use App\Services\Telegram\DraftQueuedWork;
 use App\Services\Telegram\DraftTelegramActionConfirmation;
 use App\Services\Telegram\DraftTelegramInteractionState;
 use App\Services\Telegram\DraftTelegramPresenter;
@@ -1917,15 +1918,9 @@ class TelegramWebhookController extends Controller
 
     private function draftHasQueuedWork(int $draftId): bool
     {
-        // Use the same markers that the existing jobs clear on completion/failure.
-        // No new persistent lock or independent timeout is introduced by the UI.
-        foreach (['draft-gallery-retrain', 'draft-gallery-restage', 'draft-gallery-continue', 'draft-gallery-topup', 'draft-photo-actions', 'draft-fields', 'draft-enrich', 'draft-upload'] as $operation) {
-            if (Cache::has("{$operation}:{$draftId}:queued")) {
-                return true;
-            }
-        }
-
-        return false;
+        // The same markers the existing jobs clear on completion/failure; the chat
+        // tools read them too. No persistent lock or timeout of the UI's own.
+        return DraftQueuedWork::has($draftId);
     }
 
     private function clearManualCreate(string $chat, string $user): void
