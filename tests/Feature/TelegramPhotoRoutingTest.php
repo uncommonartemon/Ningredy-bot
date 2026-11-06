@@ -124,6 +124,16 @@ class TelegramPhotoRoutingTest extends TestCase
         (new TranscribeTelegramPhoto($unsurePicture->id))->handle(app(TelegramClient::class), app(AiErrorPresenter::class));
         Queue::assertPushed(ProcessTelegramProductUpload::class, fn ($job) => $job->telegramUpdateId === $unsurePicture->id);
 
+        // A screenshot with a request about a product goes to the assistant, its read text in the message.
+        TelegramPhotoTextAgent::fake(fn (): array => ['text' => 'CrystalDiskInfo Samsung PM991 Health Status Good 95 % Power On Hours 1234 hours', 'has_text' => true,
+            'identifiers' => [], 'observations' => [], 'operator_intent' => 'request', 'intent_reason' => 'В подписи просьба дописать значения в товар.'])->preventStrayPrompts();
+        $smart = $this->update(8007, 'добавь в товар 15');
+        (new TranscribeTelegramPhoto($smart->id))->handle(app(TelegramClient::class), app(AiErrorPresenter::class));
+        Queue::assertPushed(ProcessTelegramMessage::class, fn ($job) => $job->telegramUpdateId === $smart->id);
+        Queue::assertNotPushed(ProcessTelegramProductUpload::class, fn ($job) => $job->telegramUpdateId === $smart->id);
+        $this->assertStringContainsString('Power On Hours 1234', (string) $smart->fresh()->text);
+        $this->assertStringContainsString('добавь в товар 15', (string) $smart->fresh()->text);
+
         // «найди» in the caption, or the setting «всегда поиск», is a search whatever the reader thinks.
         TelegramPhotoTextAgent::fake(fn (): array => [...$this->picture(), 'operator_intent' => 'own_product', 'intent_reason' => 'Похоже на свой товар.'])
             ->preventStrayPrompts();

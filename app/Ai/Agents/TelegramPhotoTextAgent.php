@@ -62,9 +62,16 @@ class TelegramPhotoTextAgent implements Agent, HasStructuredOutput
               Signs: a selling price, a condition they state (used, refurbished, like new, in box),
               words such as "add", "do not search", "mine", "for sale", or a plain picture of the
               device with a description and no printed code to look up.
+            - request: the caption asks something else of the bot about what it already has: add these
+              values to a product or draft, correct one, answer a question about it. A screenshot sent
+              with "добавь в товар 15" or "в черновик 213" is this.
             - unclear: the caption and the picture together do not tell which.
             With no caption, operator_intent is search. In intent_reason give one short Russian
             sentence naming the decisive clue, as you would tell the operator; they will read it.
+
+            A SMART or disk diagnostics screenshot (CrystalDiskInfo, Hard Disk Sentinel, smartctl) describes
+            one used drive. Read its model and serial as identifiers, and its state as observations with
+            these keys: health_percent, power_on_hours, tbw_written, in the units shown.
             PROMPT;
     }
 
@@ -73,7 +80,7 @@ class TelegramPhotoTextAgent implements Agent, HasStructuredOutput
         return [
             'text' => $schema->string()->max(2000)->required(),
             'has_text' => $schema->boolean()->required(),
-            'operator_intent' => $schema->string()->enum(['search', 'own_product', 'unclear'])->required(),
+            'operator_intent' => $schema->string()->enum(['search', 'own_product', 'request', 'unclear'])->required(),
             'intent_reason' => $schema->string()->max(300)->required(),
             'identifiers' => $schema->array()->max(24)->items($schema->object([
                 'kind' => $schema->string()->enum(['brand', 'model', 'family', 'mpn', 'sku', 'ean', 'upc', 'gtin', 'serial', 'regulatory', 'other'])->required(),
