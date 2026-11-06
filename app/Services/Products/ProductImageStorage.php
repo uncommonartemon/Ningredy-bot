@@ -590,6 +590,7 @@ class ProductImageStorage
         // The maker's page the search is on its way to after a thin gallery
         // (detourToOfficialSource): null = no detour, '' = that page was reached.
         $officialDetour = null;
+        $heldWithoutCode = false;
 
         foreach ($sourceQueue as $sourceIndex => $source) {
             app(ProductSearchCancellation::class)->throwIfCancelled($telegramUpdateId);
@@ -647,6 +648,7 @@ class ProductImageStorage
                     'kind' => 'next_source', 'url' => $source['url'], 'position' => $sourceIndex + 1,
                     'queue_size' => $sourceQueue->count(), 'photo_sets_waiting_for_check' => count($deferredVisionSets),
                     'best_unfinished_set_photos' => $reserve === null ? 0 : count($reserve->candidates),
+                    'holding_a_part_photo_without_a_readable_code' => $heldWithoutCode,
                 ], $progress);
             if ($watch['decision'] === 'deliver_now') {
                 break;
@@ -1024,6 +1026,13 @@ class ProductImageStorage
                     // category minimum; do not withhold a usable card merely
                     // to fill the target. A partial traversal stays partial.
                     // The one exception: a thin set while the maker's page waits.
+                    if ($this->holdsForAReadableLabel($result, $sourceQueue, $sourceIndex, $reviewedSourceUrls, $draft, $telegramUpdateId)) {
+                        $heldWithoutCode = true;
+                        $reviewedSourceUrls[rtrim((string) $source['url'], '/')] = true;
+                        $reserve = $this->keepBestReserve($reserve, $result);
+
+                        continue;
+                    }
                     if ($this->detourToOfficialSource($result, $sourceQueue, $sourceIndex, $reviewedSourceUrls, $officialDetour,
                         $target, $draft, $telegramUpdateId, $progress)) {
                         $reserve = $this->keepBestReserve($reserve, $result);
@@ -1165,6 +1174,15 @@ class ProductImageStorage
                 continue;
             }
 
+            if ($this->holdsForAReadableLabel($result, $sourceQueue, $sourceIndex, $reviewedSourceUrls, $draft, $telegramUpdateId)) {
+                $heldWithoutCode = true;
+                $reviewedSourceUrls[rtrim($originalSourceUrl, '/')] = true;
+                $reviewedSourceUrls[rtrim($productPageUrl, '/')] = true;
+                $this->destroyUnselected($allCandidates, $result->candidates);
+                $reserve = $this->keepBestReserve($reserve, $result);
+
+                continue;
+            }
             // A thin confirmed gallery while the maker's page waits (operator, 2026-10-29).
             if ($this->detourToOfficialSource($result, $sourceQueue, $sourceIndex, $reviewedSourceUrls, $officialDetour,
                 $target, $draft, $telegramUpdateId, $progress)) {
@@ -1229,7 +1247,8 @@ class ProductImageStorage
         // The maker's page was tried after a thin gallery (detourToOfficialSource) and
         // gave nothing richer: the thin complete set is the card, not a reason for the
         // fallback search (live #349: three more shops were opened after that page).
-        if ($selected === [] && $officialDetour === '' && $reserve?->isComplete()) {
+        // The same for a part's photo without a readable code once the queue is through.
+        if ($selected === [] && ($officialDetour === '' || $heldWithoutCode) && $reserve?->isComplete()) {
             $selected = $reserve->candidates;
             $chosenSource = $reserve->source;
             $chosenMethod = $reserve->method;
@@ -2519,6 +2538,39 @@ class ProductImageStorage
             count($result->candidates), $target));
 
         return true;
+    }
+
+    /**
+     * A part's photo on which no code could be read is the last resort, not the answer:
+     * while pages wait in the queue, one of them may show the label, and a person would
+     * look there first (live #402: the back of a drive went out and the search ended, with
+     * a page showing the exact code next in line). It waits as the reserve; the watcher
+     * can end the wait, and with no better frame it is the card.
+     *
+     * @param  iterable<int, array<string, mixed>>  $queue
+     * @param  array<string, true>  $reviewed
+     */
+    private function holdsForAReadableLabel(GallerySourceResult $result, iterable $queue, int $afterIndex, array $reviewed, ProductDraft $draft, ?int $telegramUpdateId): bool
+    {
+        if (! $result->isComplete() || $result->candidates === []
+            || ! collect($result->candidates)->every(fn (array $frame): bool => (bool) data_get($frame, 'photo_visual_review.identity_unproven', false))) {
+            return false;
+        }
+        foreach ($queue as $index => $candidate) {
+            if ($index > $afterIndex && is_array($candidate) && ! isset($reviewed[rtrim((string) ($candidate['url'] ?? ''), '/')])
+                && rtrim((string) ($candidate['url'] ?? ''), '/') !== rtrim((string) ($result->source['url'] ?? ''), '/')
+                && app(SearchProgressSupervisor::class)->siteDropReason($telegramUpdateId, (string) ($candidate['url'] ?? '')) === null) {
+                $this->attempts->record([
+                    'telegram_update_id' => $telegramUpdateId, 'product_draft_id' => $draft->id, 'product_url' => (string) ($result->source['url'] ?? ''),
+                    'actor' => 'server', 'phase' => 'source_selection', 'action' => 'hold_photo_without_code', 'status' => 'info',
+                    'decision' => 'look_for_a_readable_label', 'input' => ['next_source' => (string) ($candidate['url'] ?? '')],
+                ]);
+
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
