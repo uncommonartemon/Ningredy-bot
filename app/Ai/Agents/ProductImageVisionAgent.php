@@ -81,9 +81,14 @@ class ProductImageVisionAgent implements Agent, HasStructuredOutput
             (a memory module, a drive, a processor, a card), the rules above about invisible CPU/RAM/SSD differences
             do not apply - its capacity, speed and part number are printed on it. Read every label, sticker and
             silkscreen in the frame and copy the product's own part number or model marking into observed_marking
-            (not serial numbers, dates, firmware or certification codes; empty when nothing is readable). A readable
+            (not serial numbers, dates, firmware or certification codes, not a capacity or speed grade alone, not a
+            placeholder printed on a maker's render such as CT000000XX000X; empty when nothing is readable). A readable
             marking naming another part number, model or capacity than the requested product makes the frame another
-            product: exact_match=false, physical_match=conflicting, publishable=false, rejection_reason=identity. The
+            product: exact_match=false, physical_match=conflicting, publishable=false, rejection_reason=identity. Retail
+            parts often carry their name instead of their part number: the requested product's own model or series name
+            (WD Blue SN570 500GB on a drive requested as WDS500G3B0C) is this product, exact_match=true, publishable judged
+            by quality. The same code with another batch or revision suffix (-8310A and -8310 BA) is the same part:
+            exact_match=false, publishable judged by quality. The
             visible form factor must match the requested one (board length 2230/2242/2280, SO-DIMM or DIMM, 2.5 or
             3.5 inch, socket): a different one is physical_match=conflicting, rejection_reason=body. A readable
             marking that matches the requested code is exact_match=true. A frame with no readable marking and a

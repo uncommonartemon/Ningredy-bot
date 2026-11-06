@@ -167,6 +167,92 @@ class ProductPhotoIdentityTest extends TestCase
         $this->assertStringContainsString('родственный код SDBPNPZ-256G-1014', $selected[0]['vision_reason']);
     }
 
+    public function test_a_retail_parts_own_name_on_the_frame_is_not_another_code(): void
+    {
+        // Live #409: «WD Blue SN570 500GB» on the drive, refused at every store against WDS500G3B0C.
+        $draft = new ProductDraft(['title' => 'Western Digital WD Blue SN570 500GB NVMe SSD (WDS500G3B0C)', 'brand' => 'Western Digital', 'model' => 'WDS500G3B0C',
+            'specifications' => [['key' => 'capacity', 'name' => 'Capacity', 'value' => '500 GB'], ['key' => 'form_factor', 'name' => 'Form factor', 'value' => 'M.2 2280']]]);
+        $this->assertSame('name', ProductPhotoIdentity::markingVerdict($draft, 'WD Blue SN570 NVMe SSD; 500GB'));
+        $this->assertSame('name', ProductPhotoIdentity::markingVerdict($draft, 'WD Blue SN570'));
+        $this->assertSame('match', ProductPhotoIdentity::markingVerdict($draft, 'WDS500G3B0C WD Blue SN570'));
+        // Another model or capacity has a word of its own.
+        $this->assertSame('conflict', ProductPhotoIdentity::markingVerdict($draft, 'WD_BLACK SN750'));
+        $this->assertSame('conflict', ProductPhotoIdentity::markingVerdict($draft, 'WD Blue SN570 1TB'));
+        // The name says «512 GB», the label prints 512GB.
+        $samsung = new ProductDraft(['title' => 'Samsung PM9A1 512 GB M.2 2280 PCIe 4.0 NVMe SSD', 'model' => 'MZVL2512HCJQ-00B00']);
+        $this->assertSame('name', ProductPhotoIdentity::markingVerdict($samsung, 'Samsung PM9A1 512GB'));
+    }
+
+    public function test_a_frame_showing_the_products_own_name_goes_out_from_a_reseller_and_another_model_does_not(): void
+    {
+        $draft = $this->componentDraft('WDS500G3B0C', 'WD Blue SN570 500GB NVMe SSD');
+        ProductImageVisionAgent::fake(fn (): array => ['images' => [
+            $this->review(1, exactMatch: true, marking: 'WD Blue SN570 NVMe SSD; 500GB', reason: 'The requested drive under its own name.'),
+            $this->review(2, exactMatch: true, marking: 'WD_BLACK SN750', reason: 'From the related products block.'),
+        ]])->preventStrayPrompts();
+        $page = ['title' => 'WD Blue SN570 WDS500G3B0C', 'url' => 'https://reseller.example/sn570', 'type' => 'retailer'];
+        $exact = ProductPhotoApplicability::bind($draft, $page, ['verdict' => 'exact', 'plausible_target' => true, 'reason' => 'Exact.']);
+
+        $selected = app(ProductImageVisionVerifier::class)->select($draft, [
+            $this->frame('https://reseller.example/a.jpg', [...$page, '_photo_applicability' => $exact]),
+            $this->frame('https://reseller.example/b.jpg', [...$page, '_photo_applicability' => $exact]),
+        ], 4);
+
+        $this->assertSame(['https://reseller.example/a.jpg'], array_column($selected, 'source_url'));
+        $this->assertSame('name', $selected[0]['photo_visual_review']['marking_verdict']);
+        $this->assertFalse($selected[0]['photo_visual_review']['identity_unproven']);
+        $this->assertStringContainsString('название этой модели', $selected[0]['vision_reason']);
+    }
+
+    public function test_a_name_the_reviewer_is_unsure_of_is_the_last_resort_and_not_a_lost_frame(): void
+    {
+        $draft = $this->componentDraft('WDS500G3B0C', 'WD Blue SN570 500GB NVMe SSD');
+        // Live #409, coolblue: «identifies the SN570 family but not the full part number; no visible contradiction».
+        ProductImageVisionAgent::fake(fn (): array => ['images' => [
+            [...$this->review(1, exactMatch: false, marking: 'WD Blue SN570 NVMe SSD', reason: 'The family, not the full part number.'),
+                'publishable' => false, 'rejection_reason' => 'identity', 'physical_match' => 'conflicting'],
+        ]])->preventStrayPrompts();
+        $page = ['title' => 'WD Blue SN570 WDS500G3B0C', 'url' => 'https://reseller.example/sn570', 'type' => 'retailer'];
+        $exact = ProductPhotoApplicability::bind($draft, $page, ['verdict' => 'exact', 'plausible_target' => true, 'reason' => 'Exact.']);
+
+        $selected = app(ProductImageVisionVerifier::class)->select($draft, [
+            $this->frame('https://reseller.example/a.jpg', [...$page, '_photo_applicability' => $exact]),
+        ], 4);
+
+        $this->assertCount(1, $selected);
+        $this->assertTrue($selected[0]['photo_visual_review']['identity_unproven']);
+    }
+
+    public function test_a_sibling_label_the_reviewer_refused_goes_out_before_a_frame_with_no_code(): void
+    {
+        // Live #402: the drive's real label refused for one letter, its back with no code published.
+        $draft = $this->componentDraft();
+        $refused = ['publishable' => false, 'rejection_reason' => 'identity', 'physical_match' => 'conflicting'];
+        ProductImageVisionAgent::fake(fn (): array => ['images' => [
+            [...$this->review(1, exactMatch: false, marking: 'HFM512GDJTNG-8310 BA', reason: 'The readable marking differs from the requested one.'), ...$refused],
+            $this->review(2, exactMatch: true, marking: '', reason: 'The back of an M.2 drive; the page names the model.'),
+        ]])->preventStrayPrompts();
+        $page = ['title' => 'SK hynix BC501 HFM512GDJTNG-8310A', 'url' => 'https://reseller.example/bc501', 'type' => 'retailer'];
+        $exact = ProductPhotoApplicability::bind($draft, $page, ['verdict' => 'exact', 'plausible_target' => true, 'reason' => 'Exact.']);
+        $frames = [
+            $this->frame('https://reseller.example/label.jpg', [...$page, '_photo_applicability' => $exact]),
+            $this->frame('https://reseller.example/back.jpg', [...$page, '_photo_applicability' => $exact]),
+        ];
+
+        $selected = app(ProductImageVisionVerifier::class)->select($draft, $frames, 4);
+
+        $this->assertSame(['https://reseller.example/label.jpg'], array_column($selected, 'source_url'));
+        $this->assertSame('sibling', $selected[0]['photo_visual_review']['marking_verdict']);
+        $this->assertStringContainsString('родственный код', $selected[0]['vision_reason']);
+
+        // A different body is refused for what it is, whatever the label says.
+        ProductImageVisionAgent::fake(fn (): array => ['images' => [
+            [...$this->review(1, exactMatch: false, marking: 'HFM512GDJTNG-8310 BA', reason: 'A 2242 board, not 2280.'),
+                'publishable' => false, 'rejection_reason' => 'body', 'physical_match' => 'conflicting'],
+        ]])->preventStrayPrompts();
+        $this->assertSame([], app(ProductImageVisionVerifier::class)->select($draft, [$frames[0]], 4));
+    }
+
     public function test_a_components_playwright_gallery_is_read_for_labels_too(): void
     {
         $draft = $this->componentDraft();

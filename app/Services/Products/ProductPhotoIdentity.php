@@ -79,11 +79,13 @@ final class ProductPhotoIdentity
     /**
      * What a marking read from the frame says against the requested product:
      * match (the requested code), sibling (the same code with another suffix or
-     * batch), conflict (another code), none (nothing code-like was read).
+     * batch), name (no code, but the product's own model or series name),
+     * conflict (another code), none (nothing code-like was read).
      */
     public static function markingVerdict(ProductDraft $draft, ?string $observed): string
     {
-        $observed = self::compact((string) $observed);
+        $marking = (string) $observed;
+        $observed = self::compact($marking);
         if (mb_strlen($observed) < self::MIN_CODE_LENGTH || preg_match('/\d/', $observed) !== 1) {
             return 'none';
         }
@@ -107,7 +109,57 @@ final class ProductPhotoIdentity
             }
         }
 
-        return $verdict;
+        return $verdict === 'conflict' && self::namesTheProduct($draft, $marking) ? 'name' : $verdict;
+    }
+
+    /**
+     * Retail parts carry their name, not their part number: «WD Blue SN570 500GB» on the
+     * drive requested as WDS500G3B0C is that drive (live #409: the photo at every store
+     * refused as another code). Another model or capacity has a word of its own that the
+     * product does not (SN750, 1TB), and that stays a conflict.
+     */
+    private static function namesTheProduct(ProductDraft $draft, string $marking): bool
+    {
+        $own = array_flip(self::ownWords($draft));
+        foreach (self::words($marking) as $word) {
+            if (preg_match('/\d/', $word) === 1 && ! isset($own[$word])) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * The words of the product's name, codes and specifications. Neighbouring words count
+     * together too: a name says «500 GB» where the label prints 500GB.
+     *
+     * @return list<string>
+     */
+    private static function ownWords(ProductDraft $draft): array
+    {
+        $values = collect($draft->specifications ?? [])
+            ->filter(fn (mixed $row): bool => is_array($row))->pluck('value')
+            ->push($draft->title, $draft->brand, $draft->model)
+            ->map(fn (mixed $value): string => is_scalar($value) ? (string) $value : '');
+        $own = [];
+        foreach ($values as $value) {
+            $words = self::words($value);
+            foreach ($words as $index => $word) {
+                $own[] = $word;
+                if (isset($words[$index + 1])) {
+                    $own[] = $word.$words[$index + 1];
+                }
+            }
+        }
+
+        return $own;
+    }
+
+    /** @return list<string> */
+    private static function words(string $text): array
+    {
+        return preg_split('/[^A-Z0-9]+/', strtoupper($text), -1, PREG_SPLIT_NO_EMPTY) ?: [];
     }
 
     private static function compact(string $text): string

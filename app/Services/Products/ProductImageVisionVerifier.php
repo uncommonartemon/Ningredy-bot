@@ -332,6 +332,13 @@ class ProductImageVisionVerifier
                 // by the reviewer's feeling: another code is another product (live #379).
                 $observedMarking = trim((string) ($review['observed_marking'] ?? ''));
                 $markingVerdict = $labelIdentity ? ProductPhotoIdentity::markingVerdict($draft, $observedMarking) : 'none';
+                // The reviewer refuses a label that is not the requested code letter for letter;
+                // the comparison above has settled that a sibling or the product's own name is
+                // this part (live #402: the drive's real label, HFM512GDJTNG-8310 BA against
+                // -8310A, was refused and its back with no code went out). A different form
+                // factor is reported as body, not identity, and stays refused.
+                $labelDoubtOnly = in_array($markingVerdict, ['sibling', 'name'], true) && ! $review['publishable']
+                    && ($review['rejection_reason'] ?? null) === 'identity';
                 // With no code read, a component frame is not exact however sure the reviewer
                 // felt from the page (live #390: «источник подтверждает модель» with an empty
                 // marking went out as exact); it is the maker's page, a labelled gallery
@@ -339,6 +346,8 @@ class ProductImageVisionVerifier
                 $exactMatch = match ($markingVerdict) {
                     'conflict' => false,
                     'match' => true,
+                    // The name is on the frame; whether it is enough for this part is the reviewer's call.
+                    'name' => (bool) $review['exact_match'],
                     // A logo carries no label by nature; the component logo policy judges it by brand.
                     default => (! $labelIdentity || ($review['kind'] ?? '') === 'logo') && (bool) $review['exact_match'],
                 };
@@ -347,8 +356,9 @@ class ProductImageVisionVerifier
                     ...$review,
                     'exact_match' => $exactMatch,
                     'reviewer_exact_match' => (bool) $review['exact_match'],
-                    'publishable' => $markingVerdict === 'conflict' ? false : ($review['publishable'] || $identityDoubtOnly),
-                    'rejection_reason' => $markingVerdict === 'conflict' ? 'identity' : ($review['rejection_reason'] ?? 'none'),
+                    'publishable' => $markingVerdict === 'conflict' ? false : ($review['publishable'] || $identityDoubtOnly || $labelDoubtOnly),
+                    'rejection_reason' => $markingVerdict === 'conflict' ? 'identity' : ($labelDoubtOnly ? 'none' : ($review['rejection_reason'] ?? 'none')),
+                    ...($labelDoubtOnly ? ['physical_match' => 'match'] : []),
                     'identity_doubt_overruled' => $identityDoubtOnly,
                     'hero' => $review['kind'] === 'product'
                         && in_array($review['view'], ['front', 'angle'], true),
@@ -365,7 +375,8 @@ class ProductImageVisionVerifier
             // of «related products» live on the same page (live #380, #384).
             $pageOf = fn (array $review): string => (string) ($candidates[$review['index'] - 1]['page_source_context']['url'] ?? '');
             $labelledPages = $reviewed
-                ->filter(fn (array $review): bool => in_array($review['marking_verdict'], ['match', 'sibling'], true))
+                ->filter(fn (array $review): bool => in_array($review['marking_verdict'], ['match', 'sibling'], true)
+                    || ($review['marking_verdict'] === 'name' && $review['exact_match']))
                 ->map($pageOf)->filter()->unique();
             $reviewed = $reviewed->map(fn (array $review): array => $review['marking_verdict'] === 'none' && $review['reviewer_exact_match']
                 && $review['publishable'] && $pageOf($review) !== '' && $labelledPages->contains($pageOf($review))
@@ -413,7 +424,7 @@ class ProductImageVisionVerifier
         if ($labelIdentity && $reviews->isEmpty()) {
             $reviews = $this->rankReviews($reviewed->filter(fn (array $review): bool => $review['publishable']
                 && ($review['catalog_photo'] ?? true) && ($review['physical_match'] ?? null) !== 'conflicting'
-                && $review['source_supported'] && $review['marking_verdict'] === 'none'
+                && $review['source_supported'] && in_array($review['marking_verdict'], ['none', 'name'], true)
                 && in_array($review['kind'], $allowedKinds, true) && ($galleryFramePolicy || $review['score'] >= $minimumScore)
                 && ! ($forbidsPackaging && $review['kind'] === 'packaging')))
                 ->take(1)->map(fn (array $review): array => [...$review, 'identity_unproven' => true]);
@@ -438,6 +449,7 @@ class ProductImageVisionVerifier
                     ($review['marking_verdict'] ?? 'none') === 'match' => 'Код на наклейке совпадает с запрошенным: '.$review['observed_marking'].'. '.$review['reason'],
                     ($review['marking_verdict'] ?? 'none') === 'sibling' => 'На наклейке родственный код '.$review['observed_marking']
                         .' (та же модель, другая партия или суффикс). '.$review['reason'],
+                    ($review['marking_verdict'] ?? 'none') === 'name' => 'На фото название этой модели: '.$review['observed_marking'].'; кода на наклейке нет. '.$review['reason'],
                     (bool) ($review['labelled_neighbour'] ?? false) => 'Код на этом кадре не прочитан, но в той же галерее товара есть кадр с совпавшим кодом. '.$review['reason'],
                     $review['source_supported'] && ! $review['exact_match'] && ($review['maker_page'] ?? false) => 'Фото со страницы производителя или из записи по коду; код на фото не прочитан. '.$review['reason'],
                     $review['source_supported'] && ! $review['exact_match'] => 'Exact identity is supported by the source URL. '.$review['reason'],
@@ -692,7 +704,7 @@ class ProductImageVisionVerifier
         $identityPolicy = $labelIdentity
             ? 'IDENTITY FROM MARKINGS: the requested product is itself the thing photographed. Requested codes: '
                 .implode(', ', ProductPhotoIdentity::codes($draft) ?: ['none'])
-                .'. Read the label and copy its part number or model marking into observed_marking; another code or capacity on the label is another product.'
+                .'. Read the label and copy its part number or model marking into observed_marking; another code or capacity on the label is another product, the product\'s own model or series name is this product.'
                 .' What is visible on such a product: '.(ProductPhotoIdentity::hint($draft) ?: 'the label with the part number and capacity, the form factor.')
             : 'Invisible RAM/SSD/clock differences do not disqualify photographs.';
         $specifications = collect($draft->specifications ?? [])->map(function (array $item): string {
