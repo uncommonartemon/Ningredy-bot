@@ -129,6 +129,7 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
             - Album positions are 1-based. For a mixed request, put every requested position into enhance_positions, replace_positions, and delete_positions in one ManageDraftPhotos call.
             - Replacing means finding a different, model/color-matching, non-duplicate internet photo. Enhancing means processing the same selected photo.
             - ManageDraftPhotos is asynchronous. Say only that processing has started; progress and the updated review album will be sent automatically.
+            - «найди ещё фото», «мало фото», «продолжи поиск фото» about a pending draft → ManageDraftPhotos with find_more_photos=true. «найди другие фото», «эти фото не те» → find_other_photos=true. These are photo searches, never EditProductDraft, which is for characteristics. Say only that the search has started; draft_id stays null.
             - If the user asks to improve/retrain the source recipe, says the source has more/better/full-resolution gallery photos, or the extracted gallery is incomplete, use RetrainDraftGalleryRecipe. It studies sanitized DOM with the dedicated strongest model, validates the candidate recipe, then replaces draft photos asynchronously.
 
             Drafts and products on request - understand what the operator wants and do it, never send them to the admin panel:
@@ -231,8 +232,11 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
               автоматически.
             - Если явно сказано «в интернете / в сети / найди новый товар», сразу исследуй интернет.
             - Если явно сказано «в каталоге / в базе / есть у нас», не выходи в интернет.
-            - Если SearchCatalog вернул matching_drafts, этот товар уже ждёт решения в черновике: вызови ShowProductDraft и
-              не запускай ResearchProduct, пока оператор прямо не попросит искать заново.
+            - Если SearchCatalog вернул matching_drafts, этот товар уже ждёт решения в черновике: вызови ShowProductDraft, новый
+              поиск стоит денег и не нужен. Это ответ на голый код или название и на простое «найди X».
+            - «найди заново», «поищи ещё раз», «ищи снова», «новый поиск», «тот черновик не подходит», в том числе в подписи к фото
+              наклейки, — прямая просьба искать заново: сразу ResearchProduct с товаром из сообщения, даже если черновик уже есть.
+              Старый черновик остаётся, назови его номер в ответе одной фразой.
             - Интернет-исследование создаёт черновик. Готовый черновик приложение само отправляет альбомом
               с фотографиями, описанием и кнопками. Не пересказывай карточку и не придумывай текстовое меню.
             - Если ResearchProduct вернул status=found и text_only_result=true, карточка согласована, но пригодных

@@ -6,13 +6,10 @@ use App\Exceptions\LowResolutionDraftMediaException;
 use App\Exceptions\MissingDraftMediaException;
 use App\Exceptions\UnreconciledDraftSpecificationsException;
 use App\Exceptions\UnverifiedDraftMediaException;
-use App\Jobs\ContinueDraftGallerySearch;
 use App\Jobs\EnrichTelegramProductDraft;
 use App\Jobs\ProcessDraftPhotoActions;
 use App\Jobs\ProcessTelegramMessage;
 use App\Jobs\ProposeTelegramDraftEdit;
-use App\Jobs\RestageDraftGalleryPhotos;
-use App\Jobs\TopUpDraftGalleryPhotos;
 use App\Jobs\TrainDraftGalleryRecipe;
 use App\Models\AiOperation;
 use App\Models\ProductDraft;
@@ -22,6 +19,7 @@ use App\Services\Products\ProductDraftWorkflow;
 use App\Services\Products\ProductGalleryRecipeRouter;
 use App\Services\Products\ProductSourcePriority;
 use App\Services\ProductSearch\Recovery\RequestGuardian;
+use App\Services\Telegram\DraftPhotoSearch;
 use App\Services\Telegram\DraftTelegramActionConfirmation;
 use App\Services\Telegram\DraftTelegramInteractionState;
 use App\Services\Telegram\DraftTelegramPresenter;
@@ -1046,15 +1044,12 @@ class TelegramCallbackHandler
             return;
         }
 
-        $queuedKey = "draft-gallery-restage:{$draft->id}:queued";
-
-        if (! Cache::add($queuedKey, true, now()->addMinutes(35))) {
+        if (app(DraftPhotoSearch::class)->other($draft, $chatId, $update->id) !== DraftPhotoSearch::STARTED) {
             $this->answerAndClose($callbackId, $update, 'Поиск фото уже идёт.');
 
             return;
         }
 
-        RestageDraftGalleryPhotos::dispatch($draft->id, $chatId, $update->id, $draft->telegram_update_id);
         $update->update(['status' => 'completed', 'processed_at' => now()]);
         $this->telegram->answerCallbackQuery($callbackId, 'Ищу другие фото без прежних источников.');
         $this->telegram->sendMessage(
@@ -1077,27 +1072,15 @@ class TelegramCallbackHandler
             return;
         }
 
-        $resumable = in_array($draft->gallery_search_stop_reason, [
-            'cost_budget', 'time_budget', 'exhausted', 'specifications_unreconciled', 'stalled',
-        ], true)
-            || $draft->images_staged_at === null;
+        $outcome = app(DraftPhotoSearch::class)->continue($draft, $chatId, $update->id);
 
-        if (! $resumable) {
-            $this->answerAndClose($callbackId, $update, 'Поиск не был остановлен лимитом; продолжать нечего.');
+        if ($outcome !== DraftPhotoSearch::STARTED) {
+            $this->answerAndClose($callbackId, $update, $outcome === DraftPhotoSearch::NOT_STOPPED
+                ? 'Поиск не был остановлен лимитом; продолжать нечего.' : 'Продолжение поиска уже выполняется.');
 
             return;
         }
 
-        $queuedKey = "draft-gallery-continue:{$draft->id}:queued";
-
-        if (! Cache::add($queuedKey, true, now()->addMinutes(35))) {
-            $this->answerAndClose($callbackId, $update, 'Продолжение поиска уже выполняется.');
-
-            return;
-        }
-
-        $this->draftPresenter->clearForSearchContinuation($this->telegram, $draft);
-        ContinueDraftGallerySearch::dispatch($draft->id, $chatId, $update->id, $draft->telegram_update_id);
         $update->update(['status' => 'completed', 'processed_at' => now()]);
         $this->telegram->answerCallbackQuery(
             $callbackId,
@@ -1119,15 +1102,12 @@ class TelegramCallbackHandler
             return;
         }
 
-        $queuedKey = "draft-gallery-topup:{$draft->id}:queued";
-
-        if (! Cache::add($queuedKey, true, now()->addMinutes(16))) {
+        if (app(DraftPhotoSearch::class)->topUp($draft, $chatId, $update->id) !== DraftPhotoSearch::STARTED) {
             $this->answerAndClose($callbackId, $update, 'Поиск дополнительных фото уже идёт.');
 
             return;
         }
 
-        TopUpDraftGalleryPhotos::dispatch($draft->id, $chatId, $update->id, $draft->telegram_update_id);
         $update->update(['status' => 'completed', 'processed_at' => now()]);
         $this->telegram->answerCallbackQuery($callbackId, 'Ищу дополнительные фото.');
         $this->telegram->sendMessage(

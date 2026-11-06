@@ -38,7 +38,7 @@ class EditProductDraft implements Tool
         return 'Change a pending product draft. instruction: the operator\'s words with the values - a field (title, brand, model, colour, condition, description, category, product type), '
             .'a characteristic to add, correct or remove, the price, quantity or warranty of a manually uploaded product. wanted: characteristics to find on the web when the operator named them without a value; '
             .'found values are quoted from a page and known ones are not overwritten. Pass one of the two per call; for both, call twice. The change is applied at once, named in the chat, and the card comes back with its buttons: '
-            .'answer with one short line and leave draft_id null. Never change a draft\'s fields or characteristics through the database tools.';
+            .'answer with one short line and leave draft_id null. Never change a draft\'s fields or characteristics through the database tools. Photos are not characteristics: a request for more or other photos goes to ManageDraftPhotos.';
     }
 
     public function handle(Request $request): Stringable|string
