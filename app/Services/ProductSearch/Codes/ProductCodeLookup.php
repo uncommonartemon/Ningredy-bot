@@ -20,7 +20,45 @@ final class ProductCodeLookup
 {
     public const SOURCES = ['icecat', 'upcitemdb'];
 
+    /** Any open product proves a login: Icecat names an unknown user before it looks the product up. */
+    private const array LOGIN_CHECK_PRODUCT = ['Brand' => 'Samsung', 'ProductCode' => 'MZ-V9P2T0BW'];
+
     public function __construct(private readonly ProductSourceAttemptRecorder $attempts) {}
+
+    public static function upcitemdbQuotaKey(): string
+    {
+        return 'code-lookup:upcitemdb:calls:'.now()->format('Y-m-d');
+    }
+
+    /**
+     * Whether Icecat knows this login. Only the unknown-user answer refuses it: a
+     * product it does not have or a closed brand are answers to a known user.
+     *
+     * @return array{status: string, message: string}
+     */
+    public function checkIcecatLogin(string $username): array
+    {
+        try {
+            $response = Http::timeout(20)->acceptJson()->get((string) config('services.icecat.url'),
+                ['UserName' => $username, 'Language' => 'en', ...self::LOGIN_CHECK_PRODUCT]);
+        } catch (Throwable $exception) {
+            return ['status' => 'error', 'message' => mb_substr($exception->getMessage(), 0, 200)];
+        }
+        $body = (array) ($response->json() ?? []);
+        $message = (string) ($body['Message'] ?? '');
+
+        return match (true) {
+            self::unknownIcecatUser($body) => ['status' => 'unknown_user', 'message' => $message],
+            $response->serverError() || $body === [] => ['status' => 'error', 'message' => $message ?: 'HTTP '.$response->status()],
+            default => ['status' => 'accepted', 'message' => $message],
+        };
+    }
+
+    /** @param  array<string, mixed>  $body */
+    private static function unknownIcecatUser(array $body): bool
+    {
+        return (int) ($body['StatusCode'] ?? 0) === 3 || str_contains(mb_strtolower((string) ($body['Message'] ?? '')), 'user is unknown');
+    }
 
     /** Valid GTIN-8/12/13/14 codes in free text, by check digit. @return array<int, string> */
     public static function gtins(string $text): array
@@ -123,7 +161,10 @@ final class ProductCodeLookup
      */
     private function icecatQuery(array $query, string $code, ?string $brand, ?int $updateId, string $caller): array
     {
-        // The admin's login outranks ICECAT_USERNAME in .env («Настройки → Базы по кодам»).
+        if (! CodeDatabases::enabled('icecat')) {
+            return $this->outcome('icecat', $code, 'disabled', ['message' => 'Switched off by the operator.'], $updateId, $caller);
+        }
+        // The admin's login outranks ICECAT_USERNAME in .env («Настройки → Сервисы»).
         $username = (string) CodeDatabases::icecatUsername();
         if ($username === '') {
             return $this->outcome('icecat', $code, 'not_configured', [], $updateId, $caller);
@@ -140,6 +181,8 @@ final class ProductCodeLookup
             $message = (string) ($body['Message'] ?? '');
             [$status, $data] = match (true) {
                 $response->successful() && is_array($body['data']['GeneralInfo'] ?? null) => ['found', $this->icecatData($body['data'])],
+                // A 404 as well, and it is not «нет в базе»: every code would look absent for a month.
+                self::unknownIcecatUser($body) => ['bad_login', ['message' => $message]],
                 str_contains($message, 'app_key') || str_contains($message, 'restriction') => ['restricted', ['message' => $message]],
                 // An unknown GTIN comes back as 400 "The GTIN can not be found" (live #443), not 404.
                 $response->status() === 404, $response->status() === 400 && str_contains(strtolower($message), 'not be found') => ['not_found', ['message' => $message]],
@@ -148,7 +191,7 @@ final class ProductCodeLookup
         } catch (Throwable $exception) {
             [$status, $data] = ['error', ['message' => mb_substr($exception->getMessage(), 0, 200)]];
         }
-        if ($status !== 'error') {
+        if (! in_array($status, ['error', 'bad_login'], true)) {
             Cache::put($key, ['status' => $status, 'data' => $data], now()->addDays(30));
         }
 
@@ -158,12 +201,15 @@ final class ProductCodeLookup
     /** @return array<string, mixed> */
     public function upcitemdb(string $gtin, ?int $updateId, string $caller): array
     {
+        if (! CodeDatabases::enabled('upcitemdb')) {
+            return $this->outcome('upcitemdb', $gtin, 'disabled', ['message' => 'Switched off by the operator.'], $updateId, $caller);
+        }
         $key = 'code-lookup:upcitemdb:'.$gtin;
         $cached = Cache::get($key);
         if (is_array($cached)) {
             return $this->outcome('upcitemdb', $gtin, $cached['status'], $cached['data'], $updateId, $caller, cached: true);
         }
-        $quotaKey = 'code-lookup:upcitemdb:calls:'.now()->format('Y-m-d');
+        $quotaKey = self::upcitemdbQuotaKey();
         if ((int) Cache::get($quotaKey, 0) >= (int) config('services.upcitemdb.daily_limit', 90)) {
             return $this->outcome('upcitemdb', $gtin, 'quota', [], $updateId, $caller);
         }

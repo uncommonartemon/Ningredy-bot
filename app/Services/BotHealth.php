@@ -49,16 +49,25 @@ class BotHealth
      */
     private function codeDatabases(): array
     {
+        if (! CodeDatabases::enabled('icecat')) {
+            return $this->result('code_databases', 'Сервисы', 'off',
+                'Icecat выключен оператором: бот ищет без него, по остальным источникам.', 'Включить: «Настройки → Сервисы».');
+        }
         $source = CodeDatabases::icecatUsernameSource();
         if ($source === null) {
-            return $this->result('code_databases', 'Базы по кодам', 'down',
+            return $this->result('code_databases', 'Сервисы', 'down',
                 'Icecat не подключён: бот ищет по кодам только в интернете, без бесплатной базы характеристик и фото.',
-                'Зарегистрируйтесь бесплатно в Open Icecat и впишите логин: «Настройки → Базы по кодам».');
+                'Зарегистрируйтесь бесплатно в Open Icecat и впишите логин: «Настройки → Сервисы».');
+        }
+        if (CodeDatabases::lastIcecatAnswer() === 'bad_login') {
+            return $this->result('code_databases', 'Сервисы', 'down',
+                'Icecat не принял логин: на каждый код он отвечает, что такого пользователя нет.',
+                'Проверьте логин кнопкой «Проверить логин»: «Настройки → Сервисы».');
         }
         $found = (int) (CodeDatabases::stats()['icecat']['found'] ?? 0);
         $total = array_sum(CodeDatabases::stats()['icecat'] ?? []);
 
-        return $this->result('code_databases', 'Базы по кодам', 'up',
+        return $this->result('code_databases', 'Сервисы', 'up',
             'Icecat подключён (логин '.($source === 'admin' ? 'из админки' : 'из .env').'). За 7 дней найдено '.$found.' из '.$total.' запросов.', '');
     }
 

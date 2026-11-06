@@ -7,6 +7,7 @@ use App\Models\TelegramUpdate;
 use App\Services\Ai\AiSettings;
 use App\Services\Products\ProductGalleryRecipeRouter;
 use App\Services\Products\ProductSourcePriority;
+use App\Services\ProductSearch\Codes\CodeDatabases;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
 use Illuminate\Support\Facades\Validator;
 use Laravel\Ai\Contracts\Tool;
@@ -33,6 +34,8 @@ class ManageSearchSettings implements Tool
         'stronger_model_enabled' => ['boolean', 'Более сильная модель для сложных шагов.'],
         'photo_caption_routing' => ['in:label,manual,search', 'Фото с подписью без слова «найди»: label — бот читает фото и сам решает по подписи и снимку (код или модель — поиск, свой товар — ручная загрузка); '
             .'manual — всегда ручная загрузка; search — всегда поиск. Явное «не ищи» или /add всегда означает свой товар.'],
+        'icecat_enabled' => ['boolean', 'База Icecat: выключена — бот не спрашивает её и не берёт страницы и фото с её сайта, поиск идёт по остальным источникам.'],
+        'upcitemdb_enabled' => ['boolean', 'База штрихкодов UPCitemdb: выключена — бот не спрашивает её.'],
     ];
 
     public function __construct(private readonly TelegramUpdate $update) {}
@@ -40,9 +43,9 @@ class ManageSearchSettings implements Tool
     public function description(): Stringable|string
     {
         return 'Search settings and banned sites, from the chat. action=show returns the current values and every banned site; '
-            .'action=set changes one setting (max_search_cost_usd, search_max_seconds, product_search_country, fallback_sources_enabled, stronger_model_enabled, photo_caption_routing); '
+            .'action=set changes one setting (max_search_cost_usd, search_max_seconds, product_search_country, fallback_sources_enabled, stronger_model_enabled, photo_caption_routing, icecat_enabled, upcitemdb_enabled); '
             .'action=block_site bans a site from every future search (no page, photo or fact from it), action=unblock_site lifts the ban. '
-            .'API keys and logins are not here: they are changed only in the admin.';
+            .'API keys and logins are not here: they are changed only in the admin («Настройки → Сервисы», «Настройки → AI»).';
     }
 
     public function handle(Request $request): Stringable|string
@@ -71,8 +74,10 @@ class ManageSearchSettings implements Tool
             'fallback_sources_enabled' => $settings->fallbackSourcesEnabled(),
             'stronger_model_enabled' => $settings->strongerModelEnabled(),
             'photo_caption_routing' => $settings->photoCaptionRouting(),
+            'icecat_enabled' => CodeDatabases::enabled('icecat'),
+            'upcitemdb_enabled' => CodeDatabases::enabled('upcitemdb'),
         ], 'meaning' => array_map(fn (array $setting): string => $setting[1], self::SETTINGS),
-            'banned_sites' => app(ProductSourcePriority::class)->blockedDomains()];
+            'banned_sites' => array_values(array_diff(app(ProductSourcePriority::class)->blockedDomains(), CodeDatabases::switchedOffSites()))];
     }
 
     private function set(string $setting, mixed $value): array
@@ -108,6 +113,8 @@ class ManageSearchSettings implements Tool
                     'fallback_sources_enabled' => $settings->saveFallbackSourcesEnabled(filter_var($value, FILTER_VALIDATE_BOOLEAN)),
                     'stronger_model_enabled' => $settings->saveStrongerModelEnabled(filter_var($value, FILTER_VALIDATE_BOOLEAN)),
                     'photo_caption_routing' => $settings->savePhotoCaptionRouting((string) $value),
+                    'icecat_enabled' => CodeDatabases::setEnabled('icecat', filter_var($value, FILTER_VALIDATE_BOOLEAN)),
+                    'upcitemdb_enabled' => CodeDatabases::setEnabled('upcitemdb', filter_var($value, FILTER_VALIDATE_BOOLEAN)),
                 };
 
                 return ['setting' => $setting, 'before' => $before, 'after' => $this->show()['settings'][$setting]];

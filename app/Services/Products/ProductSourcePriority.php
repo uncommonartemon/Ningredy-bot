@@ -3,6 +3,7 @@
 namespace App\Services\Products;
 
 use App\Models\ProductGalleryRecipe;
+use App\Services\ProductSearch\Codes\CodeDatabases;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Str;
 use Throwable;
@@ -183,12 +184,13 @@ class ProductSourcePriority
      */
     public function blockedDomains(): array
     {
+        // A database the operator switched off counts here too: see CodeDatabases::switchedOffSites().
         if ($this->blockedDomainsCache !== null) {
             return $this->blockedDomainsCache;
         }
 
         try {
-            return $this->blockedDomainsCache = ProductGalleryRecipe::query()
+            return $this->blockedDomainsCache = [...ProductGalleryRecipe::query()
                 ->where('source_blocked', true)
                 ->get(['domain', 'path_pattern'])
                 ->filter(fn (ProductGalleryRecipe $recipe): bool => is_string($recipe->domain) && $recipe->domain !== '')
@@ -197,7 +199,7 @@ class ProductSourcePriority
                 // second opinion; separate paths have to agree with each other.
                 ->filter(fn (Collection $blocked): bool => $blocked->count() >= ProductGalleryRecipeRouter::DOMAIN_BLOCK_THRESHOLD
                     || $blocked->contains(fn (ProductGalleryRecipe $recipe): bool => $recipe->path_pattern === '*'))
-                ->keys()->values()->all();
+                ->keys()->values()->all(), ...CodeDatabases::switchedOffSites()];
         } catch (Throwable) {
             return $this->blockedDomainsCache = [];
         }
