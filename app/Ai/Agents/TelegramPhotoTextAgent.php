@@ -71,7 +71,7 @@ class TelegramPhotoTextAgent implements Agent, HasStructuredOutput
 
             A SMART or disk diagnostics screenshot (CrystalDiskInfo, Hard Disk Sentinel, smartctl) describes
             one used drive. Read its model and serial as identifiers, and its state as observations with
-            these keys: health_percent, power_on_hours, tbw_written, in the units shown.
+            these keys: health_percent, power_on_hours, data_written_tb, in the units shown.
             PROMPT;
     }
 

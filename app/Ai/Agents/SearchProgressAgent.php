@@ -33,6 +33,9 @@ class SearchProgressAgent implements Agent, HasStructuredOutput
               likely to add accepted photos of the exact product - a page with photo_match exact whose gallery
               is being collected right now, a source not yet opened on a site that has shown nothing wrong, a
               check of held frames. "Time and money remain" is never by itself a reason to continue.
+              holding_a_part_photo_without_a_readable_code means the card already has a real photo of the part and the
+              search goes on only for one that shows its code: one or two more pages are worth it, a long tail of shops
+              is not, and pages of a kind that rarely shows a label (a processor, a boxed graphics card) less so.
             leave_current_page: the page keeps producing the same frames, or its second round in a row collected
               nothing new, or it has accepted no photo after two rounds; the search moves on to its next source.
               Photos already found stay. A page selling another configuration of the same model is not by

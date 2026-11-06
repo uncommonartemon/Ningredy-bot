@@ -65,7 +65,7 @@ class StarterCatalogSeeder extends Seeder
             'names' => ['cs' => 'SSD disky', 'uk' => 'SSD-накопичувачі', 'en' => 'SSD drives'],
             'product_search_hint' => 'Без фото коробки. Код на наклейке — полный P/N производителя (например HFM512GDJTNG-8310A, MZVLQ512HBLU-00B00); OEM-накопители из ноутбуков ищи по полному коду, суффикс отличает партию.',
             'photo_identity_hint' => 'На наклейке накопителя: P/N (model), объём, интерфейс; виден форм-фактор — длина платы M.2 (2230/2242/2280) или корпус 2.5". Код на наклейке — это и есть товар.',
-            'attributes' => ['mpn', 'storage', 'form_factor', 'interface', 'health_percent', 'power_on_hours', 'tbw_written'],
+            'attributes' => ['mpn', 'storage', 'form_factor', 'interface', 'endurance_tbw', 'health_percent', 'power_on_hours', 'data_written_tb'],
             'required' => ['mpn', 'storage', 'form_factor', 'interface']],
         'hdd' => ['name' => 'Жёсткие диски', 'sort_order' => 32,
             'names' => ['cs' => 'Pevné disky', 'uk' => 'Жорсткі диски', 'en' => 'Hard drives'],
@@ -129,8 +129,10 @@ class StarterCatalogSeeder extends Seeder
             'translations' => ['en' => 'Health (SMART)', 'cs' => 'Zdraví (SMART)', 'uk' => 'Здоров’я (SMART)']],
         'power_on_hours' => ['label' => 'Наработка', 'data_type' => 'number', 'default_unit' => 'h', 'sort_order' => 210, 'is_variant' => true,
             'translations' => ['en' => 'Power-on hours', 'cs' => 'Odpracované hodiny', 'uk' => 'Напрацювання']],
-        'tbw_written' => ['label' => 'Записано (TBW)', 'data_type' => 'number', 'default_unit' => 'TB', 'sort_order' => 220, 'is_variant' => true,
-            'translations' => ['en' => 'Total bytes written', 'cs' => 'Zapsáno (TBW)', 'uk' => 'Записано (TBW)']],
+        'data_written_tb' => ['label' => 'Записано на этом экземпляре', 'data_type' => 'number', 'default_unit' => 'TB', 'sort_order' => 220, 'is_variant' => true,
+            'translations' => ['en' => 'Data written on this unit', 'cs' => 'Zapsáno na tomto kuse', 'uk' => 'Записано на цьому екземплярі']],
+        'endurance_tbw' => ['label' => 'Ресурс записи (TBW)', 'data_type' => 'number', 'default_unit' => 'TB', 'sort_order' => 195,
+            'translations' => ['en' => 'Rated endurance (TBW)', 'cs' => 'Životnost zápisu (TBW)', 'uk' => 'Ресурс запису (TBW)']],
     ];
 
     public function run(): void

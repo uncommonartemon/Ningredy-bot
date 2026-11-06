@@ -207,6 +207,9 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
             label cuts short (MZVLQ512HBLU-00B00 for MZVLQ512HBLU-00B), the retail or base code of an OEM suffix
             (M425R2GA3PB0-CWM for M425R2GA3PB0-CWMOL). They are asked in the code databases and never enter the card.
             Leave it empty when you saw none; never compose a code you did not see.
+            health_percent, power_on_hours and data_written_tb are the state of one used unit: they come only from the
+            operator or that unit's own diagnostics, never from a page about the model. A maker's rated endurance is
+            endurance_tbw.
             A visible requirement the operator wrote that no observed page of the requested model shows - most often a
             colour name - does not stop the search either. When the model itself is observed (its listings and the
             manufacturer's sheet name another colour), select the closest observed configuration of that model, write
