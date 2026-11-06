@@ -94,13 +94,26 @@ final class RelatedCatalogForms
             ->createOptionUsing(fn (array $data): int => AttributeDefinition::query()->create($data)->id);
     }
 
+    /** What every card of the category must carry; research is told the keys, the card names what is missing. */
+    public static function requiredAttributes(): Select
+    {
+        return Select::make('required_attribute_ids')->label(__('Обязательные характеристики'))
+            ->helperText(__('Что должно быть в карточке товара этой категории. Исследование ищет их по ключам; чего не нашло — карточка честно перечислит.'))
+            ->options(fn (): array => self::attributeOptions())
+            ->multiple()->searchable()->preload()->default([])
+            ->createOptionForm(self::attribute())
+            ->createOptionUsing(fn (array $data): int => AttributeDefinition::query()->create($data)->id);
+    }
+
     public static function createCategory(array $data): int
     {
         return DB::transaction(function () use ($data): int {
             $defaultIds = $data['default_attribute_ids'] ?? [];
-            unset($data['default_attribute_ids']);
+            $requiredIds = $data['required_attribute_ids'] ?? [];
+            unset($data['default_attribute_ids'], $data['required_attribute_ids']);
             $category = Category::query()->create($data);
             $category->syncDefaultAttributes($defaultIds);
+            $category->syncRequiredAttributes($requiredIds);
 
             return $category->id;
         });

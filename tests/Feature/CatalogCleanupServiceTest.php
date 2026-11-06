@@ -182,9 +182,10 @@ class CatalogCleanupServiceTest extends TestCase
         // Live 2026-11-01: a cleanup that left no category made every product search die in
         // one second. The starter categories and characteristics come back at once, and
         // nothing of what was deleted survives under its old identity.
-        $this->assertSame(array_keys(StarterCatalogSeeder::CATEGORIES), Category::query()->orderBy('sort_order')->pluck('slug')->all());
+        $this->assertSame([...array_keys(StarterCatalogSeeder::CATEGORIES), ...array_keys(StarterCatalogSeeder::COMPONENT_KINDS)],
+            Category::query()->orderBy('sort_order')->pluck('slug')->all());
         $this->assertSame(0, Category::query()->whereIn('id', $plan['tables']['categories']['ids'] ?? [])->count());
-        $this->assertSame(7, AttributeDefinition::query()->count());
+        $this->assertSame(7 + count(StarterCatalogSeeder::COMPONENT_ATTRIBUTES), AttributeDefinition::query()->count());
         $this->assertModelExists($blocked);
         $this->assertTrue($blocked->fresh()->source_blocked);
         $this->assertModelExists($data['attempt']);

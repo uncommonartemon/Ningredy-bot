@@ -75,6 +75,11 @@ class CategoryForm
                                         $record?->attributeDefinitions()->wherePivot('is_default', true)->pluck('attribute_definitions.id')->all() ?? []
                                     ))
                                     ->saveRelationshipsUsing(fn (Category $record, ?array $state) => $record->syncDefaultAttributes($state ?? [])),
+                                RelatedCatalogForms::requiredAttributes()->dehydrated(false)
+                                    ->afterStateHydrated(fn (Select $component, ?Category $record) => $component->state(
+                                        $record?->attributeDefinitions()->wherePivot('is_required', true)->pluck('attribute_definitions.id')->all() ?? []
+                                    ))
+                                    ->saveRelationshipsUsing(fn (Category $record, ?array $state) => $record->syncRequiredAttributes($state ?? [])),
                             ])
                             ->columnSpanFull(),
                         Section::make(__('Поиск фотографий'))

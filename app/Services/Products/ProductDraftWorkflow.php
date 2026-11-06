@@ -432,6 +432,13 @@ class ProductDraftWorkflow
                     'is_variant' => $isVariantAttribute,
                 ],
             );
+            // The definition decides how a value is stored: a number by its type and unit
+            // (an HDD's 5400 rpm, a module's 16 GB), the configuration or the product by its
+            // scope. The seven laptop keys above only shape a definition created on the spot.
+            $isVariantAttribute = (bool) $definition->is_variant;
+            if ($numericValue === null && $definition->data_type === 'number') {
+                [$dataType, $numericValue, $unit] = $this->numberByDefinition($definition, (string) $rawValue);
+            }
             if ($definition->wasRecentlyCreated && is_array($specification)) {
                 $group = AiAttributeGroups::resolve($specification['group'] ?? null);
                 if ($group !== null) {
@@ -582,6 +589,21 @@ class ProductDraftWorkflow
         };
 
         if ($key === 'storage' && Str::contains($lower, ['tb', 'тб'])) {
+            $number *= 1024;
+        }
+
+        return ['number', $number, $unit];
+    }
+
+    /** A value of a numeric definition: its first number in the definition's unit (terabytes become gigabytes). */
+    private function numberByDefinition(AttributeDefinition $definition, string $value): array
+    {
+        if (preg_match('/(\d+(?:[.,]\d+)?)/', $value, $matches) !== 1) {
+            return ['text', null, null];
+        }
+        $number = (float) str_replace(',', '.', $matches[1]);
+        $unit = $definition->default_unit;
+        if ($unit === 'GB' && Str::contains(Str::lower($value), ['tb', 'тб'])) {
             $number *= 1024;
         }
 

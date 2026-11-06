@@ -18,6 +18,7 @@ use App\Services\Products\ProductCatalogIdentity;
 use App\Services\Products\ProductCondition;
 use App\Services\Products\ProductRequestContext;
 use App\Services\Products\ProductSourcePriority;
+use App\Services\Products\RequiredSpecifications;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
@@ -599,6 +600,9 @@ class DraftTelegramPresenter
         $footer = implode("\n", array_filter([
             "📷 Фото: {$galleryCount}",
             ($photoNotice = $this->photoNotice($draft)) !== '' ? 'ℹ️ '.$photoNotice : null,
+            // What the category requires and research did not find (a part without its
+            // form factor or interface): named here, in the fixed part of the card.
+            $draft->isManualUpload() ? null : RequiredSpecifications::cardLine($draft),
             $primarySourceUrl !== '' ? "🔗 Источник: {$primarySourceUrl}" : null,
         ]));
         $header = implode("\n", array_filter([

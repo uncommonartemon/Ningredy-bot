@@ -2,6 +2,7 @@
 
 namespace App\Services\Catalog;
 
+use App\Models\Category;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Query\Builder as QueryBuilder;
 
@@ -10,8 +11,9 @@ class CatalogFilterQuery
     public function products(Builder $query, array $filters): void
     {
         $query
+            // A category with kinds under it lists their products too (an SSD is a component).
             ->when($filters['category'] ?? null, fn (Builder $query, string $category) => $query
-                ->whereHas('category', fn (Builder $query) => $query->where('slug', $category)))
+                ->whereIn($query->qualifyColumn('category_id'), Category::treeIdsBySlug($category)))
             ->when($filters['brands'] ?? null, fn (Builder $query, array $values) => $query
                 ->whereHas('brand', fn (Builder $query) => $query->whereIn('name', $values)))
             ->when($filters['types'] ?? null, fn (Builder $query, array $values) => $query->whereIn('product_type', $values))
