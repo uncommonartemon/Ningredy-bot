@@ -3780,7 +3780,7 @@ class ProductImageStorageTest extends TestCase
         Storage::fake('public');
         // The Vision-first mode under test; the starter component category itself is
         // Playwright-first since module 68 (operator, 2026-11-04).
-        \App\Models\Category::query()->where('slug', 'components')->update(['gallery_search_strategy' => \App\Models\Category::GALLERY_SEARCH_VISION_FIRST]);
+        Category::query()->where('slug', 'components')->update(['gallery_search_strategy' => Category::GALLERY_SEARCH_VISION_FIRST]);
         AppSetting::put('ai.fallback_sources_enabled', '0');
         ProductImageVisionAgent::fake(fn (string $prompt, $attachments): array => [
             'images' => $attachments->keys()->map(fn (int $index): array => [
