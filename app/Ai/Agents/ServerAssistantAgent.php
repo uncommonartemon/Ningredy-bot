@@ -5,6 +5,7 @@ namespace App\Ai\Agents;
 use App\Ai\Tools\AddProductSpecifications;
 use App\Ai\Tools\DeleteProductPhotos;
 use App\Ai\Tools\DescribeDatabase;
+use App\Ai\Tools\EditProductDraft;
 use App\Ai\Tools\GetProduct;
 use App\Ai\Tools\GetRecentErrors;
 use App\Ai\Tools\GetSystemStatus;
@@ -22,6 +23,7 @@ use App\Ai\Tools\RetryFailedJob;
 use App\Ai\Tools\ReviewProductDraft;
 use App\Ai\Tools\SearchCatalog;
 use App\Ai\Tools\SetProductActive;
+use App\Ai\Tools\ShowProductDraft;
 use App\Ai\Tools\UpdateProduct;
 use App\Ai\Tools\UpdateVariant;
 use App\Ai\Tools\UpscaleProductPhoto;
@@ -122,6 +124,26 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
             - Replacing means finding a different, model/color-matching, non-duplicate internet photo. Enhancing means processing the same selected photo.
             - ManageDraftPhotos is asynchronous. Say only that processing has started; progress and the updated review album will be sent automatically.
             - If the user asks to improve/retrain the source recipe, says the source has more/better/full-resolution gallery photos, or the extracted gallery is incomplete, use RetrainDraftGalleryRecipe. It studies sanitized DOM with the dedicated strongest model, validates the candidate recipe, then replaces draft photos asynchronously.
+
+            Drafts and products on request - understand what the operator wants and do it, never send them to the admin panel:
+            - «дай / покажи / открой черновик 213», «что в черновике 213», «сколько там фото», «последний черновик»
+              → ShowProductDraft with that draft_id (the latest one: ListPendingDrafts limit=1 first). It answers with the
+              draft's data and, for a pending draft, re-sends its card with the photos and buttons itself; your message is
+              then one short line and draft_id stays null. A request for one named draft is never answered with the list;
+              the list is for «какие есть черновики».
+            - An approved draft is a product: response_type catalog_results with its product_id. A rejected one: say so and why.
+            - The operator completes or corrects a pending draft in words - «в черновике 213 добавь TDP 115 Вт», «нет скорости
+              записи, 5000 МБ/с», «исправь цвет на чёрный», «убери характеристику Вес», «это б/у», a reply to its card with
+              the change → EditProductDraft with that draft_id and their words as instruction, verbatim. It applies the change
+              at once and sends the card back. They name a characteristic without a value - «в черновике 213 нет скорости
+              записи», «найди TDP» → EditProductDraft with wanted in their words: it looks on the web and writes only quoted
+              values. Never supply a value from your own knowledge. Never edit a draft's fields or characteristics through the
+              database tools.
+            - The same for a product already in the catalog: a missing or wrong characteristic → AddProductSpecifications with
+              facts_json from_operator=true (replace_existing=true when they correct a value), or wanted to find it on the web;
+              title, model, description → UpdateProduct; price, stock, colour, name, SKU, part number, EAN, condition, warranty
+              of a configuration → UpdateVariant; remove a characteristic → find its attribute_values row with QueryDatabase and
+              delete it with ManageDatabase (a confirmation button); brand, category, anything else → ManageDatabase.
 
             When a message starts with "[Пользователь ответил (Reply) на сообщение бота: ...]" - the user
             used Telegram's Reply feature on that exact earlier bot message. Treat its quoted text as the
@@ -272,6 +294,8 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
             new ManageDatabase($this->update),
             new ResearchProduct($this->update, app(ProductImageResolver::class)),
             new ListPendingDrafts($this->update),
+            new ShowProductDraft($this->update),
+            new EditProductDraft($this->update),
             new GetSystemStatus,
             new GetRecentErrors,
             new SetProductActive($this->update),

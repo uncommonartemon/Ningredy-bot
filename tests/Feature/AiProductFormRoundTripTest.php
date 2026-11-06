@@ -76,7 +76,8 @@ class AiProductFormRoundTripTest extends TestCase
         $this->assertSame(['description' => $translations['cs']['description']], $product->fresh()->translations['cs']);
         foreach ($product->variants()->get() as $variant) {
             $this->assertSame('SAME-SKU', $variant->sku);
-            $this->assertSame($translations['cs'], $variant->translations['cs']);
+            // The storefront shows the variant's copy over the product's text: it goes too.
+            $this->assertSame(['description' => $translations['cs']['description']], $variant->translations['cs']);
         }
     }
 

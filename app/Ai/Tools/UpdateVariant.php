@@ -5,6 +5,7 @@ namespace App\Ai\Tools;
 use App\Ai\Tools\Concerns\RecordsOperations;
 use App\Models\ProductVariant;
 use App\Models\TelegramUpdate;
+use App\Services\Products\ProductCondition;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Laravel\Ai\Contracts\Tool;
@@ -19,15 +20,21 @@ class UpdateVariant implements Tool
 
     public function description(): Stringable|string
     {
-        return 'Update price, currency, stock status, quantity or color of a concrete product variant. Requires variant ID.';
+        return 'Update a concrete product variant (a configuration): price, currency, stock status, quantity, color, name, SKU, part number (mpn), EAN (gtin), condition, warranty in months. Requires variant ID.';
     }
 
     public function handle(Request $request): Stringable|string
     {
         $variantId = $request->integer('variant_id');
-        $changes = array_filter($request->all(['price', 'currency', 'stock_status', 'quantity', 'color']), fn ($value) => $value !== null);
+        $changes = array_filter($request->all(['price', 'currency', 'stock_status', 'quantity', 'color', 'name', 'sku', 'mpn', 'gtin', 'condition', 'warranty_months']), fn ($value) => $value !== null);
         if ($changes === []) {
             return $this->json(['ok' => false, 'error' => 'No editable fields supplied.']);
+        }
+        if (isset($changes['condition']) && ! in_array($changes['condition'], ProductCondition::VALUES, true)) {
+            return $this->json(['ok' => false, 'error' => 'condition must be one of: '.implode(', ', ProductCondition::VALUES)]);
+        }
+        if (isset($changes['warranty_months']) && (! is_numeric($changes['warranty_months']) || (int) $changes['warranty_months'] < 0)) {
+            return $this->json(['ok' => false, 'error' => 'warranty_months must be a non-negative integer']);
         }
         if (isset($changes['price']) && (! is_numeric($changes['price']) || (float) $changes['price'] < 0)) {
             return $this->json(['ok' => false, 'error' => 'price must be a non-negative number']);
@@ -71,6 +78,12 @@ class UpdateVariant implements Tool
             'stock_status' => $schema->string()->enum(['in_stock', 'out_of_stock', 'preorder', 'unknown']),
             'quantity' => $schema->integer(),
             'color' => $schema->string(),
+            'name' => $schema->string(),
+            'sku' => $schema->string(),
+            'mpn' => $schema->string(),
+            'gtin' => $schema->string(),
+            'condition' => $schema->string()->enum(ProductCondition::VALUES),
+            'warranty_months' => $schema->integer(),
         ];
     }
 }

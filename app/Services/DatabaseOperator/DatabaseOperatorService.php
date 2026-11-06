@@ -2,6 +2,7 @@
 
 namespace App\Services\DatabaseOperator;
 
+use App\Jobs\TranslateProductText;
 use App\Models\AiOperation;
 use App\Models\AiRun;
 use App\Models\AttributeDefinition;
@@ -48,6 +49,9 @@ class DatabaseOperatorService
     private const SYSTEM_REASON = 'Системная таблица: ключи, права, настройки, очередь и идемпотентность недоступны для произвольного изменения через чат.';
 
     private const FILTERS = ['=', '!=', '>', '>=', '<', '<=', 'in', 'not_in', 'contains', 'starts_with', 'is_null', 'not_null'];
+
+    /** Products whose shown text a batch changed: made again in the catalog's languages after it commits. @var array<int, true> */
+    private array $retranslate = [];
 
     /** @return array<string, array{model: class-string<Model>, writable: array, create?: bool, delete?: bool, read?: array, reason?: string}> */
     private function registry(): array
@@ -341,6 +345,10 @@ class DatabaseOperatorService
                 }
                 $results[] = ['action' => $action, 'table' => $table, 'count' => count($ids), 'ids' => $ids];
             }
+            foreach (array_keys($this->retranslate) as $productId) {
+                TranslateProductText::dispatch($productId)->afterCommit();
+            }
+            $this->retranslate = [];
 
             return ['status' => 'completed', 'affected_count' => array_sum(array_column($results, 'count')), 'commands' => $results,
                 'references' => $references, 'scope' => $this->scope($context)];
@@ -656,6 +664,15 @@ class DatabaseOperatorService
         $previousProductId = null;
         // category_id is intentionally set server-side on this existing relation model.
         $row->forceFill($values);
+        if ($row instanceof Product && $row->exists && $row->isDirty(['title', 'description'])) {
+            $this->retranslate[(int) $row->getKey()] = true;
+        }
+        if ($row instanceof AttributeValue && $row->isDirty('value')) {
+            $productId = $row->product_id ?: ProductVariant::query()->whereKey($row->product_variant_id)->value('product_id');
+            if ($productId) {
+                $this->retranslate[(int) $productId] = true;
+            }
+        }
         if ($row instanceof AttributeDefinition && $row->exists && $row->isDirty('label') && ! array_key_exists('translations', $values)) {
             $row->translations = null;
         }

@@ -52,7 +52,9 @@ class ProductDraft extends Model
      * re-confirming the SAME source again looks like: the column's value
      * does not change, so isDirty on it is false even though this genuinely
      * is a reconciliation write - this flag is the exemption for exactly
-     * that case, one only ProductImageStorage's own trusted call sites set.
+     * that case, one only ProductImageStorage's own trusted call sites set,
+     * and a fact the operator states about the same product: their word does
+     * not undo the check of the rest of the card (TelegramDraftEditor::apply).
      */
     private static bool $writingReconciliation = false;
 

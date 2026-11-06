@@ -187,6 +187,8 @@ class DraftTelegramPresenter
         $details .= $photoNotice !== '' ? "\nℹ️ ".htmlspecialchars($photoNotice, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8')."\n" : '';
         $catalogNotice = $this->catalogNotice($draft);
         $details .= $catalogNotice !== '' ? "\n⚠️ ".htmlspecialchars($catalogNotice, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8')."\n" : '';
+        $operatorNotice = $this->operatorFactsNotice($draft);
+        $details .= $operatorNotice !== '' ? "\n✍️ ".htmlspecialchars($operatorNotice, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8')."\n" : '';
 
         return $this->messageLifecycle->replaceControlMessage(
             $telegram,
@@ -267,6 +269,7 @@ class DraftTelegramPresenter
                 "✏️ Ручная карточка #{$draft->id}. Выберите данные или фотографии для изменения. Поиск в интернете — отдельное подтверждённое действие.",
                 ['inline_keyboard' => $rows]);
         }
+        $rows[] = [['text' => '✏️ Текст и характеристики', 'callback_data' => "draft:fields:{$draft->id}"]];
         if ($draft->media()->exists()) {
             $rows[] = [['text' => '🖼 Выбрать фото для изменения', 'callback_data' => "draft:photos:{$draft->id}"]];
         }
@@ -279,7 +282,7 @@ class DraftTelegramPresenter
         $rows[] = [['text' => '← Вернуться к черновику', 'callback_data' => "draft:review:{$draft->id}"]];
 
         return $this->messageLifecycle->replaceControlMessage($telegram, $draft, $chatId,
-            "✏️ Исправить черновик #{$draft->id}\n{$draft->title}\n\nНе те фото — выберите работу с фото. Не тот товар или комплектация — уточните запрос для нового поиска. Открытие меню бесплатно; платный запуск потребует подтверждения.",
+            "✏️ Исправить черновик #{$draft->id}\n{$draft->title}\n\nНе та или пропущена характеристика — «Текст и характеристики» или просто напишите в чат. Не те фото — выберите работу с фото. Не тот товар или комплектация — уточните запрос для нового поиска. Открытие меню бесплатно; платный запуск потребует подтверждения.",
             ['inline_keyboard' => $rows]);
     }
 
@@ -749,6 +752,19 @@ class DraftTelegramPresenter
      * identical GPUs in one evening because nothing on the card mentioned the
      * product already published (live #553, #567).
      */
+    /** What the operator stated on a searched card: the page did not confirm it, and the card says so. */
+    private function operatorFactsNotice(ProductDraft $draft): string
+    {
+        if ($draft->isManualUpload()) {
+            return '';
+        }
+        $names = collect(is_array($draft->specifications) ? $draft->specifications : [])
+            ->filter(fn (mixed $row): bool => is_array($row) && ($row['operator_stated'] ?? false) === true)
+            ->pluck('name')->filter()->take(12)->implode(', ');
+
+        return $names === '' ? '' : 'Со слов оператора, без сверки со страницей: '.$names;
+    }
+
     private function catalogNotice(ProductDraft $draft): string
     {
         if (blank($draft->title)) {

@@ -33,6 +33,7 @@ use App\Services\Products\ProductSourcePriority;
 use App\Services\ProductSearch\Recovery\RequestGuardian;
 use App\Services\Telegram\CatalogTelegramNavigation;
 use App\Services\Telegram\DraftAccess;
+use App\Services\Telegram\DraftQueuedWork;
 use App\Services\Telegram\DraftTelegramActionConfirmation;
 use App\Services\Telegram\DraftTelegramInteractionState;
 use App\Services\Telegram\DraftTelegramPresenter;
@@ -687,13 +688,15 @@ class TelegramWebhookController extends Controller
         }
         if (preg_match('/^draft:(fields|upload):(\d+)$/', $data, $manualInput) === 1) {
             $draft = ProductDraft::find((int) $manualInput[2]);
-            $available = $draft?->status === 'pending_review' && $draft->isManualUpload();
+            $available = $draft?->status === 'pending_review' && ($manualInput[1] === 'fields' || $draft->isManualUpload());
             if ($available) {
                 app(DraftTelegramInteractionState::class)->remember($chatId, (string) $update->telegram_user_id, $draft,
                     $manualInput[1] === 'fields' ? 'manual_fields' : 'manual_photos');
                 $this->draftPresenter->sendInputPrompt($this->telegram, $chatId, $draft,
                     $manualInput[1] === 'fields'
-                        ? 'Напишите изменения одним сообщением. Например: «цена: 15000 CZK», «состояние: б/у», «RAM: 32 GB». Для нового описания: «описание: …». Покажу изменения перед применением. /cancel — отмена.'
+                        ? ($draft->isManualUpload()
+                            ? 'Напишите изменения одним сообщением. Например: «цена: 15000 CZK», «состояние: б/у», «RAM: 32 GB». Для нового описания: «описание: …». Покажу изменения перед применением. /cancel — отмена.'
+                            : 'Напишите изменения одним сообщением. Например: «добавь TDP 115 Вт», «цвет: чёрный», «убери Вес», «состояние: б/у». Покажу изменения перед применением. /cancel — отмена.')
                         : 'Отправьте фото или альбом для этой карточки. Фото без сжатия можно отправить файлами. /cancel — отмена.');
             }
             $this->answerAndClose($callbackId, $update, $available ? 'Ожидаю материалы.' : 'Черновик уже обработан или не принимает ручной ввод.');
@@ -1833,7 +1836,7 @@ class TelegramWebhookController extends Controller
         if (($state['kind'] ?? '') === 'manual_fields') {
             $state = $states->consume($chatId, (string) $update->telegram_user_id, $state['token']);
             $draft = $state ? ProductDraft::find($state['draft_id']) : null;
-            if ($draft && $draft->isManualUpload() && $draft->status === 'pending_review'
+            if ($draft && $draft->status === 'pending_review'
                 && (int) $draft->telegram_update_id === (int) $state['generation'] && $this->draftBelongsToContext($draft, $update)) {
                 if ($this->draftHasQueuedWork($draft->id)) {
                     $states->remember($chatId, (string) $update->telegram_user_id, $draft, 'manual_fields');
@@ -1917,15 +1920,9 @@ class TelegramWebhookController extends Controller
 
     private function draftHasQueuedWork(int $draftId): bool
     {
-        // Use the same markers that the existing jobs clear on completion/failure.
-        // No new persistent lock or independent timeout is introduced by the UI.
-        foreach (['draft-gallery-retrain', 'draft-gallery-restage', 'draft-gallery-continue', 'draft-gallery-topup', 'draft-photo-actions', 'draft-fields', 'draft-enrich', 'draft-upload'] as $operation) {
-            if (Cache::has("{$operation}:{$draftId}:queued")) {
-                return true;
-            }
-        }
-
-        return false;
+        // The same markers the existing jobs clear on completion/failure; the chat
+        // tools read them too. No persistent lock or timeout of the UI's own.
+        return DraftQueuedWork::has($draftId);
     }
 
     private function clearManualCreate(string $chat, string $user): void
