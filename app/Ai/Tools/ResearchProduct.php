@@ -864,6 +864,8 @@ class ResearchProduct implements Tool
             'reference_site_results.*.site' => ['required', 'string', 'max:255'],
             'reference_site_results.*.result' => ['required', 'in:found,not_found,not_applicable'],
             'unconfirmed_operator_codes.*' => ['string', 'max:100'],
+            'code_aliases' => ['sometimes', 'array', 'max:6'],
+            'code_aliases.*' => ['string', 'max:100'],
             'request_differences' => ['sometimes', 'array', 'max:10'],
             'request_differences.*' => ['array:requirement,requested,found,evidence'],
             'request_differences.*.requirement' => ['required', 'in:color,model,configuration,condition,other'],
@@ -1008,8 +1010,11 @@ class ResearchProduct implements Tool
     private function officialGallery(ProductCodeLookup $lookup, array $data, array $queryGtins): ?array
     {
         $specs = collect($data['specifications'] ?? []);
-        $codes = $specs->whereIn('key', ['sku', 'mpn', 'part_number', 'product_code'])->pluck('value')
-            ->push($data['model'] ?? null)->filter(fn (mixed $code): bool => is_string($code) && trim($code) !== '')
+        // The operator's own code leads even in a row the agent named itself (label_code,
+        // live #157); a barcode among them is asked as a barcode below.
+        $codes = $specs->whereIn('key', ['sku', 'mpn', 'part_number', 'product_code', 'label_code'])->pluck('value')
+            ->push($data['model'] ?? null)->merge((array) ($data['unconfirmed_operator_codes'] ?? []))
+            ->filter(fn (mixed $code): bool => is_string($code) && trim($code) !== '' && ! ctype_digit(trim($code)))
             ->map(fn (string $code): string => trim($code))
             // The datasheet's code has no localisation suffix (AA3B6UA#ABA → AA3B6UA).
             ->flatMap(fn (string $code): array => str_contains($code, '#') ? [$code, trim((string) strstr($code, '#', true))] : [$code])
@@ -1028,6 +1033,15 @@ class ResearchProduct implements Tool
         $sameGtin = fn (array $result): bool => array_intersect(array_map(fn ($gtin) => ltrim((string) $gtin, '0'), (array) ($result['gtins'] ?? [])),
             array_map(fn ($gtin) => ltrim((string) $gtin, '0'), $gtins)) !== [];
         $matches = fn (array $result): bool => $samePart($result) || $sameGtin($result);
+        // Icecat files a part under one exact code (MZVLQ512HBLU-00B00, not -00B or -00BH1,
+        // checked live 2026-11-06). Other codes of the part come from what the agent saw;
+        // such a record goes the way of one found by name: its photos are checked like any page's.
+        $aliases = collect((array) ($data['code_aliases'] ?? []))->push($data['selected_identity']['observed_model'] ?? null)
+            ->filter(fn (mixed $code): bool => is_string($code) && trim($code) !== '')->map(fn (string $code): string => trim($code))
+            ->reject(fn (string $code): bool => in_array($normal($code), array_map($normal, $codes), true))
+            ->unique()->values()->all();
+        $byAlias = fn (array $result): bool => array_intersect(
+            [$normal((string) ($result['part_number'] ?? '')), $normal((string) ($result['queried_part'] ?? ''))], array_map($normal, $aliases)) !== [];
         // A datasheet the research found by name on the catalogue's own site: its page sits
         // behind a bot check, its number is in the address, and the record is read by that
         // number through the API (operator, 2026-10-30: Icecat first for a name without a code).
@@ -1035,7 +1049,7 @@ class ResearchProduct implements Tool
             ->map(fn (array $source): ?string => ProductCodeLookup::icecatIdFromUrl((string) ($source['url'] ?? '')))
             ->filter()->unique()->take(2)->values()->all();
         try {
-            $found = collect($lookup->lookup($gtins, $data['brand'] ?? null, $codes, $this->update->id, 'official_gallery'))
+            $found = collect($lookup->lookup($gtins, $data['brand'] ?? null, [...$codes, ...$aliases], $this->update->id, 'official_gallery'))
                 ->filter(fn (array $result): bool => $result['source'] === 'icecat' && $result['found'] && ($result['page_url'] ?? null) !== null);
             foreach ($pageIds as $pageId) {
                 $byNumber = $lookup->icecatById($pageId, $this->update->id, 'official_gallery');
@@ -1068,8 +1082,8 @@ class ResearchProduct implements Tool
         // A record the research itself listed that names the selected brand and model is
         // the agent's own identification: its gallery is offered first, and its photos are
         // checked like any page's, not as a code-confirmed record.
-        $namedByResearch = ! $sameCode && in_array((string) ($match['icecat_id'] ?? ''), $pageIds, true)
-            && $this->recordNamesSelectedProduct($match, $data);
+        $namedByResearch = ! $sameCode && ($byAlias($match) || (in_array((string) ($match['icecat_id'] ?? ''), $pageIds, true)
+            && $this->recordNamesSelectedProduct($match, $data)));
         $images = collect($match['images'])->filter(fn (array $image): bool => $image['width'] >= 700 || $image['width'] === 0)
             ->pluck('url')->values()->all();
         app(ProductSourceAttemptRecorder::class)->record(['telegram_update_id' => $this->update->id,
@@ -1091,7 +1105,7 @@ class ResearchProduct implements Tool
             'image_urls' => $images, 'roles' => ['facts', 'exact_photo'], '_official_gallery' => true,
             'applicability_reason' => $sameCode
                 ? 'Official datasheet (Icecat) for the same part number/GTIN as the selected product.'
-                : 'Official datasheet (Icecat) the research found by name; its code is not among the selected product\'s codes, so its photos are checked like any page\'s.',
+                : 'Official datasheet (Icecat) the research found by name or by another code of the part; its code is not among the selected product\'s codes, so its photos are checked like any page\'s.',
             // The database record matched by the exact code is this source's identity.
             // Its page may sit behind a bot check: live #14's showed only one, the page
             // look replaced this evidence, and the official gallery lost to 800px shop photos.

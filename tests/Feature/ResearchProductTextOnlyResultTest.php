@@ -451,6 +451,37 @@ class ResearchProductTextOnlyResultTest extends TestCase
         $this->assertSame(['https://images.icecat.biz/img/gallery/exact.jpg'], $official['image_urls']);
     }
 
+    public function test_a_code_the_label_cuts_short_finds_its_datasheet_by_the_code_the_agent_saw_and_stays_on_the_card(): void
+    {
+        // Live 2026-11-06: Icecat knows MZVLQ512HBLU-00B00 and answers 404 for -00B and for
+        // the base code. #157 on another machine: the short code in a label_code row and the
+        // observed sibling were refused three times by the identity check - no card at all.
+        config(['services.icecat.username' => 'tester']);
+        Cache::flush();
+        Http::fake(['https://live.icecat.biz/*' => fn (HttpRequest $request) => str_contains($request->url(), 'ProductCode=MZVLQ512HBLU-00B00')
+            ? Http::response(['data' => ['GeneralInfo' => ['Title' => 'Samsung PM991a MZVLQ512HBLU-00B00', 'Brand' => 'Samsung', 'BrandPartCode' => 'MZVLQ512HBLU-00B00',
+                'IcecatId' => '87230398', 'ProductName' => 'PM991a', 'GTIN' => []],
+                'Gallery' => [['Pic' => 'https://images.icecat.biz/img/gallery/pm991a.jpg', 'PicWidth' => '1600', 'PicHeight' => '1200', 'No' => '1']]]])
+            : Http::response(['StatusCode' => 8, 'Message' => 'The requested product is not present in the Icecat database'], 404)]);
+
+        $this->research('cost_budget', assembled: false, responseOverrides: [
+            'title' => 'Samsung MZVLQ512HBLU-00B 512GB', 'brand' => 'Samsung', 'model' => 'MZVLQ512HBLU-00B', 'product_type' => 'component', 'category' => 'components',
+            'specifications' => [['key' => 'label_code', 'name' => 'Label code', 'value' => 'MZVLQ512HBLU-00B'], ['key' => 'capacity', 'name' => 'Capacity', 'value' => '512 GB']],
+            'unconfirmed_operator_codes' => ['MZVLQ512HBLU-00B'],
+            'code_aliases' => ['MZVLQ512HBLU-00B00'],
+            'selected_identity' => $this->observedIdentity('MZVLQ512HBLU-00B00', self::SOURCE),
+        ], text: 'Samsung MZVLQ512HBLU-00B 512GB');
+
+        $draft = ProductDraft::query()->sole();
+        $this->assertSame('MZVLQ512HBLU-00B', $draft->model);
+        $this->assertSame('MZVLQ512HBLU-00B', collect($draft->specifications)->firstWhere('key', 'label_code')['value']);
+        $official = collect($draft->sources)->firstWhere('_official_gallery', true);
+        $this->assertSame(['https://images.icecat.biz/img/gallery/pm991a.jpg'], $official['image_urls']);
+        // Not a code confirmation: its photos are checked like any page's.
+        $this->assertSame(['kind' => 'catalog_record', 'database' => 'icecat', 'id' => '87230398'], $official[SourceIdentityProvenance::KEY]);
+        $this->assertTrue(ProductSourceAttempt::query()->where('action', 'offer_official_gallery')->where('decision', 'queued_first_by_name')->exists());
+    }
+
     public function test_a_barcode_that_points_at_another_product_still_lets_the_selected_part_code_find_its_datasheet(): void
     {
         config(['services.icecat.username' => 'tester']);
