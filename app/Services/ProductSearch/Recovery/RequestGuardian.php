@@ -207,6 +207,19 @@ final class RequestGuardian
 
             return 'hang_shown_found';
         }
+        // With no draft there is nothing to show, and the assistant's call ends and
+        // retries by itself first. Past that the operator hears the one thing that
+        // helps: this process is stuck and takes no new requests (live #388).
+        $hangWithoutDraft = (int) ceil(1.5 * (int) config('services.request_guardian.hang_after_seconds', 600));
+        if ($journalSilent >= $hangWithoutDraft && $this->draftFor($update) === null && $this->claim('hang-notice', $update)) {
+            $minutes = intdiv($journalSilent, 60);
+            $this->telegram->sendMessage((string) $update->chat_id,
+                "⚠️ Запрос #{$update->id} завис: ни одного шага за {$minutes} мин, карточки пока нет. Чтобы бот принимал новые запросы, перезапустите его и повторите запрос.");
+            $this->record($update, null, 'hang_without_draft', 'completed',
+                "Шаг запроса не отвечает {$minutes} мин; карточки нет, оператор попрошен перезапустить бота.", ['journal_silent_seconds' => $journalSilent]);
+
+            return 'hang_without_draft';
+        }
         // The operator's own time budget is the one hard limit: two minutes before
         // it, the operator gets what exists. Live #598 and #611 kept searching for
         // photos into the 33rd minute through continuation slices.
