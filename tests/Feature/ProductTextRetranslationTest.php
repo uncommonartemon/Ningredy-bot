@@ -79,7 +79,7 @@ class ProductTextRetranslationTest extends TestCase
     public function test_a_batch_that_changes_shown_text_orders_translations_once_per_product(): void
     {
         [$product, $variant] = $this->product();
-        $definition = AttributeDefinition::query()->firstOrCreate(['key' => 'cooling_note'], ['label' => 'Cooling note', 'data_type' => 'text']);
+        $definition = AttributeDefinition::query()->firstOrCreate(['key' => 'cooling_note'], ['label' => 'Cooling note', 'data_type' => 'text', 'is_variant' => false]);
         $value = AttributeValue::query()->create(['attribute_definition_id' => $definition->id, 'product_id' => $product->id, 'value' => 'Two fans']);
         $service = app(DatabaseOperatorService::class);
         $context = $this->ask('Поправь товар');
