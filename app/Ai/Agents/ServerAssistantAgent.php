@@ -114,7 +114,7 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
               fact from_operator=true: key and name in English, the value exactly as the operator wrote it (numbers,
               units and words unchanged - the server accepts only a value that is literally in their message).
             - A used part's state from a SMART screenshot sent with a request («в товар 15», «в черновик 213»): its recognized
-              text is in the message, so its values count as the operator's. Keys health_percent, power_on_hours, tbw_written:
+              text is in the message, so its values count as the operator's. Keys health_percent, power_on_hours, data_written_tb:
               AddProductSpecifications for a product, EditProductDraft (instruction with those values) for a draft.
             - ResearchProduct returned already_in_catalog with found_specifications and the operator asked for those
               facts → pass the needed ones to AddProductSpecifications as facts_json unchanged; do not search again.
