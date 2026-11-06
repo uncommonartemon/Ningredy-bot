@@ -3,7 +3,9 @@
 namespace App\Ai\Tools;
 
 use App\Models\Product;
+use App\Models\ProductDraft;
 use App\Models\ProductVariant;
+use App\Models\TelegramUpdate;
 use App\Services\Products\ProductCondition;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
 use Illuminate\Database\Eloquent\Builder;
@@ -15,6 +17,8 @@ use Stringable;
 
 class SearchCatalog implements Tool
 {
+    public function __construct(private readonly ?TelegramUpdate $update = null) {}
+
     public function description(): Stringable|string
     {
         return 'Search the complete local electronics catalog, including product attributes and variants. Use this before web research. Pass structured brand, type, CPU, GPU, RAM, color or price filters when the request contains them. Results explicitly show whether a product is published and active. A product whose model, SKU, MPN or EAN exactly equals a code in the query is listed first with exact_code_match=true.';
@@ -203,7 +207,35 @@ class SearchCatalog implements Tool
             'count' => count($products),
             'searched_local_catalog' => true,
             'products' => $products,
+            'matching_drafts' => $this->matchingDrafts($query),
         ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+    }
+
+    /**
+     * Drafts of this operator waiting for a decision about the same product: a new
+     * search for one of them would pay again for a card that is already there.
+     *
+     * @return list<array{id: int, title: ?string, model: ?string}>
+     */
+    private function matchingDrafts(string $query): array
+    {
+        $query = trim($query);
+        if ($this->update === null || $query === '') {
+            return [];
+        }
+        $codes = collect(preg_split('/[\s,;]+/u', $query) ?: [])
+            ->filter(fn (string $word): bool => mb_strlen($word) >= 5 && preg_match('/\d/', $word) === 1)->take(5)->values();
+
+        return ProductDraft::query()->where('status', 'pending_review')
+            ->where('requested_by_telegram_user_id', $this->update->telegram_user_id)
+            ->where(function (Builder $draft) use ($query, $codes): void {
+                $draft->where('title', 'like', $this->like($query))->orWhere('model', 'like', $this->like($query));
+                foreach ($codes as $code) {
+                    $draft->orWhere('model', 'like', $this->like($code))->orWhere('specifications', 'like', $this->like($code));
+                }
+            })
+            ->latest('id')->limit(5)->get(['id', 'title', 'model'])
+            ->map(fn (ProductDraft $draft): array => ['id' => $draft->id, 'title' => $draft->title, 'model' => $draft->model])->all();
     }
 
     public function schema(JsonSchema $schema): array

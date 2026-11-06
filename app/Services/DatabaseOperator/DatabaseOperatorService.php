@@ -50,6 +50,9 @@ class DatabaseOperatorService
 
     private const FILTERS = ['=', '!=', '>', '>=', '<', '<=', 'in', 'not_in', 'contains', 'starts_with', 'is_null', 'not_null'];
 
+    private const FILTER_SPELLINGS = ['eq' => '=', 'equals' => '=', 'equal' => '=', '==' => '=', 'is' => '=', 'ne' => '!=', 'neq' => '!=', 'not_equals' => '!=', '<>' => '!=',
+        'gt' => '>', 'gte' => '>=', 'lt' => '<', 'lte' => '<=', 'like' => 'contains', 'nin' => 'not_in', 'null' => 'is_null', 'is_not_null' => 'not_null', 'notnull' => 'not_null'];
+
     /** Products whose shown text a batch changed: made again in the catalog's languages after it commits. @var array<int, true> */
     private array $retranslate = [];
 
@@ -440,7 +443,8 @@ class DatabaseOperatorService
         foreach ($filters as $filter) {
             $this->assert(is_array($filter), 'filters', 'Фильтр должен быть объектом.');
             $column = $filter['column'] ?? '';
-            $operator = $filter['operator'] ?? '=';
+            // The agent's own spelling of an operator is not worth a failed call and a retry.
+            $operator = self::FILTER_SPELLINGS[strtolower(trim((string) ($filter['operator'] ?? '=')))] ?? ($filter['operator'] ?? '=');
             $this->assert(in_array($column, $this->columns($table, $this->entry($table)), true) && in_array($operator, self::FILTERS, true), 'filters', 'Недопустимая колонка или оператор фильтра.');
             $value = $filter['value'] ?? null;
             if (in_array($operator, ['in', 'not_in'], true)) {

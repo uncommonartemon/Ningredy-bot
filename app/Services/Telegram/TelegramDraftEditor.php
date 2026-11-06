@@ -120,8 +120,6 @@ class TelegramDraftEditor
             }
             unset($specification);
         }
-        throw_if($patch['commercial'] !== [] && ! $draft->isManualUpload(), RuntimeException::class,
-            'Коммерческие поля пока редактируются через черновик загруженного товара.');
         $lines = $this->previewLines($draft, $patch);
         throw_if($lines === [], RuntimeException::class, $summary !== '' ? $summary : 'В сообщении нет изменений для этого черновика.');
         $proposal = [
@@ -156,8 +154,6 @@ class TelegramDraftEditor
                 && hash_equals((string) ($proposal['fingerprint'] ?? ''), $this->fingerprint($draft)),
                 RuntimeException::class, 'Черновик или фотографии изменились, либо предложение устарело. Подготовьте правку ещё раз.');
             $patch = $this->validatePatch($proposal['patch']);
-            throw_if(($patch['commercial'] ?? []) !== [] && ! $draft->isManualUpload(), RuntimeException::class,
-                'Коммерческие поля пока редактируются через черновик загруженного товара.');
 
             $fields = $patch['fields'];
             // Invalidate only translations that belonged to edited values.
@@ -186,6 +182,11 @@ class TelegramDraftEditor
                 $intake['missing_fields'] = $this->missingFields($draft);
                 $intake['status'] = $intake['missing_fields'] === [] && empty($intake['conflicts']) ? 'ready' : 'needs_input';
                 $payload['_manual_product_intake'] = $intake;
+                $origin->update(['payload' => $payload]);
+            } elseif ($origin && ($patch['commercial'] ?? []) !== []) {
+                // A found product's price is the operator's too; it waits here until the card is added.
+                $payload = $origin->payload ?? [];
+                $payload['_manual_product_intake']['commercial'] = array_replace($payload['_manual_product_intake']['commercial'] ?? [], $patch['commercial']);
                 $origin->update(['payload' => $payload]);
             }
 
