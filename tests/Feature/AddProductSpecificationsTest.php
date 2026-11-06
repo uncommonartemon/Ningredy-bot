@@ -57,6 +57,29 @@ class AddProductSpecificationsTest extends TestCase
         Queue::assertPushed(TranslateProductText::class, fn (TranslateProductText $job): bool => $job->productId === $product->id);
     }
 
+    public function test_a_correction_under_a_key_the_product_lacks_is_not_a_second_value_and_names_what_it_has(): void
+    {
+        // Real model 2026-11-06: «неверная частота, поставь 2490 MHz» wrote frequency beside boost_clock.
+        $product = $this->ssd();
+        $clock = AttributeDefinition::query()->firstOrCreate(['key' => 'boost_clock'], ['label' => 'Boost clock', 'data_type' => 'text', 'is_variant' => false]);
+        AttributeValue::query()->create(['attribute_definition_id' => $clock->id, 'product_id' => $product->id, 'value' => '2505 MHz']);
+        $tool = new AddProductSpecifications($this->update('В #'.$product->id.' неверная частота, поставь 2490 MHz'));
+
+        $wrong = json_decode($tool->handle(new ToolRequest(['product_id' => $product->id, 'wanted' => 'частота', 'replace_existing' => true,
+            'facts_json' => json_encode([['name' => 'Frequency', 'value' => '2490 MHz', 'from_operator' => true]])])), true);
+
+        $this->assertSame([], $wrong['added']);
+        $this->assertSame('no_such_key', $wrong['rejected'][0]['reason']);
+        $this->assertSame('2505 MHz', $wrong['current_specifications']['boost_clock']['value']);
+        $this->assertNull($this->value($product, 'frequency'));
+
+        $right = json_decode($tool->handle(new ToolRequest(['product_id' => $product->id, 'wanted' => 'частота', 'replace_existing' => true,
+            'facts_json' => json_encode([['name' => 'Boost clock', 'key' => 'boost_clock', 'value' => '2490 MHz', 'from_operator' => true]])])), true);
+
+        $this->assertSame('2490 MHz', $right['added'][0]['value']);
+        $this->assertSame('2490 MHz', $this->value($product, 'boost_clock'));
+    }
+
     public function test_a_named_configuration_takes_the_values_as_its_own_and_another_configurations_value_never_blocks_it(): void
     {
         // Audit 2026-11-04, C5: every configuration's values counted as «already in the product».

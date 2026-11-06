@@ -109,7 +109,7 @@ final class ProductCodeLookup
                 // A phrase is not a code (live #370: a configured model went out as ProductCode and
                 // the API answered "Exceed max string length").
                 ->filter(fn (string $code): bool => mb_strlen(trim($code)) <= 40)
-                ->filter()->unique()->take(4)->values()->all();
+                ->filter()->unique()->take(6)->values()->all();
             foreach ($parts as $part) {
                 if (collect($results)->contains(fn (array $result): bool => $result['found'] && $result['source'] === 'icecat')) {
                     break;

@@ -36,7 +36,8 @@ class ProductResearchConfigurationGuard
             ->first(fn (string $value): bool => $value !== '' && ! $this->ambiguous($value));
         $issues = [];
 
-        if (! $identity && ! $this->hasObservedFullModel($data) && ! $this->hasObservedConfiguredProduct($data)) {
+        if (! $identity && ! $this->hasObservedFullModel($data) && ! $this->hasObservedConfiguredProduct($data)
+            && ! $this->hasLabelCodeWithObservedSibling($data, $specifications)) {
             $issues[] = 'The selected identity is unresolved: provide an observed reusable SKU/MPN/GTIN or selected_identity with the full model, single_product scope, observed source URL and verbatim excerpt. A family title, source publisher type, or letters and digits alone cannot identify one configuration. Keep useful sources and facts; missing identity evidence is not not_found. A product its maker sells only through a configurator, with no code for the whole machine, is selected as one concrete configuration: basis=configured_product, observed_model the line as the page names it, model the line plus the chosen processor, memory and storage, and those options in specifications as installed values.';
         }
         // With a code already identifying the product, an honestly family-scoped
@@ -126,6 +127,38 @@ class ProductResearchConfigurationGuard
             '/\b(?:product\s+family|families|variants?|varies\s+by\s+(?:sku|region|market|config|configuration)|multiple\s+(?:skus?|configurations?|variants?)|select\s+skus?|depending\s+on\s+(?:sku|region|market|config|configuration))\b/i',
             $value,
         ) === 1;
+    }
+
+    /**
+     * The operator's own code, observed on no page, kept as their label fact in a row of
+     * its own, with the closest observed sibling named in selected_identity by a verbatim
+     * excerpt of its page: the path module 25 opened. Live 2026-11-02 (#157 on another
+     * machine): «MZVLQ512HBLU-00B», typed short of the observed MZVLQ512HBLU-00B00, sat in
+     * a label_code row; the identity check knew only sku/mpn/ean/upc/gtin rows and refused
+     * three honest answers - no card. The row's name is the agent's; the code is the fact.
+     *
+     * @param  Collection<string, array<string, mixed>>  $specifications
+     */
+    private function hasLabelCodeWithObservedSibling(array $data, Collection $specifications): bool
+    {
+        $identity = $data['selected_identity'] ?? null;
+        $normal = static fn (string $value): string => strtoupper((string) preg_replace('/[^A-Za-z0-9]/', '', $value));
+        $codes = collect((array) ($data['unconfirmed_operator_codes'] ?? []))
+            ->filter(fn (mixed $code): bool => is_string($code) && trim($code) !== '')
+            ->map(fn (string $code): string => $normal($code))
+            // A barcode names no product line.
+            ->reject(fn (string $code): bool => $code === '' || ctype_digit($code));
+        if ($codes->isEmpty() || ! is_array($identity) || ($identity['model_scope'] ?? null) !== 'single_product'
+            || trim((string) ($identity['reason'] ?? '')) === '') {
+            return false;
+        }
+        $observed = self::comparable((string) ($identity['observed_model'] ?? ''));
+        $excerpt = self::comparable((string) ($identity['source_excerpt'] ?? ''));
+        $rows = $specifications->map(fn (array $row): string => $normal((string) data_get($row, 'value', '')));
+
+        return is_array(self::identitySource($data, $identity)) && $observed !== '' && ! $this->ambiguous($observed)
+            && self::containsTokens($excerpt, $observed)
+            && $codes->contains(fn (string $code): bool => $rows->contains($code));
     }
 
     private function hasObservedFullModel(array $data): bool

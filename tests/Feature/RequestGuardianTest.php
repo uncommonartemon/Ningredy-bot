@@ -403,6 +403,21 @@ class RequestGuardianTest extends TestCase
         SearchProgressAgent::assertNeverPrompted();
     }
 
+    public function test_a_hang_before_any_draft_names_the_restart_once(): void
+    {
+        // Live #388: the assistant's first call sat twelve minutes with nothing moving.
+        [$update] = $this->runningSearch(silentMinutes: 16, withDraft: false, startedMinutesAgo: 16);
+        SearchProgressAgent::fake()->preventStrayPrompts();
+
+        $this->sweep();
+        $this->sweep();
+
+        $this->assertSentText("Запрос #{$update->id} завис");
+        $this->assertSentText('перезапустите его и повторите запрос');
+        $this->assertSame(1, ProductSourceAttempt::query()->where('telegram_update_id', $update->id)->where('action', 'hang_without_draft')->count());
+        SearchProgressAgent::assertNeverPrompted();
+    }
+
     public function test_at_the_time_limit_the_photo_search_is_wrapped_up_and_the_card_is_cut_only_after_the_assembly_overrun(): void
     {
         // Live #151: the card was cut while being assembled at the 29th minute; #161: cut

@@ -91,6 +91,9 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
               and its operation_id. The application supplies the confirmation buttons; do not invent them.
               Do not claim deletion completed before the operator clicks. Create/update results with ok=true
               are already committed. Report affected counts and actual new IDs from the result.
+            - A set of rows by their state - hidden products (products.is_active=false), products without a price, how many
+              of something - is QueryDatabase with filters, never SearchCatalog with those words. For products answer with
+              response_type catalog_results and their IDs.
             - Respect protected technical/security/proof fields. Use existing publication/photo/recipe
               workflows for those actions; never bypass verification by setting internal status flags.
             - The search's reference data is in the same tools: reference_sites («Справочники»: which site to
@@ -110,6 +113,9 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
               (for example a page of a site the bot cannot open) → AddProductSpecifications with facts_json, each
               fact from_operator=true: key and name in English, the value exactly as the operator wrote it (numbers,
               units and words unchanged - the server accepts only a value that is literally in their message).
+            - A used part's state from a SMART screenshot sent with a request («в товар 15», «в черновик 213»): its recognized
+              text is in the message, so its values count as the operator's. Keys health_percent, power_on_hours, tbw_written:
+              AddProductSpecifications for a product, EditProductDraft (instruction with those values) for a draft.
             - ResearchProduct returned already_in_catalog with found_specifications and the operator asked for those
               facts → pass the needed ones to AddProductSpecifications as facts_json unchanged; do not search again.
             - The operator names one configuration of a product that has several («для версии 1 ТБ», a colour, a SKU)
@@ -140,10 +146,14 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
               values. Never supply a value from your own knowledge. Never edit a draft's fields or characteristics through the
               database tools.
             - The same for a product already in the catalog: a missing or wrong characteristic → AddProductSpecifications with
-              facts_json from_operator=true (replace_existing=true when they correct a value), or wanted to find it on the web;
+              facts_json from_operator=true, or wanted to find it on the web; to correct a value read the product with GetProduct
+              first and pass that characteristic's key with replace_existing=true («неверная частота» is the product's boost_clock
+              when that is the frequency it has; a second row beside the wrong one is not a correction);
               title, model, description → UpdateProduct; price, stock, colour, name, SKU, part number, EAN, condition, warranty
-              of a configuration → UpdateVariant; remove a characteristic → find its attribute_values row with QueryDatabase and
-              delete it with ManageDatabase (a confirmation button); brand, category, anything else → ManageDatabase.
+              of a configuration → UpdateVariant; remove a characteristic → GetProduct shows its row id, delete that id in
+              attribute_values with ManageDatabase (a confirmation button); brand, category, anything else → ManageDatabase.
+            - A draft's price, quantity and warranty are changed the same way, with EditProductDraft; they go to the product when
+              it is added.
 
             When a message starts with "[Пользователь ответил (Reply) на сообщение бота: ...]" - the user
             used Telegram's Reply feature on that exact earlier bot message. Treat its quoted text as the
@@ -220,7 +230,9 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
               пользователь уже попросил найти, этого достаточно, чтобы продолжить поиск в интернете
               автоматически.
             - Если явно сказано «в интернете / в сети / найди новый товар», сразу исследуй интернет.
-            - Если явно сказано «в каталоге / в базе», не выходи в интернет.
+            - Если явно сказано «в каталоге / в базе / есть у нас», не выходи в интернет.
+            - Если SearchCatalog вернул matching_drafts, этот товар уже ждёт решения в черновике: вызови ShowProductDraft и
+              не запускай ResearchProduct, пока оператор прямо не попросит искать заново.
             - Интернет-исследование создаёт черновик. Готовый черновик приложение само отправляет альбомом
               с фотографиями, описанием и кнопками. Не пересказывай карточку и не придумывай текстовое меню.
             - Если ResearchProduct вернул status=found и text_only_result=true, карточка согласована, но пригодных
@@ -287,7 +299,7 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
     public function tools(): iterable
     {
         return [
-            new SearchCatalog,
+            new SearchCatalog($this->update),
             new GetProduct,
             new DescribeDatabase($this->update),
             new QueryDatabase($this->update),

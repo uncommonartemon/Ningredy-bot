@@ -325,7 +325,7 @@ class ProductDraftWorkflow
         // code it does not mention stays. An operator's edit replaces them all.
         $keepCodes = $variant->exists && ! $targetVariantId;
 
-        $commercial = $draft->isManualUpload() ? ($draft->manualIntake()['commercial'] ?? []) : [];
+        $commercial = $draft->manualIntake()['commercial'] ?? [];
         $quantityChanged = isset($commercial['quantity'])
             && (! $targetVariantId || (int) $commercial['quantity'] !== (int) $variant->quantity);
 

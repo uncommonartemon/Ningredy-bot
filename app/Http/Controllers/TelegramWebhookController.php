@@ -429,6 +429,13 @@ class TelegramWebhookController extends Controller
             return true;
         }
 
+        if (preg_match('/^\/draft(?:@\w+)?\s+#?(\d+)$/iu', $text, $showDraft) === 1) {
+            $this->showDraft((int) $showDraft[1], $chatId, $update);
+            $this->markCommandProcessed($update);
+
+            return true;
+        }
+
         if ($text === '🔎 Найти товар') {
             $this->telegram->sendMessage($chatId, 'Опишите товар. Я сначала проверю каталог, а если совпадения нет — поищу в интернете.', $this->mainKeyboard());
             $this->markCommandProcessed($update);
@@ -1724,6 +1731,33 @@ class TelegramWebhookController extends Controller
         }
     }
 
+    /** One draft by its number, without the assistant: its card, or what became of it. */
+    private function showDraft(int $draftId, string $chatId, TelegramUpdate $update): void
+    {
+        $draft = ProductDraft::query()->find($draftId);
+        if (! $draft || ! $this->draftBelongsToContext($draft, $update)) {
+            $this->telegram->sendMessage($chatId, "Черновика #{$draftId} нет в этом чате. Все черновики: /drafts", $this->mainKeyboard());
+
+            return;
+        }
+        if ($draft->status !== 'pending_review') {
+            $this->telegram->sendMessage($chatId, $draft->status === 'approved' && $draft->approved_product_id
+                ? "Черновик #{$draftId} уже добавлен: товар #{$draft->approved_product_id}. Открыть: /product {$draft->approved_product_id}"
+                : "Черновик #{$draftId} отклонён.".($draft->rejection_reason ? ' '.mb_substr((string) $draft->rejection_reason, 0, 500) : ''), $this->mainKeyboard());
+
+            return;
+        }
+        if ($this->draftHasQueuedWork($draft->id)) {
+            $this->telegram->sendMessage($chatId, "Черновик #{$draftId} сейчас обрабатывается. Карточка придёт сама.", $this->mainKeyboard());
+
+            return;
+        }
+        $this->clearManualCreate($chatId, (string) $update->telegram_user_id);
+        app(DraftTelegramInteractionState::class)->clear($chatId, (string) $update->telegram_user_id);
+        $this->draftPresenter->clearForSearchContinuation($this->telegram, $draft);
+        $this->draftPresenter->sendReview($this->telegram, $chatId, $draft);
+    }
+
     private function sendDrafts(string $chatId, string $telegramUserId): void
     {
         $drafts = ProductDraft::query()->where('requested_by_telegram_user_id', $telegramUserId)->latest('id')->limit(10)->get();
@@ -1753,6 +1787,10 @@ class TelegramWebhookController extends Controller
             • «Найди в интернете Mac mini M4» — сразу интернет и черновик
             • «Деактивируй товар #12» — скроет его с сайта
             • «Измени описание товара #12 на ...»
+            • «Покажи черновик 213», «В черновике 213 добавь TDP 115 Вт»
+            • «В черновике 213 нет скорости записи» — поищу в интернете
+            • «В товаре #12 поставь частоту 2490 MHz»
+            • «Выключи айскет», «Забань этот сайт», «Поставь бюджет поиска 1 доллар»
             • «Покажи статус сервера / последние ошибки»
 
             /find запрос — поиск
@@ -1765,6 +1803,7 @@ class TelegramWebhookController extends Controller
             /cancel — отменить ожидаемый ввод
             /admin — ручное создание и редактирование без обращения к AI
             /drafts — черновики
+            /draft номер — открыть черновик без обращения к AI
             /status — состояние системы без обращения к AI
             /errors — ошибки
             /new — очистить контекст диалога

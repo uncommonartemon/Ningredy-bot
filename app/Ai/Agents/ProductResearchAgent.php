@@ -203,6 +203,10 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
             closest observed product - select it the same way and say so; unresolved is for the case where no
             concrete product was observed at all. Leave unconfirmed_operator_codes empty when every supplied code
             was observed.
+            In code_aliases list the other codes of this same part that you saw on pages: the full code of one the
+            label cuts short (MZVLQ512HBLU-00B00 for MZVLQ512HBLU-00B), the retail or base code of an OEM suffix
+            (M425R2GA3PB0-CWM for M425R2GA3PB0-CWMOL). They are asked in the code databases and never enter the card.
+            Leave it empty when you saw none; never compose a code you did not see.
             A visible requirement the operator wrote that no observed page of the requested model shows - most often a
             colour name - does not stop the search either. When the model itself is observed (its listings and the
             manufacturer's sheet name another colour), select the closest observed configuration of that model, write
@@ -345,6 +349,8 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
                 ->description('One entry per reference site listed in the prompt: found, not_found, or not_applicable when the product is not of its kind. Empty when the prompt lists none.'),
             'unconfirmed_operator_codes' => $schema->array()->max(10)->items($schema->string()->max(100))->required()
                 ->description('Operator-supplied EAN/UPC, SKU or part numbers that no observed page shows; empty when all were observed.'),
+            'code_aliases' => $schema->array()->max(6)->items($schema->string()->max(100))->required()
+                ->description('Other codes of this same part observed on pages (full, retail or base code), asked in the code databases only; empty when none.'),
             'request_differences' => $schema->array()->max(10)->items($schema->object([
                 'requirement' => $schema->string()->enum(['color', 'model', 'configuration', 'condition', 'other'])->required(),
                 'requested' => $schema->string()->max(255)->required(),

@@ -9,10 +9,12 @@ use App\Ai\Tools\ShowProductDraft;
 use App\Models\Category;
 use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
+use App\Services\Products\ProductDraftWorkflow;
 use App\Services\Telegram\DraftTelegramPresenter;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Storage;
 use Laravel\Ai\Tools\Request as ToolRequest;
 use Tests\TestCase;
@@ -118,6 +120,28 @@ class TelegramDraftChatToolsTest extends TestCase
         Http::assertSent(fn ($request) => str_contains(json_encode($request->data()), "draft:add:{$draft->id}"));
         $this->assertFalse(Cache::has("draft-fields:{$draft->id}:queued"));
         $this->assertDatabaseHas('ai_operations', ['tool' => 'EditProductDraft', 'action' => 'edit_product_draft', 'status' => 'completed', 'target_id' => $draft->id]);
+    }
+
+    public function test_a_found_products_price_waits_on_the_draft_and_goes_to_the_product_when_it_is_added(): void
+    {
+        $draft = $this->draft();
+        ProductDraft::withReconciliationWrite(fn () => $draft->update(['specifications_reconciled_source_url' => 'https://shop.example/exact']));
+
+        $data = json_decode((new EditProductDraft($this->ask('в черновике '.$draft->id.' цена 5000 CZK')))
+            ->handle(new ToolRequest(['draft_id' => $draft->id, 'instruction' => 'цена 5000 CZK'])), true);
+
+        $this->assertTrue($data['ok'], json_encode($data, JSON_UNESCAPED_UNICODE));
+        $this->assertTrue($data['reconciled']);
+        $this->assertSame('5000.00', $draft->fresh()->manualIntake()['commercial']['price_amount']);
+        $this->assertFalse($draft->fresh()->isManualUpload());
+        Http::assertSent(fn ($request) => str_contains(json_encode($request->data(), JSON_UNESCAPED_UNICODE), 'цена 5000.00 CZK'));
+
+        Queue::fake();
+        $product = app(ProductDraftWorkflow::class)->approve($draft->fresh(), telegramReviewerId: '12345');
+
+        $variant = $product->variants()->sole();
+        $this->assertSame('5000.00', (string) $variant->price);
+        $this->assertSame('CZK', $variant->currency);
     }
 
     public function test_a_number_the_operator_did_not_write_is_not_written_and_their_own_is_found_however_it_is_spelled(): void

@@ -92,6 +92,7 @@ class AddProductSpecifications implements Tool
         $added = [];
         $kept = [];
         $rejected = [];
+        $unmatched = false;
         foreach ($supplied !== [] ? $supplied : $search['facts'] as $fact) {
             $reason = $this->rejection($fact);
             if ($reason !== null) {
@@ -100,6 +101,14 @@ class AddProductSpecifications implements Tool
                 continue;
             }
             $current = $existing[$fact['key']] ?? null;
+            // A correction is about a value the product has. Under a key it does not have
+            // the new value would sit beside the wrong one as a second characteristic.
+            if ($current === null && $request->boolean('replace_existing')) {
+                $rejected[] = ['name' => $fact['name'], 'value' => $fact['value'], 'reason' => 'no_such_key'];
+                $unmatched = true;
+
+                continue;
+            }
             if ($current !== null && (! $request->boolean('replace_existing') || self::sameValue($current['value'], $fact['value']))) {
                 $kept[] = ['name' => $current['name'], 'current' => $current['value'], 'found' => $fact['value']];
 
@@ -147,6 +156,8 @@ class AddProductSpecifications implements Tool
                 'source' => $fact['from_operator'] ? 'operator' : $fact['source_url']], $added),
             'already_in_product' => $kept,
             'rejected' => $rejected,
+            ...($unmatched ? ['current_specifications' => $existing,
+                'to_do' => 'A rejected fact with reason no_such_key names no characteristic of this product. Say nothing to the operator yet: call again with the key of the characteristic they meant from current_specifications; if they meant a new one, call without replace_existing.'] : []),
             'search_summary' => $search['summary'] ?? null,
             'web_search_calls' => $search['web_search_calls'] ?? 0,
             'person_links' => $personLinks,
@@ -417,7 +428,7 @@ class AddProductSpecifications implements Tool
             'wanted' => $schema->string()->max(1000)->required()->description('What to add, in the operator\'s words: "скорость чтения и записи".'),
             'facts_json' => $schema->string()->max(50000)->description('Optional JSON array of facts to write: [{"name":"Sequential read speed","value":"2200 MB/s","key":"sequential_read_speed","source_url":"https://…","source_excerpt":"…"}] '
                 .'or, for values the operator wrote, [{"name":"…","value":"…","from_operator":true}]. Name and value in English; numbers and units as given. Omit to search the web.'),
-            'replace_existing' => $schema->boolean()->description('true only when the operator asked to correct a value the product already has.'),
+            'replace_existing' => $schema->boolean()->description('true only when the operator asked to correct a value the product already has; pass that characteristic\'s key in facts_json.'),
             'product_variant_id' => $schema->integer()->description('The configuration (variant) the operator named when the product has several, for example "для версии 1 ТБ": its id from the catalog tools. Omit for the product as a whole.'),
         ];
     }

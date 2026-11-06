@@ -21,14 +21,15 @@ class ListPendingDrafts implements Tool
     public function handle(Request $request): Stringable|string
     {
         $limit = min(max($request->integer('limit', 10), 1), 20);
-        $drafts = ProductDraft::query()->where('status', 'pending_review')
+        $pending = ProductDraft::query()->where('status', 'pending_review')
             ->where('requested_by_telegram_user_id', $this->update->telegram_user_id)
-            ->whereHas('telegramUpdate', fn ($query) => $query->where('chat_id', $this->update->chat_id))
-            ->latest('id')->limit($limit)->get([
-                'id', 'title', 'brand', 'model', 'color', 'confidence', 'created_at',
-            ]);
+            ->whereHas('telegramUpdate', fn ($query) => $query->where('chat_id', $this->update->chat_id));
+        $drafts = (clone $pending)->latest('id')->limit($limit)->get([
+            'id', 'title', 'brand', 'model', 'color', 'confidence', 'created_at',
+        ]);
 
-        return json_encode(['count' => $drafts->count(), 'drafts' => $drafts], JSON_UNESCAPED_UNICODE);
+        // total is how many wait for a decision; count only how many this page shows.
+        return json_encode(['total' => $pending->count(), 'count' => $drafts->count(), 'drafts' => $drafts], JSON_UNESCAPED_UNICODE);
     }
 
     public function schema(JsonSchema $schema): array

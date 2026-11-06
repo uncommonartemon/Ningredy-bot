@@ -169,7 +169,9 @@ class TranscribeTelegramPhoto implements ShouldQueue
 
         return match ($data['operator_intent'] ?? null) {
             'own_product' => true,
-            'search' => false,
+            // A request about what the bot already has goes to the assistant with the
+            // read text in the message, where a value of the screenshot counts as the operator's.
+            'search', 'request' => false,
             default => ! self::showsAProductCode($data),
         };
     }
