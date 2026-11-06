@@ -3140,7 +3140,8 @@ class ProductImageStorageTest extends TestCase
             return ['images' => [['index' => 1, 'exact_match' => true, 'color_match' => true,
                 'color_observability' => 'clear', 'physical_match' => 'match', 'catalog_photo' => true,
                 'publishable' => true, 'kind' => 'product', 'view' => 'front', 'gallery_rank' => 1,
-                'score' => 95, 'reason' => 'Current downloaded frame shows the requested boxed processor.',
+                'score' => 95, 'observed_marking' => '100-100001084WOF',
+                'reason' => 'Current downloaded frame shows the requested boxed processor.',
             ]]];
         })->preventStrayPrompts();
 
