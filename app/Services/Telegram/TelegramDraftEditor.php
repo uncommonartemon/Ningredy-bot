@@ -3,8 +3,10 @@
 namespace App\Services\Telegram;
 
 use App\Ai\Agents\TelegramDraftEditAgent;
+use App\Ai\Tools\AddProductSpecifications;
 use App\Exceptions\ProductSearchCancelled;
 use App\Models\AiRun;
+use App\Models\AttributeDefinition;
 use App\Models\Category;
 use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
@@ -13,6 +15,7 @@ use App\Services\Ai\OpenAiHeavyOperationGate;
 use App\Services\Ai\ProductSearchCancellation;
 use App\Services\Products\AiAttributeGroups;
 use App\Services\Products\ProductCondition;
+use App\Services\Products\RequiredSpecifications;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
@@ -25,6 +28,13 @@ class TelegramDraftEditor
     private const FIELDS = ['title', 'brand', 'model', 'color', 'condition', 'description', 'category', 'product_type', 'specifications'];
 
     private const COMMERCIAL_FIELDS = ['price_amount', 'currency', 'quantity', 'warranty_months'];
+
+    /**
+     * What the reconciled card is about. A correction of these makes it a card about
+     * another product, which the check of the page no longer covers; a fact the
+     * operator states about the same product does not (operator, 2026-11-06).
+     */
+    private const IDENTITY_FIELDS = ['brand', 'model', 'product_type', 'category'];
 
     private const LABELS = [
         'title' => 'Название', 'brand' => 'Бренд', 'model' => 'Модель', 'color' => 'Цвет',
@@ -59,6 +69,8 @@ class TelegramDraftEditor
                     'current_draft' => $draft->only(self::FIELDS),
                     'commercial' => $draft->manualIntake()['commercial'] ?? [],
                     'active_categories' => Category::query()->where('is_active', true)->pluck('name', 'slug')->all(),
+                    'missing_required_specifications' => RequiredSpecifications::forDraft($draft),
+                    'catalog_keys' => AttributeDefinition::query()->has('values')->withCount('values')->orderByDesc('values_count')->limit(80)->pluck('key')->all(),
                 ], JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
                 $run = AiRun::query()->create([
                     'telegram_update_id' => $update->id, 'provider' => $provider, 'model' => $model,
@@ -153,11 +165,18 @@ class TelegramDraftEditor
             if ($translations !== $draft->translations) {
                 $fields['translations'] = $translations;
             }
-            if (! $draft->isManualUpload() && $fields !== []) {
-                $fields['specifications_reconciled_source_url'] = null;
-                $fields['specifications_reconciliation_attempts'] = 0;
+            // The operator's own word about a fact does not undo the check of the rest of
+            // the card; only a correction of what the card is about does (2026-11-06).
+            $identityChanged = collect(self::IDENTITY_FIELDS)->contains(fn (string $field): bool => array_key_exists($field, $fields) && $fields[$field] !== $draft->{$field});
+            if (! $draft->isManualUpload() && $fields !== [] && ! $identityChanged) {
+                ProductDraft::withReconciliationWrite(fn () => $draft->fill($fields)->save());
+            } else {
+                if (! $draft->isManualUpload() && $fields !== []) {
+                    $fields['specifications_reconciled_source_url'] = null;
+                    $fields['specifications_reconciliation_attempts'] = 0;
+                }
+                $draft->fill($fields)->save();
             }
-            $draft->fill($fields)->save();
             if ($draft->isManualUpload() && $origin) {
                 $payload = $origin->payload ?? [];
                 $intake = $payload['_manual_product_intake'] ?? [];
@@ -197,6 +216,7 @@ class TelegramDraftEditor
         Validator::make($data, [
             'summary' => 'required|string|max:500', 'changes' => 'present|array|max:40',
             'changes.*.field' => 'required|string|in:'.implode(',', TelegramDraftEditAgent::FIELDS),
+            'changes.*.key' => 'sometimes|nullable|string|max:100',
             'changes.*.name' => 'present|nullable|string|max:255', 'changes.*.value' => 'present|nullable|string|max:5000',
             'changes.*.evidence_quote' => 'required|string|max:2000',
             'changes.*.group' => 'sometimes|nullable|array:id,name,name_cs',
@@ -217,9 +237,14 @@ class TelegramDraftEditor
             if ($field === 'specification') {
                 $name = trim((string) $change['name']);
                 throw_if($name === '', RuntimeException::class, 'Для характеристики нужно название.');
+                // The agent may write the unit in English; a number the operator did not say is not theirs.
+                throw_if($value !== null && ! AddProductSpecifications::numbersStandIn((string) $value, $change['evidence_quote']), RuntimeException::class,
+                    'Агент предложил значение, которого нет в вашем сообщении: '.mb_substr((string) $value, 0, 100));
+                $key = is_string($change['key'] ?? null) && preg_match('/^[a-z0-9_]{1,100}$/', $change['key']) === 1 ? $change['key'] : null;
                 $existing = null;
                 foreach ($specifications as $index => $specification) {
-                    if (is_array($specification) && mb_strtolower((string) ($specification['name'] ?? '')) === mb_strtolower($name)) {
+                    if (is_array($specification) && (($key !== null && ($specification['key'] ?? null) === $key)
+                        || mb_strtolower((string) ($specification['name'] ?? '')) === mb_strtolower($name))) {
                         $existing = $index;
                         break;
                     }
@@ -229,8 +254,10 @@ class TelegramDraftEditor
                         unset($specifications[$existing]);
                     }
                 } else {
-                    $item = ['key' => $existing !== null ? ($specifications[$existing]['key'] ?? Str::slug($name, '_')) : Str::slug($name, '_'),
-                        'name' => $name, 'value' => $value, 'source_url' => null, 'source_excerpt' => $change['evidence_quote']];
+                    $newKey = $key ?? (Str::slug($name, '_') ?: 'attribute_'.substr(sha1($name), 0, 12));
+                    $item = ['key' => $existing !== null ? ($specifications[$existing]['key'] ?? $newKey) : $newKey,
+                        'name' => $existing !== null ? ($specifications[$existing]['name'] ?? $name) : $name,
+                        'value' => $value, 'source_url' => null, 'source_excerpt' => $change['evidence_quote'], 'operator_stated' => true];
                     if (array_key_exists('group', $change)) {
                         $item['group'] = AiAttributeGroups::normalize($change['group']);
                     } elseif ($existing !== null && array_key_exists('group', $specifications[$existing])) {

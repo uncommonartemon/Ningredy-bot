@@ -12,9 +12,11 @@ use App\Services\Ai\ProductSearchCostBudget;
 use App\Services\Ai\ProductSearchTimeBudget;
 use App\Services\Ai\StreamingProductResearch;
 use App\Services\Photos\ImageUrls;
+use App\Services\Products\ProductPhotoIdentity;
 use App\Services\Products\ProductRequestContext;
 use App\Services\Products\ProductSourcePriority;
 use App\Services\Products\ProductTextEvidenceContract;
+use App\Services\ProductSearch\Catalogs\ReferenceSites;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
 use Illuminate\Support\Facades\Validator;
 use Laravel\Ai\Contracts\Tool;
@@ -84,6 +86,7 @@ class SearchProductTextEvidence implements Tool
             'known_sources' => $draft->sources,
             'known_evidence' => $draft->specification_evidence ?? [],
             'excluded_domains' => app(ProductSourcePriority::class)->blockedDomains(),
+            'reference_sites' => app(ReferenceSites::class)->hints(ProductPhotoIdentity::codes($draft), $draft->model, $draft->brand),
             'missing_or_conflicting_facts' => mb_substr((string) $request->string('question'), 0, 3000),
         ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
         $settings = app(AiSettings::class);

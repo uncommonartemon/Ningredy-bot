@@ -39,6 +39,14 @@ final class CatalogTextTranslator
             ->pluck('id')->values()->all();
     }
 
+    /** Whether any text of this product lacks a translation in an enabled language. */
+    public function lacksTranslations(Product $product): bool
+    {
+        $locales = array_keys(CatalogLocales::contentTranslations());
+
+        return $locales !== [] && $this->items($product->loadMissing(['variants.attributes.definition', 'attributes.definition']), $locales) !== [];
+    }
+
     /** How many texts were filled in. */
     public function translate(Product $product): int
     {

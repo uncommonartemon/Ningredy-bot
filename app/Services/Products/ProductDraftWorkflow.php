@@ -7,6 +7,7 @@ use App\Exceptions\MissingDraftMediaException;
 use App\Exceptions\UnreconciledDraftSpecificationsException;
 use App\Exceptions\UnverifiedDraftMediaException;
 use App\Jobs\StoreProductImages;
+use App\Jobs\TranslateProductText;
 use App\Models\AttributeDefinition;
 use App\Models\Brand;
 use App\Models\Category;
@@ -237,6 +238,11 @@ class ProductDraftWorkflow
             }
 
             StoreProductImages::dispatch($product->id, $variant->id, $draft->id)->afterCommit();
+            // A correction in the operator's words dropped the translations of what it
+            // changed: the published card gets them back from its English text.
+            if (filled($draft->translations) && app(CatalogTextTranslator::class)->lacksTranslations($product->fresh())) {
+                TranslateProductText::dispatch($product->id)->afterCommit();
+            }
 
             return $product;
         });

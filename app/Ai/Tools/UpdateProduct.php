@@ -3,6 +3,7 @@
 namespace App\Ai\Tools;
 
 use App\Ai\Tools\Concerns\RecordsOperations;
+use App\Jobs\TranslateProductText;
 use App\Models\Product;
 use App\Models\TelegramUpdate;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
@@ -37,21 +38,28 @@ class UpdateProduct implements Tool
             }
         }
 
+        $textChanged = false;
         $result = $this->recordOperation(
             $this->update,
             class_basename(self::class),
             'update_product',
             ['product_id' => $productId, 'changes' => $changes],
-            function () use ($productId, $changes): array {
+            function () use ($productId, $changes, &$textChanged): array {
                 $product = Product::query()->find($productId);
                 throw_if(! $product, ModelNotFoundException::class, 'Product not found.');
                 $product->update($changes);
+                $textChanged = $product->wasChanged(['title', 'description']);
 
                 return ['product_id' => $product->id, 'title' => $product->title, 'changed' => array_keys($changes)];
             },
             Product::class,
             $productId,
         );
+        // The storefront reads the translated text: the old one is gone with the change,
+        // and the card's other languages are made again from the English, off this request.
+        if ($textChanged) {
+            TranslateProductText::dispatch($productId);
+        }
 
         return $this->json($result);
     }

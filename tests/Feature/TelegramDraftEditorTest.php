@@ -207,6 +207,52 @@ class TelegramDraftEditorTest extends TestCase
         $this->assertSame('pending_review', $saved->status);
     }
 
+    public function test_a_fact_the_operator_states_about_the_same_product_keeps_the_card_reconciled(): void
+    {
+        [$draft, $message] = $this->draft(manual: false);
+        ProductDraft::withReconciliationWrite(fn () => $draft->update([
+            'primary_source_url' => 'https://example.com/product', 'specifications_reconciled_source_url' => 'https://example.com/product',
+        ]));
+        $editor = app(TelegramDraftEditor::class);
+
+        foreach (['цвет: чёрный', 'описание: Corrected text', 'название: Corrected title'] as $words) {
+            $saved = $editor->apply($draft, $message, $editor->propose($draft, $message, $words));
+            $this->assertFalse($saved->reconciliationPending(), $words);
+        }
+        $this->assertSame('https://example.com/product', $saved->specifications_reconciled_source_url);
+        $this->assertSame('чёрный', $saved->color);
+    }
+
+    public function test_a_new_characteristic_takes_the_key_the_agent_names_and_an_existing_one_keeps_its_own(): void
+    {
+        [$draft, $message] = $this->draft();
+        TelegramDraftEditAgent::fake(fn (): array => ['summary' => 'Две правки.', 'changes' => [
+            ['field' => 'specification', 'key' => 'form_factor', 'name' => 'Form factor', 'value' => 'M.2 2280', 'group' => null, 'evidence_quote' => 'форм-фактор M.2 2280'],
+            ['field' => 'specification', 'key' => 'memory', 'name' => 'Память', 'value' => '32 GB', 'group' => null, 'evidence_quote' => 'память 32 ГБ'],
+        ]])->preventStrayPrompts();
+        $editor = app(TelegramDraftEditor::class);
+
+        $saved = $editor->apply($draft, $message, $editor->propose($draft, $message, 'форм-фактор M.2 2280, память 32 ГБ'));
+
+        $this->assertSame('M.2 2280', collect($saved->specifications)->firstWhere('key', 'form_factor')['value']);
+        $memory = collect($saved->specifications)->firstWhere('key', 'memory');
+        $this->assertSame('32 GB', $memory['value']);
+        $this->assertSame('Memory', $memory['name']);
+    }
+
+    public function test_a_number_the_operator_did_not_say_is_refused_though_the_agent_quotes_their_words(): void
+    {
+        [$draft, $message] = $this->draft();
+        TelegramDraftEditAgent::fake(fn (): array => ['summary' => 'TDP.', 'changes' => [
+            ['field' => 'specification', 'key' => 'tdp', 'name' => 'TDP', 'value' => '115 W', 'group' => null, 'evidence_quote' => 'добавь TDP'],
+        ]])->preventStrayPrompts();
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('которого нет в вашем сообщении');
+
+        app(TelegramDraftEditor::class)->propose($draft, $message, 'добавь TDP');
+    }
+
     public function test_server_enrichment_proposal_keeps_citations_and_does_not_buy_a_second_agent_call(): void
     {
         [$draft, $message] = $this->draft();

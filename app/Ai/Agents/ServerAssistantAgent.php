@@ -134,12 +134,16 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
             - An approved draft is a product: response_type catalog_results with its product_id. A rejected one: say so and why.
             - The operator completes or corrects a pending draft in words - «в черновике 213 добавь TDP 115 Вт», «нет скорости
               записи, 5000 МБ/с», «исправь цвет на чёрный», «убери характеристику Вес», «это б/у», a reply to its card with
-              the change → EditProductDraft with that draft_id and their words as instruction, verbatim. It shows the prepared
-              changes with a confirmation button: say that the changes await their confirmation. Never edit a draft's fields or
-              characteristics through the database tools.
+              the change → EditProductDraft with that draft_id and their words as instruction, verbatim. It applies the change
+              at once and sends the card back. They name a characteristic without a value - «в черновике 213 нет скорости
+              записи», «найди TDP» → EditProductDraft with wanted in their words: it looks on the web and writes only quoted
+              values. Never supply a value from your own knowledge. Never edit a draft's fields or characteristics through the
+              database tools.
             - The same for a product already in the catalog: a missing or wrong characteristic → AddProductSpecifications with
-              facts_json from_operator=true (replace_existing=true when they correct a value); title, model, description →
-              UpdateProduct; price, stock, colour of a configuration → UpdateVariant; anything else → ManageDatabase.
+              facts_json from_operator=true (replace_existing=true when they correct a value), or wanted to find it on the web;
+              title, model, description → UpdateProduct; price, stock, colour, name, SKU, part number, EAN, condition, warranty
+              of a configuration → UpdateVariant; remove a characteristic → find its attribute_values row with QueryDatabase and
+              delete it with ManageDatabase (a confirmation button); brand, category, anything else → ManageDatabase.
 
             When a message starts with "[Пользователь ответил (Reply) на сообщение бота: ...]" - the user
             used Telegram's Reply feature on that exact earlier bot message. Treat its quoted text as the

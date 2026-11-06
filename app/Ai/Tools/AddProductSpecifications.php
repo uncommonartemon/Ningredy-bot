@@ -43,7 +43,7 @@ class AddProductSpecifications implements Tool
     use RecordsOperations;
 
     /** Observations about another configuration or the whole family are not this product's facts. */
-    private const array APPLICABLE_SCOPES = ['exact_configuration', 'shared_chassis'];
+    public const array APPLICABLE_SCOPES = ['exact_configuration', 'shared_chassis'];
 
     public function __construct(private readonly TelegramUpdate $update) {}
 
@@ -223,6 +223,22 @@ class AddProductSpecifications implements Tool
         return true;
     }
 
+    /** Every number of the value stands in the text as a whole number; its words and units may be written differently. */
+    public static function numbersStandIn(string $value, string $text): bool
+    {
+        return array_diff(self::numbers($value), self::numbers($text)) === [];
+    }
+
+    /**
+     * The whole numbers of a text, normalised as in tokens().
+     *
+     * @return list<string>
+     */
+    public static function numbers(string $text): array
+    {
+        return array_values(array_unique(array_filter(self::tokens($text), fn (string $token): bool => preg_match('/^\d+(?:\.\d+)?$/', $token) === 1)));
+    }
+
     /**
      * Words and numbers of a text: thousands groups joined (2,138 / 2 138 → 2138), a
      * decimal comma made a dot, a whole decimal shortened (4.0 → 4).
@@ -234,6 +250,8 @@ class AddProductSpecifications implements Tool
         $text = (string) preg_replace('/(\d)[ \x{00A0}\x{202F}\'](\d{3})(?!\d)/u', '$1$2', $text);
         $text = (string) preg_replace('/(\d),(\d{3})(?!\d)/u', '$1$2', $text);
         $text = (string) preg_replace('/(\d),(\d)/u', '$1.$2', $text);
+        // "115W" is the number 115 and the unit W, like "115 W"; "DDR5" stays a word.
+        $text = (string) preg_replace('/(\d)(\p{L})/u', '$1 $2', $text);
 
         return array_values(array_map(
             fn (string $token): string => preg_match('/^\d+\.\d+$/', $token) === 1 ? rtrim(rtrim($token, '0'), '.') : $token,
