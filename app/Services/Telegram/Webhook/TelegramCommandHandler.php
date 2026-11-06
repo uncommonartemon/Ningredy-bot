@@ -21,6 +21,7 @@ use App\Services\Telegram\TelegramDatabaseOperator;
 use App\Services\Telegram\TelegramProductUploadIntake;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Laravel\Ai\Tools\Request;
 
 /** Text commands and the panel's keyboard buttons; what is not one goes on to the assistant. */
 class TelegramCommandHandler
@@ -186,7 +187,7 @@ class TelegramCommandHandler
         }
 
         if (preg_match('/^\/status(?:@\w+)?$/iu', $text) === 1 || $text === '🖥 Статус') {
-            $status = json_decode(app(GetSystemStatus::class)->handle(new \Laravel\Ai\Tools\Request([])), true);
+            $status = json_decode(app(GetSystemStatus::class)->handle(new Request([])), true);
             $this->telegram->sendMessage($chatId, implode("\n", [
                 '🖥 Состояние проекта',
                 'Товаров: '.$status['catalog']['total'].' · опубликовано: '.$status['catalog']['active'],
@@ -401,7 +402,7 @@ class TelegramCommandHandler
     public function prepareCatalogDeletion(int $productId, TelegramUpdate $update): void
     {
         $result = json_decode((string) (new PrepareProductDeletion($update))
-            ->handle(new \Laravel\Ai\Tools\Request(['product_id' => $productId])), true);
+            ->handle(new Request(['product_id' => $productId])), true);
         if (! ($result['ok'] ?? false)) {
             $this->telegram->sendMessage((string) $update->chat_id, 'Товар не найден или операция уже обработана.');
         } else {
