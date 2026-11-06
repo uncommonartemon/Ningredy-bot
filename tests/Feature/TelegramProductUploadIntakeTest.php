@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Ai\Agents\TelegramPhotoTextAgent;
 use App\Ai\Agents\TelegramProductUploadAgent;
 use App\Jobs\ProcessTelegramMessage;
 use App\Jobs\ProcessTelegramProductUpload;
@@ -12,6 +13,7 @@ use App\Models\Product;
 use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
 use App\Services\Ai\AiErrorPresenter;
+use App\Services\Ai\AiSettings;
 use App\Services\Telegram\DraftTelegramPresenter;
 use App\Services\Telegram\TelegramCatalogEditor;
 use App\Services\Telegram\TelegramClient;
@@ -61,15 +63,52 @@ class TelegramProductUploadIntakeTest extends TestCase
         $this->assertTrue(data_get($update->fresh()->payload, '_manual_product_upload'));
     }
 
+    /** Captions that are the operator's own product by their explicit words alone, unread: a refusal to search, /add. */
     public static function uploadCaptions(): array
     {
         return [
-            'description' => ['Dell Latitude 5450, used, 16 GB RAM'],
-            'new product description' => ['Новый MSI Stealth 16, 32 ГБ RAM, 1 ТБ SSD'],
             'negative Russian request' => ['Не ищи в интернете, добавь по описанию'],
             'negative English request' => ["Don't search the web; use my photos and description."],
             'explicit manual command' => ['/add Dell Latitude 5450, find extra information later'],
-            'Find is a phone model' => ['OPPO Find X7 Ultra, новый, 512 ГБ'],
+        ];
+    }
+
+    /**
+     * Module 71: a caption without an explicit instruction leaves the decision to the
+     * reader, which sees the caption and the picture together; without its verdict a
+     * picture with no product code is the operator's own item. Only the setting «всегда
+     * ручная загрузка» uploads such a photo unread.
+     */
+    #[DataProvider('neutralCaptions')]
+    public function test_a_caption_without_an_instruction_is_read_first_and_uploaded_unread_only_in_the_always_manual_mode(string $caption, string $intent): void
+    {
+        TelegramPhotoTextAgent::fake(fn (): array => ['text' => 'Серебристый ноутбук на столе.', 'has_text' => false, 'identifiers' => [], 'observations' => [],
+            'operator_intent' => $intent, 'intent_reason' => 'В подписи описан свой товар.'])->preventStrayPrompts();
+        $read = $this->photo(5101, caption: $caption);
+        (new TranscribeTelegramPhoto($read->id))->handle(app(TelegramClient::class), app(AiErrorPresenter::class));
+
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/file/bot'));
+        Queue::assertPushed(ProcessTelegramProductUpload::class, fn ($job) => $job->telegramUpdateId === $read->id);
+        Queue::assertNotPushed(ProcessTelegramMessage::class);
+        $this->assertTrue(data_get($read->fresh()->payload, '_manual_product_upload'));
+
+        app(AiSettings::class)->savePhotoCaptionRouting(AiSettings::PHOTO_CAPTION_MANUAL);
+        $sent = count(Http::recorded());
+        $unread = $this->photo(5102, caption: $caption);
+        (new TranscribeTelegramPhoto($unread->id))->handle(app(TelegramClient::class), app(AiErrorPresenter::class));
+
+        Queue::assertPushed(ProcessTelegramProductUpload::class, fn ($job) => $job->telegramUpdateId === $unread->id);
+        Queue::assertNotPushed(ProcessTelegramMessage::class);
+        $this->assertCount($sent, Http::recorded());
+        $this->assertTrue(data_get($unread->fresh()->payload, '_manual_product_upload'));
+    }
+
+    public static function neutralCaptions(): array
+    {
+        return [
+            'condition in the caption, the reader says own product' => ['Dell Latitude 5450, used, 16 GB RAM', 'own_product'],
+            'new product description, the reader unsure' => ['Новый MSI Stealth 16, 32 ГБ RAM, 1 ТБ SSD', 'unclear'],
+            'Find is a phone model' => ['OPPO Find X7 Ultra, новый, 512 ГБ', 'unclear'],
         ];
     }
 

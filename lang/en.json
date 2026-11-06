@@ -620,5 +620,10 @@
     "Что видно на таком товаре": "What is visible on such a product",
     "Подсказка для проверки фото: где на товаре код и объём, какой форм-фактор виден. Бот видит её, когда судит кадры.": "A hint for the photo check: where the code and capacity are on the product, which form factor is visible. The bot sees it when it judges frames.",
     "Обязательные характеристики": "Required characteristics",
-    "Что должно быть в карточке товара этой категории. Исследование ищет их по ключам; чего не нашло — карточка честно перечислит.": "What a product card of this category must carry. Research looks for them by key; what it did not find, the card lists honestly."
+    "Что должно быть в карточке товара этой категории. Исследование ищет их по ключам; чего не нашло — карточка честно перечислит.": "What a product card of this category must carry. Research looks for them by key; what it did not find, the card lists honestly.",
+    "Фото с подписью без слова «найди»": "A photo with a caption that does not say \"find\"",
+    "Бот решает по фото и подписи: код или модель — поиск, свой товар — ручная загрузка": "The bot decides by the photo and the caption: a code or a model is a search, your own product a manual upload",
+    "Всегда ручная загрузка": "Always a manual upload",
+    "Всегда поиск": "Always a search",
+    "Явное «не ищи» или /add всегда означает свой товар. В остальных случаях бот читает фото и, видя подпись и снимок вместе, сам решает: искать товар или принять его как свой; свой выбор и причину он называет в ответе.": "An explicit \"do not search\" or /add always means your own product. Otherwise the bot reads the photo and, seeing the caption and the picture together, decides itself: search for the product or take it as your own; it names its choice and the reason in its reply."
 }

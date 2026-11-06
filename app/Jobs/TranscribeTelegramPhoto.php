@@ -4,6 +4,7 @@ namespace App\Jobs;
 
 use App\Models\TelegramUpdate;
 use App\Services\Ai\AiErrorPresenter;
+use App\Services\Ai\AiSettings;
 use App\Services\Products\ProductInputContext;
 use App\Services\Products\ProductSearchIntentDetector;
 use App\Services\Telegram\TelegramClient;
@@ -37,12 +38,15 @@ class TranscribeTelegramPhoto implements ShouldQueue
             return;
         }
         $caption = trim((string) data_get($update->payload, 'message.caption', ''));
-        // Descriptions/albums remain manual material. A standalone labelled
-        // photo explicitly asking for search uses the same OCR path as a bare
-        // label; its caption remains the human request, not extracted evidence.
+        $detector = app(ProductSearchIntentDetector::class);
+        $routing = app(AiSettings::class)->photoCaptionRouting();
+        // Albums, the /add flow, an explicit refusal to search and the setting «всегда
+        // ручная загрузка» are the operator's own product without reading the photo.
+        // Everything else is read first, and the reader says what the operator wants;
+        // the caption stays their request, not extracted evidence.
         if (data_get($update->payload, '_manual_product_upload')
             || data_get($update->payload, 'message.media_group_id')
-            || ($caption !== '' && ! app(ProductSearchIntentDetector::class)->hasExplicitSearchRequest($caption))) {
+            || $detector->photoIsManualBeforeReading($caption, $routing)) {
             app(TelegramProductUploadIntake::class)->queue($update);
 
             return;
@@ -80,9 +84,22 @@ class TranscribeTelegramPhoto implements ShouldQueue
                 new VisionCallContext($update->id,
                     timeoutSeconds: (int) config('services.product_image_vision.timeout', 45),
                     useSearchBudget: false),
+                self::prompt($caption),
             );
             $text = trim((string) ($data['text'] ?? ''));
             throw_if($text === '', RuntimeException::class, 'Photo text extraction is empty.');
+            // Module 71: the reader saw the caption and the picture and said what the
+            // operator wants - a search or their own product to upload. Their explicit
+            // words and the setting outrank its verdict; without one, a picture with no
+            // product code is their own item (the colleague's #140 was a label: a search).
+            if (self::uploadsOwnProduct($caption, $data, $routing, $detector)) {
+                $reason = trim((string) ($data['intent_reason'] ?? ''));
+                $telegram->sendMessage($update->chat_id, '📷 Принял как свой товар'.($reason !== '' ? ": {$reason}" : '.')
+                    ."\nЕсли его нужно найти в интернете, отправьте фото ещё раз с подписью «найди».");
+                app(TelegramProductUploadIntake::class)->queue($update, $caption);
+
+                return;
+            }
 
             if ($caption !== '') {
                 $text = "{$text}\n{$caption}";
@@ -125,6 +142,62 @@ class TranscribeTelegramPhoto implements ShouldQueue
             $telegram->sendMessage($update->chat_id, 'Не удалось распознать фото. '.$presented['message']);
             $update->update(['processed_at' => now()]);
         }
+    }
+
+    /** The reader's task, with the operator's caption quoted as their words, apart from what the label says. */
+    private static function prompt(string $caption): string
+    {
+        $task = 'Extract product-identifying text or describe the visible product, and say what the operator wants (operator_intent).';
+
+        return $caption === ''
+            ? "{$task}\nThe operator sent this photo without a caption."
+            : "{$task}\nThe operator's caption to this photo, their own words and not label evidence: «".mb_substr($caption, 0, 1000).'»';
+    }
+
+    /**
+     * Whether the read photo is the operator's own product to upload rather than a
+     * search: their explicit words and the setting decide first, then the reader's
+     * verdict, and without one a photo that shows no product code is their own item.
+     *
+     * @param  array<string, mixed>  $data
+     */
+    private static function uploadsOwnProduct(string $caption, array $data, string $routing, ProductSearchIntentDetector $detector): bool
+    {
+        if ($caption === '' || $routing === AiSettings::PHOTO_CAPTION_SEARCH || $detector->hasExplicitSearchRequest($caption)) {
+            return false;
+        }
+
+        return match ($data['operator_intent'] ?? null) {
+            'own_product' => true,
+            'search' => false,
+            default => ! self::showsAProductCode($data),
+        };
+    }
+
+    /**
+     * The read photo names a product: an identifier the reader classed as a search
+     * key (not a brand, family, serial or regulatory code), or - from a provider that
+     * returns only text - a code-like token of letters and digits.
+     *
+     * @param  array<string, mixed>  $data
+     */
+    private static function showsAProductCode(array $data): bool
+    {
+        if (($data['has_text'] ?? false) !== true) {
+            return false;
+        }
+        if (is_array($data['identifiers'] ?? null)) {
+            foreach ($data['identifiers'] as $item) {
+                if (trim((string) ($item['value'] ?? '')) !== ''
+                    && in_array(mb_strtolower(trim((string) ($item['kind'] ?? ''))), ['model', 'mpn', 'sku', 'ean', 'upc', 'gtin'], true)) {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        return preg_match('/\b(?=[A-Z0-9\/-]*\d)(?=[A-Z0-9\/-]*[A-Z])[A-Z0-9\/-]{6,}\b/i', (string) ($data['text'] ?? '')) === 1;
     }
 
     public function failed(?Throwable $exception): void

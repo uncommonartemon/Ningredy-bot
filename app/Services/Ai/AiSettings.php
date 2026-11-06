@@ -299,6 +299,39 @@ class AiSettings
         AppSetting::put('ai.product_search_country', strtoupper(trim((string) $country)));
     }
 
+    /** A single photo with a neutral caption is read first, and its reader - seeing the caption and the picture - says whether it is a search or the operator's own product. */
+    public const string PHOTO_CAPTION_LABEL = 'label';
+
+    /** A single photo with a neutral caption is the operator's own product (the rule before module 71). */
+    public const string PHOTO_CAPTION_MANUAL = 'manual';
+
+    /** A single photo with a neutral caption is always a search. */
+    public const string PHOTO_CAPTION_SEARCH = 'search';
+
+    public const array PHOTO_CAPTION_ROUTINGS = [self::PHOTO_CAPTION_LABEL, self::PHOTO_CAPTION_MANUAL, self::PHOTO_CAPTION_SEARCH];
+
+    /**
+     * What a single photo with a caption that neither asks for a search nor refuses
+     * one means (module 71, the colleague's #140: a label photo with two words of
+     * caption became an empty manual card). An explicit «не ищи» or /add in the
+     * caption always means the operator's own product, whatever this says.
+     */
+    public function photoCaptionRouting(): string
+    {
+        try {
+            $value = trim((string) AppSetting::valueFor('telegram.photo_caption_routing'));
+        } catch (Throwable) {
+            return self::PHOTO_CAPTION_LABEL;
+        }
+
+        return in_array($value, self::PHOTO_CAPTION_ROUTINGS, true) ? $value : self::PHOTO_CAPTION_LABEL;
+    }
+
+    public function savePhotoCaptionRouting(?string $routing): void
+    {
+        AppSetting::put('telegram.photo_caption_routing', in_array($routing, self::PHOTO_CAPTION_ROUTINGS, true) ? $routing : null);
+    }
+
     /**
      * On by default: a fast literal text match (ProductIdentityMatcher)
      * rejects an exact source whose page wording lists the same model/SKU in

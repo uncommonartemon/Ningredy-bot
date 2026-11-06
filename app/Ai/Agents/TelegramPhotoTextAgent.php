@@ -50,6 +50,21 @@ class TelegramPhotoTextAgent implements Agent, HasStructuredOutput
             false when you fell back to a visual description because nothing legible was visible.
             With no readable text, identifiers and observations are empty: the visual description
             is a search hint, not a known configuration. The application adds the attachment reference.
+
+            The prompt quotes the operator's caption to this photo when there is one. The caption
+            is their own words to the bot, never label evidence. Decide what they want from the bot,
+            looking at the caption and the picture together, and return it as operator_intent:
+            - search: find this product (in the catalog and on the web) and build its card. A
+              photographed label, sticker, box, receipt or spec screen that shows a part number or
+              model is a search unless the caption says otherwise; so is a caption that asks to
+              find, look up or check something, or just names a product.
+            - own_product: they are adding an item they hold to the catalog, no search wanted.
+              Signs: a selling price, a condition they state (used, refurbished, like new, in box),
+              words such as "add", "do not search", "mine", "for sale", or a plain picture of the
+              device with a description and no printed code to look up.
+            - unclear: the caption and the picture together do not tell which.
+            With no caption, operator_intent is search. In intent_reason give one short Russian
+            sentence naming the decisive clue, as you would tell the operator; they will read it.
             PROMPT;
     }
 
@@ -58,6 +73,8 @@ class TelegramPhotoTextAgent implements Agent, HasStructuredOutput
         return [
             'text' => $schema->string()->max(2000)->required(),
             'has_text' => $schema->boolean()->required(),
+            'operator_intent' => $schema->string()->enum(['search', 'own_product', 'unclear'])->required(),
+            'intent_reason' => $schema->string()->max(300)->required(),
             'identifiers' => $schema->array()->max(24)->items($schema->object([
                 'kind' => $schema->string()->enum(['brand', 'model', 'family', 'mpn', 'sku', 'ean', 'upc', 'gtin', 'serial', 'regulatory', 'other'])->required(),
                 'value' => $schema->string()->max(255)->required(),
