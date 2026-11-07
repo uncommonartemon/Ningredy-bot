@@ -4,6 +4,9 @@ namespace Tests\Feature;
 
 use App\Jobs\SendDiagnosticReport;
 use App\Models\AiRun;
+use App\Models\AppSetting;
+use App\Models\Category;
+use App\Models\ProductDraft;
 use App\Models\ProductSourceAttempt;
 use App\Models\TelegramUpdate;
 use App\Services\Support\DiagnosticReport;
@@ -13,6 +16,7 @@ use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 use ZipArchive;
 
@@ -23,12 +27,13 @@ class DiagnosticReportTest extends TestCase
 
     public function test_the_report_holds_the_searches_story_the_journal_and_what_was_learned_without_secrets(): void
     {
-        config(['services.telegram.bot_token' => '1234567890:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', 'services.openai.key' => 'sk-secret-openai-key-0123456789']);
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []])]);
+        config(['services.telegram.bot_token' => '1234567890:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', 'services.openai.key' => 'sk-proj-secretopenaikey0123456789abcdef']);
         $update = TelegramUpdate::query()->create(['update_id' => 900001, 'telegram_user_id' => '1', 'chat_id' => '1',
             'payload' => [], 'status' => 'completed', 'text' => 'Dynabook Tecra A40-K', 'processed_at' => now()]);
         ProductSourceAttempt::query()->create(['telegram_update_id' => $update->id, 'domain' => 'shop.example', 'product_url' => 'https://shop.example/tecra',
             'actor' => 'server', 'phase' => 'image_download', 'action' => 'download_candidates', 'status' => 'completed', 'decision' => 'ready_for_selection',
-            'message' => 'token 1234567890:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA and key sk-secret-openai-key-0123456789 must not leave',
+            'message' => 'token 1234567890:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA and key sk-proj-secretopenaikey0123456789abcdef must not leave',
             'input' => ['page_text' => str_repeat('x', 9000)], 'output' => ['downloaded' => 7]]);
         AiRun::query()->create(['telegram_update_id' => $update->id, 'provider' => 'openai', 'model' => 'gpt-test', 'status' => 'completed',
             'prompt' => 'the prompt stays on the machine', 'activity' => ['stage' => 'photo_applicability'], 'started_at' => now()]);
@@ -45,13 +50,58 @@ class DiagnosticReportTest extends TestCase
         $this->assertStringContainsString('download_candidates', $journal);
         $this->assertStringContainsString('[redacted]', $journal);
         $this->assertStringNotContainsString('AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', $journal);
-        $this->assertStringNotContainsString('sk-secret-openai-key', $journal);
+        $this->assertStringNotContainsString('secretopenaikey', $journal);
         $this->assertStringContainsString('…[cut]', $journal);
         $this->assertStringContainsString('Dynabook Tecra A40-K', (string) $zip->getFromName("requests/{$update->id}.txt"));
         $this->assertStringNotContainsString('the prompt stays on the machine', (string) $zip->getFromName('ai_runs.jsonl'));
         $this->assertStringContainsString('photo_applicability', (string) $zip->getFromName('ai_runs.jsonl'));
         $this->assertStringContainsString('"rules"', (string) $zip->getFromName('learned/rendition_rules.json'));
         $this->assertStringNotContainsString('AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', (string) $zip->getFromName('env.redacted.txt'));
+        $zip->close();
+        @unlink($path);
+    }
+
+    public function test_the_report_shows_what_the_models_answered_the_photos_the_state_and_the_settings(): void
+    {
+        // Operator, 2026-11-07: a report that could not explain a failure. WD #409 and Toshiba
+        // #420 could be found only from the models' answers, the photos and the category rules.
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []])]);
+        Storage::fake('public');
+        $update = TelegramUpdate::query()->create(['update_id' => 900010, 'telegram_user_id' => '1', 'chat_id' => '1', 'payload' => [],
+            'status' => 'completed', 'text' => 'Toshiba MQ04ABF100', 'processed_at' => now()]);
+        $run = AiRun::query()->create(['telegram_update_id' => $update->id, 'provider' => 'openai', 'model' => 'gpt-test', 'status' => 'completed', 'prompt' => 'Fixture',
+            'activity' => ['stage' => 'vision'], 'response' => ['images' => [['index' => 1, 'observed_marking' => 'MQ04ABF100']]], 'started_at' => now()]);
+        $image = imagecreatetruecolor(1600, 800);
+        ob_start();
+        imagejpeg($image);
+        Storage::disk('public')->put('drafts/1/primary.jpg', (string) ob_get_clean());
+        $pending = ProductDraft::query()->create(['telegram_update_id' => $update->id, 'ai_run_id' => $run->id, 'requested_by_telegram_user_id' => '1', 'title' => 'Toshiba MQ04ABF100',
+            'product_type' => 'component', 'category' => 'components', 'status' => 'pending_review', 'specifications' => [], 'sources' => [], 'image_urls' => []]);
+        $pending->media()->create(['disk' => 'public', 'path' => 'drafts/1/primary.jpg', 'checksum' => 'x', 'is_primary' => true]);
+        AppSetting::put('ai.product_image_vision.model', 'gpt-test');
+        AppSetting::put('ai.keys.openai', 'sk-admin-key-that-must-not-travel');
+        AppSetting::put('telegram.proxy_url', 'http://user:pass@proxy.example:3128');
+        Category::query()->where('slug', 'components')->update(['photo_identity' => 'label']);
+        // A shop's address is not a key, even one with SK hynix in it.
+        ProductSourceAttempt::query()->create(['telegram_update_id' => $update->id, 'domain' => 'shop.example',
+            'product_url' => 'https://shop.example/genuine-hp-512gb-sk-hynix-m-2-2280-ssd-drive-hfm512gdjtng', 'actor' => 'server',
+            'phase' => 'image_download', 'action' => 'download_candidates', 'status' => 'completed', 'decision' => 'ready_for_selection']);
+
+        $path = app(DiagnosticReport::class)->build(days: 7);
+
+        $zip = new ZipArchive;
+        $this->assertTrue($zip->open($path) === true);
+        $this->assertStringContainsString('"observed_marking":"MQ04ABF100"', (string) $zip->getFromName('ai_runs.jsonl'));
+        $photo = imagecreatefromstring((string) $zip->getFromName("photos/request-{$update->id}/draft-{$pending->id}-1.jpg"));
+        $this->assertSame(800, imagesx($photo));
+        $this->assertStringContainsString('Связь с Telegram', (string) $zip->getFromName('summary.txt'));
+        $settings = (string) $zip->getFromName('settings.json');
+        $this->assertStringContainsString('ai.product_image_vision.model', $settings);
+        $this->assertStringContainsString('"photo_identity": "label"', $settings);
+        $this->assertStringNotContainsString('ai.keys.openai', $settings);
+        $this->assertStringNotContainsString('sk-admin-key', $settings);
+        $this->assertStringNotContainsString('proxy.example', $settings);
+        $this->assertStringContainsString('sk-hynix-m-2-2280-ssd-drive-hfm512gdjtng', (string) $zip->getFromName('journal.jsonl'));
         $zip->close();
         @unlink($path);
     }
@@ -75,6 +125,7 @@ class DiagnosticReportTest extends TestCase
         // can open, with keys, tokens and proxy addresses blanked before it leaves. The
         // copy is taken on a file connection of its own: SQLite refuses VACUUM inside
         // the transaction a test runs in, and the live callers never are inside one.
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []])]);
         $file = storage_path('app/reports/live-like.sqlite');
         @unlink($file);
         File::ensureDirectoryExists(dirname($file));

@@ -8,8 +8,10 @@ use App\Models\ImageRenditionRule;
 use App\Models\ImageRenditionRuleOutcome;
 use App\Models\ProductDraft;
 use App\Models\ProductGalleryRecipe;
+use App\Models\ProductMedia;
 use App\Models\ProductSourceAttempt;
 use App\Models\TelegramUpdate;
+use App\Services\BotHealth;
 use App\Services\ProductSearch\Codes\CodeDatabases;
 use App\Services\ProductSearch\SearchJournal;
 use Illuminate\Database\Connection;
@@ -18,6 +20,7 @@ use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\File;
+use Illuminate\Support\Facades\Storage;
 use PDO;
 use RuntimeException;
 use Throwable;
@@ -26,7 +29,7 @@ use ZipArchive;
 /**
  * Everything a developer needs to see what this installation's bot did, in one
  * file the operator can send: the searches of the last days with their outcome
- * and step-by-step story, the raw journal, the AI calls' accounting, the cards,
+ * and step-by-step story, the raw journal, the AI calls with what the models answered, the cards and their photos,
  * what the bot learned about sites, the error log and the shape of the
  * settings. Secrets never leave the machine (operator, 2026-10-29: the bot is
  * handed to a person; what goes wrong there has to reach the developer).
@@ -37,6 +40,14 @@ final class DiagnosticReport
     private const STRING_LIMIT = 4000;
 
     private const LOG_TAIL_BYTES = 2_097_152;
+
+    /** Enough to see the newest cards; the whole file still has to fit what Telegram accepts. */
+    private const PHOTOS_IN_REPORT = 60;
+
+    private const PHOTO_EDGE = 800;
+
+    /** Settings that are nobody's business outside this machine; the rest is what the bot was told to do. */
+    private const PRIVATE_SETTING = '/key|token|secret|password|username|login|proxy|allowed_user/i';
 
     /**
      * @param  bool  $withDatabase  also a consistent copy of the database with its secrets blanked
@@ -70,16 +81,18 @@ final class DiagnosticReport
             ));
             $zip->addFromString('ai_runs.jsonl', $this->rows(
                 AiRun::query()->whereIn('telegram_update_id', $ids)->orderBy('id'),
-                ['id', 'telegram_update_id', 'provider', 'model', 'status', 'activity', 'usage', 'error', 'started_at', 'completed_at'],
+                ['id', 'telegram_update_id', 'provider', 'model', 'status', 'activity', 'usage', 'error', 'response', 'started_at', 'completed_at'],
             ));
             $zip->addFromString('drafts.jsonl', $this->drafts($ids));
-            $zip->addFromString('learned/rendition_rules.json', $this->json([
+            $this->addPhotos($zip, $updates);
+            $zip->addFromString('settings.json', $this->settings());
+            $zip->addFromString('learned/rendition_rules.json', $this->redact($this->json([
                 'rules' => ImageRenditionRule::query()->orderBy('position')->orderBy('id')->get()->toArray(),
                 'outcomes' => ImageRenditionRuleOutcome::query()->orderBy('image_rendition_rule_id')->get()->toArray(),
-            ]));
-            $zip->addFromString('learned/recipes.json', $this->json(
+            ])));
+            $zip->addFromString('learned/recipes.json', $this->redact($this->json(
                 ProductGalleryRecipe::query()->orderBy('domain')->get()->map(fn (ProductGalleryRecipe $recipe): array => $recipe->toArray())->all(),
-            ));
+            )));
             foreach ($this->logs() as $name => $tail) {
                 $zip->addFromString("logs/{$name}", $tail);
             }
@@ -167,6 +180,9 @@ final class DiagnosticReport
                 .', last answer '.(CodeDatabases::lastIcecatAnswer() ?? '-').') · upcitemdb '.(CodeDatabases::enabled('upcitemdb') ? 'on' : 'off'),
             'active categories: '.Category::query()->where('is_active', true)->count(),
             '',
+            'health:',
+            ...$this->health(),
+            '',
         ];
         try {
             Artisan::call('search:stats', ['--days' => $days]);
@@ -176,6 +192,95 @@ final class DiagnosticReport
         }
 
         return $this->redact(implode("\n", $lines)."\n");
+    }
+
+    /**
+     * The checks of the admin's «Состояние» page: a machine whose bot says little is usually
+     * told apart here (live 2026-11-01: a second bot with no categories, and every search dead).
+     *
+     * @return list<string>
+     */
+    private function health(): array
+    {
+        try {
+            return array_map(fn (array $check): string => "  [{$check['state']}] {$check['label']}: {$check['detail']}", app(BotHealth::class)->checks());
+        } catch (Throwable $exception) {
+            return ['  the checks failed: '.$exception->getMessage()];
+        }
+    }
+
+    /** What this machine's bot was told to do: its non-secret settings and its categories. */
+    private function settings(): string
+    {
+        return $this->redact($this->json([
+            'app_settings' => DB::table('app_settings')->orderBy('key')->pluck('value', 'key')
+                ->reject(fn (mixed $value, string $key): bool => preg_match(self::PRIVATE_SETTING, $key) === 1)->all(),
+            'categories' => Category::query()->orderBy('id')->get()->map(fn (Category $category): array => $category->only([
+                'id', 'parent_id', 'slug', 'is_active', 'photo_identity', 'photo_identity_hint', 'gallery_search_strategy',
+                'minimum_verified_images', 'product_search_hint',
+            ]))->all(),
+        ]));
+    }
+
+    /**
+     * The photos of the newest cards, small. Whether a frame shows the right part can only be
+     * seen, never read from its address (live #420: a drive labelled MDD on a Toshiba card).
+     *
+     * @param  Collection<int, TelegramUpdate>  $updates
+     */
+    private function addPhotos(ZipArchive $zip, Collection $updates): void
+    {
+        $left = self::PHOTOS_IN_REPORT;
+        foreach ($updates->sortByDesc('id') as $update) {
+            foreach (ProductDraft::query()->where('telegram_update_id', $update->id)->orderBy('id')->get() as $draft) {
+                foreach ($this->cardPhotos($draft) as $number => $photo) {
+                    if ($left < 1) {
+                        return;
+                    }
+                    $small = $this->smallPhoto($photo['disk'], $photo['path']);
+                    if ($small !== null) {
+                        $zip->addFromString("photos/request-{$update->id}/draft-{$draft->id}-".($number + 1).'.jpg', $small);
+                        $left--;
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * An approved draft's files have moved to its product.
+     *
+     * @return list<array{disk: string, path: string}>
+     */
+    private function cardPhotos(ProductDraft $draft): array
+    {
+        $media = $draft->media()->orderByDesc('is_primary')->orderBy('sort_order')->get(['disk', 'path']);
+        if ($media->isEmpty() && is_array($draft->image_urls) && $draft->image_urls !== []) {
+            $media = ProductMedia::query()->whereIn('source_url', $draft->image_urls)->orderBy('sort_order')->get(['disk', 'path']);
+        }
+
+        return $media->filter(fn (mixed $photo): bool => filled($photo->path))
+            ->map(fn (mixed $photo): array => ['disk' => (string) ($photo->disk ?: 'public'), 'path' => (string) $photo->path])->values()->all();
+    }
+
+    private function smallPhoto(string $disk, string $path): ?string
+    {
+        try {
+            $image = imagecreatefromstring((string) Storage::disk($disk)->get($path));
+            if ($image === false) {
+                return null;
+            }
+            $edge = max(imagesx($image), imagesy($image));
+            if ($edge > self::PHOTO_EDGE) {
+                $image = imagescale($image, (int) round(imagesx($image) * self::PHOTO_EDGE / $edge));
+            }
+            ob_start();
+            imagejpeg($image, null, 75);
+
+            return (string) ob_get_clean();
+        } catch (Throwable) {
+            return null;
+        }
     }
 
     private function request(TelegramUpdate $update): string
@@ -348,6 +453,8 @@ final class DiagnosticReport
             $text = str_replace($secret, '[redacted]', $text);
         }
 
-        return (string) preg_replace(['/\b\d{6,}:[A-Za-z0-9_-]{30,}/', '/\bsk-[A-Za-z0-9_-]{16,}/'], '[redacted]', $text);
+        // A key holds a long random run; «sk-hynix-bc501-512gb-…» in a shop's address does not,
+        // and blanking those hid every SK hynix page from the report (225 marks in one report).
+        return (string) preg_replace(['/\b\d{6,}:[A-Za-z0-9_-]{30,}/', '/\bsk-(?:[A-Za-z0-9_]+-)*[A-Za-z0-9_]{20,}[A-Za-z0-9_-]*/'], '[redacted]', $text);
     }
 }

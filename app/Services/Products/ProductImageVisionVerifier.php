@@ -313,8 +313,11 @@ class ProductImageVisionVerifier
             $data['images'] = $consistent;
         }
 
+        $blindReadings = $labelIdentity
+            ? $this->blindLabelReadings($draft, $data['images'], $candidates, $attachments, $provider, $model, $telegramUpdateId ?? $draft->telegram_update_id)
+            : [];
         $reviewed = collect($data['images'])
-            ->map(function (array $review) use ($draft, $candidates, $labelIdentity): array {
+            ->map(function (array $review) use ($draft, $candidates, $labelIdentity, $blindReadings): array {
                 $candidate = $candidates[$review['index'] - 1] ?? [];
                 $sourceSupported = (bool) ($candidate['source_identity_confirmed'] ?? false)
                     || (bool) ($candidate['source_line_plausible'] ?? false)
@@ -330,8 +333,12 @@ class ProductImageVisionVerifier
                     && ($review['physical_match'] ?? null) !== 'conflicting';
                 // What the label in the frame says is compared on the server, by code, not
                 // by the reviewer's feeling: another code is another product (live #379).
-                $observedMarking = trim((string) ($review['observed_marking'] ?? ''));
-                $markingVerdict = $labelIdentity ? ProductPhotoIdentity::markingVerdict($draft, $observedMarking) : 'none';
+                $reviewerMarking = trim((string) ($review['observed_marking'] ?? ''));
+                $blind = $blindReadings[$review['index']] ?? null;
+                $reviewerVerdict = $labelIdentity ? ProductPhotoIdentity::markingVerdict($draft, $reviewerMarking) : 'none';
+                $markingVerdict = $blind === null ? $reviewerVerdict : ProductPhotoIdentity::blindVerdict($draft, $blind['marking'], $blind['brand']);
+                // Where the reader agrees, the reviewer's spelling stands: the reader's may hold a slip.
+                $observedMarking = $blind === null || $markingVerdict === $reviewerVerdict ? $reviewerMarking : trim($blind['brand'].' '.$blind['marking']);
                 // The reviewer refuses a label that is not the requested code letter for letter;
                 // the comparison above has settled that a sibling or the product's own name is
                 // this part (live #402: the drive's real label, HFM512GDJTNG-8310 BA against
@@ -364,10 +371,14 @@ class ProductImageVisionVerifier
                         && in_array($review['view'], ['front', 'angle'], true),
                     'source_supported' => $sourceSupported,
                     'observed_marking' => $observedMarking,
+                    'reviewer_marking' => $reviewerMarking,
                     'marking_verdict' => $markingVerdict,
                     'maker_page' => (bool) ($candidate['maker_page'] ?? false),
                 ];
             });
+        if ($labelIdentity) {
+            $this->journalLabels($draft, $reviewed, $candidates, $telegramUpdateId ?? $draft->telegram_update_id);
+        }
         if ($labelIdentity && $galleryFramePolicy) {
             // A product's own gallery shows one item from several sides: the frame without a
             // readable code next to a frame whose code matched (the drive from its connector
@@ -475,6 +486,90 @@ class ProductImageVisionVerifier
                 ],
             ];
         })->all();
+    }
+
+    /**
+     * What each label said against the request. Without this a refusal looks like nothing
+     * anywhere: live #409 lost ten good frames as «no verified frames», and the cause showed
+     * only when the model's answers were set beside the server's verdicts by hand.
+     *
+     * @param  Collection<int, array<string, mixed>>  $reviewed
+     * @param  array<int, array<string, mixed>>  $candidates
+     */
+    private function journalLabels(ProductDraft $draft, Collection $reviewed, array $candidates, ?int $telegramUpdateId): void
+    {
+        $read = $reviewed->filter(fn (array $review): bool => $review['marking_verdict'] !== 'none' || $review['reviewer_marking'] !== '')->values();
+        if ($read->isEmpty()) {
+            return;
+        }
+        $this->recorder()->record([
+            'telegram_update_id' => $telegramUpdateId, 'product_draft_id' => $draft->id,
+            'product_url' => (string) ($candidates[0]['product_page_url'] ?? ''),
+            'actor' => 'server', 'phase' => 'image_verification', 'action' => 'compare_labels', 'status' => 'info',
+            'decision' => 'compared',
+            'message' => $read->map(fn (array $review): string => 'кадр '.$review['index'].': «'.$review['observed_marking'].'» — '.$review['marking_verdict'])->implode('; '),
+            'output' => ['frames' => $read->map(fn (array $review): array => [
+                'index' => $review['index'],
+                'source_url' => (string) ($candidates[$review['index'] - 1]['source_url'] ?? ''),
+                'reviewer_marking' => $review['reviewer_marking'],
+                'read_marking' => $review['observed_marking'],
+                'verdict' => $review['marking_verdict'],
+                'reviewer_exact' => $review['reviewer_exact_match'],
+                'publishable' => $review['publishable'],
+            ])->all()],
+        ]);
+    }
+
+    private function recorder(): ProductSourceAttemptRecorder
+    {
+        return app(ProductSourceAttemptRecorder::class);
+    }
+
+    /**
+     * A reviewer told the requested code can see it where it is not printed (live #420:
+     * «маркировка MQ04ABF100 видна на наклейке» on a drive labelled MDD, the shop's picture
+     * of another product). A frame that would pass on its label is read again by a reader
+     * who is not told what is wanted, and the server compares that reading. Frames of the
+     * maker's own page do not depend on their label. A failed reading leaves the reviewer's.
+     *
+     * @param  array<int, array<string, mixed>>  $images
+     * @param  array<int, array<string, mixed>>  $candidates
+     * @param  array<int, mixed>  $attachments
+     * @return array<int, array{brand: string, marking: string}> by the frame's number in the batch
+     */
+    private function blindLabelReadings(ProductDraft $draft, array $images, array $candidates, array $attachments, string $provider, string $model, ?int $telegramUpdateId): array
+    {
+        if (! config('product-images.blind_label_read', true)) {
+            return [];
+        }
+        $frames = collect($images)->filter(fn (array $image): bool => ! ($candidates[$image['index'] - 1]['maker_page'] ?? false)
+            && in_array($image['kind'] ?? '', ['product', 'detail', 'packaging'], true)
+            && ($image['publishable'] || ($image['rejection_reason'] ?? null) === 'identity')
+            && in_array(ProductPhotoIdentity::markingVerdict($draft, (string) ($image['observed_marking'] ?? '')), ['match', 'sibling', 'name'], true))->values();
+        if ($frames->isEmpty()) {
+            return [];
+        }
+        try {
+            $read = app(VisionService::class)->readLabels(
+                $frames->map(fn (array $image): mixed => $attachments[$image['index'] - 1])->all(),
+                new VisionCallContext($telegramUpdateId, provider: $provider, model: $model),
+            );
+        } catch (ProductSearchCancelled $exception) {
+            throw $exception;
+        } catch (Throwable $exception) {
+            report($exception);
+
+            return [];
+        }
+        $readings = [];
+        foreach ((array) ($read['images'] ?? []) as $reading) {
+            $frame = is_array($reading) ? $frames->get((int) ($reading['index'] ?? 0) - 1) : null;
+            if ($frame !== null) {
+                $readings[$frame['index']] = ['brand' => trim((string) ($reading['brand'] ?? '')), 'marking' => trim((string) ($reading['marking'] ?? ''))];
+            }
+        }
+
+        return $readings;
     }
 
     /**
