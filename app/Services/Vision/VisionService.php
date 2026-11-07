@@ -6,6 +6,7 @@ use App\Ai\Agents\GalleryFrameReviewAgent;
 use App\Ai\Agents\GalleryTextLanguageAgent;
 use App\Ai\Agents\ProductGalleryVisionAgent;
 use App\Ai\Agents\ProductImageVisionAgent;
+use App\Ai\Agents\ProductLabelReaderAgent;
 use App\Ai\Agents\TelegramPhotoTextAgent;
 use Closure;
 use RuntimeException;
@@ -29,6 +30,12 @@ class VisionService
 
                 return $data;
             });
+    }
+
+    /** With no word about the wanted product: the server compares what this reader found. */
+    public function readLabels(array $attachments, VisionCallContext $context): array
+    {
+        return $this->runner->run('read_labels', ProductLabelReaderAgent::make(), 'Read the label of each attached image.', $attachments, $context);
     }
 
     public function inspectGallery(string $prompt, array $attachments, VisionCallContext $context): array

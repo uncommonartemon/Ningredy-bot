@@ -38,6 +38,9 @@ final class ProductPhotoIdentity
     /** A readable marking is the same product's other batch when this much of it matches from the start. */
     private const float SIBLING_PREFIX_SHARE = 0.75;
 
+    /** How much of a code a reader with nothing to confirm may misread in small print and still have read that code. */
+    private const float READING_SLIP_SHARE = 0.15;
+
     public static function fromLabel(ProductDraft $draft): bool
     {
         return self::policy($draft) === self::LABEL;
@@ -110,6 +113,63 @@ final class ProductPhotoIdentity
         }
 
         return $verdict === 'conflict' && self::namesTheProduct($draft, $marking) ? 'name' : $verdict;
+    }
+
+    /**
+     * The verdict on what a reader who was not told the wanted product found on the label.
+     * A name proves nothing on another maker's label: «MDD 1TB Mobile HDD» holds only words
+     * the requested Toshiba has too (live #420).
+     */
+    public static function blindVerdict(ProductDraft $draft, string $marking, string $brand): string
+    {
+        $verdict = self::markingVerdict($draft, $marking);
+        if (in_array($verdict, ['match', 'sibling'], true)) {
+            return $verdict;
+        }
+        $read = trim($brand.' '.$marking);
+        if (self::nearACode($draft, $read)) {
+            return 'match';
+        }
+        $verdict = self::markingVerdict($draft, $read);
+        if ($verdict !== 'name' || $brand === '') {
+            return $verdict;
+        }
+        $own = array_flip(self::ownWords($draft));
+        foreach (self::words($brand) as $word) {
+            if (isset($own[$word])) {
+                return 'name';
+            }
+        }
+
+        return 'conflict';
+    }
+
+    /**
+     * A reader with nothing to confirm makes honest slips in small print: on real frames
+     * KXG80ZNV512G for KXG60ZNV512G and HFM512GDJNG for HFM512GDJTNG. Refusing those would
+     * lose the frames that prove the part, so a code misread by a few characters counts as
+     * read. Another model is further off: KXG5AZNV512G from KXG60ZNV512G by two of twelve.
+     */
+    private static function nearACode(ProductDraft $draft, string $read): bool
+    {
+        $read = self::compact($read);
+        foreach (self::codes($draft) as $code) {
+            $code = self::compact($code);
+            $length = strlen($code);
+            if ($length < self::MIN_CODE_LENGTH || preg_match('/\d/', $code) !== 1) {
+                continue;
+            }
+            $allowed = max(1, (int) floor($length * self::READING_SLIP_SHARE));
+            for ($size = $length - $allowed; $size <= $length + $allowed; $size++) {
+                for ($start = 0; $start + $size <= strlen($read); $start++) {
+                    if (levenshtein(substr($read, $start, $size), $code) <= $allowed) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
     }
 
     /**

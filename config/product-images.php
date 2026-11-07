@@ -73,6 +73,8 @@ return [
     // shop; the ones past this budget keep their place and are opened only if
     // the ones before them come to nothing. Unchecked is not rejected.
     'max_preflight_sources' => (int) env('PRODUCT_IMAGE_MAX_PREFLIGHT_SOURCES', 4),
+    // A part's label is read a second time by a reader not told what is wanted.
+    'blind_label_read' => (bool) env('PRODUCT_IMAGE_BLIND_LABEL_READ', true),
     // How many pages from one host a single resolve pass may open. Research
     // routinely returns four links to the same manufacturer's shop; opening
     // all four is one shop asked four times in three minutes, which is both

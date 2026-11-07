@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Ai\Agents\GalleryFrameReviewAgent;
 use App\Ai\Agents\ProductImageVisionAgent;
+use App\Ai\Agents\ProductLabelReaderAgent;
 use App\Models\Category;
 use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
@@ -251,6 +252,100 @@ class ProductPhotoIdentityTest extends TestCase
                 'publishable' => false, 'rejection_reason' => 'body', 'physical_match' => 'conflicting'],
         ]])->preventStrayPrompts();
         $this->assertSame([], app(ProductImageVisionVerifier::class)->select($draft, [$frames[0]], 4));
+    }
+
+    public function test_a_code_the_reviewer_saw_counts_only_when_a_reader_not_told_it_finds_it_too(): void
+    {
+        // Live #420: «маркировка MQ04ABF100 видна на наклейке» on a drive labelled MDD.
+        config(['product-images.blind_label_read' => true]);
+        $draft = $this->componentDraft('MQ04ABF100', 'Toshiba MQ04ABF100 1TB 2.5-inch HDD');
+        ProductImageVisionAgent::fake(fn (string $prompt, $attachments): array => ['images' => $attachments->keys()
+            ->map(fn (int $index): array => $this->review($index + 1, exactMatch: true, marking: 'MQ04ABF100', reason: 'Marking visible on the label.'))->all()])
+            ->preventStrayPrompts();
+        $asked = [];
+        ProductLabelReaderAgent::fake(function (string $prompt, $attachments) use (&$asked): array {
+            $asked[] = [$prompt, $attachments->count()];
+
+            return ['images' => [
+                ['index' => 1, 'brand' => 'MDD', 'marking' => 'MD1000GSA854'],
+                ['index' => 2, 'brand' => 'MDD', 'marking' => '1TB Mobile HDD'],
+                ['index' => 3, 'brand' => 'Toshiba', 'marking' => 'MQ04ABF100'],
+            ]];
+        })->preventStrayPrompts();
+        $page = ['title' => 'Toshiba MQ04ABF100 1TB', 'url' => 'https://reseller.example/mq04', 'type' => 'retailer'];
+        $exact = ProductPhotoApplicability::bind($draft, $page, ['verdict' => 'exact', 'plausible_target' => true, 'reason' => 'Exact.']);
+        $frames = array_map(fn (string $name): array => $this->frame("https://reseller.example/{$name}.jpg", [...$page, '_photo_applicability' => $exact]), ['other-code', 'other-maker', 'real']);
+
+        $selected = app(ProductImageVisionVerifier::class)->select($draft, $frames, 4);
+
+        $this->assertSame(['https://reseller.example/real.jpg'], array_column($selected, 'source_url'));
+        $this->assertSame('match', $selected[0]['photo_visual_review']['marking_verdict']);
+        $this->assertSame('MQ04ABF100', $selected[0]['photo_visual_review']['observed_marking']);
+        // The reader is told nothing about the wanted product.
+        $this->assertCount(1, $asked);
+        $this->assertSame(3, $asked[0][1]);
+        $this->assertStringNotContainsString('MQ04ABF100', $asked[0][0]);
+        $this->assertStringNotContainsString('Toshiba', $asked[0][0]);
+    }
+
+    public function test_what_a_reader_not_told_the_product_found_is_compared_with_room_for_a_slip(): void
+    {
+        // Real readings of real frames, 2026-11-07.
+        $toshiba = new ProductDraft(['brand' => 'Toshiba', 'title' => 'Toshiba MQ04ABF100 1TB 2.5-inch HDD', 'model' => 'MQ04ABF100']);
+        $this->assertSame('conflict', ProductPhotoIdentity::blindVerdict($toshiba, 'MD1000GSA854', 'MDD'));
+        $this->assertSame('conflict', ProductPhotoIdentity::blindVerdict($toshiba, '1TB Mobile HDD', 'MDD'));
+        $this->assertSame('none', ProductPhotoIdentity::blindVerdict($toshiba, '', 'MDT'));
+        $kioxia = new ProductDraft(['brand' => 'KIOXIA', 'title' => 'KIOXIA XG6 512GB NVMe SSD', 'model' => 'KXG60ZNV512G']);
+        $this->assertSame('match', ProductPhotoIdentity::blindVerdict($kioxia, 'KXG80ZNV512G', 'KIOXIA'));
+        $this->assertSame('conflict', ProductPhotoIdentity::blindVerdict($kioxia, 'KXG5AZNV512G', 'KIOXIA'));
+        $hynix = new ProductDraft(['brand' => 'SK hynix', 'title' => 'SK hynix BC501 512GB NVMe SSD', 'model' => 'BC501',
+            'specifications' => [['key' => 'mpn', 'value' => 'HFM512GDJTNG-8310A']]]);
+        $this->assertSame('match', ProductPhotoIdentity::blindVerdict($hynix, 'BC501 NVMe; HFM512GDJNG-8310A BA', 'SK hynix'));
+        $wd = new ProductDraft(['brand' => 'Western Digital', 'title' => 'Western Digital WD Blue SN570 500GB NVMe SSD', 'model' => 'WDS500G3B0C']);
+        $this->assertSame('name', ProductPhotoIdentity::blindVerdict($wd, 'WD Blue SN570', 'Western Digital'));
+        $this->assertSame('conflict', ProductPhotoIdentity::blindVerdict($wd, 'WD_BLACK SN750', 'Western Digital'));
+        $crucial = new ProductDraft(['brand' => 'Crucial', 'title' => 'Crucial P3 Plus 1TB M.2 NVMe SSD', 'model' => 'CT1000P3PSSD8']);
+        $this->assertSame('name', ProductPhotoIdentity::blindVerdict($crucial, 'P3 Plus', 'Crucial'));
+    }
+
+    public function test_a_label_the_reader_cannot_read_is_the_last_resort_and_a_failed_reading_leaves_the_reviewers(): void
+    {
+        config(['product-images.blind_label_read' => true]);
+        $draft = $this->componentDraft('MQ04ABF100', 'Toshiba MQ04ABF100 1TB 2.5-inch HDD');
+        ProductImageVisionAgent::fake(fn (): array => ['images' => [$this->review(1, exactMatch: true, marking: 'MQ04ABF100', reason: 'Marking visible.')]])->preventStrayPrompts();
+        $page = ['title' => 'Toshiba MQ04ABF100 1TB', 'url' => 'https://reseller.example/mq04', 'type' => 'retailer'];
+        $exact = ProductPhotoApplicability::bind($draft, $page, ['verdict' => 'exact', 'plausible_target' => true, 'reason' => 'Exact.']);
+        $frame = $this->frame('https://reseller.example/a.jpg', [...$page, '_photo_applicability' => $exact]);
+
+        ProductLabelReaderAgent::fake(fn (): array => ['images' => [['index' => 1, 'brand' => '', 'marking' => '']]])->preventStrayPrompts();
+        $unread = app(ProductImageVisionVerifier::class)->select($draft, [$frame], 4);
+        $this->assertTrue($unread[0]['photo_visual_review']['identity_unproven']);
+
+        // The helper failing is not a verdict on the frame.
+        ProductLabelReaderAgent::fake(fn () => throw new \RuntimeException('Provider down'))->preventStrayPrompts();
+        $unchecked = app(ProductImageVisionVerifier::class)->select($draft, [$frame], 4);
+        $this->assertSame('match', $unchecked[0]['photo_visual_review']['marking_verdict']);
+    }
+
+    public function test_the_makers_own_page_and_a_frame_with_no_marking_are_not_read_again(): void
+    {
+        config(['product-images.blind_label_read' => true]);
+        $draft = $this->componentDraft();
+        ProductImageVisionAgent::fake(fn (): array => ['images' => [
+            $this->review(1, exactMatch: true, marking: 'HFM512GDJTNG-8310A', reason: 'The maker\'s render.'),
+            $this->review(2, exactMatch: false, marking: '', reason: 'No label in sight.'),
+        ]])->preventStrayPrompts();
+        ProductLabelReaderAgent::fake(fn () => throw new \RuntimeException('Must not be asked'))->preventStrayPrompts();
+        $maker = ['title' => 'SK hynix BC501', 'url' => 'https://maker.example/bc501', 'type' => 'manufacturer'];
+        $reseller = ['title' => 'BC501 512GB', 'url' => 'https://reseller.example/bc501', 'type' => 'retailer'];
+        $exactFor = fn (array $page): array => ProductPhotoApplicability::bind($draft, $page, ['verdict' => 'exact', 'plausible_target' => true, 'reason' => 'Exact.']);
+
+        app(ProductImageVisionVerifier::class)->select($draft, [
+            $this->frame('https://maker.example/a.jpg', [...$maker, '_photo_applicability' => $exactFor($maker)]),
+            $this->frame('https://reseller.example/b.jpg', [...$reseller, '_photo_applicability' => $exactFor($reseller)]),
+        ], 4);
+
+        ProductLabelReaderAgent::assertNeverPrompted();
     }
 
     public function test_a_components_playwright_gallery_is_read_for_labels_too(): void
