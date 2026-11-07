@@ -1626,27 +1626,6 @@ class ProductImageStorage
             $outcome = $reserve->outcome;
         }
 
-        // Last resort only: every normal source and round produced nothing
-        // usable. Before finishing with zero photos, fall back to the best
-        // candidate that was otherwise acceptable (identity/color/score) but
-        // deterministically rejected only for violating the category's photo
-        // instruction. The override is explicitly labelled below so nobody
-        // mistakes it for a normal, rule-compliant result.
-        $categoryHintOverrideUsed = false;
-
-        if ($selected === []) {
-            $hintBlockedCandidate = $this->visionVerifier->takeHintBlockedCandidate($draft);
-
-            if ($hintBlockedCandidate !== null) {
-                $selected = [$hintBlockedCandidate];
-                $chosenSource = $chosenSource ?? (is_string($hintBlockedCandidate['product_page_url'] ?? null)
-                    ? ['url' => $hintBlockedCandidate['product_page_url']]
-                    : null);
-                $chosenMethod = $chosenMethod ?: 'category_hint_override';
-                $categoryHintOverrideUsed = true;
-            }
-        }
-
         if ($selected !== [] && $chosenSource !== null && $outcome !== GalleryOutcome::Interrupted) {
             $chosenSource = $this->sourceAfterPixelReview($draft, $chosenSource, $selected);
         }
@@ -1982,14 +1961,10 @@ class ProductImageStorage
                 .($reconciliationOutcome->summary !== null ? ': '.$reconciliationOutcome->summary : '')
                 .'. Публикация недоступна, пока сверка не завершится.'
             : null;
-        $categoryHintNote = $stored > 0 && $categoryHintOverrideUsed
-            ? 'Не найдено ни одного фото без нарушения подсказки категории. '
-                .'Принято как крайний вариант фото, нарушающее подсказку (см. заметку проверки у фото).'
-            : null;
         $partialNote = $stored > 0 && $galleryIsPartial
             ? 'После полного цикла поиска сохранён лучший частичный результат: '.$stored.' проверенных фото.'
             : null;
-        $galleryNotes = implode(' ', array_filter([$categoryHintNote, $identityNote, $reconciliationNote, $partialNote]));
+        $galleryNotes = implode(' ', array_filter([$identityNote, $reconciliationNote, $partialNote]));
 
         $finalFields = [...[
             'primary_source_url' => $chosenSource['url'] ?? $textCardSourceUrl ?? $draft->primary_source_url,

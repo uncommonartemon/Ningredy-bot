@@ -331,80 +331,62 @@ class ProductImageStorageTest extends TestCase
         $this->assertSame(5, $product->media()->count());
     }
 
-    public function test_packaging_photos_are_deterministically_rejected_when_the_category_forbids_them(): void
+    /**
+     * Operator, 2026-11-07: «если даст коробку - норм, если даст фото детали - лучше». A component's
+     * box is an ordinary photo with no rule of its own, and the part itself comes first.
+     */
+    public function test_a_components_box_is_an_ordinary_photo_after_the_part_itself(): void
     {
-        Category::query()->where('slug', 'components')->update(['product_search_hint' => 'Без фото коробки']);
-        ProductImageVisionAgent::fake(fn (): array => [
-            'images' => [[
-                'index' => 1,
-                'exact_match' => true,
-                'publishable' => true,
-                'color_match' => true,
-                'kind' => 'packaging',
-                'view' => 'packaging',
-                'gallery_rank' => 1,
-                'score' => 95,
-                'reason' => 'Clean retail packaging matching the exact model.',
-            ]],
-        ])->preventStrayPrompts();
+        ProductImageVisionAgent::fake(fn (): array => ['images' => [
+            ['index' => 1, 'exact_match' => true, 'publishable' => true, 'color_match' => true, 'kind' => 'packaging', 'view' => 'packaging',
+                'gallery_rank' => 2, 'score' => 90, 'observed_marking' => 'Ryzen 5 5600X', 'reason' => 'Its retail box.'],
+            ['index' => 2, 'exact_match' => true, 'publishable' => true, 'color_match' => true, 'kind' => 'product', 'view' => 'front',
+                'gallery_rank' => 1, 'score' => 90, 'observed_marking' => 'Ryzen 5 5600X', 'reason' => 'The processor itself.'],
+        ]])->preventStrayPrompts();
         [, , $draft] = $this->records();
-        $draft->update(['category' => 'components']);
-
-        $accepted = app(ProductImageVisionVerifier::class)->select($draft->fresh(), [[
-            'image' => imagecreatefromstring($this->jpeg(1)),
-            'source_url' => 'https://93.184.216.34/image-1.jpg',
+        $draft->update(['category' => 'components', 'product_type' => 'component', 'brand' => 'AMD',
+            'model' => 'Ryzen 5 5600X', 'title' => 'AMD Ryzen 5 5600X Desktop Processor', 'color' => null]);
+        $frames = collect([1, 2])->map(fn (int $index): array => [
+            'image' => imagecreatefromstring($this->jpeg($index)),
+            'source_url' => "https://93.184.216.34/frame-{$index}.jpg",
+            'source_identity_confirmed' => true,
             'width' => 800,
             'height' => 800,
-        ]], 1);
+        ])->all();
 
-        // The model said publishable=true, but the category deterministically
-        // forbids packaging photos regardless of what the model claims.
-        $this->assertSame([], $accepted);
+        $accepted = app(ProductImageVisionVerifier::class)->selectGalleryFrames($draft->fresh(), $frames, 2);
+
+        $this->assertSame(['https://93.184.216.34/frame-2.jpg', 'https://93.184.216.34/frame-1.jpg'], array_column($accepted, 'source_url'));
     }
 
-    public function test_a_packaging_photo_is_accepted_as_a_labelled_last_resort_once_the_search_finds_nothing_else(): void
+    /** Shops show a boxed processor by its box, with no code on it to read (live #386, #422). */
+    public function test_a_processor_shown_only_by_its_box_gets_that_box(): void
     {
         Storage::fake('public');
-        Category::query()->where('slug', 'other-tech')->update(['product_search_hint' => 'Без фото коробки']);
+        AppSetting::put('ai.fallback_sources_enabled', '0');
         ProductImageVisionAgent::fake(fn (string $prompt, $attachments): array => [
             'images' => $attachments->keys()->map(fn (int $index): array => [
-                'index' => $index + 1,
-                'exact_match' => true,
-                'publishable' => true,
-                'color_match' => true,
-                'kind' => 'packaging',
-                'view' => 'packaging',
-                'gallery_rank' => $index + 1,
-                'score' => 95 - $index,
-                'reason' => 'Clean retail packaging matching the exact model.',
+                'index' => $index + 1, 'exact_match' => true, 'catalog_photo' => true, 'color_match' => true, 'observed_marking' => '',
+                'publishable' => true, 'rejection_reason' => 'none', 'kind' => 'packaging', 'view' => 'packaging',
+                'gallery_rank' => $index + 1, 'score' => 70, 'reason' => 'Its retail box.',
             ])->all(),
         ])->preventStrayPrompts();
-        Http::fake(fn (Request $request) => Http::response($this->jpeg(1), 200, [
-            'Content-Type' => 'image/jpeg',
-        ]));
+        Http::fake(fn (Request $request) => Http::response($this->jpeg(1), 200, ['Content-Type' => 'image/jpeg']));
         [, , $draft] = $this->records();
         $draft->update([
-            'category' => 'other-tech',
-            'image_urls' => [],
+            'category' => 'components', 'product_type' => 'component', 'brand' => 'AMD', 'color' => null,
+            'model' => 'Ryzen 5 5600X', 'title' => 'AMD Ryzen 5 5600X Desktop Processor', 'image_urls' => [],
             'sources' => [[
-                'title' => 'Only known card, box photo only',
-                'url' => 'https://93.184.216.34/only-card',
+                'title' => 'AMD Ryzen 5 5600X',
+                'url' => 'https://93.184.216.34/amd-ryzen-5-5600x',
                 'type' => 'retailer',
-                'image_urls' => ['https://93.184.216.34/image-1.jpg'],
+                'image_urls' => ['https://93.184.216.34/amd-ryzen-5-5600x-box.jpg'],
             ]],
         ]);
 
-        $stored = app(ProductImageStorage::class)->stage($draft->fresh());
+        $this->assertSame(1, app(ProductImageStorage::class)->stage($draft->fresh()));
 
-        $this->assertSame(1, $stored);
-        $media = $draft->media()->get();
-        $this->assertCount(1, $media);
-        $this->assertSame('hint_override', $media->first()->verification_status);
-        $this->assertStringContainsString('крайний вариант', (string) $media->first()->verification_notes);
-        $this->assertStringContainsString('Без фото коробки', (string) $media->first()->verification_notes);
-
-        $draftNotes = (string) $draft->fresh()->gallery_notes;
-        $this->assertStringContainsString('нарушающее подсказку', $draftNotes);
+        $this->assertCount(1, $draft->media()->get());
     }
 
     public function test_it_requires_vision_even_for_an_exact_retailer_source(): void

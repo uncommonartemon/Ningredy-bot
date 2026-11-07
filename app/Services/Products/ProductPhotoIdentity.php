@@ -41,6 +41,9 @@ final class ProductPhotoIdentity
     /** How much of a code a reader with nothing to confirm may misread in small print and still have read that code. */
     private const float READING_SLIP_SHARE = 0.15;
 
+    /** From this length a word of a code is one unbroken part number, with room for a misread character or another batch. */
+    private const int LONG_CODE_LENGTH = 10;
+
     public static function fromLabel(ProductDraft $draft): bool
     {
         return self::policy($draft) === self::LABEL;
@@ -92,13 +95,14 @@ final class ProductPhotoIdentity
         if (mb_strlen($observed) < self::MIN_CODE_LENGTH || preg_match('/\d/', $observed) !== 1) {
             return 'none';
         }
-        $codes = array_values(array_filter(array_map(self::compact(...), self::codes($draft)),
-            fn (string $code): bool => mb_strlen($code) >= self::MIN_CODE_LENGTH && preg_match('/\d/', $code) === 1));
+        $codes = array_values(array_filter(self::codes($draft),
+            fn (string $code): bool => mb_strlen(self::compact($code)) >= self::MIN_CODE_LENGTH && preg_match('/\d/', $code) === 1));
         if ($codes === []) {
             return 'none';
         }
         $verdict = 'conflict';
-        foreach ($codes as $code) {
+        foreach ($codes as $written) {
+            $code = self::compact($written);
             if ($observed === $code || str_contains($observed, $code) || str_contains($code, $observed)) {
                 return 'match';
             }
@@ -107,7 +111,7 @@ final class ProductPhotoIdentity
             while ($prefix < $shorter && $observed[$prefix] === $code[$prefix]) {
                 $prefix++;
             }
-            if ($prefix >= max(8, (int) ceil($shorter * self::SIBLING_PREFIX_SHARE))) {
+            if (self::longWords($written) !== [] && $prefix >= max(8, (int) ceil($shorter * self::SIBLING_PREFIX_SHARE))) {
                 $verdict = 'sibling';
             }
         }
@@ -153,23 +157,36 @@ final class ProductPhotoIdentity
     private static function nearACode(ProductDraft $draft, string $read): bool
     {
         $read = self::compact($read);
-        foreach (self::codes($draft) as $code) {
-            $code = self::compact($code);
-            $length = strlen($code);
-            if ($length < self::MIN_CODE_LENGTH || preg_match('/\d/', $code) !== 1) {
-                continue;
-            }
-            $allowed = max(1, (int) floor($length * self::READING_SLIP_SHARE));
-            for ($size = $length - $allowed; $size <= $length + $allowed; $size++) {
-                for ($start = 0; $start + $size <= strlen($read); $start++) {
-                    if (levenshtein(substr($read, $start, $size), $code) <= $allowed) {
-                        return true;
+        foreach (self::codes($draft) as $written) {
+            foreach (self::longWords($written) as $code) {
+                $length = strlen($code);
+                $allowed = (int) floor($length * self::READING_SLIP_SHARE);
+                for ($size = $length - $allowed; $size <= $length + $allowed; $size++) {
+                    for ($start = 0; $start + $size <= strlen($read); $start++) {
+                        if (levenshtein(substr($read, $start, $size), $code) <= $allowed) {
+                            return true;
+                        }
                     }
                 }
             }
         }
 
         return false;
+    }
+
+    /**
+     * The long part numbers in a code as written. Only they have room for a misread character
+     * or another batch: in a name of short words one character is another product
+     * (i5-12400F and i5-13400F, Ryzen 5 5600X and 5600G, RTX 4060 and 4070).
+     *
+     * @return list<string>
+     */
+    private static function longWords(string $written): array
+    {
+        $words = array_map(self::compact(...), preg_split('/\s+/', $written, -1, PREG_SPLIT_NO_EMPTY) ?: []);
+
+        return array_values(array_filter($words,
+            fn (string $word): bool => strlen($word) >= self::LONG_CODE_LENGTH && preg_match('/\d/', $word) === 1));
     }
 
     /**
