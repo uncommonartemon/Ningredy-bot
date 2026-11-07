@@ -7,6 +7,7 @@ use App\Ai\Agents\ProductImageVisionAgent;
 use App\Ai\Agents\ProductLabelReaderAgent;
 use App\Models\Category;
 use App\Models\ProductDraft;
+use App\Models\ProductSourceAttempt;
 use App\Models\TelegramUpdate;
 use App\Services\Products\ProductImageVisionVerifier;
 use App\Services\Products\ProductPhotoApplicability;
@@ -281,6 +282,11 @@ class ProductPhotoIdentityTest extends TestCase
         $this->assertSame(['https://reseller.example/real.jpg'], array_column($selected, 'source_url'));
         $this->assertSame('match', $selected[0]['photo_visual_review']['marking_verdict']);
         $this->assertSame('MQ04ABF100', $selected[0]['photo_visual_review']['observed_marking']);
+        // The refusal is in the journal, not only in the result.
+        $journal = ProductSourceAttempt::query()->where('action', 'compare_labels')->sole();
+        $this->assertStringContainsString('«MDD MD1000GSA854» — conflict', (string) $journal->message);
+        $this->assertSame('MQ04ABF100', $journal->output['frames'][0]['reviewer_marking']);
+        $this->assertSame('conflict', $journal->output['frames'][0]['verdict']);
         // The reader is told nothing about the wanted product.
         $this->assertCount(1, $asked);
         $this->assertSame(3, $asked[0][1]);

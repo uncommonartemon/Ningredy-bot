@@ -376,6 +376,9 @@ class ProductImageVisionVerifier
                     'maker_page' => (bool) ($candidate['maker_page'] ?? false),
                 ];
             });
+        if ($labelIdentity) {
+            $this->journalLabels($draft, $reviewed, $candidates, $telegramUpdateId ?? $draft->telegram_update_id);
+        }
         if ($labelIdentity && $galleryFramePolicy) {
             // A product's own gallery shows one item from several sides: the frame without a
             // readable code next to a frame whose code matched (the drive from its connector
@@ -483,6 +486,43 @@ class ProductImageVisionVerifier
                 ],
             ];
         })->all();
+    }
+
+    /**
+     * What each label said against the request. Without this a refusal looks like nothing
+     * anywhere: live #409 lost ten good frames as «no verified frames», and the cause showed
+     * only when the model's answers were set beside the server's verdicts by hand.
+     *
+     * @param  Collection<int, array<string, mixed>>  $reviewed
+     * @param  array<int, array<string, mixed>>  $candidates
+     */
+    private function journalLabels(ProductDraft $draft, Collection $reviewed, array $candidates, ?int $telegramUpdateId): void
+    {
+        $read = $reviewed->filter(fn (array $review): bool => $review['marking_verdict'] !== 'none' || $review['reviewer_marking'] !== '')->values();
+        if ($read->isEmpty()) {
+            return;
+        }
+        $this->recorder()->record([
+            'telegram_update_id' => $telegramUpdateId, 'product_draft_id' => $draft->id,
+            'product_url' => (string) ($candidates[0]['product_page_url'] ?? ''),
+            'actor' => 'server', 'phase' => 'image_verification', 'action' => 'compare_labels', 'status' => 'info',
+            'decision' => 'compared',
+            'message' => $read->map(fn (array $review): string => 'кадр '.$review['index'].': «'.$review['observed_marking'].'» — '.$review['marking_verdict'])->implode('; '),
+            'output' => ['frames' => $read->map(fn (array $review): array => [
+                'index' => $review['index'],
+                'source_url' => (string) ($candidates[$review['index'] - 1]['source_url'] ?? ''),
+                'reviewer_marking' => $review['reviewer_marking'],
+                'read_marking' => $review['observed_marking'],
+                'verdict' => $review['marking_verdict'],
+                'reviewer_exact' => $review['reviewer_exact_match'],
+                'publishable' => $review['publishable'],
+            ])->all()],
+        ]);
+    }
+
+    private function recorder(): ProductSourceAttemptRecorder
+    {
+        return app(ProductSourceAttemptRecorder::class);
     }
 
     /**
