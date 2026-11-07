@@ -13,6 +13,7 @@ use App\Services\Products\ProductImageVisionVerifier;
 use App\Services\Products\ProductPhotoApplicability;
 use App\Services\Products\ProductPhotoIdentity;
 use App\Services\Products\SourceIdentityProvenance;
+use Database\Seeders\StarterCatalogSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
 
@@ -38,6 +39,33 @@ class ProductPhotoIdentityTest extends TestCase
         $this->assertFalse(ProductPhotoIdentity::fromLabel(new ProductDraft(['category' => 'laptops', 'product_type' => 'laptop'])));
         // No category row yet: the product kind decides.
         $this->assertTrue(ProductPhotoIdentity::fromLabel(new ProductDraft(['product_type' => 'component'])));
+    }
+
+    /**
+     * Operator, 2026-11-07: no rule about boxes on components. Only the rule's sentence leaves
+     * a hint; what else is written there stays, and so does a rule written on another category.
+     */
+    public function test_the_box_rule_leaves_component_hints_and_nothing_else_does(): void
+    {
+        $hints = ['components' => 'Без фото коробки', 'cpu' => 'Без фото коробки (OEM/tray). На крышке процессора — модель.',
+            'ssd' => 'Без фото коробки. Код на наклейке — P/N.', 'gpu' => 'Своя фраза. Без фото коробки. Ещё фраза.', 'laptops' => 'Без фото коробки'];
+        foreach ($hints as $slug => $hint) {
+            Category::query()->where('slug', $slug)->update(['product_search_hint' => $hint]);
+        }
+
+        (require database_path('migrations/2026_11_07_100000_drop_box_rule_from_component_hints.php'))->up();
+
+        $left = Category::query()->whereIn('slug', array_keys($hints))->pluck('product_search_hint', 'slug');
+        $this->assertNull($left['components']);
+        $this->assertSame('На крышке процессора — модель.', $left['cpu']);
+        $this->assertSame('Код на наклейке — P/N.', $left['ssd']);
+        $this->assertSame('Своя фраза. Ещё фраза.', $left['gpu']);
+        $this->assertSame('Без фото коробки', $left['laptops']);
+        // A new install starts without it.
+        $this->assertNull(StarterCatalogSeeder::CATEGORIES['components']['product_search_hint']);
+        foreach (StarterCatalogSeeder::COMPONENT_KINDS as $kind) {
+            $this->assertStringNotContainsString('коробк', $kind['product_search_hint']);
+        }
     }
 
     public function test_a_marking_read_from_the_frame_is_compared_with_the_requested_codes(): void
@@ -292,6 +320,21 @@ class ProductPhotoIdentityTest extends TestCase
         $this->assertSame(3, $asked[0][1]);
         $this->assertStringNotContainsString('MQ04ABF100', $asked[0][0]);
         $this->assertStringNotContainsString('Toshiba', $asked[0][0]);
+    }
+
+    /** One character in a name of short words is another product, for the reviewer and for the reader alike. */
+    public function test_a_short_model_name_one_character_off_is_another_product(): void
+    {
+        $intel = new ProductDraft(['brand' => 'Intel', 'title' => 'Intel Core i5-12400F Processor', 'model' => 'Core i5-12400F']);
+        $this->assertSame('match', ProductPhotoIdentity::blindVerdict($intel, 'Core i5-12400F', 'Intel'));
+        $this->assertSame('conflict', ProductPhotoIdentity::blindVerdict($intel, 'Core i5-13400F', 'Intel'));
+        $amd = new ProductDraft(['brand' => 'AMD', 'title' => 'AMD Ryzen 5 5600X Processor', 'model' => 'Ryzen 5 5600X']);
+        foreach (['Ryzen 5 5600G', 'Ryzen 5 5500X'] as $another) {
+            $this->assertSame('conflict', ProductPhotoIdentity::markingVerdict($amd, $another));
+            $this->assertSame('conflict', ProductPhotoIdentity::blindVerdict($amd, $another, 'AMD'));
+        }
+        $msi = new ProductDraft(['brand' => 'MSI', 'title' => 'MSI GeForce RTX 4060 VENTUS 2X BLACK 8G OC', 'model' => 'RTX 4060 VENTUS 2X BLACK 8G OC']);
+        $this->assertSame('conflict', ProductPhotoIdentity::blindVerdict($msi, 'RTX 4070 VENTUS 2X BLACK 8G OC', 'MSI'));
     }
 
     public function test_what_a_reader_not_told_the_product_found_is_compared_with_room_for_a_slip(): void

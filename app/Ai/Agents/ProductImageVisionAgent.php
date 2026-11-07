@@ -82,7 +82,8 @@ class ProductImageVisionAgent implements Agent, HasStructuredOutput
             do not apply - its capacity, speed and part number are printed on it. Read every label, sticker and
             silkscreen in the frame and copy the product's own part number or model marking into observed_marking
             (not serial numbers, dates, firmware or certification codes, not a capacity or speed grade alone, not a
-            placeholder printed on a maker's render such as CT000000XX000X; empty when nothing is readable). A readable
+            family or series name alone such as Ryzen 5 5000 Series or 12th Gen Core i5, not a placeholder printed on a
+            maker's render such as CT000000XX000X; empty when nothing is readable). A readable
             marking naming another part number, model or capacity than the requested product makes the frame another
             product: exact_match=false, physical_match=conflicting, publishable=false, rejection_reason=identity. Retail
             parts often carry their name instead of their part number: the requested product's own model or series name

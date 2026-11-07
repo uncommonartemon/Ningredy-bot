@@ -149,7 +149,6 @@
     "Українська": "Українська",
     "Каноническое имя и запасной вариант для API.": "Canonical name and fallback for the API.",
     "Агент и валидатор используют это поле, чтобы категория не противоречила типу товара.": "Agent and validator use this to keep category and product type consistent.",
-    "Нарушает подсказку": "Violates the hint",
     "Фото ещё не найдены": "No images found yet",
     "Галерея заполняется автоматически поиском фото.": "The photo search fills this gallery automatically.",
     "Используются поиском как кандидаты. Сохранённые фотографии находятся в таблице «Галерея»; ссылки не заменяют проверенные файлы.": "Used as search candidates. Saved photos are in Gallery; URLs do not replace verified files.",

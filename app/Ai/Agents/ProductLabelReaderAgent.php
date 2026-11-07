@@ -28,11 +28,12 @@ class ProductLabelReaderAgent implements Agent, HasStructuredOutput
             The attached images are numbered in attachment order starting at 1. You are not told which product anyone
             is looking for, and no answer is better than another.
 
-            For each image copy what is really printed on the part itself, character by character:
+            For each image copy what is really printed on the part or on its box, character by character:
             - brand: the maker's name on the label, as printed. Empty when none is readable.
             - marking: the part's own model name and part number, as printed, a model line and a code together when
               both are there. Not serial numbers, dates, firmware, certification or regulatory codes. Not a capacity,
-              speed or interface alone. Not a placeholder of zeros or X on a maker's render.
+              speed or interface alone. Not a family or series name alone, such as Ryzen 5 5000 Series or 12th Gen
+              Core i5. Not a placeholder of zeros or X on a maker's render.
 
             What you cannot read character by character stays empty, and you never complete a code from what such a
             part usually carries. Text on a shop's own overlay, watermark or logo is not a label.

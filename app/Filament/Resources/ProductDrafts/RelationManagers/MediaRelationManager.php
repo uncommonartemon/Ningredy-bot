@@ -70,7 +70,6 @@ class MediaRelationManager extends RelationManager
                         'source_verified' => __('Подтверждено источником'),
                         'manual' => __('Вручную'),
                         'rejected' => __('Отклонено'),
-                        'hint_override' => __('Нарушает подсказку'),
                         default => __('Не проверено'),
                     })
                     ->color(fn (?string $state): string => match ($state) {
@@ -78,7 +77,6 @@ class MediaRelationManager extends RelationManager
                         'source_verified' => 'success',
                         'manual' => 'info',
                         'rejected' => 'danger',
-                        'hint_override' => 'warning',
                         default => 'warning',
                     }),
                 TextColumn::make('dimensions')
