@@ -3140,7 +3140,8 @@ class ProductImageStorageTest extends TestCase
             return ['images' => [['index' => 1, 'exact_match' => true, 'color_match' => true,
                 'color_observability' => 'clear', 'physical_match' => 'match', 'catalog_photo' => true,
                 'publishable' => true, 'kind' => 'product', 'view' => 'front', 'gallery_rank' => 1,
-                'score' => 95, 'reason' => 'Current downloaded frame shows the requested boxed processor.',
+                'score' => 95, 'observed_marking' => '100-100001084WOF',
+                'reason' => 'Current downloaded frame shows the requested boxed processor.',
             ]]];
         })->preventStrayPrompts();
 
@@ -3775,9 +3776,74 @@ class ProductImageStorageTest extends TestCase
         $this->assertArrayNotHasKey('content_verified_by_vision', $storedRecipe);
     }
 
+    /**
+     * Live #402: the back of a drive with no code went out and the search ended, while a
+     * page showing the exact code was next in line. With no better frame it is the card.
+     *
+     * @return array{0: ProductDraft, 1: int}
+     */
+    private function partOnTwoPages(array $secondPageImages, int $secondPageCalls = 1): array
+    {
+        Storage::fake('public');
+        Category::query()->where('slug', 'components')->update(['gallery_search_strategy' => Category::GALLERY_SEARCH_VISION_FIRST]);
+        AppSetting::put('ai.fallback_sources_enabled', '0');
+        ProductImageVisionAgent::fake(function (string $prompt, $attachments): array {
+            $labelled = str_contains($prompt, 'component-21');
+
+            return ['images' => $attachments->keys()->map(fn (int $index): array => [
+                'index' => $index + 1, 'exact_match' => $labelled, 'color_match' => true, 'publishable' => true, 'kind' => 'product', 'view' => 'front',
+                'gallery_rank' => $index + 1, 'score' => 95, 'observed_marking' => $labelled ? 'CMP-1000' : '', 'reason' => 'A component.',
+            ])->all()];
+        })->preventStrayPrompts();
+        Http::fake(function (Request $request) {
+            if (str_contains($request->url(), 'cmp-1000-')) {
+                return Http::response('<html><body><div class=product-gallery></div></body></html>', 200, ['Content-Type' => 'text/html']);
+            }
+            preg_match('/component-(\d+)/', $request->url(), $matches);
+
+            return Http::response($this->jpeg((int) ($matches[1] ?? 1)), 200, ['Content-Type' => 'image/jpeg']);
+        });
+        $browser = $this->mockBrowser();
+        $browser->shouldReceive('extract')->andReturnUsing(fn (...$arguments): array => str_contains(json_encode($arguments), 'page-two')
+            ? $secondPageImages : ['https://93.184.216.34/component-11.jpg']);
+        $browser->shouldReceive('isConfirmedGalleryImage')->andReturn(false);
+        $browser->shouldReceive('isPartialGalleryImage')->andReturn(false);
+        [, , $draft] = $this->records();
+        $draft->update(['category' => 'components', 'product_type' => 'component', 'model' => 'CMP-1000',
+            'primary_source_url' => 'https://93.184.216.34/cmp-1000-page-one', 'image_urls' => [],
+            'sources' => [['title' => 'CMP-1000', 'url' => 'https://93.184.216.34/cmp-1000-page-one', 'type' => 'retailer', 'image_urls' => []],
+                ['title' => 'CMP-1000', 'url' => 'https://93.184.216.34/cmp-1000-page-two', 'type' => 'retailer', 'image_urls' => []]]]);
+
+        return [$draft->fresh(), app(ProductImageStorage::class)->stage($draft->fresh())];
+    }
+
+    public function test_a_parts_photo_without_a_readable_code_waits_while_another_page_may_show_the_label(): void
+    {
+        [$draft, $stored] = $this->partOnTwoPages(['https://93.184.216.34/component-21.jpg']);
+
+        $this->assertSame(1, $stored);
+        $media = $draft->fresh()->media()->sole();
+        $this->assertStringContainsString('component-21', (string) $media->source_url);
+        $this->assertStringContainsString('Код на наклейке совпадает', (string) $media->verification_notes);
+        $this->assertDatabaseHas('product_source_attempts', ['product_draft_id' => $draft->id, 'action' => 'hold_photo_without_code']);
+    }
+
+    public function test_with_no_better_frame_the_photo_without_a_code_is_the_card_and_says_so(): void
+    {
+        [$draft, $stored] = $this->partOnTwoPages([]);
+
+        $this->assertSame(1, $stored);
+        $media = $draft->fresh()->media()->sole();
+        $this->assertStringContainsString('component-11', (string) $media->source_url);
+        $this->assertStringContainsString('без прочитанного кода', (string) $media->verification_notes);
+    }
+
     public function test_component_category_uses_vision_first_and_only_allows_active_recipes(): void
     {
         Storage::fake('public');
+        // The Vision-first mode under test; the starter component category itself is
+        // Playwright-first since module 68 (operator, 2026-11-04).
+        Category::query()->where('slug', 'components')->update(['gallery_search_strategy' => Category::GALLERY_SEARCH_VISION_FIRST]);
         AppSetting::put('ai.fallback_sources_enabled', '0');
         ProductImageVisionAgent::fake(fn (string $prompt, $attachments): array => [
             'images' => $attachments->keys()->map(fn (int $index): array => [
@@ -3789,6 +3855,8 @@ class ProductImageStorageTest extends TestCase
                 'view' => $index === 0 ? 'front' : 'detail',
                 'gallery_rank' => $index + 1,
                 'score' => 98 - $index,
+                // A component is proven by the code read on it (module 68/70), not by the reviewer's word.
+                'observed_marking' => 'CMP-1000',
                 'reason' => 'Exact component image.',
             ])->all(),
         ])->preventStrayPrompts();
@@ -3820,6 +3888,7 @@ class ProductImageStorageTest extends TestCase
         $draft->update([
             'category' => 'components',
             'product_type' => 'component',
+            'model' => 'CMP-1000',
             'primary_source_url' => 'https://93.184.216.34/component-card',
             'sources' => [[
                 'title' => 'Exact component card',

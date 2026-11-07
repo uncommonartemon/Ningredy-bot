@@ -7,6 +7,8 @@ use App\Models\AttributeDefinition;
 use App\Models\Brand;
 use App\Models\Category;
 use App\Models\Product;
+use App\Models\ProductDraft;
+use App\Models\TelegramUpdate;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Laravel\Ai\Tools\Request as ToolRequest;
 use Tests\TestCase;
@@ -14,6 +16,26 @@ use Tests\TestCase;
 class SearchCatalogToolTest extends TestCase
 {
     use RefreshDatabase;
+
+    public function test_a_draft_of_the_same_product_is_named_so_a_new_search_does_not_pay_for_it_again(): void
+    {
+        $origin = TelegramUpdate::query()->create(['update_id' => 99100, 'telegram_user_id' => '12345', 'chat_id' => '98765', 'message_id' => 1, 'text' => 'x', 'payload' => [], 'status' => 'completed']);
+        $run = $origin->aiRuns()->create(['provider' => 'local', 'model' => 'fixture', 'status' => 'completed', 'prompt' => 'x', 'started_at' => now(), 'completed_at' => now()]);
+        $draft = ProductDraft::query()->create(['telegram_update_id' => $origin->id, 'ai_run_id' => $run->id, 'requested_by_telegram_user_id' => '12345', 'status' => 'pending_review',
+            'title' => 'Samsung PM991 512GB', 'model' => 'PM991', 'specifications' => [['key' => 'mpn', 'name' => 'Part number', 'value' => 'MZALQ512HALU-000L1']], 'sources' => [], 'image_urls' => []]);
+        $asking = TelegramUpdate::query()->create(['update_id' => 99101, 'telegram_user_id' => '12345', 'chat_id' => '98765', 'message_id' => 2, 'text' => 'y', 'payload' => [], 'status' => 'processing']);
+        $stranger = TelegramUpdate::query()->create(['update_id' => 99102, 'telegram_user_id' => '777', 'chat_id' => '555', 'message_id' => 3, 'text' => 'z', 'payload' => [], 'status' => 'processing']);
+        $search = fn (?TelegramUpdate $update, string $query): array => json_decode((string) (new SearchCatalog($update))->handle(new ToolRequest(['query' => $query])), true);
+
+        $this->assertSame($draft->id, $search($asking, 'MZALQ512HALU-000L1')['matching_drafts'][0]['id']);
+        $this->assertSame($draft->id, $search($asking, 'Samsung PM991')['matching_drafts'][0]['id']);
+        $this->assertSame([], $search($asking, 'Kingston KVR32S22S8/16')['matching_drafts']);
+        $this->assertSame([], $search($stranger, 'MZALQ512HALU-000L1')['matching_drafts']);
+        $this->assertSame([], $search(null, 'MZALQ512HALU-000L1')['matching_drafts']);
+
+        $draft->update(['status' => 'approved']);
+        $this->assertSame([], $search($asking, 'MZALQ512HALU-000L1')['matching_drafts']);
+    }
 
     public function test_condition_and_memory_must_match_one_variant(): void
     {

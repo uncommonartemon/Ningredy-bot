@@ -61,7 +61,7 @@ class BotStatus extends Page
                     ->schema([
                         TextEntry::make($check['key'].'_state')->label(__('Состояние'))->state($check['state'])
                             ->badge()->formatStateUsing(fn (string $state): string => match ($state) {
-                                'up' => __('Работает'), 'down' => __('Не работает'), default => __('Неизвестно'),
+                                'up' => __('Работает'), 'down' => __('Не работает'), 'off' => __('Выключено'), default => __('Неизвестно'),
                             })->color(fn (string $state): string => match ($state) {
                                 'up' => 'success', 'down' => 'danger', default => 'gray',
                             }),

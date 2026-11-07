@@ -34,6 +34,8 @@ class TelegramProductUploadAgent implements Agent, HasStructuredOutput
             Classify each attachment: product (the product/its useful detail is clearly visible), label
             (label, receipt or specification screenshot rather than a catalog product photo), unrelated,
             or uncertain. Product photos are manual uploads, never manufacturer/source verified.
+            A SMART or disk diagnostics screenshot is a label attachment about this very used drive: read its
+            state as specifications with the keys health_percent, power_on_hours and data_written_tb, in the units shown.
             If photos show different products or contradict the description, record the conflict and
             do not approve those photos as matching. Readable foreign labels are allowed in this manual
             workflow. Only select an active category supplied in the prompt. Commercial data must come

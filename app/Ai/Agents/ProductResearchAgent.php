@@ -8,6 +8,7 @@ use App\Services\Products\AiAttributeGroups;
 use App\Services\Products\ProductCondition;
 use App\Services\Products\ProductSourceTypes;
 use App\Services\Products\ProductTextEvidenceContract;
+use App\Services\ProductSearch\Catalogs\ReferenceSites;
 use App\Services\ProductSearch\Research\ResearchSourceRoles;
 use Database\Seeders\StarterCatalogSeeder;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
@@ -58,7 +59,10 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
             part is product_type=component, so its category must be whichever entry above is for components or
             parts, never one meant for complete laptops or complete desktop computers. Decide product_type first
             using its explicit rule below, then choose the category consistent with that decision - do not pick
-            category independently and risk it disagreeing with product_type.
+            category independently and risk it disagreeing with product_type. When a category is listed as a
+            kind of another (an SSD under components), choose the kind. A category may list required
+            specifications: write each one you find under exactly that key; one you cannot find on any page
+            is left out, never guessed or filled from a similar product - the card will say it is missing.
 
             {$this->researchInstructions()}
 
@@ -199,6 +203,13 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
             closest observed product - select it the same way and say so; unresolved is for the case where no
             concrete product was observed at all. Leave unconfirmed_operator_codes empty when every supplied code
             was observed.
+            In code_aliases list the other codes of this same part that you saw on pages: the full code of one the
+            label cuts short (MZVLQ512HBLU-00B00 for MZVLQ512HBLU-00B), the retail or base code of an OEM suffix
+            (M425R2GA3PB0-CWM for M425R2GA3PB0-CWMOL). They are asked in the code databases and never enter the card.
+            Leave it empty when you saw none; never compose a code you did not see.
+            health_percent, power_on_hours and data_written_tb are the state of one used unit: they come only from the
+            operator or that unit's own diagnostics, never from a page about the model. A maker's rated endurance is
+            endurance_tbw.
             A visible requirement the operator wrote that no observed page of the requested model shows - most often a
             colour name - does not stop the search either. When the model itself is observed (its listings and the
             manufacturer's sheet name another colour), select the closest observed configuration of that model, write
@@ -224,6 +235,12 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
             and product agree with the request, ignore them when they describe something else. Either way say so
             in code_lookup_verdict (used, ignored or not_applicable, with a short reason); the search continues on
             the web either way.
+            The prompt may list reference sites the operator keeps for particular kinds of products (SSD and HDD,
+            processors, memory...). You decide which fit the product: for each fitting one, look the exact code or
+            model up there with the search given; a page found there supplies only what the row allows (a
+            facts-only site never supplies photos), and it must still show the selected code or full model. Report
+            each listed site in reference_site_results: found, not_found, or not_applicable when the product is
+            not of its kind.
 
             status is a commitment, not a guess: return found only when you are also returning a non-empty title,
             at least one entry in sources, and a primary_source_url pointing at one of those sources. If any of
@@ -266,7 +283,8 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
         return Category::query()
             ->where('is_active', true)
             ->orderBy('sort_order')
-            ->get(['slug', 'name', 'product_search_hint'])
+            ->with(['parent:id,slug', 'requiredAttributeDefinitions'])
+            ->get(['id', 'parent_id', 'slug', 'name', 'product_type_affinity', 'product_search_hint'])
             ->map->productSearchPromptLine()
             ->implode("\n            ");
     }
@@ -327,8 +345,15 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
                 'decision' => $schema->string()->enum(['used', 'ignored', 'not_applicable'])->required(),
                 'reason' => $schema->string()->max(500)->required(),
             ])->required()->description('Your decision about structured product database results in the prompt.'),
+            'reference_site_results' => $schema->array()->max(ReferenceSites::MAX_HINTS)->items($schema->object([
+                'site' => $schema->string()->max(255)->required(),
+                'result' => $schema->string()->enum(['found', 'not_found', 'not_applicable'])->required(),
+            ])->withoutAdditionalProperties())->required()
+                ->description('One entry per reference site listed in the prompt: found, not_found, or not_applicable when the product is not of its kind. Empty when the prompt lists none.'),
             'unconfirmed_operator_codes' => $schema->array()->max(10)->items($schema->string()->max(100))->required()
                 ->description('Operator-supplied EAN/UPC, SKU or part numbers that no observed page shows; empty when all were observed.'),
+            'code_aliases' => $schema->array()->max(6)->items($schema->string()->max(100))->required()
+                ->description('Other codes of this same part observed on pages (full, retail or base code), asked in the code databases only; empty when none.'),
             'request_differences' => $schema->array()->max(10)->items($schema->object([
                 'requirement' => $schema->string()->enum(['color', 'model', 'configuration', 'condition', 'other'])->required(),
                 'requested' => $schema->string()->max(255)->required(),

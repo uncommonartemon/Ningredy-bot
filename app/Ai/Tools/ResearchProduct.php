@@ -7,7 +7,9 @@ use App\Ai\Tools\Concerns\RecordsOperations;
 use App\Jobs\ContinueDraftGallerySearch;
 use App\Models\AiRun;
 use App\Models\AttributeDefinition;
+use App\Models\AttributeValue;
 use App\Models\Category;
+use App\Models\Product;
 use App\Models\ProductDraft;
 use App\Models\ProductSourceAttempt;
 use App\Models\ProductSourcePageEvidence;
@@ -32,8 +34,10 @@ use App\Services\Products\ProductResearchResponseNormalizer;
 use App\Services\Products\ProductSourceAttemptRecorder;
 use App\Services\Products\ProductSourcePriority;
 use App\Services\Products\ProductTextEvidenceContract;
+use App\Services\Products\RequiredSpecifications;
 use App\Services\Products\SourceIdentityProvenance;
 use App\Services\ProductSearch\Catalogs\BrandCatalogs;
+use App\Services\ProductSearch\Catalogs\ReferenceSites;
 use App\Services\ProductSearch\Codes\ProductCodeLookup;
 use App\Services\ProductSearch\Research\InvalidResearchResponse;
 use App\Services\ProductSearch\Research\RecoverableProductResearch;
@@ -190,6 +194,10 @@ class ResearchProduct implements Tool
         // how a code is found there. Icecat, when it answered, keeps its priority.
         $brandCatalogs = app(BrandCatalogs::class);
         $catalogHints = $brandCatalogs->hints($brandCatalogs->forText($query), BrandCatalogs::codesIn($query));
+        // The operator's reference sites per kind of product: the agent decides which fit.
+        $referenceSites = app(ReferenceSites::class);
+        $referenceHints = $referenceSites->hints(BrandCatalogs::codesIn($query));
+        $personSites = $referenceSites->personSites();
         $researchPrompt = $query
             .PHP_EOL.'Input provenance and prioritized search alternatives (observations are not additional mandatory requirements): '
             .json_encode($inputContext, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
@@ -208,6 +216,13 @@ class ResearchProduct implements Tool
                 .json_encode($catalogHints, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
                 .'. Look the exact code up there first, with the search given, and list the page you find among the sources'
                 .' as the manufacturer\'s page; structured database results above, when present, still come first.')
+            .($referenceHints === [] ? '' : PHP_EOL.'Reference sites the operator keeps for particular kinds of products ("for" says which, "take" what they may supply): '
+                .json_encode($referenceHints, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
+                .'. When the product is of a listed kind, look its exact code or model up on those sites with the search given, and list each page'
+                .' you find among the sources with only the roles "take" allows: a facts-only site never supplies photos. A page there must still'
+                .' show the selected code or full model like any source. Report every listed site you considered in reference_site_results.')
+            .($personSites === [] ? '' : PHP_EOL.'Sites only a person opens (the operator gets their links; the bot never uses their pages as a source'
+                .' or a photo page): '.implode(', ', $personSites).'. Do not search them and never return their pages among the sources.')
             .($vocabulary === '' ? '' : PHP_EOL.'Specification keys this catalog already uses: '.$vocabulary
                 .'. Give a specification one of these keys when it means the same thing; a new snake_case key only'
                 .' for a concept not on the list. Two keys for one thing split the storefront filter in two.');
@@ -367,6 +382,9 @@ class ResearchProduct implements Tool
                 $codeLookup->recordVerdict($this->update->id, (string) ($data['code_lookup_verdict']['decision'] ?? ''),
                     (string) ($data['code_lookup_verdict']['reason'] ?? ''), 'product_research');
             }
+            if ($referenceHints !== []) {
+                $referenceSites->record(array_values((array) ($data['reference_site_results'] ?? [])), $this->update->id);
+            }
             $officialGallery = $data['status'] === 'found' ? $this->officialGallery($codeLookup, $data, $queryGtins) : null;
             if ($officialGallery !== null) {
                 // The agent may list the same datasheet page itself (it saw it in the hint) as a
@@ -513,12 +531,20 @@ class ResearchProduct implements Tool
                     report($exception);
                 }
 
+                // Live 2026-11-02: research found an SSD's speeds, the product already
+                // existed, and the found facts were dropped here; the operator who had
+                // asked for exactly those speeds was told the page had no numbers.
+                $foundSpecifications = $this->specificationsMissingFrom($existingProduct, $data['specifications'] ?? []);
+
                 return $this->json([
                     'ok' => true,
                     'status' => 'already_in_catalog',
                     'product_id' => $existingProduct->id,
                     'title' => $existingProduct->title,
                     'active' => $existingProduct->is_active,
+                    'found_specifications' => $foundSpecifications,
+                    ...($foundSpecifications === [] ? [] : ['message' => 'found_specifications — характеристики со страниц, которых в товаре нет.'
+                        .' Если оператор просил их дописать, передай нужные в AddProductSpecifications (facts_json, как есть): повторный поиск не нужен.']),
                 ]);
             }
 
@@ -580,6 +606,9 @@ class ResearchProduct implements Tool
                         'description' => $draft->description,
                         'research_notes' => $draft->research_notes,
                         'specifications' => $draft->specifications,
+                        // The category's required characteristics research did not find: the card
+                        // names them; the assistant may say so too, but never asks mid-search.
+                        'missing_required_specifications' => RequiredSpecifications::forDraft($draft),
                         'sources' => $draft->sources,
                         'primary_source_url' => $draft->primary_source_url,
                         'official_source_url' => $draft->official_source_url,
@@ -831,7 +860,12 @@ class ResearchProduct implements Tool
             'code_lookup_verdict' => ['sometimes', 'nullable', 'array'],
             'code_lookup_verdict.decision' => ['required_with:code_lookup_verdict', 'in:used,ignored,not_applicable'],
             'code_lookup_verdict.reason' => ['required_with:code_lookup_verdict', 'string', 'max:500'],
+            'reference_site_results' => ['sometimes', 'array', 'max:'.ReferenceSites::MAX_HINTS],
+            'reference_site_results.*.site' => ['required', 'string', 'max:255'],
+            'reference_site_results.*.result' => ['required', 'in:found,not_found,not_applicable'],
             'unconfirmed_operator_codes.*' => ['string', 'max:100'],
+            'code_aliases' => ['sometimes', 'array', 'max:6'],
+            'code_aliases.*' => ['string', 'max:100'],
             'request_differences' => ['sometimes', 'array', 'max:10'],
             'request_differences.*' => ['array:requirement,requested,found,evidence'],
             'request_differences.*.requirement' => ['required', 'in:color,model,configuration,condition,other'],
@@ -875,6 +909,12 @@ class ResearchProduct implements Tool
                 throw ValidationException::withMessages(["sources.{$index}.roles" => 'A photo candidate cannot be both exact and a different potentially compatible configuration. Keep the observed source and choose its actual candidate role; neither role verifies the gallery.']);
             }
         }
+        // What the operator's reference sites forbid is kept by the server, not left to the prompt:
+        // a facts-only site gives no photos, a site only a person opens is not queued at all.
+        $referenceSites = app(ReferenceSites::class);
+        $personHosts = $referenceSites->personOnlyHosts($data['sources']);
+        $data['sources'] = $referenceSites->restrictRoles($data['sources']);
+        $data['image_urls'] = array_values(array_filter($data['image_urls'], fn (string $url): bool => $referenceSites->allowsPhotos($url)));
 
         if ($data['status'] === 'unresolved') {
             // Live #197: the operator's label code was on no page, sibling regional
@@ -911,12 +951,20 @@ class ResearchProduct implements Tool
         }
 
         if ($data['status'] === 'found') {
+            $sources = app(ProductSourcePriority::class)->sortSources($data['sources'], $data['brand'] ?? null);
+            // A page on a site only a person opens was dropped above: the agent is
+            // told that cause, not a false «no source» (audit 2026-11-04, C3).
+            if ($personHosts !== [] && $this->primarySource($sources) === null) {
+                throw ValidationException::withMessages(['sources' => 'The page(s) on '.implode(', ', $personHosts)
+                    .' belong to reference sites only a person opens: the bot never uses them as a source or a photo page (the operator gets their links).'
+                    .' Keep the facts you read there as specifications with their source_url, and name a page the bot can open that shows this exact product (a shop, the maker, a database record) as the source;'
+                    .' with none observed, answer unresolved and say so in research_notes.']);
+            }
             Validator::make($data, [
                 'title' => ['required', 'string'],
                 'sources' => ['required', 'array', 'min:1'],
                 'primary_source_url' => ['required', 'url:http,https'],
             ])->validate();
-            $sources = app(ProductSourcePriority::class)->sortSources($data['sources'], $data['brand'] ?? null);
             Validator::make(['primary_source' => $this->primarySource($sources)], [
                 'primary_source' => ['required', 'array'],
             ], ['primary_source.required' => 'The found result has no unblocked source that identifies the exact product. Keep observed URLs and facts and add the page or record that shows this exact product; do not invent or relabel its source type.'])->validate();
@@ -962,8 +1010,11 @@ class ResearchProduct implements Tool
     private function officialGallery(ProductCodeLookup $lookup, array $data, array $queryGtins): ?array
     {
         $specs = collect($data['specifications'] ?? []);
-        $codes = $specs->whereIn('key', ['sku', 'mpn', 'part_number', 'product_code'])->pluck('value')
-            ->push($data['model'] ?? null)->filter(fn (mixed $code): bool => is_string($code) && trim($code) !== '')
+        // The operator's own code leads even in a row the agent named itself (label_code,
+        // live #157); a barcode among them is asked as a barcode below.
+        $codes = $specs->whereIn('key', ['sku', 'mpn', 'part_number', 'product_code', 'label_code'])->pluck('value')
+            ->push($data['model'] ?? null)->merge((array) ($data['unconfirmed_operator_codes'] ?? []))
+            ->filter(fn (mixed $code): bool => is_string($code) && trim($code) !== '' && ! ctype_digit(trim($code)))
             ->map(fn (string $code): string => trim($code))
             // The datasheet's code has no localisation suffix (AA3B6UA#ABA → AA3B6UA).
             ->flatMap(fn (string $code): array => str_contains($code, '#') ? [$code, trim((string) strstr($code, '#', true))] : [$code])
@@ -982,6 +1033,15 @@ class ResearchProduct implements Tool
         $sameGtin = fn (array $result): bool => array_intersect(array_map(fn ($gtin) => ltrim((string) $gtin, '0'), (array) ($result['gtins'] ?? [])),
             array_map(fn ($gtin) => ltrim((string) $gtin, '0'), $gtins)) !== [];
         $matches = fn (array $result): bool => $samePart($result) || $sameGtin($result);
+        // Icecat files a part under one exact code (MZVLQ512HBLU-00B00, not -00B or -00BH1,
+        // checked live 2026-11-06). Other codes of the part come from what the agent saw;
+        // such a record goes the way of one found by name: its photos are checked like any page's.
+        $aliases = collect((array) ($data['code_aliases'] ?? []))->push($data['selected_identity']['observed_model'] ?? null)
+            ->filter(fn (mixed $code): bool => is_string($code) && trim($code) !== '')->map(fn (string $code): string => trim($code))
+            ->reject(fn (string $code): bool => in_array($normal($code), array_map($normal, $codes), true))
+            ->unique()->values()->all();
+        $byAlias = fn (array $result): bool => array_intersect(
+            [$normal((string) ($result['part_number'] ?? '')), $normal((string) ($result['queried_part'] ?? ''))], array_map($normal, $aliases)) !== [];
         // A datasheet the research found by name on the catalogue's own site: its page sits
         // behind a bot check, its number is in the address, and the record is read by that
         // number through the API (operator, 2026-10-30: Icecat first for a name without a code).
@@ -989,7 +1049,7 @@ class ResearchProduct implements Tool
             ->map(fn (array $source): ?string => ProductCodeLookup::icecatIdFromUrl((string) ($source['url'] ?? '')))
             ->filter()->unique()->take(2)->values()->all();
         try {
-            $found = collect($lookup->lookup($gtins, $data['brand'] ?? null, $codes, $this->update->id, 'official_gallery'))
+            $found = collect($lookup->lookup($gtins, $data['brand'] ?? null, [...$codes, ...$aliases], $this->update->id, 'official_gallery'))
                 ->filter(fn (array $result): bool => $result['source'] === 'icecat' && $result['found'] && ($result['page_url'] ?? null) !== null);
             foreach ($pageIds as $pageId) {
                 $byNumber = $lookup->icecatById($pageId, $this->update->id, 'official_gallery');
@@ -1022,8 +1082,8 @@ class ResearchProduct implements Tool
         // A record the research itself listed that names the selected brand and model is
         // the agent's own identification: its gallery is offered first, and its photos are
         // checked like any page's, not as a code-confirmed record.
-        $namedByResearch = ! $sameCode && in_array((string) ($match['icecat_id'] ?? ''), $pageIds, true)
-            && $this->recordNamesSelectedProduct($match, $data);
+        $namedByResearch = ! $sameCode && ($byAlias($match) || (in_array((string) ($match['icecat_id'] ?? ''), $pageIds, true)
+            && $this->recordNamesSelectedProduct($match, $data)));
         $images = collect($match['images'])->filter(fn (array $image): bool => $image['width'] >= 700 || $image['width'] === 0)
             ->pluck('url')->values()->all();
         app(ProductSourceAttemptRecorder::class)->record(['telegram_update_id' => $this->update->id,
@@ -1045,7 +1105,7 @@ class ResearchProduct implements Tool
             'image_urls' => $images, 'roles' => ['facts', 'exact_photo'], '_official_gallery' => true,
             'applicability_reason' => $sameCode
                 ? 'Official datasheet (Icecat) for the same part number/GTIN as the selected product.'
-                : 'Official datasheet (Icecat) the research found by name; its code is not among the selected product\'s codes, so its photos are checked like any page\'s.',
+                : 'Official datasheet (Icecat) the research found by name or by another code of the part; its code is not among the selected product\'s codes, so its photos are checked like any page\'s.',
             // The database record matched by the exact code is this source's identity.
             // Its page may sit behind a bot check: live #14's showed only one, the page
             // look replaced this evidence, and the official gallery lost to 800px shop photos.
@@ -1080,6 +1140,26 @@ class ResearchProduct implements Tool
         }
 
         return ProductResearchConfigurationGuard::containsTokens($title, $model);
+    }
+
+    /**
+     * Researched specifications the catalog product does not have yet, each with the
+     * page and quotation it came from.
+     *
+     * @param  list<array<string, mixed>>  $specifications
+     * @return list<array<string, mixed>>
+     */
+    private function specificationsMissingFrom(Product $product, array $specifications): array
+    {
+        $known = AttributeValue::query()
+            ->where(fn ($query) => $query->where('product_id', $product->id)->orWhereIn('product_variant_id', $product->variants()->pluck('id')))
+            ->with('definition:id,key')->get()->pluck('definition.key')->filter()->all();
+
+        return collect($specifications)
+            ->filter(fn (mixed $spec): bool => is_array($spec) && filled($spec['source_url'] ?? null) && filled($spec['source_excerpt'] ?? null)
+                && ! in_array($spec['key'] ?? null, $known, true))
+            ->map(fn (array $spec): array => array_intersect_key($spec, array_flip(['key', 'name', 'value', 'source_url', 'source_excerpt'])))
+            ->take(40)->values()->all();
     }
 
     private function primarySource(array $sources): ?array

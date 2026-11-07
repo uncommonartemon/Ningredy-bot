@@ -186,27 +186,7 @@ final class BrandCatalogs
      */
     private function fill(?string $template, BrandCatalog $catalog, array $codes, ?string $model, bool $encode, bool $keepUnfilled = false): array
     {
-        $template = trim((string) $template);
-        if ($template === '') {
-            return [];
-        }
-        $value = fn (string $raw): string => $encode ? rawurlencode($raw) : $raw;
-        $base = str_replace('{brand}', $value((string) $catalog->brand), $template);
-        // A search the agent runs itself may keep a placeholder it can fill from what it learns.
-        if ($keepUnfilled && ((str_contains($base, '{code}') && $codes === []) || (str_contains($base, '{model}') && blank($model)))) {
-            return [$base];
-        }
-        if (str_contains($base, '{code}')) {
-            return collect($codes)->map(fn (string $code): string => str_replace('{code}', $value($code), $base))
-                ->map(fn (string $filled): string => str_contains($filled, '{model}')
-                    ? (filled($model) ? str_replace('{model}', $value((string) $model), $filled) : '') : $filled)
-                ->filter()->unique()->take(3)->values()->all();
-        }
-        if (str_contains($base, '{model}')) {
-            return filled($model) ? [str_replace('{model}', $value((string) $model), $base)] : [];
-        }
-
-        return [$base];
+        return CodeTemplate::fill($template, $codes, $model, (string) $catalog->brand, $encode, $keepUnfilled);
     }
 
     /** @return Collection<int, BrandCatalog> */

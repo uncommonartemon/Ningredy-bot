@@ -36,6 +36,14 @@ class TelegramDraftEditAgent implements Agent, HasStructuredOutput
             field or specification. Never erase unspecified specifications. Specification names must
             match an existing name when updating it; the existing key must remain unchanged.
 
+            key is for a specification change only, otherwise null: the key of the existing specification
+            when changing or removing it; for a new one the fitting key from missing_required_specifications
+            or catalog_keys, else null. A new specification's name is in English, the catalog's source
+            language, whatever language the operator wrote in ("скорость записи" is "Write speed"). Its
+            value keeps the operator's numbers exactly, with units and generic words in English
+            ("115 Вт" is "115 W", "5000 МБ/с" is "5000 MB/s"). If they name a characteristic without a
+            value, return no changes and say the value is needed: never supply one from your knowledge.
+
             Normalize prices to decimal strings without thousands separators, currency to three-letter
             ISO code, quantity and warranty_months to nonnegative integer strings. Do not assume a
             currency when absent. condition: new, open_box, used or refurbished. product_type: laptop,
@@ -54,6 +62,7 @@ class TelegramDraftEditAgent implements Agent, HasStructuredOutput
             'summary' => $schema->string()->max(500)->required(),
             'changes' => $schema->array()->max(40)->items($schema->object([
                 'field' => $schema->string()->enum(self::FIELDS)->required(),
+                'key' => $schema->string()->max(100)->nullable()->required(),
                 'name' => $schema->string()->max(255)->nullable()->required(),
                 'value' => $schema->string()->max(5000)->nullable()->required(),
                 'group' => AiAttributeGroups::schema($schema),

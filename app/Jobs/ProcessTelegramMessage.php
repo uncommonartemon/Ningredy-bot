@@ -47,6 +47,14 @@ class ProcessTelegramMessage implements ShouldQueue
 
     public array $backoff = [30, 180];
 
+    /**
+     * One provider call of the assistant; its tools run between calls, each with limits
+     * of its own. Plain answers took 7 to 14 s in the journal. At the 24 minutes this used
+     * to be, a call that never came back held the assistant queue with nothing to show
+     * (live #388: no answer and no step for twelve minutes); now it ends and is retried.
+     */
+    private const int ASSISTANT_CALL_TIMEOUT_SECONDS = 300;
+
     public bool $freshConversation = false;
 
     public function __construct(public int $telegramUpdateId, bool $freshConversation = false)
@@ -176,7 +184,7 @@ class ProcessTelegramMessage implements ShouldQueue
             $prompt = $update->reply_to_text
                 ? "[Пользователь ответил (Reply) на сообщение бота: \"{$update->reply_to_text}\"]\n{$update->text}"
                 : (string) $update->text;
-            $response = $agent->prompt($prompt, provider: $provider, model: $model, timeout: 1440);
+            $response = $agent->prompt($prompt, provider: $provider, model: $model, timeout: self::ASSISTANT_CALL_TIMEOUT_SECONDS);
             if ($this->isCancelled($update)) {
                 $this->finishCancelledRun($update, $run, [
                     'invocation_id' => $response->invocationId,

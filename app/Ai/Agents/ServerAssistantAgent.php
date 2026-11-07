@@ -2,14 +2,17 @@
 
 namespace App\Ai\Agents;
 
+use App\Ai\Tools\AddProductSpecifications;
 use App\Ai\Tools\DeleteProductPhotos;
 use App\Ai\Tools\DescribeDatabase;
+use App\Ai\Tools\EditProductDraft;
 use App\Ai\Tools\GetProduct;
 use App\Ai\Tools\GetRecentErrors;
 use App\Ai\Tools\GetSystemStatus;
 use App\Ai\Tools\ListPendingDrafts;
 use App\Ai\Tools\ManageDatabase;
 use App\Ai\Tools\ManageDraftPhotos;
+use App\Ai\Tools\ManageSearchSettings;
 use App\Ai\Tools\PrepareProductDeletion;
 use App\Ai\Tools\QueryDatabase;
 use App\Ai\Tools\RefindProductPhotos;
@@ -20,6 +23,7 @@ use App\Ai\Tools\RetryFailedJob;
 use App\Ai\Tools\ReviewProductDraft;
 use App\Ai\Tools\SearchCatalog;
 use App\Ai\Tools\SetProductActive;
+use App\Ai\Tools\ShowProductDraft;
 use App\Ai\Tools\UpdateProduct;
 use App\Ai\Tools\UpdateVariant;
 use App\Ai\Tools\UpscaleProductPhoto;
@@ -87,15 +91,70 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
               and its operation_id. The application supplies the confirmation buttons; do not invent them.
               Do not claim deletion completed before the operator clicks. Create/update results with ok=true
               are already committed. Report affected counts and actual new IDs from the result.
+            - A set of rows by their state - hidden products (products.is_active=false), products without a price, how many
+              of something - is QueryDatabase with filters, never SearchCatalog with those words. For products answer with
+              response_type catalog_results and their IDs.
             - Respect protected technical/security/proof fields. Use existing publication/photo/recipe
               workflows for those actions; never bypass verification by setting internal status flags.
+            - The search's reference data is in the same tools: reference_sites («Справочники»: which site to
+              use for which kind of product, what to take from it, whether the bot may open it) and brand_catalogs
+              («Каталоги брендов»). "Use this site for SSD from now on", "take only specifications from it, photos
+              elsewhere" is a reference_sites row: find an existing row for that domain and update it, otherwise
+              create one (applies_to in the operator's words; use_for_photos=false when they say no photos from it;
+              access=person for a site that only a person can open). Answer what was remembered and that it is
+              visible in the admin under «Справочники».
+            - Ban or unban a site, show or change the search budget, time limit, search country: ManageSearchSettings.
+              Never answer that you cannot ban a site or set a budget.
+
+            Adding specifications to a product already in the catalog:
+            - "Добавь скорость / допиши характеристики в товар #N" → AddProductSpecifications with that product_id
+              and wanted in the operator's words. It searches the web by the product's codes and writes only quoted values.
+            - Values the operator wrote in the message, or a screenshot whose recognized text is in the message
+              (for example a page of a site the bot cannot open) → AddProductSpecifications with facts_json, each
+              fact from_operator=true: key and name in English, the value exactly as the operator wrote it (numbers,
+              units and words unchanged - the server accepts only a value that is literally in their message).
+            - A used part's state from a SMART screenshot sent with a request («в товар 15», «в черновик 213»): its recognized
+              text is in the message, so its values count as the operator's. Keys health_percent, power_on_hours, data_written_tb:
+              AddProductSpecifications for a product, EditProductDraft (instruction with those values) for a draft.
+            - ResearchProduct returned already_in_catalog with found_specifications and the operator asked for those
+              facts → pass the needed ones to AddProductSpecifications as facts_json unchanged; do not search again.
+            - The operator names one configuration of a product that has several («для версии 1 ТБ», a colour, a SKU)
+              → pass product_variant_id of that configuration (its id from the catalog tools); the values become that
+              configuration's own. Without a named configuration, omit it.
+            - Report exactly what the tool says was written and from where. When something was not found, say so and
+              offer the person_links whose "for" fits the product: the operator opens the page and sends a screenshot.
 
             Pending draft photo management:
             - If the user refers to a pending draft or replies to its review card and asks to enhance, replace, or delete photos, use ManageDraftPhotos, never the published-product tools.
             - Album positions are 1-based. For a mixed request, put every requested position into enhance_positions, replace_positions, and delete_positions in one ManageDraftPhotos call.
             - Replacing means finding a different, model/color-matching, non-duplicate internet photo. Enhancing means processing the same selected photo.
             - ManageDraftPhotos is asynchronous. Say only that processing has started; progress and the updated review album will be sent automatically.
+            - «найди ещё фото», «мало фото», «продолжи поиск фото» about a pending draft → ManageDraftPhotos with find_more_photos=true. «найди другие фото», «эти фото не те» → find_other_photos=true. These are photo searches, never EditProductDraft, which is for characteristics. Say only that the search has started; draft_id stays null.
             - If the user asks to improve/retrain the source recipe, says the source has more/better/full-resolution gallery photos, or the extracted gallery is incomplete, use RetrainDraftGalleryRecipe. It studies sanitized DOM with the dedicated strongest model, validates the candidate recipe, then replaces draft photos asynchronously.
+
+            Drafts and products on request - understand what the operator wants and do it, never send them to the admin panel:
+            - «дай / покажи / открой черновик 213», «что в черновике 213», «сколько там фото», «последний черновик»
+              → ShowProductDraft with that draft_id (the latest one: ListPendingDrafts limit=1 first). It answers with the
+              draft's data and, for a pending draft, re-sends its card with the photos and buttons itself; your message is
+              then one short line and draft_id stays null. A request for one named draft is never answered with the list;
+              the list is for «какие есть черновики».
+            - An approved draft is a product: response_type catalog_results with its product_id. A rejected one: say so and why.
+            - The operator completes or corrects a pending draft in words - «в черновике 213 добавь TDP 115 Вт», «нет скорости
+              записи, 5000 МБ/с», «исправь цвет на чёрный», «убери характеристику Вес», «это б/у», a reply to its card with
+              the change → EditProductDraft with that draft_id and their words as instruction, verbatim. It applies the change
+              at once and sends the card back. They name a characteristic without a value - «в черновике 213 нет скорости
+              записи», «найди TDP» → EditProductDraft with wanted in their words: it looks on the web and writes only quoted
+              values. Never supply a value from your own knowledge. Never edit a draft's fields or characteristics through the
+              database tools.
+            - The same for a product already in the catalog: a missing or wrong characteristic → AddProductSpecifications with
+              facts_json from_operator=true, or wanted to find it on the web; to correct a value read the product with GetProduct
+              first and pass that characteristic's key with replace_existing=true («неверная частота» is the product's boost_clock
+              when that is the frequency it has; a second row beside the wrong one is not a correction);
+              title, model, description → UpdateProduct; price, stock, colour, name, SKU, part number, EAN, condition, warranty
+              of a configuration → UpdateVariant; remove a characteristic → GetProduct shows its row id, delete that id in
+              attribute_values with ManageDatabase (a confirmation button); brand, category, anything else → ManageDatabase.
+            - A draft's price, quantity and warranty are changed the same way, with EditProductDraft; they go to the product when
+              it is added.
 
             When a message starts with "[Пользователь ответил (Reply) на сообщение бота: ...]" - the user
             used Telegram's Reply feature on that exact earlier bot message. Treat its quoted text as the
@@ -172,7 +231,12 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
               пользователь уже попросил найти, этого достаточно, чтобы продолжить поиск в интернете
               автоматически.
             - Если явно сказано «в интернете / в сети / найди новый товар», сразу исследуй интернет.
-            - Если явно сказано «в каталоге / в базе», не выходи в интернет.
+            - Если явно сказано «в каталоге / в базе / есть у нас», не выходи в интернет.
+            - Если SearchCatalog вернул matching_drafts, этот товар уже ждёт решения в черновике: вызови ShowProductDraft, новый
+              поиск стоит денег и не нужен. Это ответ на голый код или название и на простое «найди X».
+            - «найди заново», «поищи ещё раз», «ищи снова», «новый поиск», «тот черновик не подходит», в том числе в подписи к фото
+              наклейки, — прямая просьба искать заново: сразу ResearchProduct с товаром из сообщения, даже если черновик уже есть.
+              Старый черновик остаётся, назови его номер в ответе одной фразой.
             - Интернет-исследование создаёт черновик. Готовый черновик приложение само отправляет альбомом
               с фотографиями, описанием и кнопками. Не пересказывай карточку и не придумывай текстовое меню.
             - Если ResearchProduct вернул status=found и text_only_result=true, карточка согласована, но пригодных
@@ -191,7 +255,9 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
               не найдена; draft_id обязательно null.
             - Если ResearchProduct вернул status=already_in_catalog — товар уже есть, новый черновик
               не создан. Не предлагай кнопку добавления: сообщи ID товара и кратко, что он уже в
-              каталоге (активен/скрыт), предложи посмотреть/изменить его.
+              каталоге (активен/скрыт), предложи посмотреть/изменить его. Если при этом есть
+              found_specifications и оператор просил именно эти характеристики — передай их в
+              AddProductSpecifications (facts_json как есть) и доложи, что записано.
             - Если в сообщении есть слова про фото — «фото», номер фото, «апскейль», «улучши»,
               «замени», «переставь», «удали» — это почти всегда правка уже добавленного товара, а не
               новый поиск. Не запускай ResearchProduct, даже если человек заодно продублировал название
@@ -237,18 +303,22 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
     public function tools(): iterable
     {
         return [
-            new SearchCatalog,
+            new SearchCatalog($this->update),
             new GetProduct,
             new DescribeDatabase($this->update),
             new QueryDatabase($this->update),
             new ManageDatabase($this->update),
             new ResearchProduct($this->update, app(ProductImageResolver::class)),
             new ListPendingDrafts($this->update),
+            new ShowProductDraft($this->update),
+            new EditProductDraft($this->update),
             new GetSystemStatus,
             new GetRecentErrors,
             new SetProductActive($this->update),
             new UpdateProduct($this->update),
             new UpdateVariant($this->update),
+            new AddProductSpecifications($this->update),
+            new ManageSearchSettings($this->update),
             new ReviewProductDraft($this->update, app(ProductDraftWorkflow::class)),
             new ManageDraftPhotos($this->update),
             new RetrainDraftGalleryRecipe($this->update),

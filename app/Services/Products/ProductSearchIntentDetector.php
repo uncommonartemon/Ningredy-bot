@@ -2,16 +2,41 @@
 
 namespace App\Services\Products;
 
+use App\Services\Ai\AiSettings;
 use Illuminate\Support\Str;
 
 class ProductSearchIntentDetector
 {
+    /** The caption says not to search: /add, «не ищи», «без поиска», "don't search". */
+    public function refusesSearch(?string $message): bool
+    {
+        $text = mb_strtolower(trim((string) $message));
+
+        return $text !== '' && (preg_match('/^\/add(?:@\w+)?(?:\s|$)/u', $text) === 1
+            || preg_match('/\b(?:не\s+(?:(?:надо|нужно|треба)\s+)?(?:ищи\w*|искать|шукай\w*|шукати)|без\s+(?:поиск\w*|пошук\w*|интернет\w*|інтернет\w*)|(?:do\s+not|don[\x{2019}\x{0027}]?t|without|no)\s+(?:search\w*|research\w*|internet|web|look\s+up))\b/u', $text) === 1);
+    }
+
+    /**
+     * Whether a single photo with this caption is the operator's own product before
+     * the photo is read: their explicit refusal to search (/add, «не ищи») or the
+     * setting «всегда ручная загрузка». A price, a condition or a description is not
+     * an instruction: such a photo is read first, and the reader - seeing the caption
+     * and the picture together - says what the operator wants (module 71).
+     */
+    public function photoIsManualBeforeReading(string $caption, string $routing): bool
+    {
+        if (trim($caption) === '' || $this->hasExplicitSearchRequest($caption)) {
+            return false;
+        }
+
+        return $this->refusesSearch($caption) || $routing === AiSettings::PHOTO_CAPTION_MANUAL;
+    }
+
     /** A caption must ask for search explicitly; a model/specification list is upload material. */
     public function hasExplicitSearchRequest(?string $message): bool
     {
         $text = mb_strtolower(trim((string) $message));
-        if ($text === '' || preg_match('/^\/add(?:@\w+)?(?:\s|$)/u', $text)
-            || preg_match('/\b(?:не\s+(?:(?:надо|нужно|треба)\s+)?(?:ищи\w*|искать|шукай\w*|шукати)|без\s+(?:поиск\w*|пошук\w*|интернет\w*|інтернет\w*)|(?:do\s+not|don[\x{2019}\x{0027}]?t|without|no)\s+(?:search\w*|research\w*|internet|web|look\s+up))\b/u', $text)) {
+        if ($text === '' || $this->refusesSearch($text)) {
             return false;
         }
 

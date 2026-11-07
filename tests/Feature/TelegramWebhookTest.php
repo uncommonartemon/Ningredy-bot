@@ -128,10 +128,10 @@ class TelegramWebhookTest extends TestCase
         ];
     }
 
-    public function test_descriptions_and_negative_search_captions_remain_manual_uploads(): void
+    public function test_negative_search_captions_remain_manual_uploads_and_a_description_is_read_first(): void
     {
         Queue::fake();
-        foreach (['Dell Latitude 5450, used, 16 GB RAM', 'Не ищи в интернете, добавь по описанию',
+        foreach (['Не ищи в интернете, добавь по описанию',
             "Don't search the web, use this description.", '/add Dell Latitude, search details later'] as $index => $caption) {
             $payload = $this->messagePayload(updateId: 9050 + $index);
             unset($payload['message']['text']);
@@ -141,9 +141,18 @@ class TelegramWebhookTest extends TestCase
                 'X-Telegram-Bot-Api-Secret-Token' => 'test-secret',
             ])->assertOk()->assertJson(['upload' => true]);
         }
+        // A description is not an instruction (module 71): the photo is read first and
+        // its reader, seeing the caption and the picture, says what the operator wants.
+        $payload = $this->messagePayload(updateId: 9053);
+        unset($payload['message']['text']);
+        $payload['message']['caption'] = 'Dell Latitude 5450, used, 16 GB RAM';
+        $payload['message']['photo'] = [['file_id' => 'operator-photo', 'width' => 800, 'height' => 600]];
+        $this->postJson('/api/telegram/webhook', $payload, [
+            'X-Telegram-Bot-Api-Secret-Token' => 'test-secret',
+        ])->assertOk()->assertJson(['photo' => true]);
 
-        Queue::assertPushed(ProcessTelegramProductUpload::class, 4);
-        Queue::assertNotPushed(TranscribeTelegramPhoto::class);
+        Queue::assertPushed(ProcessTelegramProductUpload::class, 3);
+        Queue::assertPushed(TranscribeTelegramPhoto::class, 1);
         Queue::assertNotPushed(ProcessTelegramMessage::class);
     }
 

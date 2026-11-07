@@ -3,6 +3,7 @@
 namespace App\Services\Support;
 
 use App\Models\AiRun;
+use App\Models\Category;
 use App\Models\ImageRenditionRule;
 use App\Models\ImageRenditionRuleOutcome;
 use App\Models\ProductDraft;
@@ -162,6 +163,9 @@ final class DiagnosticReport
             'version: '.$this->version(),
             'php: '.PHP_VERSION.' · os: '.PHP_OS_FAMILY.' · laravel: '.app()->version(),
             "window: last {$days} days · requests: ".$updates->count(),
+            'services: icecat '.(CodeDatabases::enabled('icecat') ? 'on' : 'off').' (login '.(CodeDatabases::icecatUsernameSource() ?? 'none')
+                .', last answer '.(CodeDatabases::lastIcecatAnswer() ?? '-').') · upcitemdb '.(CodeDatabases::enabled('upcitemdb') ? 'on' : 'off'),
+            'active categories: '.Category::query()->where('is_active', true)->count(),
             '',
         ];
         try {

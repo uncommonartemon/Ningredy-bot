@@ -7,6 +7,7 @@ use App\Exceptions\MissingDraftMediaException;
 use App\Exceptions\UnreconciledDraftSpecificationsException;
 use App\Exceptions\UnverifiedDraftMediaException;
 use App\Jobs\StoreProductImages;
+use App\Jobs\TranslateProductText;
 use App\Models\AttributeDefinition;
 use App\Models\Brand;
 use App\Models\Category;
@@ -50,6 +51,26 @@ class ProductDraftWorkflow
             // lookup now sees the committed product and its variant.
             return $this->doApprove($draft, $reviewer, $telegramReviewerId, $acceptUnreconciled);
         }
+    }
+
+    /**
+     * Specifications added to a published product (the assistant's «допиши в
+     * товар», operator 2026-11-02): written the way an approved card writes them,
+     * shared by the product's configurations unless the key belongs to one.
+     * Leaving out what the product already has is the caller's decision.
+     *
+     * A configuration named by the operator («для версии 1 ТБ») takes every value
+     * as its own (audit 2026-11-04, C5).
+     *
+     * @param  list<array{key: string, name: string, value: string}>  $specifications
+     */
+    public function addSpecifications(Product $product, array $specifications, ?ProductVariant $configuration = null): void
+    {
+        $variant = $configuration ?? $product->defaultVariant()->first() ?? $product->variants()->orderBy('id')->first();
+        $category = $product->category()->first();
+        throw_if($variant === null || $category === null, \RuntimeException::class, 'У товара нет конфигурации или категории.');
+        throw_if($configuration !== null && (int) $configuration->product_id !== (int) $product->id, \RuntimeException::class, 'Конфигурация принадлежит другому товару.');
+        $this->syncAttributes($product, $variant, $category, $specifications, variantScoped: $configuration !== null);
     }
 
     private function assertReadyForApproval(ProductDraft $draft, bool $acceptUnreconciled = false): void
@@ -217,6 +238,11 @@ class ProductDraftWorkflow
             }
 
             StoreProductImages::dispatch($product->id, $variant->id, $draft->id)->afterCommit();
+            // A correction in the operator's words dropped the translations of what it
+            // changed: the published card gets them back from its English text.
+            if (filled($draft->translations) && app(CatalogTextTranslator::class)->lacksTranslations($product->fresh())) {
+                TranslateProductText::dispatch($product->id)->afterCommit();
+            }
 
             return $product;
         });
@@ -299,7 +325,7 @@ class ProductDraftWorkflow
         // code it does not mention stays. An operator's edit replaces them all.
         $keepCodes = $variant->exists && ! $targetVariantId;
 
-        $commercial = $draft->isManualUpload() ? ($draft->manualIntake()['commercial'] ?? []) : [];
+        $commercial = $draft->manualIntake()['commercial'] ?? [];
         $quantityChanged = isset($commercial['quantity'])
             && (! $targetVariantId || (int) $commercial['quantity'] !== (int) $variant->quantity);
 
@@ -416,6 +442,13 @@ class ProductDraftWorkflow
                     'is_variant' => $isVariantAttribute,
                 ],
             );
+            // The definition decides how a value is stored: a number by its type and unit
+            // (an HDD's 5400 rpm, a module's 16 GB), the configuration or the product by its
+            // scope. The seven laptop keys above only shape a definition created on the spot.
+            $isVariantAttribute = (bool) $definition->is_variant;
+            if ($numericValue === null && $definition->data_type === 'number') {
+                [$dataType, $numericValue, $unit] = $this->numberByDefinition($definition, (string) $rawValue);
+            }
             if ($definition->wasRecentlyCreated && is_array($specification)) {
                 $group = AiAttributeGroups::resolve($specification['group'] ?? null);
                 if ($group !== null) {
@@ -566,6 +599,21 @@ class ProductDraftWorkflow
         };
 
         if ($key === 'storage' && Str::contains($lower, ['tb', 'тб'])) {
+            $number *= 1024;
+        }
+
+        return ['number', $number, $unit];
+    }
+
+    /** A value of a numeric definition: its first number in the definition's unit (terabytes become gigabytes). */
+    private function numberByDefinition(AttributeDefinition $definition, string $value): array
+    {
+        if (preg_match('/(\d+(?:[.,]\d+)?)/', $value, $matches) !== 1) {
+            return ['text', null, null];
+        }
+        $number = (float) str_replace(',', '.', $matches[1]);
+        $unit = $definition->default_unit;
+        if ($unit === 'GB' && Str::contains(Str::lower($value), ['tb', 'тб'])) {
             $number *= 1024;
         }
 

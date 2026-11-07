@@ -9,6 +9,7 @@ use Illuminate\Contracts\JsonSchema\JsonSchema;
 use Laravel\Ai\Contracts\Tool;
 use Laravel\Ai\Tools\Request;
 use Stringable;
+use Throwable;
 
 class DescribeDatabase implements Tool
 {
@@ -21,7 +22,12 @@ class DescribeDatabase implements Tool
 
     public function handle(Request $request): Stringable|string
     {
-        app(TelegramDatabaseOperator::class)->assertAuthorized($this->update);
+        try {
+            app(TelegramDatabaseOperator::class)->assertAuthorized($this->update);
+        } catch (Throwable $exception) {
+            // An answer the assistant can repeat; a thrown one ends the whole request.
+            return json_encode(['ok' => false, 'error' => $exception->getMessage()], JSON_UNESCAPED_UNICODE);
+        }
 
         $description = app(DatabaseOperatorService::class)->describe();
         $table = trim((string) ($request['table'] ?? ''));

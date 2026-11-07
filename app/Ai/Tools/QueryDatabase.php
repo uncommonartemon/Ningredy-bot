@@ -17,7 +17,7 @@ class QueryDatabase implements Tool
 
     public function description(): Stringable|string
     {
-        return 'Find and count table records by IDs, inclusive ID range, all records, or column filters. selection_json example: {"id_from":5,"id_to":10}, {"all":true}, or {"filters":[{"column":"name","operator":"contains","value":"RAM"}]}. Query rows and their actual IDs yourself; do not ask the operator for IDs when they gave a usable name, SKU, range or all. Results are paginated with limit/offset; never interpret the first page as the entire table.';
+        return 'Find and count table records by IDs, inclusive ID range, all records, or column filters. selection_json example: {"id_from":5,"id_to":10}, {"all":true}, or {"filters":[{"column":"name","operator":"contains","value":"RAM"}]}. Operators: =, !=, >, >=, <, <=, in, not_in, contains, starts_with, is_null, not_null. Query rows and their actual IDs yourself; do not ask the operator for IDs when they gave a usable name, SKU, range or all. Results are paginated with limit/offset; never interpret the first page as the entire table.';
     }
 
     public function handle(Request $request): Stringable|string

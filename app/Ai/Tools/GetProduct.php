@@ -18,7 +18,7 @@ class GetProduct implements Tool
     public function handle(Request $request): Stringable|string
     {
         $product = Product::query()->with([
-            'brand', 'category', 'variants.attributes.definition', 'media', 'sources',
+            'brand', 'category', 'attributes.definition', 'variants.attributes.definition', 'media', 'sources',
         ])->find($request->integer('product_id'));
 
         if (! $product) {

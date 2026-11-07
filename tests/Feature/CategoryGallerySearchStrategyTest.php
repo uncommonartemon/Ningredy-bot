@@ -12,8 +12,10 @@ class CategoryGallerySearchStrategyTest extends TestCase
 
     public function test_seeded_categories_have_the_expected_gallery_search_strategies(): void
     {
+        // Components search galleries the way laptops do since module 68 (operator,
+        // 2026-11-04): the static pictures of a reseller page carried «related products».
         $this->assertSame(
-            Category::GALLERY_SEARCH_VISION_FIRST,
+            Category::GALLERY_SEARCH_PLAYWRIGHT_FIRST,
             Category::query()->where('slug', 'components')->firstOrFail()->gallerySearchStrategy(),
         );
         $this->assertSame(
