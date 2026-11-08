@@ -242,7 +242,9 @@ class ProductImageVisionVerifier
                 // this part (live #402: the drive's real label, HFM512GDJTNG-8310 BA against
                 // -8310A, was refused and its back with no code went out). A different form
                 // factor is reported as body, not identity, and stays refused.
-                $labelDoubtOnly = in_array($markingVerdict, ['sibling', 'name'], true) && ! $review['publishable']
+                // #203 at the colleague's: the label read M393A4K40BB1-CRC0Q against a requested
+                // -CRCQ0, the comparison said match, and the reviewer's refusal still stood.
+                $labelDoubtOnly = in_array($markingVerdict, ['match', 'sibling', 'name'], true) && ! $review['publishable']
                     && ($review['rejection_reason'] ?? null) === 'identity';
                 // With no code read, a component frame is not exact however sure the reviewer
                 // felt from the page (live #390: «источник подтверждает модель» with an empty

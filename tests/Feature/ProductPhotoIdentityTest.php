@@ -283,6 +283,23 @@ class ProductPhotoIdentityTest extends TestCase
         $this->assertSame([], app(ProductImageVisionVerifier::class)->select($draft, [$frames[0]], 4));
     }
 
+    /** #203 at the colleague's: the label shows the code with a letter and a digit swapped against the request. */
+    public function test_a_label_with_the_code_read_with_a_slip_goes_out_although_the_reviewer_refused_it(): void
+    {
+        $draft = $this->componentDraft('M393A4K40BB1-CRCQ0', 'Samsung M393A4K40BB1-CRCQ0 32GB DDR4-2400 ECC Registered DIMM');
+        $this->assertSame('match', ProductPhotoIdentity::markingVerdict($draft, 'M393A4K40BB1-CRC0Q'));
+        $this->assertSame('conflict', ProductPhotoIdentity::markingVerdict($draft, 'M393A3K40CB2-CRC'));
+        ProductImageVisionAgent::fake(fn (): array => ['images' => [[...$this->review(1, exactMatch: false, marking: 'M393A4K40BB1-CRC0Q',
+            reason: 'На наклейке M393A4K40BB1-CRC0Q, отличный от запрошенного M393A4K40BB1-CRCQ0.'),
+            'publishable' => false, 'rejection_reason' => 'identity', 'physical_match' => 'conflicting']]])->preventStrayPrompts();
+        $page = ['title' => 'Samsung M393A4K40BB1-CRC0Q 32GB', 'url' => 'https://reseller.example/m393', 'type' => 'retailer'];
+
+        $selected = app(ProductImageVisionVerifier::class)->select($draft, [$this->frame('https://reseller.example/label.jpg', $page)], 4);
+
+        $this->assertSame(['https://reseller.example/label.jpg'], array_column($selected, 'source_url'));
+        $this->assertSame('match', $selected[0]['photo_visual_review']['marking_verdict']);
+    }
+
     public function test_a_code_the_reviewer_saw_counts_only_when_a_reader_not_told_it_finds_it_too(): void
     {
         // Live #420: «маркировка MQ04ABF100 видна на наклейке» on a drive labelled MDD.

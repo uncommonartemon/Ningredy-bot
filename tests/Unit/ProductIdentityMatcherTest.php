@@ -9,6 +9,32 @@ use Tests\TestCase;
 
 class ProductIdentityMatcherTest extends TestCase
 {
+    /**
+     * #203 at the colleague's, 2026-11-08: the label was read as M393A4K40BB1-CRCQ0, Samsung and
+     * every shop write -CRC0Q. Eleven shops were refused as another code and the card had nothing.
+     */
+    public function test_a_long_code_with_a_letter_and_a_digit_swapped_is_the_same_code(): void
+    {
+        $draft = new ProductDraft(['brand' => 'Samsung', 'model' => 'M393A4K40BB1-CRCQ0',
+            'specifications' => [['key' => 'mpn', 'value' => 'M393A4K40BB1-CRCQ0']]]);
+        $draft->setRelation('telegramUpdate', new TelegramUpdate(['text' => '32GB 2Rx4 PC4-2400T-RA1-11-DC0 M393A4K40BB1-CRCQ0']));
+        $matcher = new ProductIdentityMatcher;
+        $shop = ['url' => 'https://www.itcreations.com/product/92896',
+            'title' => 'M393A4K40BB1-CRC0Q - Used - Samsung 32GB PC4-19200 DDR4-2400t-R Registered ECC 2RX4'];
+
+        $this->assertFalse($matcher->conflictsSource($draft, $shop));
+        $this->assertTrue($matcher->confirmsExactIdentifier($draft, $shop));
+
+        // Another die revision is another code, slip or not.
+        $this->assertFalse($matcher->confirmsExactIdentifier($draft, ['url' => 'https://shop.example/1',
+            'title' => 'Samsung 32GB M393A4K40CB1-CRC0Q Registered ECC']));
+        // Two digits swapped are another product, however long the code.
+        $drive = new ProductDraft(['brand' => 'Samsung', 'model' => 'MZVLQ512HBLU',
+            'specifications' => [['key' => 'mpn', 'value' => 'MZVLQ512HBLU']]]);
+        $drive->setRelation('telegramUpdate', new TelegramUpdate(['text' => 'Samsung MZVLQ512HBLU']));
+        $this->assertFalse($matcher->confirmsExactIdentifier($drive, ['url' => 'https://shop.example/2', 'title' => 'Samsung MZVLQ521HBLU SSD']));
+    }
+
     public function test_a_shared_family_does_not_hide_a_conflicting_explicit_model(): void
     {
         $draft = $this->explicitStealthDraft();

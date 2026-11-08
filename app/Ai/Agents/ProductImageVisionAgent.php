@@ -31,7 +31,9 @@ class ProductImageVisionAgent implements Agent, HasStructuredOutput
             way an online store's gallery does: feature slides with overlaid graphics or callouts, illustrations
             of internal components, infographics and banners are not catalog photos, even inside a complete
             official gallery. Several views of the same product composed in one frame without advertising text
-            or graphics over them are a product photo, not an advert. The primary image shows the whole product.
+            or graphics over them are a product photo, not an advert. Several identical units of the requested
+            product in one frame (two or more memory modules or drives of the same part) are a photo of this
+            product: how many units are shown is never a difference. The primary image shows the whole product.
             score is the frame's worth as a catalog photo on a 0-100 scale (not 0-10).
             When the trusted source context explicitly establishes compatible-body applicability, its known regional
             SKU suffix or permitted keyboard difference alone is not a wrong-body verdict; keep the factual notice.

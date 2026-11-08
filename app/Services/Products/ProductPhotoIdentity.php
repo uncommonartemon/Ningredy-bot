@@ -103,7 +103,8 @@ final class ProductPhotoIdentity
         $verdict = 'conflict';
         foreach ($codes as $written) {
             $code = self::compact($written);
-            if ($observed === $code || str_contains($observed, $code) || str_contains($code, $observed)) {
+            if ($observed === $code || str_contains($observed, $code) || str_contains($code, $observed)
+                || ReadingSlip::within($observed, $code)) {
                 return 'match';
             }
             $shorter = min(mb_strlen($observed), mb_strlen($code));
