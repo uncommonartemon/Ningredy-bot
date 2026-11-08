@@ -192,7 +192,7 @@ class ProductIdentityMatcher
         // never reject a different, equally valid regional card the way an
         // operator-typed one legitimately can.
         if (collect($this->confirmationIdentifierCandidates($draft))->contains(
-            fn (string $identifier): bool => str_contains($compactEvidence, $identifier),
+            fn (string $identifier): bool => str_contains($compactEvidence, $identifier) || ReadingSlip::within($compactEvidence, $identifier),
         )) {
             return true;
         }
@@ -298,14 +298,21 @@ class ProductIdentityMatcher
             return false;
         }
 
-        $pattern = '/(?<![a-z0-9])'
-            .implode('[^a-z0-9]*', array_map(
-                fn (string $char): string => preg_quote($char, '/'),
-                str_split($identifier),
-            ))
-            .'(?![a-z0-9])/';
+        // A long code with a neighbouring letter and digit swapped is the same code read
+        // with a slip (#203 at the colleague's: CRCQ0 on the label reading, CRC0Q everywhere).
+        foreach ([$identifier, ...ReadingSlip::variants($identifier)] as $spelling) {
+            $pattern = '/(?<![a-z0-9])'
+                .implode('[^a-z0-9]*', array_map(
+                    fn (string $char): string => preg_quote($char, '/'),
+                    str_split($spelling),
+                ))
+                .'(?![a-z0-9])/';
+            if (preg_match($pattern, $evidence) === 1) {
+                return true;
+            }
+        }
 
-        return preg_match($pattern, $evidence) === 1;
+        return false;
     }
 
     /**
@@ -504,8 +511,10 @@ class ProductIdentityMatcher
      */
     private function nearbyIdentifier(string $identifier, array $evidenceIdentifiers, Collection $exactIdentifiers, int $minimumDistance = 1): ?string
     {
+        $slips = ReadingSlip::variants($identifier);
         foreach ($evidenceIdentifiers as $candidate) {
-            if ($candidate === $identifier || abs(strlen($candidate) - strlen($identifier)) > 3) {
+            // The requested code read with a slip is that code, not its sibling.
+            if ($candidate === $identifier || in_array($candidate, $slips, true) || abs(strlen($candidate) - strlen($identifier)) > 3) {
                 continue;
             }
 
