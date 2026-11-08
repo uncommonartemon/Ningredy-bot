@@ -108,6 +108,19 @@ class CompactProductsTableTest extends TestCase
         $this->assertSame(4, $offer->fresh()->quantity);
     }
 
+    public function test_units_in_stock_add_up_across_the_offers_and_none_is_a_dash(): void
+    {
+        $stocked = $this->product('Two offers in stock');
+        $stocked->variants()->create($this->offer(['sku' => 'A', 'quantity' => 3]));
+        $stocked->variants()->create($this->offer(['sku' => 'B', 'quantity' => 4, 'is_default' => false]));
+        $empty = $this->product('Nothing on hand');
+
+        Livewire::test(ListProducts::class)
+            ->assertTableColumnExists('variants_sum_quantity')
+            ->assertTableColumnStateSet('variants_sum_quantity', 7, $stocked)
+            ->assertTableColumnStateNotSet('variants_sum_quantity', 7, $empty);
+    }
+
     private function product(string $title, array $overrides = []): Product
     {
         return Product::create([

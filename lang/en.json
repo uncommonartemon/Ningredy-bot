@@ -273,6 +273,7 @@
     "Каталог": "Catalog",
     "Атрибут": "Attribute",
     "Название": "Title",
+    "На складе, шт.": "In stock, pcs",
     "Тип данных": "Data type",
     "Текст": "Text",
     "Число": "Number",

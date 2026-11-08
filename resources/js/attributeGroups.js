@@ -36,3 +36,14 @@ export const groupAttributeBlocks = (attributes = []) => {
 };
 
 export const orderedAttributes = (attributes = []) => groupAttributeBlocks(attributes).flatMap((block) => block.attributes);
+
+// A catalog card shows the characteristics chosen for it first, in their order; the
+// rest follow in the usual order, so a card is never left short by a missing key.
+export const cardAttributes = (attributes = [], keys = []) => {
+    const position = new Map(keys.map((key, index) => [key, index]));
+    const ordered = orderedAttributes(attributes);
+    const chosen = ordered.filter((attribute) => position.has(attribute.key))
+        .sort((left, right) => position.get(left.key) - position.get(right.key));
+
+    return [...chosen, ...ordered.filter((attribute) => !position.has(attribute.key))];
+};
