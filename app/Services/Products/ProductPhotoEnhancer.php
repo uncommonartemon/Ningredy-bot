@@ -8,6 +8,9 @@ use App\Models\ProductDraftMedia;
 use App\Models\ProductMedia;
 use App\Services\Ai\AiSettings;
 use App\Services\Ai\ProductSearchCancellation;
+use App\Services\Vision\VisionCallContext;
+use App\Services\Vision\VisionImagePreparer;
+use App\Services\Vision\VisionService;
 use GdImage;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
@@ -28,6 +31,20 @@ class ProductPhotoEnhancer
         less. Keep the same framing and background.
         PROMPT;
 
+    /**
+     * Operator, 2026-11-08: «функцию убрать вотермарку через ИИ-агента» in the photo menu. A
+     * shop's mark lies over the picture; the part's own label is its identity and stays.
+     */
+    private const UNMARK_PROMPT = <<<'PROMPT'
+        Remove from this exact product photo everything a shop or website laid over the picture:
+        watermarks, logos, website addresses, stamps, badges and captions on top of the image. Fill
+        where they were with what is plainly behind them: the product's own surface or the background.
+        Everything that belongs to the product itself stays exactly as it is, including the text,
+        logos, labels, stickers and markings printed on the product. This must remain a faithful photo
+        of the same physical product: do not add, remove, invent or alter any part, color, proportion or
+        detail of the product. Keep the same framing.
+        PROMPT;
+
     public function __construct(
         private readonly ProductImageEncoder $encoder,
         private readonly ProductImageVisionVerifier $vision,
@@ -42,10 +59,14 @@ class ProductPhotoEnhancer
         ?ProductDraft $verificationDraft = null,
         ?callable $beforeSave = null,
         ?callable $commit = null,
+        string $purpose = 'enhance',
     ): array {
         if (! $media->disk || ! $media->path || ! Storage::disk($media->disk)->exists($media->path)) {
             throw new RuntimeException('That photo has no readable stored file to enhance.');
         }
+        $prompt = $purpose === 'unmark' ? self::UNMARK_PROMPT : self::PROMPT;
+        // Only where a shop laid something over the picture gets cleaned; found before paying for a picture.
+        $overlays = $purpose === 'unmark' ? $this->overlays($media, $telegramUpdateId) : [];
 
         $provider = app(AiSettings::class)->providerFor('image_upscale');
         $model = app(AiSettings::class)->modelFor('image_upscale');
@@ -54,14 +75,14 @@ class ProductPhotoEnhancer
             'provider' => $provider,
             'model' => $model,
             'status' => 'running',
-            'prompt' => self::PROMPT,
+            'prompt' => $prompt,
             'started_at' => now(),
         ]);
         $image = null;
         $stagedPath = null;
 
         try {
-            $response = Image::of(self::PROMPT)
+            $response = Image::of($prompt)
                 ->attachments([new StoredImage($media->path, $media->disk)])
                 ->timeout((int) config('services.image_upscale.timeout', 90))
                 ->generate($provider, $model);
@@ -78,6 +99,9 @@ class ProductPhotoEnhancer
                 RuntimeException::class, 'Generated image exceeds safe decoding limits.');
             $image = @imagecreatefromstring($generatedBytes);
             throw_unless($image instanceof GdImage, RuntimeException::class, 'The AI did not return a usable image.');
+            if ($purpose === 'unmark') {
+                $image = $this->onlyOverTheOverlays($media, $image, $overlays);
+            }
 
             $verification = null;
 
@@ -111,7 +135,7 @@ class ProductPhotoEnhancer
                 $beforeSave();
             }
 
-            $save = function () use ($media, $stagedPath, $converted, $verification, $telegramUpdateId, $run, $response): array {
+            $save = function () use ($media, $stagedPath, $converted, $verification, $telegramUpdateId, $run, $response, $purpose): array {
                 $media->update([
                     'path' => $stagedPath,
                     'mime_type' => 'image/webp',
@@ -126,9 +150,8 @@ class ProductPhotoEnhancer
                     'verification_model' => $verification['vision_model'] ?? $media->verification_model,
                     'verification_notes' => trim(implode(' ', array_filter([
                         $verification['vision_reason'] ?? $media->verification_notes,
-                        $telegramUpdateId
-                            ? "[AI-enhanced by Telegram update {$telegramUpdateId}]"
-                            : '[AI-enhanced by admin request]',
+                        ($purpose === 'unmark' ? '[Watermark removed by AI' : '[AI-enhanced')
+                            .($telegramUpdateId ? " by Telegram update {$telegramUpdateId}]" : ' by admin request]'),
                     ]))),
                 ]);
 
@@ -169,5 +192,85 @@ class ProductPhotoEnhancer
                 imagedestroy($image);
             }
         }
+    }
+
+    /**
+     * Where a shop laid its marks over the photo, as boxes in percent of the picture.
+     *
+     * @return list<array{left: int, top: int, right: int, bottom: int}>
+     */
+    private function overlays(ProductMedia|ProductDraftMedia $media, ?int $telegramUpdateId): array
+    {
+        $found = app(VisionService::class)->locateOverlays(
+            [app(VisionImagePreparer::class)->fromBytes((string) Storage::disk($media->disk)->get($media->path), 'photo.jpg')],
+            new VisionCallContext($telegramUpdateId, useSearchBudget: false),
+        );
+        $boxes = [];
+        foreach ((array) ($found['overlays'] ?? []) as $box) {
+            $box = array_map('intval', array_intersect_key((array) $box, array_flip(['left', 'top', 'right', 'bottom'])));
+            if (count($box) === 4 && $box['right'] > $box['left'] && $box['bottom'] > $box['top']) {
+                $boxes[] = $box;
+            }
+        }
+        throw_if($boxes === [], RuntimeException::class, 'Водяной знак на фото не найден: фото не изменено.');
+        $covered = array_sum(array_map(fn (array $box): int => ($box['right'] - $box['left']) * ($box['bottom'] - $box['top']), $boxes));
+        throw_if($covered > 5000, RuntimeException::class,
+            'Водяной знак закрывает больше половины фото: его не убрать, не перерисовав сам товар. Фото не изменено.');
+
+        return $boxes;
+    }
+
+    /**
+     * The cleaned picture is taken only inside the boxes; everything else, a part's label first of
+     * all, stays the original pixels. Cleaned whole, a real KIOXIA frame came back with its label
+     * reading KXG602NV512G instead of KXG60ZNV512G (2026-11-08).
+     *
+     * @param  list<array{left: int, top: int, right: int, bottom: int}>  $boxes
+     */
+    private function onlyOverTheOverlays(ProductMedia|ProductDraftMedia $media, GdImage $cleaned, array $boxes): GdImage
+    {
+        $original = @imagecreatefromstring((string) Storage::disk($media->disk)->get($media->path));
+        throw_unless($original instanceof GdImage, RuntimeException::class, 'Не удалось прочитать исходное фото: оно не изменено.');
+        if (! imageistruecolor($original)) {
+            imagepalettetotruecolor($original);
+        }
+        $width = imagesx($original);
+        $height = imagesy($original);
+        throw_if(abs($width / $height - imagesx($cleaned) / imagesy($cleaned)) > 0.02 * $width / $height, RuntimeException::class,
+            'Очищенное фото пришло другой формы, его не наложить на исходное: фото не изменено.');
+        $scaled = imagescale($cleaned, $width, $height, IMG_BICUBIC);
+        throw_unless($scaled instanceof GdImage, RuntimeException::class, 'Не удалось подогнать очищенное фото: исходное не изменено.');
+        $padX = (int) ceil($width * 0.02);
+        $padY = (int) ceil($height * 0.02);
+        // The cleaned white is never quite the original white, and a hard edge shows as a pale
+        // box (live 2026-11-08): across a band inside the margin the cleaned picture fades in.
+        $band = max(1, min($padX, $padY));
+        $share = (int) round(100 * (1 - 0.05 ** (1 / $band)));
+        imagealphablending($original, false);
+        foreach ($boxes as $box) {
+            $left = max(0, (int) floor($box['left'] * $width / 100) - $padX);
+            $top = max(0, (int) floor($box['top'] * $height / 100) - $padY);
+            $right = min($width, (int) ceil($box['right'] * $width / 100) + $padX);
+            $bottom = min($height, (int) ceil($box['bottom'] * $height / 100) + $padY);
+            // A side at the frame's edge has nothing to fade into: there the mark goes whole
+            // (a faded band at the top edge left the top of a logo showing).
+            [$fadeLeft, $fadeTop, $fadeRight, $fadeBottom] = [$left > 0, $top > 0, $right < $width, $bottom < $height];
+            for ($inset = 0; $inset <= $band; $inset++) {
+                $x = $left + ($fadeLeft ? $inset : 0);
+                $y = $top + ($fadeTop ? $inset : 0);
+                $w = $right - ($fadeRight ? $inset : 0) - $x;
+                $h = $bottom - ($fadeBottom ? $inset : 0) - $y;
+                if ($w <= 0 || $h <= 0) {
+                    break;
+                }
+                $inset < $band
+                    ? imagecopymerge($original, $scaled, $x, $y, $x, $y, $w, $h, $share)
+                    : imagecopy($original, $scaled, $x, $y, $x, $y, $w, $h);
+            }
+        }
+        imagedestroy($scaled);
+        imagedestroy($cleaned);
+
+        return $original;
     }
 }

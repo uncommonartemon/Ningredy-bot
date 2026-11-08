@@ -8,6 +8,7 @@ use App\Ai\Agents\ProductGalleryVisionAgent;
 use App\Ai\Agents\ProductImageVisionAgent;
 use App\Ai\Agents\ProductLabelReaderAgent;
 use App\Ai\Agents\TelegramPhotoTextAgent;
+use App\Ai\Agents\WatermarkLocatorAgent;
 use Closure;
 use RuntimeException;
 use UnexpectedValueException;
@@ -36,6 +37,12 @@ class VisionService
     public function readLabels(array $attachments, VisionCallContext $context): array
     {
         return $this->runner->run('read_labels', ProductLabelReaderAgent::make(), 'Read the label of each attached image.', $attachments, $context);
+    }
+
+    /** Where a shop's marks lie over a product photo, as boxes in percent of the picture. */
+    public function locateOverlays(array $attachments, VisionCallContext $context): array
+    {
+        return $this->runner->run('locate_overlays', WatermarkLocatorAgent::make(), 'Find what a shop laid over this product photo.', $attachments, $context);
     }
 
     public function inspectGallery(string $prompt, array $attachments, VisionCallContext $context): array

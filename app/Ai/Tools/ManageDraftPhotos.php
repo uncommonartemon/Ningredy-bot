@@ -26,7 +26,8 @@ class ManageDraftPhotos implements Tool
     public function description(): Stringable|string
     {
         return 'Queue one or several photo operations for a pending product draft. Positions are 1-based album positions. '
-            .'Supports mixed commands in one request: enhance, replace with a different non-duplicate internet photo, and delete. '
+            .'Supports mixed commands in one request: enhance, remove a watermark (a shop\'s mark, logo or caption laid over the photo; '
+            .'the product and its own markings stay), replace with a different non-duplicate internet photo, and delete. '
             .'Resolve every position against the original album before processing, so mixed operations are safe. '
             .'find_more_photos: the operator asks for more photos or to go on searching; a search stopped by a limit or with nothing found continues, a finished one is topped up and keeps its photos. '
             .'find_other_photos: the operator asks for other photos instead of these; the gallery is searched again without its old sources. Both are asynchronous: leave draft_id null, the card comes back by itself.';
@@ -37,6 +38,7 @@ class ManageDraftPhotos implements Tool
         $draftId = $request->integer('draft_id');
         $requested = [
             'enhance' => $request->array('enhance_positions'),
+            'unmark' => $request->array('remove_watermark_positions'),
             'replace' => $request->array('replace_positions'),
             'delete' => $request->array('delete_positions'),
         ];
@@ -134,6 +136,7 @@ class ManageDraftPhotos implements Tool
         return [
             'draft_id' => $schema->integer()->required(),
             'enhance_positions' => $schema->array()->items($schema->integer()),
+            'remove_watermark_positions' => $schema->array()->items($schema->integer()),
             'replace_positions' => $schema->array()->items($schema->integer()),
             'delete_positions' => $schema->array()->items($schema->integer()),
             'find_more_photos' => $schema->boolean(),

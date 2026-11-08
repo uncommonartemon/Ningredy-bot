@@ -9,7 +9,7 @@ class DraftTelegramActionConfirmation
 {
     public function describe(string $callback): ?array
     {
-        if (! preg_match('/^draft:(enrich|webphotos|restage|continue-search|findmore|source-retrain|retrain|new-search|enhance-photo|replace-photo|delete-photo):\d+(?::\d+)?$/', $callback, $match)) {
+        if (! preg_match('/^draft:(enrich|webphotos|restage|continue-search|findmore|source-retrain|retrain|new-search|enhance-photo|unmark-photo|replace-photo|delete-photo):\d+(?::\d+)?$/', $callback, $match)) {
             return null;
         }
 
@@ -22,11 +22,12 @@ class DraftTelegramActionConfirmation
             'source-retrain', 'retrain' => ['Переобучить источник?', 'Агент заново проверит способ сбора фото. Рабочий рецепт не заменяется непроверенным.'],
             'new-search' => ['Запустить уточнённый поиск?', 'Это новый поиск товара и фото. Старый черновик не меняется и не отклоняется.'],
             'enhance-photo' => ['Улучшить выбранное фото?', 'Это платная обработка изображения через AI, а не поиск оригинала. Цена зависит от модели и изображения.'],
+            'unmark-photo' => ['Убрать водяной знак с выбранного фото?', 'Это платная обработка изображения через AI: модель сотрёт надписи, логотипы и адреса магазина поверх фото. Сам товар и надписи на нём не меняются; если товар на фото изменится, останется оригинал.'],
             'replace-photo' => ['Найти замену выбранному фото?', 'Бот поищет другой кадр. Остальные фото остаются.'],
             'delete-photo' => ['Удалить выбранное фото?', 'Фото будет удалено из этого черновика. Остальные останутся. Действие бесплатное.'],
         };
 
-        $budget = ! in_array($match[1], ['enhance-photo', 'delete-photo'], true)
+        $budget = ! in_array($match[1], ['enhance-photo', 'unmark-photo', 'delete-photo'], true)
             ? app(AiSettings::class)->maxSearchCostUsd() : null;
         if ($budget !== null) {
             $description .= $budget > 0
