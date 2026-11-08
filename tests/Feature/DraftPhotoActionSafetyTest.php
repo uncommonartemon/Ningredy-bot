@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Ai\Agents\WatermarkLocatorAgent;
 use App\Ai\Tools\ManageDraftPhotos;
 use App\Jobs\ProcessDraftPhotoActions;
 use App\Models\AiOperation;
@@ -182,6 +183,82 @@ class DraftPhotoActionSafetyTest extends TestCase
         $run = AiRun::where('telegram_update_id', $update->id)->firstOrFail();
         $this->assertSame('failed', $run->status);
         $this->assertIsArray($run->usage);
+    }
+
+    /**
+     * Operator, 2026-11-08: a shop's watermark comes off through the image model. Only inside the
+     * boxes the locator found is the cleaned picture used: a part's label elsewhere stays the
+     * original pixels (cleaned whole, a real KIOXIA label read KXG602NV512G instead of KXG60ZNV512G).
+     */
+    public function test_a_watermark_is_cleaned_only_where_it_lies_and_the_rest_stays_the_original(): void
+    {
+        [, $update, $media] = $this->fixtures();
+        $media->update(['verification_status' => 'verified']);
+        // A grey studio background: a white one would be re-centred by the encoder (module 84).
+        Storage::disk('public')->put($media->path, $this->picture(400, 300, [200, 200, 200]));
+        WatermarkLocatorAgent::fake(fn (): array => ['overlays' => [['what' => 'IT CREATIONS logo', 'left' => 10, 'top' => 0, 'right' => 90, 'bottom' => 20]]])
+            ->preventStrayPrompts();
+        // The model's whole picture is black: only the box may take it.
+        Image::fake(fn () => base64_encode($this->picture(800, 600, [0, 0, 0])))->preventStrayImages();
+
+        $result = app(ProductPhotoEnhancer::class)->enhance($media, $update->id, purpose: 'unmark');
+
+        $this->assertTrue($result['ok']);
+        $this->assertSame([400, 300], [$result['width'], $result['height']]);
+        $prompt = (string) AiRun::query()->where('telegram_update_id', $update->id)->where('model', '!=', 'fixture')->latest('id')->value('prompt');
+        $this->assertStringContainsString('printed on the product', $prompt);
+        $fresh = $media->fresh();
+        $this->assertStringContainsString("[Watermark removed by AI by Telegram update {$update->id}]", (string) $fresh->verification_notes);
+        $cleaned = imagecreatefromstring((string) Storage::disk('public')->get($fresh->path));
+        $this->assertLessThan(40, imagecolorat($cleaned, 200, 30) & 0xFF, 'Inside the box the cleaned picture is used.');
+        $this->assertGreaterThan(180, imagecolorat($cleaned, 200, 200) & 0xFF, 'Outside the box the original stays.');
+        $this->assertGreaterThan(180, imagecolorat($cleaned, 10, 290) & 0xFF);
+    }
+
+    public function test_no_watermark_found_costs_no_picture_and_changes_nothing(): void
+    {
+        [, $update, $media] = $this->fixtures();
+        $media->update(['verification_status' => 'verified']);
+        $original = $this->picture(400, 300, [255, 255, 255]);
+        Storage::disk('public')->put($media->path, $original);
+        WatermarkLocatorAgent::fake(fn (): array => ['overlays' => []])->preventStrayPrompts();
+        Image::fake()->preventStrayImages();
+
+        try {
+            app(ProductPhotoEnhancer::class)->enhance($media, $update->id, purpose: 'unmark');
+            $this->fail('A photo without a watermark was processed.');
+        } catch (RuntimeException $error) {
+            $this->assertStringContainsString('Водяной знак на фото не найден', $error->getMessage());
+        }
+        Image::assertNothingGenerated();
+        $this->assertSame($original, Storage::disk('public')->get($media->fresh()->path));
+    }
+
+    public function test_a_watermark_over_most_of_the_photo_is_refused_before_any_picture(): void
+    {
+        [, $update, $media] = $this->fixtures();
+        Storage::disk('public')->put($media->path, $this->picture(400, 300, [255, 255, 255]));
+        WatermarkLocatorAgent::fake(fn (): array => ['overlays' => [['what' => 'tiled site address', 'left' => 0, 'top' => 0, 'right' => 100, 'bottom' => 80]]])
+            ->preventStrayPrompts();
+        Image::fake()->preventStrayImages();
+
+        $this->expectExceptionMessage('больше половины фото');
+        try {
+            app(ProductPhotoEnhancer::class)->enhance($media, $update->id, purpose: 'unmark');
+        } finally {
+            Image::assertNothingGenerated();
+        }
+    }
+
+    /** @param  array{0: int, 1: int, 2: int}  $rgb */
+    private function picture(int $width, int $height, array $rgb): string
+    {
+        $canvas = imagecreatetruecolor($width, $height);
+        imagefill($canvas, 0, 0, imagecolorallocate($canvas, ...$rgb));
+        ob_start();
+        imagejpeg($canvas, null, 95);
+
+        return (string) ob_get_clean();
     }
 
     public function test_telegram_delivery_failure_after_success_does_not_repay_on_retry(): void

@@ -55,6 +55,9 @@ class ProductsTable
                     ->color(fn (string $state): string => match ($state) {
                         'visible' => 'success', 'draft' => 'warning', default => 'gray',
                     })->toggleable(),
+                // Units on hand across all of the product's offers (operator, 2026-11-08).
+                TextColumn::make('variants_sum_quantity')->label(__('На складе, шт.'))->sum('variants', 'quantity')
+                    ->numeric()->placeholder('—')->alignEnd()->sortable()->toggleable(),
                 TextColumn::make('brand.name')->label(__('Бренд'))->searchable()->sortable()->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('model')->label(__('Модель'))->searchable()->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('product_type')->label(__('Тип'))->badge()

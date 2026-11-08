@@ -1,6 +1,23 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { groupAttributeBlocks, orderedAttributes } from '../../resources/js/attributeGroups.js';
+import { cardAttributes, groupAttributeBlocks, orderedAttributes } from '../../resources/js/attributeGroups.js';
+
+test('a catalog card shows its chosen characteristics first and fills up from the rest', () => {
+    const ports = { id: 1, name: 'Connectivity', sort_order: 1 };
+    const attrs = [
+        { key: 'camera', sort_order: 1, group: ports },
+        { key: 'bluetooth', sort_order: 2, group: ports },
+        { key: 'cpu', sort_order: 0, group: null },
+        { key: 'gpu', sort_order: 0, group: null },
+        { key: 'display', sort_order: 0, group: null },
+    ];
+
+    // Without a choice the card keeps the usual order: groups first.
+    assert.deepEqual(cardAttributes(attrs).slice(0, 2).map((attr) => attr.key), ['camera', 'bluetooth']);
+    // A key the product no longer has gives its row back.
+    assert.deepEqual(cardAttributes(attrs, ['gpu', 'removed', 'cpu']).slice(0, 4).map((attr) => attr.key),
+        ['gpu', 'cpu', 'camera', 'bluetooth']);
+});
 
 test('groups stay adjacent and follow group order before attribute order', () => {
     const storage = { id: 20, name: 'Storage', sort_order: 20, highlight_in_filters: false };

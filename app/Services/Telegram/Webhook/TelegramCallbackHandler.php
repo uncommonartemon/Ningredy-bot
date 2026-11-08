@@ -319,7 +319,7 @@ class TelegramCallbackHandler
             return;
         }
 
-        if (preg_match('/^draft:(enhance|replace|delete)-photo:(\d+):(\d+)$/', $data, $photoMatches) === 1) {
+        if (preg_match('/^draft:(enhance|unmark|replace|delete)-photo:(\d+):(\d+)$/', $data, $photoMatches) === 1) {
             $this->handleDraftEnhancePhoto(
                 draftId: (int) $photoMatches[2],
                 mediaId: (int) $photoMatches[3],
@@ -332,7 +332,7 @@ class TelegramCallbackHandler
             return;
         }
 
-        if (preg_match('/^draft:(enhance|replace|delete):(\d+)$/', $data, $menuMatches) === 1) {
+        if (preg_match('/^draft:(enhance|unmark|replace|delete):(\d+)$/', $data, $menuMatches) === 1) {
             $this->handleDraftEnhanceMenu(
                 draftId: (int) $menuMatches[2],
                 action: $menuMatches[1],
@@ -774,8 +774,8 @@ class TelegramCallbackHandler
             ->pluck('id')
             ->search($media->id);
         $position = $position === false ? 1 : $position + 1;
-        $labels = ['enhance' => 'Улучшаю', 'replace' => 'Ищу замену для', 'delete' => 'Удаляю'];
-        $limits = ['enhance' => 180, 'replace' => 180, 'delete' => 10];
+        $labels = ['enhance' => 'Улучшаю', 'unmark' => 'Убираю водяной знак с', 'replace' => 'Ищу замену для', 'delete' => 'Удаляю'];
+        $limits = ['enhance' => 180, 'unmark' => 180, 'replace' => 180, 'delete' => 10];
         $operation = AiOperation::query()->firstOrCreate(['idempotency_key' => "{$action}-draft-photo:{$update->id}"], [
             'telegram_update_id' => $update->id,
             'telegram_user_id' => $update->telegram_user_id,
@@ -1140,7 +1140,7 @@ class TelegramCallbackHandler
         }
 
         $activePhotoAction = $target && AiOperation::query()->where('telegram_update_id', $target->id)
-            ->whereIn('action', ['enhance_draft_photo', 'replace_draft_photo', 'delete_draft_photo', 'process_draft_photos', 'refind_catalog_photos'])
+            ->whereIn('action', ['enhance_draft_photo', 'unmark_draft_photo', 'replace_draft_photo', 'delete_draft_photo', 'process_draft_photos', 'refind_catalog_photos'])
             ->whereIn('status', ['running', 'failed'])->exists();
         if (! $target || ($target->processed_at !== null && ! $activePhotoAction)) {
             $this->telegram->answerCallbackQuery($callbackId, 'Поиск уже завершён — отменять нечего.');

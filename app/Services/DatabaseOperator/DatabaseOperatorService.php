@@ -70,6 +70,7 @@ class DatabaseOperatorService
                 'category_id' => $fk('categories', false), 'brand_id' => $fk('brands'), 'slug' => 'string|max:255',
                 'product_type' => 'in:laptop,desktop,component,other', 'status' => 'in:draft,published,archived',
                 'is_active' => $bool, 'is_featured' => $bool, 'sort_order' => $order, 'translations' => $translations,
+                'card_attribute_keys' => 'nullable|array|max:4',
             ]],
             'product_variants' => ['model' => ProductVariant::class, 'writable' => [
                 'product_id' => $fk('products', false), 'name' => $text, 'sku' => $text, 'mpn' => $text, 'gtin' => $text,

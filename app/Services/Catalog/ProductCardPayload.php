@@ -45,6 +45,7 @@ class ProductCardPayload
             'stock_status' => $variant?->stock_status ?: 'unknown',
             'image' => $this->imageUrl($product, $variant),
             'attributes' => AttributePresentation::values($attributes),
+            'card_keys' => array_values((array) ($product->card_attribute_keys ?? [])),
         ];
     }
 

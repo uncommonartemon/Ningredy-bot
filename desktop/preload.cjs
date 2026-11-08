@@ -4,6 +4,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('ningredy', {
     start: (mode) => ipcRenderer.invoke('start', mode),
     stop: () => ipcRenderer.invoke('stop'),
+    update: () => ipcRenderer.invoke('update'),
     state: () => ipcRenderer.invoke('state'),
     refresh: () => ipcRenderer.invoke('refresh'),
     open: (target) => ipcRenderer.invoke('open', target),

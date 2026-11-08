@@ -91,6 +91,9 @@ class ProcessDraftPhotoActions implements ShouldQueue
                 if ($action['action'] === 'enhance') {
                     $progress->step("{$number}/".count($this->actions)." · улучшение фото {$action['position']}", 180);
                     $enhancer->enhance($media, $this->telegramUpdateId, $draft, $beforeSave);
+                } elseif ($action['action'] === 'unmark') {
+                    $progress->step("{$number}/".count($this->actions)." · водяной знак с фото {$action['position']}", 180);
+                    $enhancer->enhance($media, $this->telegramUpdateId, $draft, $beforeSave, purpose: 'unmark');
                 } elseif ($action['action'] === 'replace') {
                     $progress->step("{$number}/".count($this->actions)." · поиск замены фото {$action['position']}", 180);
                     $images->replaceDraftMedia($draft, $media, fn (string $message) => $progress->info($message), $this->telegramUpdateId, $beforeSave);
@@ -154,7 +157,7 @@ class ProcessDraftPhotoActions implements ShouldQueue
         if ($this->operationId) {
             return AiOperation::query()->whereKey($this->operationId)
                 ->where('telegram_update_id', $update->id)->where('telegram_user_id', $update->telegram_user_id)
-                ->whereIn('action', ['enhance_draft_photo', 'replace_draft_photo', 'delete_draft_photo', 'process_draft_photos'])
+                ->whereIn('action', ['enhance_draft_photo', 'unmark_draft_photo', 'replace_draft_photo', 'delete_draft_photo', 'process_draft_photos'])
                 ->where('payload->draft_id', $this->draftId)->first();
         }
         // Legacy callers and trained-gallery replacements also need a persistent retry receipt.

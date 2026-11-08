@@ -42,7 +42,8 @@ function fixture(mode) {
     writeFileSync(join(root, 'composer.lock'), '{}');
     writeFileSync(join(root, 'package.json'), '{"private":true}\n');
     writeFileSync(join(root, 'package-lock.json'), '{}');
-    writeFileSync(join(root, '.gitignore'), '.env\nvendor/\ndatabase/*.sqlite*\nstorage/\npublic/\nbootstrap/cache/\n');
+    writeFileSync(join(root, '.gitignore'), '.env\nvendor/\ndatabase/*.sqlite*\nstorage/\npublic/\nbootstrap/cache/\nNingredy.lnk\n');
+    writeFileSync(join(root, 'Ningredy.lnk'), 'the panel shortcut install-panel.ps1 makes');
     writeFileSync(join(root, 'version.txt'), 'old');
     writeFileSync(join(root, 'delete-me.txt'), 'recover deleted file');
     writeFileSync(join(root, '.env'), 'APP_KEY=fixture-preserve-me\nDB_CONNECTION=sqlite\n');
@@ -115,6 +116,21 @@ function Get-CimInstance {
     if ($env:UPDATE_TEST_MODE -in @('running', 'force-running')) {
         [PSCustomObject]@{ ProcessId = 12345; Name = 'php.exe'; CommandLine = 'php artisan queue:work --queue=media' }
     }
+    # The panel that pressed «Обновить» is still closing for the first two looks.
+    if ($env:UPDATE_TEST_MODE -eq 'panel-closing') {
+        $global:panelLooks = 1 + [int]$global:panelLooks
+        if ($global:panelLooks -le 2) {
+            [PSCustomObject]@{ ProcessId = 23456; Name = 'electron.exe'; CommandLine = 'electron.exe'; ExecutablePath = ${psQuote(join(root, 'node_modules', 'electron', 'dist', 'electron.exe'))} }
+        }
+    }
+}
+function Start-Process {
+    [CmdletBinding()] param([string]$FilePath)
+    Add-Content -LiteralPath $env:UPDATE_TEST_TRACE -Value "OPEN $FilePath"
+}
+function Start-Sleep {
+    [CmdletBinding()] param([int]$Seconds)
+    Add-Content -LiteralPath $env:UPDATE_TEST_TRACE -Value "SLEEP $Seconds"
 }
 function Get-Command {
     [CmdletBinding()] param([string]$Name, $CommandType)
@@ -125,7 +141,7 @@ function Get-Command {
         default { [PSCustomObject]@{Source = (Join-Path ${psQuote(work)} ($toolName + '.cmd'))} }
     }
 }
-& ${psQuote(updater)} -NoPause${mode.startsWith('force-') ? ' -ForceUpdate' : ''}${mode === 'force-success' ? ` -ProjectRoot ${psQuote(root)}` : ''}
+& ${psQuote(updater)} -NoPause${mode.startsWith('force-') ? ' -ForceUpdate' : ''}${['no-start', 'panel-closing'].includes(mode) ? ' -NoStart -OpenPanel' : ''}${mode === 'force-success' ? ` -ProjectRoot ${psQuote(root)}` : ''}
 exit $LASTEXITCODE
 `);
     if (mode === 'dirty') writeFileSync(join(root, 'version.txt'), 'local important edit');
@@ -213,6 +229,35 @@ for (const mode of ['success', 'running', 'dirty', 'untracked', 'diverged', 'off
             });
             assert.equal(repeated.status, 0, repeated.stdout + repeated.stderr);
             assert.equal(readdirSync(f.work).filter((name) => name.includes('-backup-')).length, 2);
+        }
+    });
+}
+
+// update.bat and the panel's «Обновить»: every step of an update, then the
+// panel opens again instead of the bot starting.
+for (const mode of ['no-start', 'panel-closing']) {
+    test(`Windows updater without a start: ${mode}`, { skip: !windows, timeout: 60000 }, () => {
+        const f = fixture(mode);
+        const outcome = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', f.harness], {
+            cwd: f.root, env: f.env, encoding: 'utf8', timeout: 45000,
+        });
+        writeFileSync(join(f.work, 'result.log'), outcome.stdout + '\n' + outcome.stderr);
+        assert.equal(outcome.error, undefined, outcome.error?.message);
+        assert.equal(outcome.status, 0, outcome.stdout + outcome.stderr);
+        const trace = readFileSync(f.trace, 'utf8');
+        assert.ok(!trace.includes('START'), trace);
+        assert.equal(readFileSync(join(f.root, 'version.txt'), 'utf8'), 'new');
+        assert.ok(trace.indexOf('backup-before-update.php') < trace.indexOf('artisan migrate --force'), trace);
+        assert.ok(trace.indexOf('artisan migrate --force') < trace.indexOf('npm run build'), trace);
+        // Windows PowerShell appends in the ANSI code page, so only the ASCII end of the path is compared.
+        assert.match(trace, /^OPEN .+\\Ningredy\.lnk\r?$/m, trace);
+        assert.ok(trace.indexOf('npm run build') < trace.indexOf('OPEN '), trace);
+        assert.match(outcome.stdout, /Бот не запускался/);
+        assert.equal(readdirSync(f.work).filter((name) => name.includes('-backup-')).length, 1);
+        if (mode === 'panel-closing') {
+            // It waited for the closing panel instead of refusing to update.
+            assert.equal(trace.split('SLEEP 1').length - 1, 2, trace);
+            assert.ok(trace.lastIndexOf('SLEEP 1') < trace.indexOf('composer install'), trace);
         }
     });
 }

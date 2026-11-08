@@ -3,11 +3,11 @@ import { Link } from '@inertiajs/vue3';
 import { computed } from 'vue';
 import ProductVisual from './ProductVisual.vue';
 import { useI18n } from '../i18n';
-import { orderedAttributes } from '../attributeGroups';
+import { cardAttributes } from '../attributeGroups';
 const props = defineProps({ product: { type: Object, required: true }, view: { type: String, default: 'grid' } });
 const { localeTag, t, categoryName, translatedText, attributeLabel, attributeValue, attributeUnit } = useI18n();
 const title = computed(() => translatedText(props.product.translations, 'title') || props.product.title);
-const highlights = computed(() => orderedAttributes(props.product.attributes || []).slice(0, 4));
+const highlights = computed(() => cardAttributes(props.product.attributes || [], props.product.card_keys || []).slice(0, 4));
 const formatPrice = (value, currency) => {
     if (value === null || value === undefined) return t('priceUnavailable');
     try {

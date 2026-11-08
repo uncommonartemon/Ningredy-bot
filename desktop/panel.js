@@ -13,6 +13,7 @@ function renderState({ mode, startedAt: since }) {
     $('state-label').textContent = running ? (mode === 'bot' ? 'Бот работает' : 'Сайт работает') : 'Остановлен';
     $('start-bot').hidden = running;
     $('start-site').hidden = running;
+    $('update').hidden = running;
     $('stop').hidden = !running;
     $('stop').disabled = false;
     tick();
@@ -77,6 +78,7 @@ function appendLine(line) {
 
 $('start-bot').addEventListener('click', () => api.start('bot').then(renderState));
 $('start-site').addEventListener('click', () => api.start('site').then(renderState));
+$('update').addEventListener('click', () => api.update());
 $('stop').addEventListener('click', () => {
     $('stop').disabled = true;
     api.stop();

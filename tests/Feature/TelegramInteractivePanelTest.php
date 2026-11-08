@@ -233,7 +233,8 @@ class TelegramInteractivePanelTest extends TestCase
             return str_contains((string) ($request['text'] ?? ''), "Фотографии черновика #{$draft->id}")
                 && in_array("draft:enhance:{$draft->id}", $callbacks, true)
                 && in_array("draft:replace:{$draft->id}", $callbacks, true)
-                && in_array("draft:delete:{$draft->id}", $callbacks, true);
+                && in_array("draft:delete:{$draft->id}", $callbacks, true)
+                && in_array("draft:unmark:{$draft->id}", $callbacks, true);
         });
     }
 
@@ -556,6 +557,34 @@ class TelegramInteractivePanelTest extends TestCase
         $fresh = $draft->fresh();
         $this->assertSame([], $fresh->telegram_control_message_ids);
         $this->assertSame([950, 951], $fresh->telegram_review_message_ids);
+    }
+
+    /** Operator, 2026-11-08: a watermark comes off through the same photo menu, by the image model. */
+    public function test_a_shops_watermark_comes_off_a_chosen_draft_photo_from_the_photo_menu(): void
+    {
+        Queue::fake();
+        $draft = $this->pendingDraftWithMedia();
+        $media = $draft->media()->orderByDesc('is_primary')->orderBy('sort_order')->firstOrFail();
+
+        $this->postJson('/api/telegram/webhook', ['update_id' => 3201, 'callback_query' => [
+            'id' => 'callback-unmark-menu', 'from' => ['id' => 12345, 'username' => 'admin'],
+            'data' => "draft:unmark:{$draft->id}", 'message' => ['message_id' => 80, 'chat' => ['id' => 98765]],
+        ]], $this->headers())->assertOk();
+        Http::assertSent(fn (ClientRequest $request): bool => str_ends_with($request->url(), '/sendMessage')
+            && str_contains((string) ($request['text'] ?? ''), "Какое фото черновика #{$draft->id} очистить от водяного знака")
+            && str_starts_with((string) data_get($request['reply_markup'] ?? [], 'inline_keyboard.0.0.callback_data'), "draft:unmark-photo:{$draft->id}:"));
+
+        $this->postJson('/api/telegram/webhook', ['update_id' => 3202, 'callback_query' => [
+            'id' => 'callback-unmark-photo', 'from' => ['id' => 12345, 'username' => 'admin'],
+            'data' => "draft:unmark-photo:{$draft->id}:{$media->id}", 'message' => ['message_id' => 81, 'chat' => ['id' => 98765]],
+        ]], $this->headers())->assertOk();
+        $this->confirmPendingAction($draft);
+
+        Queue::assertPushed(ProcessDraftPhotoActions::class, fn (ProcessDraftPhotoActions $job): bool => $job->draftId === $draft->id
+            && data_get($job->actions, '0.action') === 'unmark' && data_get($job->actions, '0.media_id') === $media->id);
+        $this->assertDatabaseHas('ai_operations', ['action' => 'unmark_draft_photo', 'target_id' => $media->id, 'status' => 'running']);
+        Http::assertSent(fn (ClientRequest $request): bool => str_ends_with($request->url(), '/sendMessage')
+            && str_contains((string) ($request['text'] ?? ''), 'Убираю водяной знак с фото 1'));
     }
 
     public function test_selecting_a_draft_photo_queues_enhancement_and_reports_progress(): void

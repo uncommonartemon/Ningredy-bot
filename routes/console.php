@@ -11,3 +11,4 @@ Artisan::command('inspire', function () {
 Schedule::command('queue:health-check')->everyTwoMinutes();
 Schedule::command('bot:guard')->everyMinute()->withoutOverlapping(10);
 Schedule::command('gallery:recover-stuck-drafts')->everyFifteenMinutes();
+Schedule::command('catalog:card-highlights')->everyTenMinutes()->withoutOverlapping(10);

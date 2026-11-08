@@ -28,7 +28,8 @@ class UpscaleProductPhoto implements Tool
         return 'AI-enhance one already-published product photo in place (sharpen/clean up), by its '
             .'1-based gallery position. Use only when the admin says a specific photo looks bad/low-quality '
             .'and asks to improve it - this is generative, not a lossless upscale, so it is never run '
-            .'automatically or on every photo.';
+            .'automatically or on every photo. With remove_watermark=true it instead removes a shop\'s watermark, logo or '
+            .'caption laid over that photo, keeping the product and its own printed markings.';
     }
 
     public function handle(Request $request): Stringable|string
@@ -36,13 +37,14 @@ class UpscaleProductPhoto implements Tool
         $productId = $request->integer('product_id');
         $position = $request->integer('position');
         $variantId = $request->integer('variant_id') ?: null;
+        $purpose = $request->boolean('remove_watermark') ? 'unmark' : 'enhance';
 
         $result = $this->recordOperation(
             $this->update,
             class_basename(self::class),
-            'upscale_product_photo',
+            $purpose === 'unmark' ? 'unmark_product_photo' : 'upscale_product_photo',
             ['product_id' => $productId, 'position' => $position, 'variant_id' => $variantId],
-            function (callable $commit) use ($productId, $position, $variantId): array {
+            function (callable $commit) use ($productId, $position, $variantId, $purpose): array {
                 $product = Product::query()->find($productId);
                 throw_if(! $product, ModelNotFoundException::class, 'Product not found.');
 
@@ -68,6 +70,7 @@ class UpscaleProductPhoto implements Tool
                             return ['product_id' => $product->id, ...$save()];
                         });
                     },
+                    purpose: $purpose,
                 );
             },
             Product::class,
@@ -84,6 +87,7 @@ class UpscaleProductPhoto implements Tool
             'product_id' => $schema->integer()->required(),
             'variant_id' => $schema->integer(),
             'position' => $schema->integer()->required(),
+            'remove_watermark' => $schema->boolean(),
         ];
     }
 }

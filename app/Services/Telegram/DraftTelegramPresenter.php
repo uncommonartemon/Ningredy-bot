@@ -302,12 +302,13 @@ class DraftTelegramPresenter
     ): array {
         $labels = [
             'enhance' => 'улучшить',
+            'unmark' => 'очистить от водяного знака',
             'replace' => 'заменить',
             'delete' => 'удалить',
         ];
         // The fallback has to move the action itself, not just its label: the
         // callback_data below carries $action into a button, and only these
-        // three have a handler. An unknown verb used to draw a menu labelled
+        // four have a handler. An unknown verb used to draw a menu labelled
         // "улучшить" whose every button did nothing when pressed.
         $action = isset($labels[$action]) ? $action : 'enhance';
         $verb = $labels[$action];
@@ -496,7 +497,10 @@ class DraftTelegramPresenter
                 ['text' => '✨ Улучшить', 'callback_data' => "draft:enhance:{$draft->id}"],
                 ['text' => '🔄 Заменить', 'callback_data' => "draft:replace:{$draft->id}"],
             ],
-            [['text' => '🗑 Удалить', 'callback_data' => "draft:delete:{$draft->id}"]],
+            [
+                ['text' => '🧽 Убрать водяной знак', 'callback_data' => "draft:unmark:{$draft->id}"],
+                ['text' => '🗑 Удалить', 'callback_data' => "draft:delete:{$draft->id}"],
+            ],
             [['text' => '← Назад', 'callback_data' => "draft:review:{$draft->id}"]],
         ];
         if ($draft->isManualUpload()) {
@@ -505,6 +509,7 @@ class DraftTelegramPresenter
                     ['text' => '🗑 Удалить', 'callback_data' => "draft:delete:{$draft->id}"]],
                 [['text' => '✨ Улучшить', 'callback_data' => "draft:enhance:{$draft->id}"],
                     ['text' => '🔎 Подобрать в интернете', 'callback_data' => "draft:webphotos:{$draft->id}"]],
+                [['text' => '🧽 Убрать водяной знак', 'callback_data' => "draft:unmark:{$draft->id}"]],
                 [['text' => '← Назад', 'callback_data' => "draft:review:{$draft->id}"]],
             ];
         }

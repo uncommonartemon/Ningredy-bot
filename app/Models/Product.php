@@ -19,13 +19,14 @@ class Product extends Model
         'translations',
         'category_id', 'brand_id', 'canonical_key', 'product_type', 'status', 'slug',
         'title', 'model', 'description', 'confidence', 'is_active', 'is_featured',
-        'sort_order', 'published_at',
+        'sort_order', 'published_at', 'card_attribute_keys',
     ];
 
     protected function casts(): array
     {
         return [
             'translations' => 'array',
+            'card_attribute_keys' => 'array',
             'confidence' => 'decimal:4',
             'is_active' => 'boolean',
             'is_featured' => 'boolean',
