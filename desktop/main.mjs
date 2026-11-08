@@ -71,6 +71,40 @@ function stop() {
     });
 }
 
+// An update replaces node_modules, where this panel runs from, so the panel
+// opens update.bat the way a double-click would, in a window of its own, and
+// closes. The update waits for it to be gone and opens it again at the end.
+async function update() {
+    if (bot) return state();
+    const { response } = await dialog.showMessageBox(window, {
+        type: 'question',
+        title: 'Ningredy',
+        message: 'Обновить Ningredy?',
+        detail: 'Скачается новая версия и обновится база, перед этим сохранится резервная копия. '
+            + 'Панель закроется, обновление пойдёт в отдельном окне, потом панель откроется снова. Бот не запускается.',
+        buttons: ['Обновить', 'Отмена'],
+        defaultId: 0,
+        cancelId: 1,
+    });
+    if (response !== 0 || bot) return state();
+    const failure = await shell.openPath(path.join(root, 'update.bat'));
+    if (failure) {
+        send('log', `— обновление не запустилось: ${failure}`);
+
+        return state();
+    }
+    app.quit();
+
+    return state();
+}
+
+// The journal opens with the version, so an update can be seen to have arrived.
+function sendVersion() {
+    execFile('git', ['log', '-1', '--format=%h, %cd', '--date=short'], { cwd: root, windowsHide: true }, (error, stdout) => {
+        if (!error) send('log', `— версия ${stdout.trim()}`);
+    });
+}
+
 let statusRunning = false;
 function refreshStatus() {
     if (statusRunning) return;
@@ -87,6 +121,7 @@ function refreshStatus() {
 
 ipcMain.handle('start', (_event, mode) => start(mode));
 ipcMain.handle('stop', () => stop());
+ipcMain.handle('update', () => update());
 ipcMain.handle('state', () => state());
 ipcMain.handle('refresh', () => refreshStatus());
 ipcMain.handle('open', (_event, target) => links[target] && shell.openExternal(links[target]));
@@ -106,7 +141,10 @@ app.whenReady().then(() => {
     });
     window.removeMenu();
     window.loadFile(path.join(root, 'desktop', 'index.html'));
-    window.webContents.on('did-finish-load', refreshStatus);
+    window.webContents.on('did-finish-load', () => {
+        refreshStatus();
+        sendVersion();
+    });
     setInterval(refreshStatus, STATUS_EVERY_MS);
 
     // Closing the window is how the bot has always been stopped, so a running

@@ -1,4 +1,4 @@
-﻿param([switch]$NoPause, [switch]$ForceUpdate, [string]$ProjectRoot)
+﻿param([switch]$NoPause, [switch]$ForceUpdate, [switch]$NoStart, [switch]$OpenPanel, [string]$ProjectRoot)
 
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -53,8 +53,21 @@ function Assert-BotStopped {
     }
 }
 
+function Wait-PanelClosed {
+    # The panel's «Обновить» opens update.bat and closes itself. npm ci replaces
+    # the files the panel runs from, so give it a moment to be gone.
+    for ($second = 0; $second -lt 20; $second++) {
+        $panel = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
+            $_.Name -eq 'electron.exe' -and $_.ExecutablePath -like (Join-Path $root 'node_modules\*')
+        })
+        if ($panel.Count -eq 0) { return }
+        Start-Sleep -Seconds 1
+    }
+}
+
 try {
-    Write-Host "`n  NINGREDY — обновление и запуск`n" -ForegroundColor Cyan
+    $title = if ($NoStart) { 'обновление' } else { 'обновление и запуск' }
+    Write-Host "`n  NINGREDY — $title`n" -ForegroundColor Cyan
     if ($ForceUpdate) {
         Write-Host '  Принудительный режим: после резервного копирования локальный код будет заменён версией из GitHub.' -ForegroundColor Yellow
     }
@@ -94,6 +107,7 @@ try {
             throw "Не найден $required. Этот файл обновляет уже установленный проект; сначала требуется первоначальная настройка."
         }
     }
+    Wait-PanelClosed
     Assert-BotStopped
 
     $branch = Invoke-Checked $git @('branch', '--show-current') 'Проверяю ветку Git' -Capture
@@ -165,20 +179,34 @@ try {
     $hotFile = Join-Path $root 'public\hot'
     if (Test-Path -LiteralPath $hotFile -PathType Leaf) { Remove-Item -LiteralPath $hotFile }
 
-    Write-Host "`n  Обновление завершено. Запускаю проверку компьютера и бота..." -ForegroundColor Green
+    $version = Invoke-Checked $git @('log', '-1', '--format=%h, %cd', '--date=short') '' -Capture
+    if ($NoStart) {
+        Write-Host "`n  Обновление завершено, версия $version. Бот не запускался." -ForegroundColor Green
+    } else {
+        Write-Host "`n  Обновление завершено, версия $version. Запускаю проверку компьютера и бота..." -ForegroundColor Green
+    }
     Write-Host "  Резервная копия: $backup"
     Write-Host "  Журнал обновления: $log`n"
     Stop-Transcript | Out-Null
     $transcribing = $false
-    # Reuse the standard launcher: it clears stale jobs BEFORE machine checks.
-    # Calling smoke here first would prevent recovery after a previous crash.
-    Invoke-Checked 'powershell.exe' @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $root 'scripts\start-ningredy.ps1')) ''
+    if ($NoStart) {
+        $panel = Join-Path $root 'Ningredy.lnk'
+        if ($OpenPanel -and (Test-Path -LiteralPath $panel)) {
+            Write-Host '  Открываю панель Ningredy: бота запускайте из неё.'
+            Start-Process -FilePath $panel
+        }
+        Start-Sleep -Seconds 5
+    } else {
+        # Reuse the standard launcher: it clears stale jobs BEFORE machine checks.
+        # Calling smoke here first would prevent recovery after a previous crash.
+        Invoke-Checked 'powershell.exe' @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $root 'scripts\start-ningredy.ps1')) ''
+    }
 } catch {
     Write-Host "`n  Обновление/запуск остановлены: $($_.Exception.Message)" -ForegroundColor Red
     if ($backupComplete) { Write-Host "  Ваша резервная копия: $backup" -ForegroundColor Yellow }
     elseif ($backup) { Write-Host "  Копия в $backup НЕ завершена. Код и миграции ещё не обновлялись." -ForegroundColor Yellow }
     if ($log) { Write-Host "  Журнал: $log" }
-    Write-Host '  Исправьте указанную причину и запустите update-and-start.bat снова.'
+    Write-Host "  Исправьте указанную причину и запустите $(if ($NoStart) { 'update.bat или кнопку «Обновить»' } else { 'update-and-start.bat' }) снова."
     if (-not $NoPause) { $null = Read-Host '  Нажмите Enter, чтобы закрыть' }
     exit 1
 } finally {
