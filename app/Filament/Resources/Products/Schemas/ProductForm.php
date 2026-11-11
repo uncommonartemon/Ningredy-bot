@@ -124,8 +124,8 @@ class ProductForm
                         ->default('new')->required()->live(),
                     TextInput::make('price')->label(__('Цена'))->numeric()->minValue(0),
                     TextInput::make('currency')->label(__('Валюта'))->default('CZK')->length(3),
-                    Select::make('stock_status')->label(__('Наличие'))->options(ProductOptions::stockStatuses())->default('unknown')->required(),
-                    TextInput::make('quantity')->label(__('Количество'))->integer()->minValue(0)->default(0)->required()
+                    Select::make('stock_status')->label(__('Наличие'))->options(ProductOptions::stockStatuses())->default('in_stock')->required(),
+                    TextInput::make('quantity')->label(__('Количество'))->integer()->minValue(0)->default(1)->required()
                         ->live(onBlur: true)
                         ->afterStateUpdated(fn (Get $get, Set $set, mixed $state) => $set('stock_units',
                             StockUnitRows::resize($get('stock_units') ?? [], (int) $state))),

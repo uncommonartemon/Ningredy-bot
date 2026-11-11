@@ -330,6 +330,10 @@ class ProductDraftWorkflow
         $commercial = $draft->manualIntake()['commercial'] ?? [];
         $quantityChanged = isset($commercial['quantity'])
             && (! $targetVariantId || (int) $commercial['quantity'] !== (int) $variant->quantity);
+        // A card is made because the item is there (operator, 2026-11-11: «если позиция есть, значит по
+        // дефолту 1 есть»): approved with no quantity stated and nothing in stock, it is one item in stock.
+        // An edit of an existing card through the Telegram editor says what it means and is left alone.
+        $firstItem = ! isset($commercial['quantity']) && ! $targetVariantId && (int) $variant->quantity === 0;
 
         $variant->fill([
             'name' => $targetVariantId ? $variant->name : ($draft->color ?: ProductVariant::DEFAULT_NAME),
@@ -340,13 +344,15 @@ class ProductDraftWorkflow
             'condition' => $draft->condition ?? 'new',
             'translations' => CatalogLocales::textTranslations($draft->translations),
             'currency' => $commercial['currency'] ?? ($variant->currency ?: 'CZK'),
-            'stock_status' => $quantityChanged
-                ? ((int) $commercial['quantity'] > 0 ? 'in_stock' : 'out_of_stock')
-                : ($variant->stock_status ?: 'unknown'),
+            'stock_status' => match (true) {
+                $firstItem => 'in_stock',
+                $quantityChanged => (int) $commercial['quantity'] > 0 ? 'in_stock' : 'out_of_stock',
+                default => $variant->stock_status ?: 'unknown',
+            },
             'is_default' => $variant->exists ? $variant->is_default : ! $product->variants()->exists(),
             'is_active' => $targetVariantId ? $variant->is_active : true,
             ...(array_key_exists('price_amount', $commercial) ? ['price' => $commercial['price_amount']] : []),
-            ...(isset($commercial['quantity']) ? ['quantity' => $commercial['quantity']] : []),
+            ...(isset($commercial['quantity']) ? ['quantity' => $commercial['quantity']] : ($firstItem ? ['quantity' => 1] : [])),
             ...(array_key_exists('warranty_months', $commercial) ? ['warranty_months' => $commercial['warranty_months']] : []),
         ])->save();
 

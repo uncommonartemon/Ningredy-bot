@@ -5,8 +5,10 @@ namespace Tests\Feature;
 use App\Jobs\StoreProductImages;
 use App\Models\AiRun;
 use App\Models\ProductDraft;
+use App\Models\StockUnit;
 use App\Models\TelegramUpdate;
 use App\Services\Ai\AiSettings;
+use App\Services\Catalog\StockUnits;
 use App\Services\Products\ProductDraftWorkflow;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Queue;
@@ -31,6 +33,28 @@ class ProductDraftTypeTest extends TestCase
 
         $this->assertSame('laptop', $product->product_type);
         $this->assertSame('laptops', $product->category->slug);
+    }
+
+    public function test_a_card_approved_with_no_quantity_stated_is_one_item_in_stock(): void
+    {
+        // Operator, 2026-11-11: «если позиция есть, значит по дефолту 1 есть».
+        $product = app(ProductDraftWorkflow::class)->approve(
+            $this->draft('Lenovo IdeaPad Slim 3 15AMN8', 'IdeaPad Slim 3 15AMN8', 'laptop'),
+        );
+        $variant = $product->variants()->sole();
+        $this->assertSame([1, 'in_stock'], [$variant->quantity, $variant->stock_status]);
+        $unit = $variant->stockUnits()->sole();
+        $this->assertSame([StockUnit::IN_STOCK, $product->title], [$unit->status, $unit->product_title]);
+        $this->assertNotNull($unit->code);
+
+        // The same product approved again while its only item is sold: the one that came in is counted.
+        app(StockUnits::class)->sell($unit, '9000', now());
+        $this->assertSame(0, $variant->fresh()->quantity);
+        app(ProductDraftWorkflow::class)->approve($this->draft('Lenovo IdeaPad Slim 3 15AMN8', 'IdeaPad Slim 3 15AMN8', 'laptop'));
+        $this->assertSame([1, 2], [$variant->fresh()->quantity, $variant->stockUnits()->count()]);
+        // Approved once more while one is in stock: nothing is added by guess.
+        app(ProductDraftWorkflow::class)->approve($this->draft('Lenovo IdeaPad Slim 3 15AMN8', 'IdeaPad Slim 3 15AMN8', 'laptop'));
+        $this->assertSame([1, 2], [$variant->fresh()->quantity, $variant->stockUnits()->count()]);
     }
 
     public function test_ideapad_without_explicit_type_is_guessed_as_laptop(): void

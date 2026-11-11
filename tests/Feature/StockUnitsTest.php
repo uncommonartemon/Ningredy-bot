@@ -147,6 +147,31 @@ class StockUnitsTest extends TestCase
         $this->assertNotNull($unit->code);
     }
 
+    public function test_a_position_on_sale_whose_stock_nobody_stated_becomes_one_item_in_stock(): void
+    {
+        $unstated = $this->variant(quantity: 0);
+        $unstated->update(['stock_status' => 'unknown']);
+        $saidNone = $this->variant(quantity: 0);
+        $saidNone->update(['stock_status' => 'out_of_stock']);
+        $asleep = $this->variant(quantity: 0);
+        $asleep->update(['stock_status' => 'unknown']);
+        $asleep->product->takeOffSale();
+        $soldOut = $this->variant(quantity: 1);
+        app(StockUnits::class)->sell($soldOut->stockUnits()->sole(), '900', now());
+        $soldOut->update(['stock_status' => 'unknown']);
+
+        (require database_path('migrations/2026_11_11_130000_a_position_on_sale_is_one_item_in_stock.php'))->up();
+
+        $this->assertSame([1, 'in_stock'], [$unstated->fresh()->quantity, $unstated->fresh()->stock_status]);
+        $unit = $unstated->stockUnits()->sole();
+        $this->assertSame([StockUnit::IN_STOCK, 'Samsung PM9A1 512 GB', 'CZK', 'U-'.str_pad((string) $unit->id, 6, '0', STR_PAD_LEFT)],
+            [$unit->status, $unit->product_title, $unit->currency, $unit->code]);
+        // What was stated stays: «нет», a product off sale, a configuration whose item was sold.
+        $this->assertSame([0, 0, 0], [$saidNone->fresh()->quantity, $asleep->fresh()->quantity, $soldOut->fresh()->quantity]);
+        // Nor did saving the sold-out configuration again bring its sold item back as a new unit.
+        $this->assertSame(1, StockUnit::query()->inStock()->count());
+    }
+
     public function test_what_was_in_stock_before_the_books_becomes_units_and_the_chat_can_write_them(): void
     {
         $variant = $this->variant(quantity: 2);

@@ -34,12 +34,15 @@ class StockUnits
      *
      * @param  array<int|string, array<string, mixed>>|null  $rows
      */
-    public function afterVariantSaved(ProductVariant $variant, ?array $rows): void
+    public function afterVariantSaved(ProductVariant $variant, ?array $rows, bool $inserted = false): void
     {
         if ($variant->wasChanged('currency')) {
             $variant->stockUnits()->toBase()->update(['currency' => $variant->currency]);
         }
-        if ($this->busy || ($rows === null && ! $variant->wasRecentlyCreated && ! $variant->wasChanged('quantity'))) {
+        // Only a save that wrote the quantity is about the quantity: the save that inserted the configuration,
+        // or one that changed the number. A later save of the same object is neither, however new that object
+        // still calls itself - it would match the units against a quantity it remembers from before a sale.
+        if ($this->busy || ($rows === null && ! $inserted && ! $variant->wasChanged('quantity'))) {
             return;
         }
         $this->quietly(function () use ($variant, $rows): void {
