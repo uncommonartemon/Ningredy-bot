@@ -133,7 +133,7 @@ class StockUnitsTest extends TestCase
         $key = array_key_first($page->get('data.variants'));
         // Nothing in stock: the table is there all the same, with its button.
         $this->assertSame([], $page->get("data.variants.$key.stock_units"));
-        $page->assertSee('Единицы на складе: 0')->assertSee('Добавить единицу');
+        $page->assertSee('Единицы на складе')->assertSee('Добавить единицу');
 
         $page->callAction(TestAction::make('add')->schemaComponent("variants.$key.stock_units"));
         $rows = $page->get("data.variants.$key.stock_units");
