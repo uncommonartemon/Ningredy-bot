@@ -82,7 +82,7 @@ class ComponentKindsTest extends TestCase
         $instructions = (string) (new ProductResearchAgent)->instructions();
 
         $this->assertStringContainsString('- ram: Оперативная память (a kind of components: prefer it over the parent when it fits) | product_type=component', $instructions);
-        $this->assertStringContainsString('required specifications, use these exact keys: mpn (Manufacturer part number), ram (Оперативная память), memory_type (Memory type), data_rate (Data rate), module_type (Module type)', $instructions);
+        $this->assertStringContainsString('required specifications, use these exact keys: mpn (Manufacturer part number), ram (Memory), memory_type (Memory type), data_rate (Data rate), module_type (Module type)', $instructions);
         preg_match('/^[ \t]*- laptops: Ноутбуки[^\n]*/mu', $instructions, $laptops);
         $this->assertStringNotContainsString('required specifications', $laptops[0] ?? 'no laptops line');
         $this->assertStringContainsString('one you cannot find on any page', $instructions);
