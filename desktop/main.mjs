@@ -5,11 +5,14 @@ import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { checkForUpdate } from './update-check.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const script = (name) => path.join(root, 'scripts', name);
 const links = { site: 'http://127.0.0.1:8000', admin: 'http://127.0.0.1:8000/admin', tables: 'http://127.0.0.1:8000/admin/adminer' };
 const STATUS_EVERY_MS = 15_000;
+const UPDATE_CHECK_EVERY_MS = 30 * 60_000;
+const UPDATE_RECHECK_ON_FOCUS_MS = 5 * 60_000;
 
 let window = null;
 let bot = null; // { mode, child, startedAt }
@@ -105,6 +108,30 @@ function sendVersion() {
     });
 }
 
+// The button says whether GitHub has something newer: asked when the panel opens, every
+// half hour, and when the window gets the focus back after a while.
+let updateInfo = { state: 'checking' };
+let updateCheckedAt = 0;
+let updateChecking = false;
+function refreshUpdate() {
+    if (updateChecking) return;
+    updateChecking = true;
+    updateCheckedAt = Date.now();
+    checkForUpdate(root).then((found) => {
+        const changed = JSON.stringify(found) !== JSON.stringify(updateInfo);
+        updateInfo = found;
+        send('update', found);
+        if (!changed) return;
+        if (found.state === 'available') {
+            send('log', `— есть обновление: новых изменений ${found.count}${found.date ? `, последнее от ${found.date}` : ''}`);
+        } else if (found.reason) {
+            send('log', `— ${found.reason}`);
+        }
+    }).finally(() => {
+        updateChecking = false;
+    });
+}
+
 let statusRunning = false;
 function refreshStatus() {
     if (statusRunning) return;
@@ -122,6 +149,7 @@ function refreshStatus() {
 ipcMain.handle('start', (_event, mode) => start(mode));
 ipcMain.handle('stop', () => stop());
 ipcMain.handle('update', () => update());
+ipcMain.handle('update-info', () => updateInfo);
 ipcMain.handle('state', () => state());
 ipcMain.handle('refresh', () => refreshStatus());
 ipcMain.handle('open', (_event, target) => links[target] && shell.openExternal(links[target]));
@@ -144,8 +172,13 @@ app.whenReady().then(() => {
     window.webContents.on('did-finish-load', () => {
         refreshStatus();
         sendVersion();
+        refreshUpdate();
     });
     setInterval(refreshStatus, STATUS_EVERY_MS);
+    setInterval(refreshUpdate, UPDATE_CHECK_EVERY_MS);
+    window.on('focus', () => {
+        if (Date.now() - updateCheckedAt > UPDATE_RECHECK_ON_FOCUS_MS) refreshUpdate();
+    });
 
     // Closing the window is how the bot has always been stopped, so a running
     // bot is never stopped by it without saying so.

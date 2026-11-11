@@ -4,17 +4,38 @@ const $ = (id) => document.getElementById(id);
 const log = $('log');
 const LOG_LINES = 1500;
 let startedAt = null;
+let running = false;
+let updateInfo = { state: 'checking' };
+
+// Grey when there is nothing to install or it cannot be installed now; the reason is the tooltip.
+function renderUpdate(info = updateInfo) {
+    updateInfo = info;
+    const button = $('update');
+    const available = info.state === 'available';
+    const labels = {
+        checking: 'Проверяю обновления…',
+        current: 'Нет новых обновлений',
+        available: running ? 'Есть обновление — остановите бота' : 'Есть обновление — обновить',
+        blocked: 'Обновление недоступно',
+        unknown: 'Обновления не проверены',
+    };
+    button.textContent = labels[info.state] ?? labels.unknown;
+    button.disabled = running || !available;
+    button.classList.toggle('primary', available);
+    button.title = info.reason
+        ?? (available ? `Новых изменений: ${info.count}${info.date ? `, последнее от ${info.date}` : ''}` : '');
+}
 
 function renderState({ mode, startedAt: since }) {
     startedAt = since;
-    const running = mode !== null;
+    running = mode !== null;
     document.body.classList.toggle('running', running);
     $('state').classList.toggle('on', running);
     $('state-label').textContent = running ? (mode === 'bot' ? 'Бот работает' : 'Сайт работает') : 'Остановлен';
     $('start-bot').hidden = running;
     $('start-site').hidden = running;
-    $('update').hidden = running;
     $('stop').hidden = !running;
+    renderUpdate();
     $('stop').disabled = false;
     tick();
 }
@@ -88,5 +109,7 @@ document.querySelectorAll('[data-open]').forEach((link) => link.addEventListener
 api.on('state', renderState);
 api.on('status', renderStatus);
 api.on('log', appendLine);
+api.on('update', renderUpdate);
+api.updateInfo().then(renderUpdate);
 api.state().then(renderState);
 setInterval(tick, 1000);
