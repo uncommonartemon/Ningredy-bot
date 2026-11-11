@@ -4,9 +4,11 @@ namespace App\Filament\Resources\Products\Tables;
 
 use App\Filament\Resources\Products\ProductResource;
 use App\Filament\Schemas\ProductCommercialAction;
+use App\Filament\Schemas\ProductSaleActions;
 use App\Filament\Support\ProductOptions;
 use App\Models\Product;
 use Filament\Actions\ActionGroup;
+use Filament\Actions\DeleteAction;
 use Filament\Actions\EditAction;
 use Filament\Actions\ViewAction;
 use Filament\Tables\Columns\TextColumn;
@@ -85,7 +87,13 @@ class ProductsTable
                 SelectFilter::make('product_type')->label(__('Тип'))->options(ProductOptions::types()),
                 TernaryFilter::make('is_active')->label(__('product-table.show_on_site')),
                 TernaryFilter::make('is_featured')->label(__('Рекомендуемый')),
-            ])->recordActions([ActionGroup::make([ProductCommercialAction::make(), ViewAction::make(), EditAction::make()])])
+            ])->recordActions([ActionGroup::make([
+                ProductCommercialAction::make(), ViewAction::make(), EditAction::make(),
+                // Two different ways out (operator, 2026-11-11): to sleep and back, or deleted for good.
+                ProductSaleActions::takeOff(), ProductCommercialAction::putBackOnSale(),
+                ProductSaleActions::delete(DeleteAction::make()),
+            ])])
+            ->toolbarActions([ProductSaleActions::bulk()])
             ->recordUrl(fn ($record): string => ProductResource::getUrl('edit', ['record' => $record]));
     }
 }

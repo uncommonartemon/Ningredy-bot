@@ -44,6 +44,7 @@ use App\Services\ProductSearch\Research\RecoverableProductResearch;
 use App\Services\ProductSearch\Research\ResearchSourceRoles;
 use App\Services\ProductSearch\Research\ResearchWebSearchTrace;
 use App\Services\ProductSearch\Supervision\SearchProgressSupervisor;
+use App\Services\Telegram\CatalogTelegramNavigation;
 use App\Services\Telegram\ProductCardPresenter;
 use App\Services\Telegram\TelegramClient;
 use App\Services\Telegram\TelegramProgressReporter;
@@ -522,7 +523,10 @@ class ResearchProduct implements Tool
                         app(TelegramClient::class),
                         (string) $this->update->chat_id,
                         $existingProduct,
-                        '✅ Такой товар уже есть в каталоге',
+                        // A repeat of a product that sleeps (operator, 2026-11-11): its card says so
+                        // and carries the button that puts it back, instead of a second card.
+                        $existingProduct->isOnSale() ? '✅ Такой товар уже есть в каталоге' : '💤 Такой товар уже есть в каталоге: он снят с продажи',
+                        $existingProduct->isOnSale() ? null : app(CatalogTelegramNavigation::class)->product($existingProduct),
                         condition: $data['condition'] ?? 'new',
                         variantId: $catalogIdentity->variant($existingProduct, $data['specifications'] ?? [], $data['condition'] ?? 'new', activeOnly: true, model: $data['model'] ?? null)?->id,
                         telegramUserId: $this->update->telegram_user_id,
@@ -542,6 +546,7 @@ class ResearchProduct implements Tool
                     'product_id' => $existingProduct->id,
                     'title' => $existingProduct->title,
                     'active' => $existingProduct->is_active,
+                    'on_sale' => $existingProduct->isOnSale(),
                     'found_specifications' => $foundSpecifications,
                     ...($foundSpecifications === [] ? [] : ['message' => 'found_specifications — характеристики со страниц, которых в товаре нет.'
                         .' Если оператор просил их дописать, передай нужные в AddProductSpecifications (facts_json, как есть): повторный поиск не нужен.']),

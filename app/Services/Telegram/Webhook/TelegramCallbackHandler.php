@@ -68,6 +68,13 @@ class TelegramCallbackHandler
 
             return;
         }
+        // Two different ways out (operator, 2026-11-11): to sleep and back, or deleted for good.
+        if (preg_match('/^product:(sleep|wake):(\d+)$/', $data, $sale) === 1) {
+            $this->commands->setCatalogSale((int) $sale[2], $sale[1] === 'wake', $update);
+            $this->telegram->answerCallbackQuery($callbackId, $sale[1] === 'wake' ? 'Возвращаю в продажу.' : 'Снимаю с продажи.');
+
+            return;
+        }
         if (preg_match('/^product:(tgedit|remove):(\d+)(?::(\d+))?$/', $data, $catalogAction) === 1) {
             if ($catalogAction[1] === 'tgedit') {
                 $this->commands->openCatalogEditor((int) $catalogAction[2], $update, isset($catalogAction[3]) ? (int) $catalogAction[3] : null);
@@ -508,7 +515,7 @@ class TelegramCallbackHandler
             return;
         }
 
-        if (preg_match('/^product:delete:(confirm|cancel):(\d+)$/', $data, $deleteMatches) === 1) {
+        if (preg_match('/^product:delete:(confirm|cancel|sleep):(\d+)$/', $data, $deleteMatches) === 1) {
             $this->handleProductDeletion(
                 action: $deleteMatches[1],
                 operationId: (int) $deleteMatches[2],
@@ -1210,7 +1217,9 @@ class TelegramCallbackHandler
             if ($operation?->status === 'completed') {
                 $result = ['status' => 'completed', 'message' => 'Товар удалён. Операция #'.$operationId.'.', 'notify' => true];
             } else {
-                $result = ['status' => 'failed', 'message' => 'Не удалось удалить товар. Ошибка записана в журнал.'];
+                $result = ['status' => 'failed', 'message' => $action === 'sleep'
+                    ? 'Не удалось снять товар с продажи. Ошибка записана в журнал.'
+                    : 'Не удалось удалить товар. Ошибка записана в журнал.'];
             }
         }
         $update->update(['status' => $result['status'], 'processed_at' => now()]);

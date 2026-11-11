@@ -26,13 +26,30 @@ final class CatalogTelegramNavigation
     public function product(Product $product): ?array
     {
         $base = $this->baseUrl();
+        // Two different ways out (operator, 2026-11-11): to sleep and back, or deleted for good.
         $rows = [[['text' => '✏️ Изменить в Telegram', 'callback_data' => 'product:tgedit:'.$product->id]],
+            [$product->isOnSale()
+                ? ['text' => '💤 Снять с продажи', 'callback_data' => 'product:sleep:'.$product->id]
+                : ['text' => '✅ Вернуть в продажу', 'callback_data' => 'product:wake:'.$product->id]],
             [['text' => '🗑 Удалить товар', 'callback_data' => 'product:remove:'.$product->id]]];
         if ($base !== null) {
             $rows[] = [['text' => '🛠 Открыть в Filament', 'url' => $base.'/admin/products/'.$product->getRouteKey().'/edit']];
         }
 
         return ['inline_keyboard' => $rows];
+    }
+
+    /** What the operator hears after the card went to sleep or came back. */
+    public function saleNote(Product $product): string
+    {
+        if (! $product->isOnSale()) {
+            return "💤 Товар #{$product->id} «{$product->title}» снят с продажи: на сайте его нет. "
+                .'Карточка, фото и характеристики сохранены — когда такой товар появится снова, верните его кнопкой ниже.';
+        }
+        $inStock = (int) $product->variants()->sum('quantity');
+
+        return "✅ Товар #{$product->id} «{$product->title}» снова в продаже."
+            .($inStock > 0 ? " В наличии: {$inStock} шт." : ' В наличии 0 шт. — напишите, сколько штук пришло и цену, если она изменилась.');
     }
 
     private function baseUrl(): ?string

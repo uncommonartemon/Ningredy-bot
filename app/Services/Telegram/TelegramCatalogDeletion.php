@@ -23,6 +23,31 @@ class TelegramCatalogDeletion
         return hash('sha256', json_encode($snapshot, JSON_THROW_ON_ERROR));
     }
 
+    /**
+     * The question asked before a deletion, the same wherever it was requested. Deleting is for
+     * a card that was a mistake: a product that will come in again is taken off sale instead,
+     * so that way out stands beside the deletion (operator, 2026-11-11: «две разные кнопки»).
+     *
+     * @return array{0: string, 1: array{inline_keyboard: list<list<array{text: string, callback_data: string}>>}}
+     */
+    public function confirmation(AiOperation $operation): array
+    {
+        $product = Product::query()->find($operation->target_id);
+        $title = $product?->title ?? (string) data_get($operation->payload, 'title', 'Товар');
+        $rows = [[['text' => 'Удалить навсегда', 'callback_data' => "product:delete:confirm:{$operation->id}"]]];
+        if ($product?->isOnSale()) {
+            $rows[] = [['text' => '💤 Снять с продажи', 'callback_data' => "product:delete:sleep:{$operation->id}"]];
+        }
+        $rows[] = [['text' => 'Отмена', 'callback_data' => "product:delete:cancel:{$operation->id}"]];
+
+        return ["Удалить товар #{$operation->target_id} «{$title}» навсегда?\n\n"
+            .'Удалятся карточка, конфигурации, характеристики и фото; продажи останутся в учёте. '
+            .($product?->isOnSale()
+                ? 'Если такой товар может появиться снова, снимите его с продажи: карточка сохранится и не придётся искать заново.'
+                : 'Сейчас товар снят с продажи: карточка сохранена и ждёт, когда такой товар появится снова.')
+            ."\n\nПодтверждение действует 10 минут.", ['inline_keyboard' => $rows]];
+    }
+
     /** @return array{status: string, message: string, notify?: bool} */
     public function resolve(int $operationId, string $action, TelegramUpdate $update): array
     {
@@ -43,6 +68,20 @@ class TelegramCatalogDeletion
                 $operation->update(['status' => 'cancelled', 'result' => ['cancelled_by_update_id' => $update->id], 'executed_at' => now()]);
 
                 return ['status' => 'completed', 'message' => "Удаление товара #{$productId} отменено.", 'notify' => true];
+            }
+            // The other way out, chosen on the confirmation itself: nothing is deleted.
+            if ($action === 'sleep') {
+                $product = Product::query()->lockForUpdate()->find($productId);
+                if (! $product) {
+                    $operation->update(['status' => 'failed', 'error' => 'Product was not found at confirmation time.', 'executed_at' => now()]);
+
+                    return ['status' => 'not_found', 'message' => 'Товар уже отсутствует.'];
+                }
+                $product->takeOffSale();
+                $operation->update(['status' => 'cancelled', 'result' => ['taken_off_sale_by_update_id' => $update->id], 'executed_at' => now()]);
+
+                return ['status' => 'completed', 'message' => "💤 Товар #{$productId} «{$product->title}» снят с продажи вместо удаления: на сайте его нет, "
+                    .'карточка, фото и характеристики сохранены. Вернуть: кнопка под карточкой (/product '.$productId.') или «верни в продажу '.$productId.'».', 'notify' => true];
             }
             // Legacy confirmations have no reviewed snapshot and must be requested again.
             $expires = data_get($operation->payload, 'expires_at');

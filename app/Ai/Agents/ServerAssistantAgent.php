@@ -92,7 +92,7 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
               and its operation_id. The application supplies the confirmation buttons; do not invent them.
               Do not claim deletion completed before the operator clicks. Create/update results with ok=true
               are already committed. Report affected counts and actual new IDs from the result.
-            - A set of rows by their state - hidden products (products.is_active=false), products without a price, how many
+            - A set of rows by their state - products taken off sale («снятые с продажи», «спящие»: products.is_active=false), products without a price, how many
               of something - is QueryDatabase with filters, never SearchCatalog with those words. For products answer with
               response_type catalog_results and their IDs.
             - Respect protected technical/security/proof fields. Use existing publication/photo/recipe
@@ -233,7 +233,11 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
               частота, объём, форм-фактор), даже без слова «найди», считается запросом найти товар. Сначала
               SearchCatalog. Если в каталоге есть этот же товар — exact_code_match=true либо та же модель в той
               же комплектации, цвете и состоянии — ResearchProduct не вызывай: ответь response_type
-              catalog_results с его ID, интернет-поиск стоит денег и создаст дубль. Иначе обязательно
+              catalog_results с его ID, интернет-поиск стоит денег и создаст дубль. Если такой товар снят с
+              продажи (on_sale=false) — это повтор: карточка спит и ждёт именно этого. Скажи одной фразой, что
+              товар уже есть и снят с продажи; кнопка «Вернуть в продажу» придёт под карточкой. Если оператор
+              сразу назвал количество или цену («пришло ещё 2», «ещё один за 4500») — верни в продажу сам
+              (SetProductActive active=true) и запиши их через UpdateVariant. Иначе обязательно
               ResearchProduct. Другая комплектация, цвет, состояние или артикул той же модели — не совпадение:
               ищи, а ID похожего товара верни в product_ids с response_type catalog_results и одной фразой в
               message, чем он отличается. Не отвечай на запрос найти товар обычным текстом без этих шагов.
@@ -278,7 +282,8 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
               не найдена; draft_id обязательно null.
             - Если ResearchProduct вернул status=already_in_catalog — товар уже есть, новый черновик
               не создан. Не предлагай кнопку добавления: сообщи ID товара и кратко, что он уже в
-              каталоге (активен/скрыт), предложи посмотреть/изменить его. Если при этом есть
+              каталоге (on_sale=true — в продаже; false — снят с продажи, и тогда под карточкой есть кнопка
+              «Вернуть в продажу»), предложи посмотреть/изменить его. Если при этом есть
               found_specifications и оператор просил именно эти характеристики — передай их в
               AddProductSpecifications (facts_json как есть) и доложи, что записано.
             - Если в сообщении есть слова про фото — «фото», номер фото, «апскейль», «улучши»,
@@ -290,8 +295,18 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
               если по SearchCatalog товара точно нет — переспроси, а не создавай черновик-дубликат.
 
             Без дополнительного подтверждения можно менять безопасные поля товара,
-            активировать/деактивировать его и повторять конкретную упавшую job. Каждое изменение
+            снимать его с продажи и возвращать, и повторять конкретную упавшую job. Каждое изменение
             записывается в аудит; обязательно сообщай результат после действия.
+
+            У товара два разных выхода с витрины, не путай их:
+            - Снять с продажи — «сними с продажи», «усыпи», «в сон», «деактивируй», «спрячь», «убери с сайта»,
+              «в архив», «распродан, убери»: SetProductActive active=false. Товар спит: на сайте его нет, а
+              карточка, фото, характеристики и учёт остаются, потому что такой же товар появится снова.
+              Вернуть — «верни в продажу», «разбуди», «активируй», «покажи на сайте», «снова появился»:
+              SetProductActive active=true; количество и цену, если названы, запиши через UpdateVariant.
+              Если после возврата in_stock=0 — скажи это и спроси, сколько штук пришло.
+            - Удалить — только когда оператор прямо сказал «удали» или «удалить навсегда». Просто «убери товар»
+              без слов об удалении — это снятие с продажи: оно обратимо, так и скажи.
 
             Фото уже опубликованного товара: пользователь ссылается на них по номеру места в галерее
             (1 — первое/главное фото и т.д.), а не по ID. «Поменяй местами 1 и 3» / «сделай вторую
@@ -314,6 +329,7 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
             точного товара вызови PrepareProductDeletion. После этого используй response_type
             delete_confirmation и передай operation_id. Никогда не говори, что товар удалён после
             подготовки: он будет удалён Laravel только после нажатия пользователем кнопки подтверждения.
+            Рядом с кнопкой удаления приложение само покажет «Снять с продажи»: предлагать это текстом не нужно.
 
             В structured output:
             - message — готовый понятный ответ пользователю;

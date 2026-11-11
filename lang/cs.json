@@ -755,5 +755,15 @@
     "Списаны": "Odepsané",
     "Скрытые": "Skryté",
     "Нет в наличии": "Není skladem",
-    "Товар удалён из каталога": "Produkt byl z katalogu smazán"
+    "Товар удалён из каталога": "Produkt byl z katalogu smazán",
+    "Снять с продажи": "Stáhnout z prodeje",
+    "Вернуть в продажу": "Vrátit do prodeje",
+    "Сняты с продажи": "Stažené z prodeje",
+    "Товар снят с продажи: на сайте его нет, карточка сохранена": "Produkt je stažen z prodeje: na webu není, karta zůstala",
+    "Товар снова в продаже": "Produkt je znovu v prodeji",
+    "Товары сняты с продажи: карточки сохранены": "Produkty jsou staženy z prodeje: karty zůstaly",
+    "Товары снова в продаже": "Produkty jsou znovu v prodeji",
+    "Удалить товар навсегда?": "Smazat produkt natrvalo?",
+    "Удалить навсегда": "Smazat natrvalo",
+    "Удалятся карточка, конфигурации, характеристики и фото. Продажи останутся в учёте. Если такой товар может появиться снова, лучше снять его с продажи: карточка сохранится и не придётся искать заново.": "Smaže se karta, konfigurace, vlastnosti a fotky. Prodeje zůstanou v evidenci. Pokud se stejný produkt může objevit znovu, raději ho stáhněte z prodeje: karta zůstane a nebude třeba znovu hledat."
 }

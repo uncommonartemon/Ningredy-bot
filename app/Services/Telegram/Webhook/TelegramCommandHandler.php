@@ -4,8 +4,10 @@ namespace App\Services\Telegram\Webhook;
 
 use App\Ai\Tools\GetSystemStatus;
 use App\Ai\Tools\PrepareProductDeletion;
+use App\Ai\Tools\SetProductActive;
 use App\Jobs\ProcessTelegramMessage;
 use App\Jobs\SendDiagnosticReport;
+use App\Models\AiOperation;
 use App\Models\AppSetting;
 use App\Models\Product;
 use App\Models\ProductDraft;
@@ -14,6 +16,7 @@ use App\Services\Telegram\CatalogTelegramNavigation;
 use App\Services\Telegram\DraftTelegramInteractionState;
 use App\Services\Telegram\DraftTelegramPresenter;
 use App\Services\Telegram\ProductCardPresenter;
+use App\Services\Telegram\TelegramCatalogDeletion;
 use App\Services\Telegram\TelegramCatalogEditor;
 use App\Services\Telegram\TelegramClient;
 use App\Services\Telegram\TelegramConversationScope;
@@ -406,13 +409,23 @@ class TelegramCommandHandler
         if (! ($result['ok'] ?? false)) {
             $this->telegram->sendMessage((string) $update->chat_id, 'Товар не найден или операция уже обработана.');
         } else {
-            $id = $result['operation_id'];
-            $this->telegram->sendMessage((string) $update->chat_id,
-                "Удалить товар #{$productId}: ".$result['product']['title']."?\nУдаление товара, вариантов и фото необратимо. Подтверждение действует 10 минут.",
-                ['inline_keyboard' => [[
-                    ['text' => 'Удалить навсегда', 'callback_data' => "product:delete:confirm:{$id}"],
-                    ['text' => 'Отмена', 'callback_data' => "product:delete:cancel:{$id}"],
-                ]]]);
+            [$question, $buttons] = app(TelegramCatalogDeletion::class)->confirmation(AiOperation::query()->findOrFail($result['operation_id']));
+            $this->telegram->sendMessage((string) $update->chat_id, $question, $buttons);
+        }
+        $this->markCommandProcessed($update);
+    }
+
+    /** The card's own button: to sleep or back on sale, with the audit the assistant's tool keeps. */
+    public function setCatalogSale(int $productId, bool $onSale, TelegramUpdate $update): void
+    {
+        $product = Product::query()->find($productId);
+        if ($product === null) {
+            $this->telegram->sendMessage((string) $update->chat_id, 'Товар не найден: возможно, он уже удалён.');
+        } else {
+            (new SetProductActive($update))->handle(new Request(['product_id' => $productId, 'active' => $onSale]));
+            $navigation = app(CatalogTelegramNavigation::class);
+            $product->refresh();
+            $this->telegram->sendMessage((string) $update->chat_id, $navigation->saleNote($product), $navigation->product($product));
         }
         $this->markCommandProcessed($update);
     }

@@ -19,7 +19,9 @@ class SetProductActive implements Tool
 
     public function description(): Stringable|string
     {
-        return 'Activate or deactivate a catalog product. Deactivated products are hidden from the public Inertia/Vue catalog.';
+        return 'Take a catalog product off sale (active=false) or put it back on sale (active=true). Off sale the product sleeps: '
+            .'the public catalog no longer shows it, while its card, photos, characteristics and the books stay, because the same '
+            .'product comes in again. This is not a deletion and needs no confirmation.';
     }
 
     public function handle(Request $request): Stringable|string
@@ -35,9 +37,10 @@ class SetProductActive implements Tool
             function () use ($productId, $active): array {
                 $product = Product::query()->find($productId);
                 throw_if(! $product, ModelNotFoundException::class, 'Product not found.');
-                $product->update(['is_active' => $active]);
+                $active ? $product->putBackOnSale() : $product->takeOffSale();
 
-                return ['product_id' => $product->id, 'title' => $product->title, 'active' => $product->is_active];
+                return ['product_id' => $product->id, 'title' => $product->title, 'active' => $product->is_active,
+                    'on_sale' => $product->isOnSale(), 'in_stock' => (int) $product->variants()->sum('quantity')];
             },
             Product::class,
             $productId,

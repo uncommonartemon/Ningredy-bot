@@ -25,7 +25,8 @@ class ListProducts extends ListRecords
             'all' => Tab::make(__('Все')),
             'visible' => Tab::make(__('На сайте'))
                 ->modifyQueryUsing(fn (Builder $query) => $query->where('status', 'published')->where('is_active', true)),
-            'hidden' => Tab::make(__('Скрытые'))
+            // Asleep: off the storefront, the card kept for when the same product comes in again.
+            'hidden' => Tab::make(__('Сняты с продажи'))
                 ->modifyQueryUsing(fn (Builder $query) => $query->where(fn (Builder $hidden) => $hidden
                     ->where('status', '!=', 'published')->orWhere('is_active', false))),
             'sold_out' => Tab::make(__('Нет в наличии'))

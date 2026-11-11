@@ -6,10 +6,12 @@ use App\Filament\Resources\Concerns\GuardsCatalogEditRevision;
 use App\Filament\Resources\Products\Pages\Concerns\HandlesProductPhotoUploads;
 use App\Filament\Resources\Products\Pages\Concerns\InteractsWithProductFormAssistant;
 use App\Filament\Resources\Products\ProductResource;
+use App\Filament\Schemas\ProductSaleActions;
 use Filament\Actions\Action;
 use Filament\Actions\DeleteAction;
 use Filament\Actions\ViewAction;
 use Filament\Resources\Pages\EditRecord;
+use Filament\Support\Icons\Heroicon;
 
 class EditProduct extends EditRecord
 {
@@ -48,7 +50,25 @@ class EditProduct extends EditRecord
             ViewAction::make(),
             $this->productAiAssistantAction(),
             $this->getSaveFormAction()->formId('form')->keyBindings([]),
-            DeleteAction::make(),
+            // Two different buttons (operator, 2026-11-11): the card goes to sleep and comes back, or is deleted for good.
+            ProductSaleActions::takeOff()->after(fn () => $this->saleChanged()),
+            Action::make('putBackOnSale')->label(__('Вернуть в продажу'))->icon(Heroicon::OutlinedEye)->color('gray')
+                ->visible(fn (): bool => ! $this->record->isOnSale())
+                ->action(function (Action $action): void {
+                    $this->record->putBackOnSale();
+                    $this->saleChanged();
+                    $action->success();
+                })
+                ->successNotificationTitle(__('Товар снова в продаже')),
+            ProductSaleActions::delete(DeleteAction::make()),
         ];
+    }
+
+    /** The button wrote past the open form: the form shows the new state and saving stays allowed. */
+    private function saleChanged(): void
+    {
+        $this->record->refresh();
+        $this->refreshFormData(['is_active', 'status']);
+        $this->rememberCatalogRevision();
     }
 }

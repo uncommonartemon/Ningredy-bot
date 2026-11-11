@@ -17,7 +17,7 @@ class ProductController extends Controller
 {
     public function __invoke(Product $product, Request $request): Response
     {
-        abort_unless($product->status === 'published' && $product->is_active, 404);
+        abort_unless($product->isOnSale(), 404);
 
         $product->load([
             'brand:id,name,country,website_url',

@@ -755,5 +755,15 @@
     "Списаны": "Written off",
     "Скрытые": "Hidden",
     "Нет в наличии": "Out of stock",
-    "Товар удалён из каталога": "The product was deleted from the catalog"
+    "Товар удалён из каталога": "The product was deleted from the catalog",
+    "Снять с продажи": "Take off sale",
+    "Вернуть в продажу": "Put back on sale",
+    "Сняты с продажи": "Off sale",
+    "Товар снят с продажи: на сайте его нет, карточка сохранена": "The product is off sale: the site no longer shows it, the card is kept",
+    "Товар снова в продаже": "The product is on sale again",
+    "Товары сняты с продажи: карточки сохранены": "The products are off sale: their cards are kept",
+    "Товары снова в продаже": "The products are on sale again",
+    "Удалить товар навсегда?": "Delete the product for good?",
+    "Удалить навсегда": "Delete for good",
+    "Удалятся карточка, конфигурации, характеристики и фото. Продажи останутся в учёте. Если такой товар может появиться снова, лучше снять его с продажи: карточка сохранится и не придётся искать заново.": "The card, its configurations, characteristics and photos will be deleted. Sales stay in the books. If the same product may come in again, take it off sale instead: the card is kept and nothing has to be searched for again."
 }

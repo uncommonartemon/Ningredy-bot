@@ -1491,6 +1491,44 @@ class ProcessTelegramMessageTest extends TestCase
         });
     }
 
+    public function test_a_repeat_of_a_sleeping_product_shows_its_card_with_the_button_that_wakes_it(): void
+    {
+        // Operator, 2026-11-11: «повторы будут однозначно». The same product comes in again while
+        // its card is off sale: no second card, the old one with the way back.
+        Storage::fake('public');
+        config(['services.telegram.bot_token' => 'test-token']);
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []])]);
+        $brand = Brand::query()->firstOrCreate(['slug' => 'lenovo'], ['name' => 'Lenovo', 'is_active' => true]);
+        $sleeping = Product::query()->create([
+            'category_id' => Category::query()->where('slug', 'laptops')->value('id'), 'brand_id' => $brand->id,
+            'canonical_key' => ProductIdentityKey::for('Lenovo', 'Legion 5 16IRX9', 'Lenovo Legion 5 16IRX9'),
+            'product_type' => 'laptop', 'status' => 'published', 'slug' => 'lenovo-legion-5-16irx9',
+            'title' => 'Lenovo Legion 5 16IRX9', 'is_active' => false, 'published_at' => now(),
+        ]);
+        ProductResearchAgent::fake([[
+            'status' => 'found', 'title' => 'Lenovo Legion 5 16IRX9', 'brand' => 'Lenovo', 'model' => 'Legion 5 16IRX9',
+            'category' => 'laptops', 'product_type' => 'laptop', 'color' => 'Luna Grey', 'description' => 'Игровой ноутбук.',
+            'specifications' => [], 'sources' => [['title' => 'Amazon', 'url' => 'https://www.amazon.com/dp/LEGION', 'type' => 'marketplace']],
+            'primary_source_url' => 'https://www.amazon.com/dp/LEGION', 'official_source_url' => null, 'research_notes' => null,
+            'image_urls' => [], 'confidence' => 0.95,
+            'selected_identity' => $this->observedIdentity('Legion 5 16IRX9', 'https://www.amazon.com/dp/LEGION'),
+        ]]);
+        $resolver = $this->mock(ProductImageResolver::class);
+        $resolver->shouldNotReceive('resolve');
+
+        $result = json_decode((new ResearchProduct($this->update(), $resolver))->handle(new Request([
+            'query' => 'Lenovo Legion 5 32 GB',
+        ])), true, flags: JSON_THROW_ON_ERROR);
+
+        $this->assertSame(['already_in_catalog', $sleeping->id, false], [$result['status'], $result['product_id'], $result['on_sale']]);
+        $this->assertSame(0, ProductDraft::query()->count());
+        Http::assertSent(fn (HttpRequest $request): bool => str_ends_with($request->url(), '/sendMessage')
+            && str_contains((string) $request['text'], '💤 Такой товар уже есть в каталоге: он снят с продажи')
+            && str_contains((string) $request['text'], '💤 Снят с продажи')
+            && collect(data_get($request->data(), 'reply_markup.inline_keyboard', []))->flatten(1)->pluck('callback_data')
+                ->contains("product:wake:{$sleeping->id}"));
+    }
+
     /** @return array{Product, Product} */
     private function products(): array
     {
