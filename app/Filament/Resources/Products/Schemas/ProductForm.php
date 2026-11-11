@@ -226,7 +226,8 @@ class ProductForm
                     // Taking a row away is taking that item out of the stock.
                     ->afterStateUpdated(fn (Set $set, ?array $state) => $set('quantity', count($state ?? []))),
             ])
-            ->compact()->collapsed()->columnSpanFull()
+            // Open by default: the table is what the operator looks for under the quantity (2026-11-11, «не вижу как устроено»).
+            ->compact()->collapsible()->columnSpanFull()
             ->visible(fn (Get $get): bool => (int) $get('quantity') > 0 || ($get('stock_units') ?? []) !== []);
     }
 

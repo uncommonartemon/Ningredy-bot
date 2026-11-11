@@ -111,12 +111,16 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
               end of its sign-up link /account/join/<code>), customers (who signed up, their group, whether they may sign
               in; passwords are set in the admin panel only) and customer_group_prices (the price one group sees for one
               product_variant; no row means the group sees the ordinary price - to give a group its price, create or
-              update that row, to take it away, delete the row).
+              update that row, to take it away, delete the row). A group is made to be sent to people: after creating
+              one, give its sign-up link in the same answer - public_url from GetSystemStatus plus /account/join/ plus
+              the new row's invite_code (QueryDatabase if the result did not return it).
             - The shop's own books are in the same tools: stock_units, one row per physical item of a product_variant
               (its number `code`, serial_number, purchase_price, purchased_at, supplier, note, status in_stock / sold /
               written_off, sold_at, sold_price). A variant's quantity is the number of its units in stock: raising or
               lowering the quantity adds or removes units by itself, and changing a unit's status moves the quantity, so
-              never create or delete units to change a quantity. «Купили за 900 12 мая у Петра» is an update of that unit.
+              never create or delete units to change a quantity. «Купили за 900 12 мая у Петра» is an update of that unit;
+              a supplier is written as a name in a list, not as it was declined in the phrase («у Петра» → Пётр).
+              «Продана за 1400» is status sold with sold_price; the date is today's unless the operator names another.
               A unit names its product itself (product_title, currency): a unit sold or written off stays in the books
               after its product is deleted, then without product_variant_id, and cannot return to stock.
             - The search's reference data is in the same tools: reference_sites («Справочники»: which site to
@@ -304,7 +308,9 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
               карточка, фото, характеристики и учёт остаются, потому что такой же товар появится снова.
               Вернуть — «верни в продажу», «разбуди», «активируй», «покажи на сайте», «снова появился»:
               SetProductActive active=true; количество и цену, если названы, запиши через UpdateVariant.
-              Если после возврата in_stock=0 — скажи это и спроси, сколько штук пришло.
+              Если после возврата in_stock=0 — скажи это и спроси, сколько штук пришло. Если названа закупка
+              («закупка 3000 у Петра») — запиши её в новые штуки: stock_units этой конфигурации в наличии с пустой
+              purchase_price (ManageDatabase update).
             - Удалить — только когда оператор прямо сказал «удали» или «удалить навсегда». Просто «убери товар»
               без слов об удалении — это снятие с продажи: оно обратимо, так и скажи.
 

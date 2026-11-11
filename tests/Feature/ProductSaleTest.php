@@ -78,12 +78,21 @@ class ProductSaleTest extends TestCase
         // The same product came in again: one window puts it back with how many there are and the price.
         $list->mountTableAction('putBackOnSale', $asleep)
             ->assertTableActionDataSet(['quantity' => 1, 'stock_status' => 'in_stock'])
-            ->setTableActionData(['quantity' => 2, 'price' => 4500])
+            ->setTableActionData(['quantity' => 2, 'price' => 4500, 'purchase_price' => 3000, 'purchased_at' => '2026-11-10', 'supplier' => 'Petr'])
             ->callMountedTableAction()->assertHasNoTableActionErrors();
         $variant = $asleep->variants()->sole();
         $this->assertTrue($asleep->fresh()->isOnSale());
         $this->assertSame([2, '4500.00', 'in_stock', 2], [$variant->quantity, $variant->price, $variant->stock_status,
             $variant->stockUnits()->inStock()->count()]);
+        // What the two new items were bought for is in their rows, each with a number of its own.
+        $arrived = $variant->stockUnits()->inStock()->orderBy('id')->get();
+        $this->assertSame([['3000.00', '2026-11-10', 'Petr'], ['3000.00', '2026-11-10', 'Petr']],
+            $arrived->map(fn (StockUnit $unit): array => [$unit->purchase_price, $unit->purchased_at->toDateString(), $unit->supplier])->all());
+        $this->assertCount(2, $arrived->pluck('code')->unique());
+        // One more comes in later at another price: only its row gets that price.
+        $list->mountTableAction('editCommercial', $asleep)->setTableActionData(['quantity' => 3, 'purchase_price' => 3100])
+            ->callMountedTableAction()->assertHasNoTableActionErrors();
+        $this->assertSame(['3000.00', '3000.00', '3100.00'], $variant->stockUnits()->inStock()->orderBy('id')->pluck('purchase_price')->all());
 
         // A selection goes to sleep and comes back at once.
         $list->callTableBulkAction('takeOffSale', [$onSale, $asleep]);

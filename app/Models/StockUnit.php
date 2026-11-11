@@ -44,6 +44,17 @@ class StockUnit extends Model
                 $unit->currency ??= $variant?->currency;
             }
         });
+        // Whoever changes the state - a button, the form, the chat - the sale's date and price follow it:
+        // sold without a date is sold now, at the configuration's price; any other state has no sale to keep.
+        static::saving(function (StockUnit $unit): void {
+            if ($unit->status === self::SOLD) {
+                $unit->sold_at ??= now();
+                $unit->sold_price ??= $unit->variant?->price;
+            } elseif ($unit->isDirty('status')) {
+                $unit->sold_at = null;
+                $unit->sold_price = null;
+            }
+        });
         // The number comes from the row's own id: unique, and never reused.
         static::created(function (StockUnit $unit): void {
             $unit->forceFill(['code' => 'U-'.str_pad((string) $unit->id, 6, '0', STR_PAD_LEFT)])->saveQuietly();

@@ -140,6 +140,18 @@ class StockUnitsTest extends TestCase
         $this->assertSame(['900.00', 'Petr', StockUnit::SOLD, '1400.00'],
             [$unit->fresh()->purchase_price, $unit->fresh()->supplier, $unit->fresh()->status, $unit->fresh()->sold_price]);
         $this->assertSame(1, $variant->fresh()->quantity);
+        // A sale marked without a date is today's: without one the month's books would not count it
+        // (seen with the real model, 2026-11-11: «отметь U-000002 проданной за 1400»).
+        $this->assertSame(now()->toDateString(), $unit->fresh()->sold_at?->toDateString());
+        // Sold with nothing said about the price is sold at the configuration's price.
+        $other = $variant->stockUnits()->inStock()->firstOrFail();
+        $operator->execute($operator->prepare([['action' => 'update', 'table' => 'stock_units', 'selection' => ['ids' => [$other->id]],
+            'values' => ['status' => 'sold']]]));
+        $this->assertSame(['1000.00', true], [$other->fresh()->sold_price, $other->fresh()->sold_at !== null]);
+        // Back in stock from the chat, the sale is forgotten.
+        $operator->execute($operator->prepare([['action' => 'update', 'table' => 'stock_units', 'selection' => ['ids' => [$other->id]],
+            'values' => ['status' => 'in_stock']]]));
+        $this->assertSame([StockUnit::IN_STOCK, null, null], [$other->fresh()->status, $other->fresh()->sold_at, $other->fresh()->sold_price]);
     }
 
     public function test_what_the_books_know_stays_when_its_product_is_renamed_and_then_deleted(): void

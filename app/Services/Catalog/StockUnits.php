@@ -86,6 +86,30 @@ class StockUnits
         }
     }
 
+    /**
+     * Items that just came in are written down as they come: what they were bought for, when and
+     * from whom goes into the rows this change added - the ones that were not there before it.
+     * The same product comes in again and again (operator, 2026-11-11), each time at its own price.
+     *
+     * @param  list<int>  $knownUnitIds  the configuration's units before the change
+     * @param  array<string, mixed>  $purchase
+     */
+    public function describeArrivals(ProductVariant $variant, array $knownUnitIds, array $purchase): int
+    {
+        $details = array_filter([
+            'purchase_price' => is_numeric($purchase['purchase_price'] ?? null) && (float) $purchase['purchase_price'] >= 0 ? $purchase['purchase_price'] : null,
+            'purchased_at' => filled($purchase['purchased_at'] ?? null) ? $purchase['purchased_at'] : null,
+            'supplier' => self::text($purchase['supplier'] ?? null),
+        ], fn (mixed $value): bool => $value !== null);
+        if ($details === []) {
+            return 0;
+        }
+        $arrived = $variant->stockUnits()->inStock()->whereNotIn('id', $knownUnitIds)->get();
+        $arrived->each(fn (StockUnit $unit) => $unit->update($details));
+
+        return $arrived->count();
+    }
+
     /** How many units of the product the books keep once it is deleted: all but the rows that only stood for the quantity. */
     public function keptAfter(Product $product): int
     {
