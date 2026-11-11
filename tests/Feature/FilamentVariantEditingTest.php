@@ -195,7 +195,9 @@ class FilamentVariantEditingTest extends TestCase
         $this->assertCount(1, $fresh);
         $variant = array_values($fresh)[0];
         $this->assertTrue($variant['is_default']);
-        $this->assertSame(0, $variant['quantity']);
+        // A card is made because the item is there (operator, 2026-11-11): one item in stock, with its row.
+        $this->assertSame([1, 'in_stock'], [$variant['quantity'], $variant['stock_status']]);
+        $this->assertCount(1, $variant['stock_units']);
         $this->assertCount(3, $variant['attributes']);
         foreach ($variant['attributes'] as $attribute) {
             $this->assertNull($attribute['value']);
