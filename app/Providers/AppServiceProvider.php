@@ -4,6 +4,7 @@ namespace App\Providers;
 
 use App\Services\Ai\AiSettings;
 use App\Services\Catalog\CustomerPricing;
+use App\Services\Catalog\StockUnits;
 use App\Services\Playwright\BrowserRunner;
 use App\Services\Playwright\PlaywrightRunner;
 use App\Services\Products\BrowserProductImageTransferStore;
@@ -33,6 +34,8 @@ class AppServiceProvider extends ServiceProvider
         $this->app->scoped(BrowserProductImageTransferStore::class);
         // The visitor's group and its price list are read once per request.
         $this->app->scoped(CustomerPricing::class);
+        // One instance, so its own writes to units are not taken for changes to react to.
+        $this->app->scoped(StockUnits::class);
     }
 
     /**

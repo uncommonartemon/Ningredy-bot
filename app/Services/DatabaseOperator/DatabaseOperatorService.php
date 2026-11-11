@@ -30,6 +30,7 @@ use App\Models\ProductSourcePageRule;
 use App\Models\ProductSourceStat;
 use App\Models\ProductVariant;
 use App\Models\ReferenceSite;
+use App\Models\StockUnit;
 use App\Models\TelegramUpdate;
 use App\Services\Products\CatalogEditRevision;
 use App\Services\Products\CatalogLocales;
@@ -168,6 +169,14 @@ class DatabaseOperatorService
                     'customer_group_id' => $fk('customer_groups'), 'name' => 'required|string|max:120', 'phone' => 'nullable|string|max:40',
                     'company' => 'nullable|string|max:160', 'is_active' => $bool, 'note' => 'nullable|string|max:2000',
                 ]],
+            // The shop's own books (operator, 2026-11-11): one row per physical item. Rows appear
+            // and leave with the configuration's quantity, so they are changed here, not created.
+            'stock_units' => ['model' => StockUnit::class, 'create' => false, 'writable' => [
+                'serial_number' => $text, 'purchase_price' => 'nullable|numeric|min:0|max:9999999999.99',
+                'purchased_at' => 'nullable|date', 'supplier' => $text, 'note' => 'nullable|string|max:2000',
+                'status' => [Rule::in(StockUnit::STATUSES)], 'sold_at' => 'nullable|date',
+                'sold_price' => 'nullable|numeric|min:0|max:9999999999.99',
+            ]],
             // A rule is a regular expression the agent learns and checks on examples:
             // the chat switches it on or off and annotates it, never rewrites it.
             'image_rendition_rules' => ['model' => ImageRenditionRule::class, 'create' => false, 'delete' => false,

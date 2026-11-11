@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use App\Models\Concerns\InvalidatesStaleTextTranslations;
+use App\Services\Catalog\StockUnits;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -20,8 +21,11 @@ class ProductVariant extends Model
         'translations',
         'product_id', 'fingerprint', 'name', 'sku', 'mpn', 'gtin', 'color', 'condition',
         'price', 'compare_at_price', 'currency', 'stock_status', 'quantity',
-        'warranty_months', 'is_default', 'is_active', 'group_prices',
+        'warranty_months', 'is_default', 'is_active', 'group_prices', 'stock_units',
     ];
+
+    /** The product form's rows for the units in stock, written once the configuration is saved. */
+    private ?array $pendingStockUnits = null;
 
     /** Prices for groups of customers given with the configuration, written once it is saved. */
     private ?array $pendingGroupPrices = null;
@@ -49,7 +53,22 @@ class ProductVariant extends Model
         });
         static::saved(function (ProductVariant $variant): void {
             $variant->writePendingGroupPrices();
+            // The quantity and the units in stock are the same number, whoever changed either.
+            $rows = $variant->pendingStockUnits;
+            $variant->pendingStockUnits = null;
+            app(StockUnits::class)->afterVariantSaved($variant, $rows);
         });
+    }
+
+    public function stockUnits(): HasMany
+    {
+        return $this->hasMany(StockUnit::class);
+    }
+
+    /** The product form's rows for the units in stock; they are rows of their own, not a column. */
+    public function setStockUnitsAttribute(mixed $rows): void
+    {
+        $this->pendingStockUnits = is_array($rows) ? $rows : [];
     }
 
     public function groupPrices(): HasMany

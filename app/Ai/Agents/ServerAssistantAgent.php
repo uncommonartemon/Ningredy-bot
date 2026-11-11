@@ -101,6 +101,11 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
               in; passwords are set in the admin panel only) and customer_group_prices (the price one group sees for one
               product_variant; no row means the group sees the ordinary price - to give a group its price, create or
               update that row, to take it away, delete the row).
+            - The shop's own books are in the same tools: stock_units, one row per physical item of a product_variant
+              (its number `code`, serial_number, purchase_price, purchased_at, supplier, note, status in_stock / sold /
+              written_off, sold_at, sold_price). A variant's quantity is the number of its units in stock: raising or
+              lowering the quantity adds or removes units by itself, and changing a unit's status moves the quantity, so
+              never create or delete units to change a quantity. «Купили за 900 12 мая у Петра» is an update of that unit.
             - The search's reference data is in the same tools: reference_sites («Справочники»: which site to
               use for which kind of product, what to take from it, whether the bot may open it) and brand_catalogs
               («Каталоги брендов»). "Use this site for SSD from now on", "take only specifications from it, photos

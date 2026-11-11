@@ -58,6 +58,8 @@ class AdminPanelProvider extends PanelProvider
             ->unsavedChangesAlerts()
             ->navigationGroups([
                 NavigationGroup::make()->label(fn (): string => __('Каталог')),
+                NavigationGroup::make()->label(fn (): string => __('Склад и учёт')),
+                NavigationGroup::make()->label(fn (): string => __('Клиенты')),
                 NavigationGroup::make()->label(fn (): string => __('Поиск и AI')),
                 NavigationGroup::make()->label(fn (): string => __('Настройки')),
                 NavigationGroup::make()->label(fn (): string => __('Система')),
