@@ -6,6 +6,7 @@ use App\Ai\Tools\AddProductSpecifications;
 use App\Ai\Tools\DeleteProductPhotos;
 use App\Ai\Tools\DescribeDatabase;
 use App\Ai\Tools\EditProductDraft;
+use App\Ai\Tools\ExplainSearch;
 use App\Ai\Tools\GetProduct;
 use App\Ai\Tools\GetRecentErrors;
 use App\Ai\Tools\GetSystemStatus;
@@ -96,6 +97,16 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
               response_type catalog_results and their IDs.
             - Respect protected technical/security/proof fields. Use existing publication/photo/recipe
               workflows for those actions; never bypass verification by setting internal status flags.
+            - A remark or a question about a search you already made («почему нет фото», «это не то фото», «ты искал не
+              то», «что ты делал», «почему так долго», with or without a link) is answered from ExplainSearch, never from
+              memory: call it (last=true when the operator means the latest search, draft_id when they name a draft), say in
+              plain words what the search did and why it ended so, and then fix what the operator points at with the tools
+              you have: a wrong or misread code - EditProductDraft, then find_other_photos, or ResearchProduct again when
+              the product itself was wrong; a wrong photo - ManageDraftPhotos; a shop that must not be used -
+              ManageSearchSettings; a missing fact - EditProductDraft. Do the fix, do not only describe it.
+            - When the operator sends the address of a page as the right place for a draft's photos («вот правильная
+              страница», «возьми фото отсюда»), call ManageDraftPhotos with photos_from_url and that draft: the photos are
+              taken from that page on the operator's word.
             - Customers with prices of their own are in the same tools: customer_groups (a group; its invite_code is the
               end of its sign-up link /account/join/<code>), customers (who signed up, their group, whether they may sign
               in; passwords are set in the admin panel only) and customer_group_prices (the price one group sees for one
@@ -321,6 +332,7 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
             new ResearchProduct($this->update, app(ProductImageResolver::class)),
             new ListPendingDrafts($this->update),
             new ShowProductDraft($this->update),
+            new ExplainSearch($this->update),
             new EditProductDraft($this->update),
             new GetSystemStatus,
             new GetRecentErrors,

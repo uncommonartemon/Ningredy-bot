@@ -4,6 +4,7 @@ namespace Tests\Unit;
 
 use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
+use App\Services\Products\PartNumberSuffix;
 use App\Services\Products\ProductIdentityMatcher;
 use Tests\TestCase;
 
@@ -33,6 +34,44 @@ class ProductIdentityMatcherTest extends TestCase
             'specifications' => [['key' => 'mpn', 'value' => 'MZVLQ512HBLU']]]);
         $drive->setRelation('telegramUpdate', new TelegramUpdate(['text' => 'Samsung MZVLQ512HBLU']));
         $this->assertFalse($matcher->confirmsExactIdentifier($drive, ['url' => 'https://shop.example/2', 'title' => 'Samsung MZVLQ521HBLU SSD']));
+    }
+
+    /**
+     * At the colleague's, 2026-11-08: the label read HMCG78AGBSA095N BA and the shop's page
+     * HMCG78AGBSA095N; the label MTA9ASF1G72PZ-2G6J1QI and Micron's own page MTA9ASF1G72PZ-2G6J1.
+     * Both pages were refused as another code, and the searches took 19 and 16 minutes.
+     */
+    public function test_a_parts_code_without_its_revision_tail_is_not_another_code(): void
+    {
+        $matcher = new ProductIdentityMatcher;
+        $hynix = $this->part('SK hynix', 'HMCG78AGBSA095N BA');
+        $this->assertFalse($matcher->conflictsSource($hynix, ['url' => 'https://www.avadirect.com/p/1',
+            'title' => 'SK hynix 16GB HMCG78AGBSA095N DDR5 5600MT/s SO-DIMM Memory | AVADirect']));
+        $micron = $this->part('Micron', 'MTA9ASF1G72PZ-2G6J1QI');
+        $this->assertFalse($matcher->conflictsSource($micron, ['url' => 'https://my.micron.com/part/1',
+            'title' => 'MTA9ASF1G72PZ-2G6J1 Obsolete RDIMM Obsolete part detail | Micron Technology Inc.']));
+
+        // Another speed grade differs in the middle of the code, not by a tail.
+        $this->assertTrue($matcher->conflictsSource($micron, ['url' => 'https://shop.example/1', 'title' => 'Micron MTA9ASF1G72PZ-3G2J1QI 8GB RDIMM']));
+        // A laptop's longer SKU is another configuration, as before.
+        $laptop = new ProductDraft(['brand' => 'Lenovo', 'model' => '83JE0013US', 'product_type' => 'laptop',
+            'specifications' => [['key' => 'sku', 'value' => '83JE0013US']]]);
+        $laptop->setRelation('telegramUpdate', new TelegramUpdate(['text' => 'Lenovo LOQ 83JE0013US']));
+        $this->assertTrue($matcher->conflictsSource($laptop, ['url' => 'https://shop.example/2', 'title' => 'Lenovo LOQ 15IRX10 83JE0013USX']));
+        // The rule itself: only a short tail on a long part number.
+        $this->assertTrue(PartNumberSuffix::sameBase('hmcg78agbsa095nba', 'hmcg78agbsa095n'));
+        $this->assertFalse(PartNumberSuffix::sameBase('hmcg78agbsa095nba', 'hmcg78agbsa095naa'));
+        $this->assertFalse(PartNumberSuffix::sameBase('i512400f', 'i512400'));
+        $this->assertFalse(PartNumberSuffix::sameBase('mzvlq512hblu00b00', 'mzvlq512hblu'));
+    }
+
+    private function part(string $brand, string $code): ProductDraft
+    {
+        $draft = new ProductDraft(['brand' => $brand, 'model' => $code, 'product_type' => 'component',
+            'specifications' => [['key' => 'mpn', 'value' => $code]]]);
+        $draft->setRelation('telegramUpdate', new TelegramUpdate(['text' => $brand.' '.$code]));
+
+        return $draft;
     }
 
     public function test_a_shared_family_does_not_hide_a_conflicting_explicit_model(): void

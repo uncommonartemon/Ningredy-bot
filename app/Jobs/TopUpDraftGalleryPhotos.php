@@ -27,6 +27,8 @@ class TopUpDraftGalleryPhotos implements ShouldQueue
         public string $chatId,
         public int $telegramUpdateId,
         public ?int $expectedDraftTelegramUpdateId = null,
+        // The page the operator named as the right one for this draft's photos, if any.
+        public ?string $operatorPage = null,
     ) {
         $this->onQueue('media');
     }
@@ -58,12 +60,17 @@ class TopUpDraftGalleryPhotos implements ShouldQueue
             throw_unless($draft->status === 'pending_review', RuntimeException::class, 'Черновик уже обработан.');
 
             $progress = new TelegramProgressReporter($telegram, $this->chatId);
-            $progress->step('Ищу дополнительные фото', 780);
-            $stored = $images->topUpDraftMedia($draft, fn (string $message) => $progress->info($message), $this->telegramUpdateId);
+            $page = $this->operatorPage === null ? null : (parse_url($this->operatorPage, PHP_URL_HOST) ?: $this->operatorPage);
+            $progress->step($page === null ? 'Ищу дополнительные фото' : "Беру фото со страницы {$page}", 780);
+            $stored = $images->topUpDraftMedia($draft, fn (string $message) => $progress->info($message), $this->telegramUpdateId, $this->operatorPage);
 
             if ($stored > 0) {
                 $progress->done("Добавлено новых фото: {$stored}");
                 $presenter->sendReview($telegram, $this->chatId, $draft->fresh('media'));
+            } elseif ($page !== null) {
+                // Said as it is: the page was opened on the operator's word and gave nothing usable.
+                $progress->done("Со страницы {$page} не удалось взять ни одного проверенного фото: страница не открылась, на ней нет подходящих кадров, "
+                    .'или на кадрах читается другой код. Прежние фото сохранены.');
             } else {
                 $progress->done('Дозаливка завершена: новых проверенных фото из текущей галереи не получено. Прежние фото сохранены.');
             }

@@ -300,6 +300,25 @@ class ProductPhotoIdentityTest extends TestCase
         $this->assertSame('match', $selected[0]['photo_visual_review']['marking_verdict']);
     }
 
+    /** Operator, 2026-11-11: a page the admin sent as the right one stands like the maker's own. */
+    public function test_a_frame_from_the_page_the_operator_named_goes_out_without_a_code_but_not_with_another_one(): void
+    {
+        $draft = $this->componentDraft();
+        ProductImageVisionAgent::fake(fn (): array => ['images' => [
+            $this->review(1, exactMatch: true, marking: '', reason: 'A clean M.2 drive; no code is readable.'),
+            [...$this->review(2, exactMatch: false, marking: 'HFS512GEJ9X125N', reason: 'Another part number on the label.'),
+                'publishable' => false, 'rejection_reason' => 'identity', 'physical_match' => 'conflicting'],
+        ]])->preventStrayPrompts();
+        $page = ['title' => 'A shop page the bot could not judge', 'url' => 'https://reseller.example/any', 'type' => 'retailer'];
+        $frames = array_map(fn (string $name): array => [...$this->frame("https://reseller.example/{$name}.jpg", $page),
+            'operator_page' => true, 'source_identity_confirmed' => true], ['clean', 'other']);
+
+        $selected = app(ProductImageVisionVerifier::class)->select($draft, $frames, 4);
+
+        $this->assertSame(['https://reseller.example/clean.jpg'], array_column($selected, 'source_url'));
+        $this->assertStringContainsString('которую указал оператор', $selected[0]['vision_reason']);
+    }
+
     public function test_a_code_the_reviewer_saw_counts_only_when_a_reader_not_told_it_finds_it_too(): void
     {
         // Live #420: «маркировка MQ04ABF100 видна на наклейке» on a drive labelled MDD.

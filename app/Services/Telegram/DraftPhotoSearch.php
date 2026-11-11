@@ -63,6 +63,17 @@ class DraftPhotoSearch
         return self::STARTED;
     }
 
+    /** Photos from the page the operator named: their word that it is the right one. */
+    public function fromPage(ProductDraft $draft, string $chatId, int $updateId, string $page): string
+    {
+        if (! Cache::add("draft-gallery-topup:{$draft->id}:queued", true, now()->addMinutes(16))) {
+            return self::ALREADY_RUNNING;
+        }
+        TopUpDraftGalleryPhotos::dispatch($draft->id, $chatId, $updateId, $draft->telegram_update_id, $page);
+
+        return self::STARTED;
+    }
+
     public function other(ProductDraft $draft, string $chatId, int $updateId): string
     {
         if (! Cache::add("draft-gallery-restage:{$draft->id}:queued", true, now()->addMinutes(35))) {

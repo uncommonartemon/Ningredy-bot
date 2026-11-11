@@ -89,6 +89,19 @@ class DraftPhotoSearchFromChatTest extends TestCase
         Queue::assertPushed(RestageDraftGalleryPhotos::class, fn (RestageDraftGalleryPhotos $job): bool => $job->draftId === $draft->id);
     }
 
+    /** Operator, 2026-11-11: «вот правильная страница» with a link. */
+    public function test_a_link_from_the_operator_starts_taking_photos_from_that_page(): void
+    {
+        [$draft, $words] = $this->fixtures();
+
+        $answer = $this->ask($words, ['draft_id' => $draft->id, 'photos_from_url' => 'https://www.avadirect.com/sk-hynix-16gb/p/1']);
+
+        $this->assertTrue($answer['ok']);
+        Queue::assertPushed(TopUpDraftGalleryPhotos::class, fn (TopUpDraftGalleryPhotos $job): bool => $job->draftId === $draft->id
+            && $job->operatorPage === 'https://www.avadirect.com/sk-hynix-16gb/p/1' && $job->telegramUpdateId !== $words->id);
+        Queue::assertNotPushed(RestageDraftGalleryPhotos::class);
+    }
+
     public function test_nothing_starts_twice_or_on_top_of_a_running_search(): void
     {
         [$draft, $words] = $this->fixtures();

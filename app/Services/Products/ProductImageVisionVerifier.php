@@ -107,10 +107,12 @@ class ProductImageVisionVerifier
                 'source_line_plausible' => (bool) ($candidate['source_line_plausible'] ?? false) || $pageLinePlausible,
                 // The maker's own page or a record matched by code shows the product it names;
                 // a reseller's page shows whatever picture the reseller had.
-                'maker_page' => $pageContext !== null && (SourceIdentityProvenance::confirmedByCode($pageContext)
-                    || SourceIdentityProvenance::fromCatalog($pageContext)
-                    || (bool) ($pageContext['_brand_catalog'] ?? false)
-                    || ($pageContext['type'] ?? null) === 'manufacturer'),
+                // A page the operator named stands like the maker's: it is their word that it is the product's.
+                'maker_page' => (bool) ($candidate['operator_page'] ?? false)
+                    || ($pageContext !== null && (SourceIdentityProvenance::confirmedByCode($pageContext)
+                        || SourceIdentityProvenance::fromCatalog($pageContext)
+                        || (bool) ($pageContext['_brand_catalog'] ?? false)
+                        || ($pageContext['type'] ?? null) === 'manufacturer')),
             ];
         }, $candidates);
         // Operator, 2026-11-04: a component is identified by the markings on it, not by
@@ -274,6 +276,7 @@ class ProductImageVisionVerifier
                     'reviewer_marking' => $reviewerMarking,
                     'marking_verdict' => $markingVerdict,
                     'maker_page' => (bool) ($candidate['maker_page'] ?? false),
+                    'operator_page' => (bool) ($candidate['operator_page'] ?? false),
                 ];
             });
         if ($labelIdentity) {
@@ -349,6 +352,7 @@ class ProductImageVisionVerifier
                         .' (та же модель, другая партия или суффикс). '.$review['reason'],
                     ($review['marking_verdict'] ?? 'none') === 'name' => 'На фото название этой модели: '.$review['observed_marking'].'; кода на наклейке нет. '.$review['reason'],
                     (bool) ($review['labelled_neighbour'] ?? false) => 'Код на этом кадре не прочитан, но в той же галерее товара есть кадр с совпавшим кодом. '.$review['reason'],
+                    $review['source_supported'] && ! $review['exact_match'] && ($review['operator_page'] ?? false) => 'Фото со страницы, которую указал оператор; код на фото не прочитан. '.$review['reason'],
                     $review['source_supported'] && ! $review['exact_match'] && ($review['maker_page'] ?? false) => 'Фото со страницы производителя или из записи по коду; код на фото не прочитан. '.$review['reason'],
                     $review['source_supported'] && ! $review['exact_match'] => 'Exact identity is supported by the source URL. '.$review['reason'],
                     default => $review['reason'],

@@ -37,6 +37,9 @@ use Throwable;
 
 class ProductImageStorage
 {
+    /** How many photos the page an operator named may add even to a full gallery. */
+    private const int OPERATOR_PAGE_PHOTOS = 3;
+
     public function __construct(
         private readonly ProductImageResolver $resolver,
         private readonly ProductImageCandidateDiscovery $candidateDiscovery,
@@ -3430,7 +3433,13 @@ class ProductImageStorage
      *
      * @param  null|callable(string): void  $progress
      */
-    public function topUpDraftMedia(ProductDraft $draft, ?callable $progress = null, ?int $telegramUpdateId = null): int
+    /**
+     * More photos for a pending draft from its own gallery, or - with `$operatorPage` - from
+     * the page the operator named as the right one (operator, 2026-11-11: «админ сказал с
+     * ссылкой… чтобы был инструмент исправлять»). Their word stands for the page: its clean
+     * frames are taken like a maker's; a frame whose own label shows another code is still refused.
+     */
+    public function topUpDraftMedia(ProductDraft $draft, ?callable $progress = null, ?int $telegramUpdateId = null, ?string $operatorPage = null): int
     {
         throw_unless($draft->status === 'pending_review', \RuntimeException::class, 'Draft is no longer pending review.');
 
@@ -3438,6 +3447,10 @@ class ProductImageStorage
         $existingMedia = $draft->media()->get();
         $existing = $existingMedia->count();
         $remaining = $this->targetDraftImageCount($draft) - $existing;
+        if ($operatorPage !== null) {
+            // A full gallery still has room for the page the operator sent.
+            $remaining = max($remaining, self::OPERATOR_PAGE_PHOTOS);
+        }
 
         if ($remaining <= 0) {
             return 0;
@@ -3446,7 +3459,9 @@ class ProductImageStorage
         $existingUrls = $this->cleanUrls($existingMedia->pluck('source_url')->all());
         $excludedHashes = $this->perceptualHashesForMedia($existingMedia);
         $currentSource = $this->currentDraftSource($draft);
-        $sources = $currentSource ? [$currentSource] : [];
+        $sources = $operatorPage !== null
+            ? [['url' => $operatorPage, 'title' => 'Страница от оператора', 'type' => 'retailer', 'image_urls' => []]]
+            : ($currentSource ? [$currentSource] : []);
         $activeRecipeOnly = $this->gallerySearchStrategy($draft) === Category::GALLERY_SEARCH_VISION_FIRST;
         $selected = [];
 
@@ -3458,7 +3473,8 @@ class ProductImageStorage
             if (
                 ! is_array($source)
                 || ! is_string($source['url'] ?? null)
-                || $this->sourceExcludedForDraft($source['url'], $draft)
+                // An earlier «другие фото» set the page aside; the operator's own link brings it back.
+                || ($operatorPage === null && $this->sourceExcludedForDraft($source['url'], $draft))
             ) {
                 continue;
             }
@@ -3492,6 +3508,10 @@ class ProductImageStorage
 
             if ($candidates === []) {
                 continue;
+            }
+            if ($operatorPage !== null) {
+                $candidates = array_map(fn (array $candidate): array => [...$candidate,
+                    'operator_page' => true, 'source_identity_confirmed' => true], $candidates);
             }
 
             $verified = $this->selectFromCandidatesSafely($draft, $candidates, $needed, $telegramUpdateId, $progress);
