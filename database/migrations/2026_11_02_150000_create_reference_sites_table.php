@@ -7,8 +7,7 @@ use Illuminate\Support\Facades\Schema;
 
 /**
  * Reference sites per kind of product, as data the operator and the bot edit
- * (operator, 2026-11-02: «добавить таблицу с запросами + ссылки… использовать
- * при поиске ссд и хард диск»). One generic reader serves every row; a new
+ * (operator's decision, 2026-11-02). One generic reader serves every row; a new
  * site is a new row, never new code. The starting rows arrive once, here.
  */
 return new class extends Migration

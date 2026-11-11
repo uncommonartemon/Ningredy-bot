@@ -1493,7 +1493,7 @@ class ProcessTelegramMessageTest extends TestCase
 
     public function test_a_repeat_of_a_sleeping_product_shows_its_card_with_the_button_that_wakes_it(): void
     {
-        // Operator, 2026-11-11: «повторы будут однозначно». The same product comes in again while
+        // Operator's decision, 2026-11-11. The same product comes in again while
         // its card is off sale: no second card, the old one with the way back.
         Storage::fake('public');
         config(['services.telegram.bot_token' => 'test-token']);

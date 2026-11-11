@@ -6,8 +6,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
 /**
- * Who the shop buys from (operator, 2026-11-11: «поставщик, пускай будет селект с + добавить
- * на месте»). The list is what the admin picks from; a unit keeps the supplier's name itself,
+ * Who the shop buys from (operator's decision, 2026-11-11). The list is what the admin picks from; a unit keeps the supplier's name itself,
  * as it keeps its product's, so the books stay readable whatever happens to the list.
  */
 class Supplier extends Model

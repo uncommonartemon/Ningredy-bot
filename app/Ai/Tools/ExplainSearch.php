@@ -15,8 +15,7 @@ use Laravel\Ai\Tools\Request;
 use Stringable;
 
 /**
- * What the bot did in a search of its own (operator, 2026-11-11: «админ сказал: вот твой
- * последний поиск был такой-то, указал на ошибку… чтобы был респонс и инструмент»). Before,
+ * What the bot did in a search of its own (operator's decision, 2026-11-11). Before,
  * the assistant could act on a draft but could not look back: asked «почему нет фото» or «ты
  * нашёл не то», it had nothing to answer from. This reads the journal the search itself
  * wrote - the pages opened and what each gave, what was read on the labels, how it ended.

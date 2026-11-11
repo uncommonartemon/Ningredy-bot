@@ -4,7 +4,7 @@ use Illuminate\Database\Migrations\Migration;
 use Illuminate\Support\Facades\DB;
 
 /**
- * Operator, 2026-11-07: «если даст коробку - норм, если даст фото детали - лучше», no rule about
+ * Operator's decision, 2026-11-07, no rule about
  * boxes. Shops show a boxed processor by its box, and the rule left the card with no photo (live
  * #386, #422). Only the rule's sentence leaves a component's hint; the rest of it stays.
  */

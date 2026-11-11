@@ -89,7 +89,7 @@ class DraftPhotoSearchFromChatTest extends TestCase
         Queue::assertPushed(RestageDraftGalleryPhotos::class, fn (RestageDraftGalleryPhotos $job): bool => $job->draftId === $draft->id);
     }
 
-    /** Operator, 2026-11-11: «вот правильная страница» with a link. */
+    /** Operator's decision, 2026-11-11 with a link. */
     public function test_a_link_from_the_operator_starts_taking_photos_from_that_page(): void
     {
         [$draft, $words] = $this->fixtures();

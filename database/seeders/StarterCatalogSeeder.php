@@ -69,8 +69,7 @@ class StarterCatalogSeeder extends Seeder
     private const LAPTOP_DEFAULTS = ['gpu', 'cpu', 'display'];
 
     /**
-     * The kinds of components the colleague photographs (operator, 2026-11-04:
-     * «подкатегории? да»), each under «Комплектующие» with the characteristics a
+     * The kinds of components the colleague photographs (operator's decision, 2026-11-04), each under «Комплектующие» with the characteristics a
      * card of that kind must carry. Research is told the keys; what it does not
      * find, the card says is missing instead of staying silent.
      */

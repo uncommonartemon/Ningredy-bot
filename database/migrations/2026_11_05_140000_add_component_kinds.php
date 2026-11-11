@@ -7,7 +7,7 @@ use Illuminate\Support\Facades\DB;
 /**
  * The kinds of components (SSD, HDD, memory, processors, graphics cards) under
  * «Комплектующие», each with the characteristics a card of that kind must carry
- * (operator, 2026-11-04: «подкатегории? да»; used parts carry health rows).
+ * (operator's decision, 2026-11-04; used parts carry health rows).
  * Only what is missing is added; the rows are the operator's to edit afterwards.
  */
 return new class extends Migration

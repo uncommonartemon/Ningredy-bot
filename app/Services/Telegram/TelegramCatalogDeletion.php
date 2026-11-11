@@ -26,7 +26,7 @@ class TelegramCatalogDeletion
     /**
      * The question asked before a deletion, the same wherever it was requested. Deleting is for
      * a card that was a mistake: a product that will come in again is taken off sale instead,
-     * so that way out stands beside the deletion (operator, 2026-11-11: «две разные кнопки»).
+     * so that way out stands beside the deletion (operator's decision, 2026-11-11).
      *
      * @return array{0: string, 1: array{inline_keyboard: list<list<array{text: string, callback_data: string}>>}}
      */

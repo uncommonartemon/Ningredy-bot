@@ -330,8 +330,7 @@ class ProductDraftWorkflow
         $commercial = $draft->manualIntake()['commercial'] ?? [];
         $quantityChanged = isset($commercial['quantity'])
             && (! $targetVariantId || (int) $commercial['quantity'] !== (int) $variant->quantity);
-        // A card is made because the item is there (operator, 2026-11-11: «если позиция есть, значит по
-        // дефолту 1 есть»): approved with no quantity stated and nothing in stock, it is one item in stock.
+        // A card is made because the item is there (operator's decision, 2026-11-11): approved with no quantity stated and nothing in stock, it is one item in stock.
         // An edit of an existing card through the Telegram editor says what it means and is left alone.
         $firstItem = ! isset($commercial['quantity']) && ! $targetVariantId && (int) $variant->quantity === 0;
 

@@ -86,7 +86,7 @@ class CatalogLanguagesTest extends TestCase
 
     public function test_the_telegram_card_itself_is_in_the_chosen_language(): void
     {
-        // Operator, 2026-11-01: «если выбран укр, то телеграм на укр слать». The card with its
+        // Operator's decision, 2026-11-01. The card with its
         // title, description and characteristics, not only the summary under it.
         Http::fake(fn () => Http::response(['ok' => true, 'result' => ['message_id' => 72]]));
         $draft = $this->draft(['uk' => ['title' => 'Ноутбук Lenovo ThinkPad E14', 'description' => 'Перевірений опис.',

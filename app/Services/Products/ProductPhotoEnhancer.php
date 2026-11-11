@@ -32,7 +32,7 @@ class ProductPhotoEnhancer
         PROMPT;
 
     /**
-     * Operator, 2026-11-08: «функцию убрать вотермарку через ИИ-агента» in the photo menu. A
+     * Operator's decision, 2026-11-08 in the photo menu. A
      * shop's mark lies over the picture; the part's own label is its identity and stays.
      */
     private const UNMARK_PROMPT = <<<'PROMPT'

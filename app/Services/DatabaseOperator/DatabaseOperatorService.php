@@ -141,7 +141,7 @@ class DatabaseOperatorService
                 'domain' => 'required|string|max:255', 'agent_hint' => 'nullable|string|max:20000',
             ]],
             // The search's reference data is the operator's to change from the chat as well
-            // (operator, 2026-11-02: «сделать гибким бота в телеграме, чтобы он всё мог делать с бд по запросу»).
+            // (operator's decision, 2026-11-02).
             'reference_sites' => ['model' => ReferenceSite::class, 'writable' => [
                 'domain' => 'required|string|max:255', 'applies_to' => 'required|string|max:500',
                 'use_for_facts' => $bool, 'use_for_photos' => $bool, 'access' => [Rule::in(ReferenceSite::ACCESS)],

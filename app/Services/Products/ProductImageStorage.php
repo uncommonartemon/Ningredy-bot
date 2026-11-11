@@ -3435,8 +3435,7 @@ class ProductImageStorage
      */
     /**
      * More photos for a pending draft from its own gallery, or - with `$operatorPage` - from
-     * the page the operator named as the right one (operator, 2026-11-11: «админ сказал с
-     * ссылкой… чтобы был инструмент исправлять»). Their word stands for the page: its clean
+     * the page the operator named as the right one (operator's decision, 2026-11-11). Their word stands for the page: its clean
      * frames are taken like a maker's; a frame whose own label shows another code is still refused.
      */
     public function topUpDraftMedia(ProductDraft $draft, ?callable $progress = null, ?int $telegramUpdateId = null, ?string $operatorPage = null): int

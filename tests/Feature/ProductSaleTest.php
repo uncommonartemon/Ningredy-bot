@@ -23,8 +23,7 @@ use Livewire\Livewire;
 use Tests\TestCase;
 
 /**
- * Operator, 2026-11-11: «можно закинуть в сон или удалить, две разные кнопки… сделай как
- * правильно для бизнеса, повторы будут однозначно». A product taken off sale sleeps with
+ * Operator's decision, 2026-11-11. A product taken off sale sleeps with
  * everything kept; the same product coming in again wakes its card; deleting is the other button.
  */
 class ProductSaleTest extends TestCase
