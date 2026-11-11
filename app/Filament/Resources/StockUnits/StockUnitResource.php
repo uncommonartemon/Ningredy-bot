@@ -21,6 +21,7 @@ use Filament\Support\Icons\Heroicon;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Filters\Filter;
 use Filament\Tables\Filters\SelectFilter;
+use Filament\Tables\Grouping\Group;
 use Filament\Tables\Table;
 use Illuminate\Database\Eloquent\Builder;
 use UnitEnum;
@@ -47,6 +48,24 @@ class StockUnitResource extends Resource
     protected static ?int $navigationSort = 2;
 
     protected static ?string $recordTitleAttribute = 'code';
+
+    /** How many units in stock still lack a purchase price: what the books wait for. */
+    public static function getNavigationBadge(): ?string
+    {
+        $unpriced = StockUnit::query()->inStock()->whereNull('purchase_price')->count();
+
+        return $unpriced > 0 ? (string) $unpriced : null;
+    }
+
+    public static function getNavigationBadgeColor(): string
+    {
+        return 'warning';
+    }
+
+    public static function getNavigationBadgeTooltip(): ?string
+    {
+        return __('Без цены закупки');
+    }
 
     public static function canCreate(): bool
     {
@@ -81,7 +100,8 @@ class StockUnitResource extends Resource
             ->defaultSort('id', 'desc')
             ->columns([
                 TextColumn::make('code')->label(__('Номер'))->searchable()->sortable()->copyable()->fontFamily(FontFamily::Mono),
-                TextColumn::make('variant.product.title')->label(__('Товар'))->searchable()->wrap()->limit(60)
+                TextColumn::make('variant.product.title')->label(__('Товар'))->searchable()->limit(46)
+                    ->tooltip(fn (StockUnit $record): ?string => $record->variant?->product?->title)
                     ->description(fn (StockUnit $record): ?string => $record->variant?->sku)
                     ->url(fn (StockUnit $record): ?string => $record->variant?->product_id === null ? null
                         : ProductResource::getUrl('edit', ['record' => $record->variant->product_id])),
@@ -103,8 +123,11 @@ class StockUnitResource extends Resource
                     ->color(fn (?float $state): string => $state === null ? 'gray' : ($state >= 0 ? 'success' : 'danger')),
                 TextColumn::make('note')->label(__('Заметка'))->limit(40)->placeholder('—')->toggleable(isToggledHiddenByDefault: true),
             ])
+            ->groups([
+                Group::make('variant.product.title')->label(__('Товар'))->collapsible(),
+                Group::make('supplier')->label(__('Поставщик'))->collapsible(),
+            ])
             ->filters([
-                SelectFilter::make('status')->label(__('Состояние'))->options(self::statuses()),
                 Filter::make('unpriced')->label(__('Без цены закупки'))->toggle()
                     ->query(fn (Builder $query): Builder => $query->whereNull('purchase_price')),
                 SelectFilter::make('supplier')->label(__('Поставщик'))

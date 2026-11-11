@@ -6,6 +6,7 @@ use App\Filament\Pages\Accounting;
 use App\Filament\Resources\StockUnits\Pages\ListStockUnits;
 use App\Filament\Widgets\Accounting\BooksChart;
 use App\Filament\Widgets\Accounting\BooksStats;
+use App\Filament\Widgets\Accounting\RecentSales;
 use App\Filament\Widgets\CatalogStats;
 use App\Models\Category;
 use App\Models\Product;
@@ -74,11 +75,12 @@ class StockBooksTest extends TestCase
         Livewire::test(BooksStats::class)->assertOk()->assertSee('В наличии, шт.')->assertSee('Без цены закупки: 2');
         Livewire::test(BooksChart::class)->assertOk();
         // The books stay on their own page: the main dashboard keeps its own widgets.
-        $this->assertSame([BooksStats::class, BooksChart::class], (new Accounting)->getWidgets());
+        $this->assertSame([BooksStats::class, BooksChart::class, RecentSales::class], (new Accounting)->getWidgets());
+        Livewire::test(RecentSales::class)->assertOk();
         $this->assertContains(CatalogStats::class, (new Dashboard)->getWidgets());
         $this->assertNotContains(BooksStats::class, (new Dashboard)->getWidgets());
 
-        $table = Livewire::test(ListStockUnits::class)->assertCanSeeTableRecords([$first, $second]);
+        $table = Livewire::test(ListStockUnits::class)->assertSet('activeTab', 'in_stock')->assertCanSeeTableRecords([$first, $second]);
         $table->callTableAction('edit', $first, ['purchase_price' => 1200, 'purchased_at' => '2026-11-01', 'supplier' => 'Petr'])
             ->assertHasNoTableActionErrors();
         $this->assertSame(['1200.00', 'Petr'], [$first->fresh()->purchase_price, $first->fresh()->supplier]);
@@ -87,9 +89,14 @@ class StockBooksTest extends TestCase
         $this->assertSame([StockUnit::SOLD, '1900.00', 1], [$first->fresh()->status, $first->fresh()->sold_price, $variant->fresh()->quantity]);
         $table->callTableAction('writeOff', $second);
         $this->assertSame([StockUnit::WRITTEN_OFF, 0], [$second->fresh()->status, $variant->fresh()->quantity]);
-        $table->callTableAction('restore', $first);
+        // A sold unit is brought back from the tab it went to.
+        $table->set('activeTab', 'sold')->callTableAction('restore', $first);
+        $table->set('activeTab', 'in_stock');
         $this->assertSame([StockUnit::IN_STOCK, 1], [$first->fresh()->status, $variant->fresh()->quantity]);
-        $table->filterTable('unpriced')->assertCanSeeTableRecords([$second])->assertCanNotSeeTableRecords([$first]);
+        // A written-off unit left the stock's tab and is under its own.
+        $table->assertCanSeeTableRecords([$first])->assertCanNotSeeTableRecords([$second]);
+        $table->set('activeTab', 'written_off')->assertCanSeeTableRecords([$second])->assertCanNotSeeTableRecords([$first]);
+        $table->set('activeTab', 'all')->filterTable('unpriced')->assertCanSeeTableRecords([$second])->assertCanNotSeeTableRecords([$first]);
 
         $download = Livewire::test(ListStockUnits::class)->callAction('download');
         $download->assertFileDownloaded('stock-units-'.now()->format('Y-m-d').'.csv');

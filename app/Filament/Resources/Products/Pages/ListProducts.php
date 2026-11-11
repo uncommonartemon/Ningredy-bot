@@ -9,13 +9,30 @@ use App\Models\User;
 use Filament\Actions\CreateAction;
 use Filament\Facades\Filament;
 use Filament\Resources\Pages\ListRecords;
+use Filament\Schemas\Components\Tabs\Tab;
 use Filament\Tables\Table;
+use Illuminate\Database\Eloquent\Builder;
 
 class ListProducts extends ListRecords
 {
     use InteractsWithCatalogCleanup;
 
     protected static string $resource = ProductResource::class;
+
+    public function getTabs(): array
+    {
+        return [
+            'all' => Tab::make(__('Все')),
+            'visible' => Tab::make(__('На сайте'))
+                ->modifyQueryUsing(fn (Builder $query) => $query->where('status', 'published')->where('is_active', true)),
+            'hidden' => Tab::make(__('Скрытые'))
+                ->modifyQueryUsing(fn (Builder $query) => $query->where(fn (Builder $hidden) => $hidden
+                    ->where('status', '!=', 'published')->orWhere('is_active', false))),
+            'sold_out' => Tab::make(__('Нет в наличии'))
+                ->modifyQueryUsing(fn (Builder $query) => $query->whereDoesntHave('variants',
+                    fn (Builder $variant) => $variant->where('quantity', '>', 0))),
+        ];
+    }
 
     public function table(Table $table): Table
     {

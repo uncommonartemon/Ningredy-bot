@@ -13,6 +13,11 @@ class BooksStats extends StatsOverviewWidget
     // Shown on the «Учёт» page only, not on the main dashboard.
     protected static bool $isDiscovered = false;
 
+    protected function getColumns(): int
+    {
+        return 4;
+    }
+
     protected function getStats(): array
     {
         $books = app(StockBooks::class)->summary();
@@ -40,6 +45,10 @@ class BooksStats extends StatsOverviewWidget
                     ? __('Без цены закупки продано: :count, в прибыль не вошли', ['count' => $books['sold_unpriced']])
                     : __('Продажа минус закупка'))
                 ->color($books['profit'] >= 0 ? 'success' : 'danger'),
+            Stat::make(__('Наценка за :days дней', ['days' => $books['days']]),
+                $books['sold_cost'] > 0 ? sprintf('%+d %%', (int) round(100 * $books['profit'] / $books['sold_cost'])) : '—')
+                ->description(__('Прибыль к закупке проданного'))
+                ->color($books['sold_cost'] > 0 && $books['profit'] < 0 ? 'danger' : 'gray'),
         ];
     }
 }

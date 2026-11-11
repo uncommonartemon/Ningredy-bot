@@ -5,6 +5,7 @@ namespace App\Filament\Pages;
 use App\Filament\Resources\StockUnits\StockUnitResource;
 use App\Filament\Widgets\Accounting\BooksChart;
 use App\Filament\Widgets\Accounting\BooksStats;
+use App\Filament\Widgets\Accounting\RecentSales;
 use BackedEnum;
 use Filament\Actions\Action;
 use Filament\Pages\Dashboard;
@@ -40,13 +41,13 @@ class Accounting extends Dashboard
 
     public function getWidgets(): array
     {
-        return [BooksStats::class, BooksChart::class];
+        return [BooksStats::class, BooksChart::class, RecentSales::class];
     }
 
     protected function getHeaderActions(): array
     {
         return [
-            Action::make('units')->label(__('Все единицы склада'))->icon(Heroicon::OutlinedQueueList)
+            Action::make('units')->label(__('Все единицы склада'))->icon(Heroicon::OutlinedQueueList)->color('gray')
                 ->url(StockUnitResource::getUrl()),
         ];
     }

@@ -201,7 +201,7 @@ class ProductForm
      */
     private static function stockUnits(): Section
     {
-        return Section::make(__('Единицы на складе'))
+        return Section::make(fn (Get $get): string => __('Единицы на складе').': '.count($get('stock_units') ?? []))
             ->description(__('Строка на каждую штуку в наличии. Для своего учёта: на сайте этого не видно. Убранная строка с данными считается проданной по текущей цене; исправить это можно в разделе «Учёт».'))
             ->schema([
                 Repeater::make('stock_units')->hiddenLabel()

@@ -7,12 +7,35 @@ use App\Filament\Resources\StockUnits\StockUnitResource;
 use App\Models\StockUnit;
 use Filament\Actions\Action;
 use Filament\Resources\Pages\ListRecords;
+use Filament\Schemas\Components\Tabs\Tab;
 use Filament\Support\Icons\Heroicon;
+use Illuminate\Database\Eloquent\Builder;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class ListStockUnits extends ListRecords
 {
     protected static string $resource = StockUnitResource::class;
+
+    /** Where a unit is now; the stock is what the page opens on. */
+    public function getTabs(): array
+    {
+        $count = fn (string $status): int => StockUnit::query()->where('status', $status)->count();
+
+        return [
+            'in_stock' => Tab::make(__('В наличии'))->badge($count(StockUnit::IN_STOCK))
+                ->modifyQueryUsing(fn (Builder $query) => $query->where('status', StockUnit::IN_STOCK)),
+            'sold' => Tab::make(__('Проданы'))->badge($count(StockUnit::SOLD))
+                ->modifyQueryUsing(fn (Builder $query) => $query->where('status', StockUnit::SOLD)),
+            'written_off' => Tab::make(__('Списаны'))->badge($count(StockUnit::WRITTEN_OFF))
+                ->modifyQueryUsing(fn (Builder $query) => $query->where('status', StockUnit::WRITTEN_OFF)),
+            'all' => Tab::make(__('Все')),
+        ];
+    }
+
+    public function getDefaultActiveTab(): string|int|null
+    {
+        return 'in_stock';
+    }
 
     protected function getHeaderActions(): array
     {

@@ -16,7 +16,8 @@ class StockBooks
 {
     /**
      * @return array{currency: string, other_currencies: int, in_stock: int, unpriced: int, invested: float, shelf_value: float,
-     *     expected_profit: float, bought: float, bought_count: int, sold: float, sold_count: int, profit: float, sold_unpriced: int, days: int}
+     *     expected_profit: float, bought: float, bought_count: int, sold: float, sold_count: int, profit: float, sold_cost: float,
+     *     sold_unpriced: int, days: int}
      */
     public function summary(int $days = 30): array
     {
@@ -39,6 +40,7 @@ class StockBooks
             'bought' => (float) $bought->sum('purchase_price'), 'bought_count' => $bought->count(),
             'sold' => (float) $sold->sum('sold_price'), 'sold_count' => $sold->count(),
             'profit' => (float) $soldPriced->sum(fn ($unit): float => $unit->sold_price - $unit->purchase_price),
+            'sold_cost' => (float) $soldPriced->sum('purchase_price'),
             'sold_unpriced' => $sold->count() - $soldPriced->count(),
         ];
     }
