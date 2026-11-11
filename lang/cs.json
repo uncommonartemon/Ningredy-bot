@@ -754,5 +754,6 @@
     "Проданы": "Prodané",
     "Списаны": "Odepsané",
     "Скрытые": "Skryté",
-    "Нет в наличии": "Není skladem"
+    "Нет в наличии": "Není skladem",
+    "Товар удалён из каталога": "Produkt byl z katalogu smazán"
 }

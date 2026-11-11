@@ -117,6 +117,8 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
               written_off, sold_at, sold_price). A variant's quantity is the number of its units in stock: raising or
               lowering the quantity adds or removes units by itself, and changing a unit's status moves the quantity, so
               never create or delete units to change a quantity. «Купили за 900 12 мая у Петра» is an update of that unit.
+              A unit names its product itself (product_title, currency): a unit sold or written off stays in the books
+              after its product is deleted, then without product_variant_id, and cannot return to stock.
             - The search's reference data is in the same tools: reference_sites («Справочники»: which site to
               use for which kind of product, what to take from it, whether the bot may open it) and brand_catalogs
               («Каталоги брендов»). "Use this site for SSD from now on", "take only specifications from it, photos

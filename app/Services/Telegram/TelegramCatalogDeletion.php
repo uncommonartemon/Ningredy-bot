@@ -5,6 +5,7 @@ namespace App\Services\Telegram;
 use App\Models\AiOperation;
 use App\Models\Product;
 use App\Models\TelegramUpdate;
+use App\Services\Catalog\StockUnits;
 use Illuminate\Support\Facades\DB;
 
 class TelegramCatalogDeletion
@@ -63,11 +64,14 @@ class TelegramCatalogDeletion
                 return ['status' => 'completed', 'message' => "Товар изменился после запроса удаления. Проверьте карточку и отправьте /delete {$productId} заново.", 'notify' => true];
             }
             $title = $product->title;
+            $kept = app(StockUnits::class)->keptAfter($product);
             $product->delete();
             $operation->update(['status' => 'completed', 'result' => ['deleted_product_id' => $productId,
                 'title' => $title, 'confirmed_by_update_id' => $update->id], 'executed_at' => now()]);
 
-            return ['status' => 'completed', 'message' => "🗑 Товар #{$productId} «{$title}» удалён навсегда. Операция #{$operation->id}.", 'notify' => true];
+            return ['status' => 'completed', 'message' => "🗑 Товар #{$productId} «{$title}» удалён навсегда. Операция #{$operation->id}."
+                // What was sold is history and stays; the operator should know why the books still name the product.
+                .($kept > 0 ? " В учёте остались его единицы: {$kept} (проданные, списанные и описанные)." : ''), 'notify' => true];
         });
     }
 }

@@ -48,11 +48,11 @@ class ListStockUnits extends ListRecords
                     fwrite($out, "\xEF\xBB\xBF");
                     fputcsv($out, ['code', 'product', 'sku', 'serial_number', 'status', 'purchase_price', 'purchased_at', 'supplier',
                         'sold_price', 'sold_at', 'currency', 'note'], ';');
-                    StockUnit::query()->with('variant.product')->orderBy('id')->chunk(500, function ($units) use ($out): void {
+                    StockUnit::query()->with('variant')->orderBy('id')->chunk(500, function ($units) use ($out): void {
                         foreach ($units as $unit) {
-                            fputcsv($out, [$unit->code, $unit->variant?->product?->title, $unit->variant?->sku, $unit->serial_number,
+                            fputcsv($out, [$unit->code, $unit->product_title, $unit->variant?->sku, $unit->serial_number,
                                 $unit->status, $unit->purchase_price, $unit->purchased_at?->toDateString(), $unit->supplier,
-                                $unit->sold_price, $unit->sold_at?->format('Y-m-d H:i'), $unit->variant?->currency, $unit->note], ';');
+                                $unit->sold_price, $unit->sold_at?->format('Y-m-d H:i'), $unit->variant?->currency ?? $unit->currency, $unit->note], ';');
                         }
                     });
                     fclose($out);

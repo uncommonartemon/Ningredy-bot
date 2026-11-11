@@ -45,6 +45,7 @@ class CatalogCleanupService
     private const LABELS = [
         'products' => 'Товары', 'product_variants' => 'Комплектации', 'product_media' => 'Фото каталога',
         'product_sources' => 'Источники товаров', 'attribute_values' => 'Значения характеристик',
+        'stock_units' => 'Единицы склада и их история продаж',
         'product_drafts' => 'Черновики', 'product_draft_media' => 'Фото черновиков',
         'product_source_page_evidence' => 'Сохранённые страницы черновиков',
         'attribute_definition_category' => 'Привязки характеристик к категориям',
@@ -205,7 +206,8 @@ class CatalogCleanupService
     {
         $tables = [];
         if (in_array($preset, ['catalog', 'test_data'], true)) {
-            $tables = ['product_media', 'attribute_values', 'product_sources', 'product_variants', 'products'];
+            // The books go first and whole: otherwise what was sold would stay behind as history of a cleared catalog.
+            $tables = ['stock_units', 'product_media', 'attribute_values', 'product_sources', 'product_variants', 'products'];
         }
         if (in_array($preset, ['drafts', 'test_data'], true)) {
             $tables = [...$tables, 'product_draft_media', 'product_source_page_evidence', 'product_drafts'];

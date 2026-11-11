@@ -3,18 +3,25 @@
 namespace Tests\Feature;
 
 use App\Filament\Resources\Products\Pages\EditProduct;
+use App\Filament\Resources\StockUnits\Pages\ListStockUnits;
+use App\Filament\Widgets\Accounting\RecentSales;
+use App\Models\AiOperation;
 use App\Models\Category;
 use App\Models\Product;
 use App\Models\ProductVariant;
 use App\Models\StockUnit;
+use App\Models\TelegramUpdate;
 use App\Models\User;
+use App\Services\Catalog\StockBooks;
 use App\Services\Catalog\StockUnits;
 use App\Services\DatabaseOperator\DatabaseOperatorService;
+use App\Services\Telegram\TelegramCatalogDeletion;
 use Filament\Actions\Testing\TestAction;
 use Filament\Facades\Filament;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Validation\ValidationException;
 use Livewire\Livewire;
 use Tests\TestCase;
 
@@ -120,7 +127,10 @@ class StockUnitsTest extends TestCase
         $variant = $this->variant(quantity: 2);
         Schema::drop('stock_units');
         (require database_path('migrations/2026_11_11_110000_create_stock_units.php'))->up();
+        (require database_path('migrations/2026_11_11_120000_stock_units_outlive_their_product.php'))->up();
         $this->assertSame(2, DB::table('stock_units')->where('product_variant_id', $variant->id)->where('status', 'in_stock')->count());
+        // Units that were there before they carried a name get their product's.
+        $this->assertSame(2, DB::table('stock_units')->where('product_title', 'Samsung PM9A1 512 GB')->where('currency', 'CZK')->count());
         $this->assertSame(2, DB::table('stock_units')->whereNotNull('code')->distinct()->count('code'));
 
         $unit = $variant->stockUnits()->orderBy('id')->firstOrFail();
@@ -130,6 +140,103 @@ class StockUnitsTest extends TestCase
         $this->assertSame(['900.00', 'Petr', StockUnit::SOLD, '1400.00'],
             [$unit->fresh()->purchase_price, $unit->fresh()->supplier, $unit->fresh()->status, $unit->fresh()->sold_price]);
         $this->assertSame(1, $variant->fresh()->quantity);
+    }
+
+    public function test_what_the_books_know_stays_when_its_product_is_renamed_and_then_deleted(): void
+    {
+        $this->travelTo('2026-11-11 12:00:00');
+        $variant = $this->variant(quantity: 4, price: 2000);
+        [$sold, $described, $blank, $writtenOff] = $variant->stockUnits()->orderBy('id')->get()->all();
+        // A unit is called as its product from the first day.
+        $this->assertSame(['Samsung PM9A1 512 GB', 'CZK'], [$sold->product_title, $sold->currency]);
+        $sold->update(['purchase_price' => 1000, 'purchased_at' => '2026-10-01']);
+        $books = app(StockUnits::class);
+        $books->sell($sold, '1900', '2026-11-05 10:00:00');
+        $described->update(['purchase_price' => 1100, 'supplier' => 'Petr']);
+        $books->writeOff($writtenOff);
+
+        $variant->product->update(['title' => 'Samsung PM9A1 512 GB NVMe']);
+        $variant->update(['currency' => 'EUR']);
+        $this->assertSame(['Samsung PM9A1 512 GB NVMe', 'EUR'], [$sold->fresh()->product_title, $sold->fresh()->currency]);
+
+        $variant->product->delete();
+
+        $this->assertNull(ProductVariant::query()->find($variant->id));
+        // What was sold stays as it was, only without the link.
+        $this->assertSame([StockUnit::SOLD, '1900.00', null, 'Samsung PM9A1 512 GB NVMe', 'EUR'], [$sold->fresh()->status,
+            $sold->fresh()->sold_price, $sold->fresh()->product_variant_id, $sold->fresh()->product_title, $sold->fresh()->currency]);
+        $this->assertSame([StockUnit::WRITTEN_OFF, null], [$writtenOff->fresh()->status, $writtenOff->fresh()->product_variant_id]);
+        // A described item in stock left the catalog without a sale: written off. A row that only stood for the quantity is gone.
+        $this->assertSame([StockUnit::WRITTEN_OFF, null, '1100.00'],
+            [$described->fresh()->status, $described->fresh()->sold_price, $described->fresh()->purchase_price]);
+        $this->assertNull($blank->fresh());
+
+        // The month's sale is still in the books, in the unit's own currency.
+        $summary = app(StockBooks::class)->summary();
+        $this->assertSame(['EUR', 1900.0, 1, 900.0, 0], [$summary['currency'], $summary['sold'], $summary['sold_count'], $summary['profit'], $summary['in_stock']]);
+
+        // Such a unit has no shelf to return to: neither a button nor the chat puts it back.
+        $books->restore($sold->fresh());
+        $this->assertSame(StockUnit::SOLD, $sold->fresh()->status);
+        $operator = app(DatabaseOperatorService::class);
+        try {
+            $operator->execute($operator->prepare([['action' => 'update', 'table' => 'stock_units', 'selection' => ['ids' => [$sold->id]],
+                'values' => ['status' => 'in_stock']]]));
+            $this->fail('A unit without a product came back to stock.');
+        } catch (ValidationException $exception) {
+            $this->assertStringContainsString('удалён из каталога', $exception->getMessage());
+        }
+        // What the chat may still do with it: correct the sale.
+        $operator->execute($operator->prepare([['action' => 'update', 'table' => 'stock_units', 'selection' => ['ids' => [$sold->id]],
+            'values' => ['sold_price' => 1850]]]));
+        $this->assertSame('1850.00', $sold->fresh()->sold_price);
+    }
+
+    public function test_one_configuration_deleted_alone_leaves_its_sales_and_the_lists_show_them(): void
+    {
+        $this->admin();
+        $kept = $this->variant(quantity: 1, price: 1000);
+        $leaving = $kept->product->variants()->create(['condition' => 'new', 'price' => 3000, 'currency' => 'CZK', 'quantity' => 2,
+            'stock_status' => 'in_stock', 'is_default' => false, 'is_active' => true]);
+        [$sold, $blank] = $leaving->stockUnits()->orderBy('id')->get()->all();
+        app(StockUnits::class)->sell($sold, '2900', now());
+
+        $leaving->delete();
+
+        $this->assertSame([StockUnit::SOLD, null], [$sold->fresh()->status, $sold->fresh()->product_variant_id]);
+        $this->assertNull($blank->fresh());
+        $this->assertSame(1, $kept->fresh()->quantity);
+        $this->assertModelExists($kept->product);
+
+        Livewire::test(RecentSales::class)->assertOk()->assertSee('Samsung PM9A1 512 GB')->assertSee($sold->code);
+        $list = Livewire::test(ListStockUnits::class)->set('activeTab', 'sold');
+        $list->assertCanSeeTableRecords([$sold->fresh()])->assertSee('Товар удалён из каталога')
+            ->assertTableActionHidden('restore', $sold->fresh());
+        // A unit of a product that is still there can come back.
+        $staying = $kept->stockUnits()->sole();
+        app(StockUnits::class)->sell($staying, '950', now());
+        Livewire::test(ListStockUnits::class)->set('activeTab', 'sold')->assertTableActionVisible('restore', $staying->fresh());
+    }
+
+    public function test_deleting_a_product_in_telegram_says_what_stays_in_the_books(): void
+    {
+        $variant = $this->variant(quantity: 2, price: 1000);
+        app(StockUnits::class)->sell($variant->stockUnits()->orderBy('id')->firstOrFail(), '950', now());
+        $this->assertSame(1, app(StockUnits::class)->keptAfter($variant->product));
+
+        $update = TelegramUpdate::query()->create(['update_id' => 770001, 'telegram_user_id' => '7', 'chat_id' => '7',
+            'text' => 'delete', 'payload' => [], 'status' => 'processing']);
+        $deletion = app(TelegramCatalogDeletion::class);
+        $operation = AiOperation::query()->create(['idempotency_key' => 'delete-with-books', 'telegram_update_id' => $update->id,
+            'telegram_user_id' => '7', 'tool' => 'PrepareProductDeletion', 'action' => 'delete_product', 'target_type' => Product::class,
+            'target_id' => $variant->product_id, 'status' => 'awaiting_confirmation', 'payload' => [
+                'catalog_fingerprint' => $deletion->fingerprint($variant->product), 'expires_at' => now()->addMinutes(10)->getTimestamp()]]);
+
+        $answer = $deletion->resolve($operation->id, 'confirm', $update);
+
+        $this->assertStringContainsString('удалён навсегда', $answer['message']);
+        $this->assertStringContainsString('В учёте остались его единицы: 1', $answer['message']);
+        $this->assertSame(1, StockUnit::query()->whereNull('product_variant_id')->where('status', StockUnit::SOLD)->count());
     }
 
     private function variant(int $quantity, int $price = 1000): ProductVariant

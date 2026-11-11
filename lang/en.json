@@ -754,5 +754,6 @@
     "Проданы": "Sold",
     "Списаны": "Written off",
     "Скрытые": "Hidden",
-    "Нет в наличии": "Out of stock"
+    "Нет в наличии": "Out of stock",
+    "Товар удалён из каталога": "The product was deleted from the catalog"
 }

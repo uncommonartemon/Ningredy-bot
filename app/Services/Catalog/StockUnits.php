@@ -2,6 +2,7 @@
 
 namespace App\Services\Catalog;
 
+use App\Models\Product;
 use App\Models\ProductVariant;
 use App\Models\StockUnit;
 use Illuminate\Support\Facades\DB;
@@ -15,6 +16,10 @@ use Illuminate\Support\Facades\DB;
  * A unit that leaves because the quantity went down is taken as sold, at the configuration's
  * price and now: the shop has no orders, so this is the only trace of a sale. A unit nobody
  * wrote anything about is simply removed. The books can correct either.
+ *
+ * The books are a history, and a sold-out product is deleted from the catalog sooner or later.
+ * So a unit carries its product's name and currency itself, and what the books know about it
+ * stays when the product goes.
  */
 class StockUnits
 {
@@ -31,6 +36,9 @@ class StockUnits
      */
     public function afterVariantSaved(ProductVariant $variant, ?array $rows): void
     {
+        if ($variant->wasChanged('currency')) {
+            $variant->stockUnits()->toBase()->update(['currency' => $variant->currency]);
+        }
         if ($this->busy || ($rows === null && ! $variant->wasRecentlyCreated && ! $variant->wasChanged('quantity'))) {
             return;
         }
@@ -72,7 +80,45 @@ class StockUnits
     /** Puts a unit back: a sale that did not happen, a mistake in the books. */
     public function restore(StockUnit $unit): void
     {
-        $unit->update(['status' => StockUnit::IN_STOCK, 'sold_at' => null, 'sold_price' => null]);
+        // A unit whose product was deleted has no shelf to return to.
+        if ($unit->product_variant_id !== null) {
+            $unit->update(['status' => StockUnit::IN_STOCK, 'sold_at' => null, 'sold_price' => null]);
+        }
+    }
+
+    /** How many units of the product the books keep once it is deleted: all but the rows that only stood for the quantity. */
+    public function keptAfter(Product $product): int
+    {
+        return StockUnit::query()->whereIn('product_variant_id', $product->variants()->select('id'))->get()
+            ->reject(fn (StockUnit $unit): bool => $unit->status === StockUnit::IN_STOCK && $unit->isBlank())->count();
+    }
+
+    /** The product got another name: its units are called the same. */
+    public function productRenamed(Product $product): void
+    {
+        StockUnit::query()->whereIn('product_variant_id', $product->variants()->select('id'))
+            ->toBase()->update(['product_title' => $product->title]);
+    }
+
+    /**
+     * Before configurations are deleted, with their product or alone. What the books know
+     * stays, without the link: a unit sold or written off, and a unit in stock somebody
+     * described - that one is written off, because the item left the catalog without a sale.
+     * A unit that only stood for the quantity goes with the configuration.
+     *
+     * @param  list<int>  $variantIds
+     */
+    public function variantsLeaving(array $variantIds): void
+    {
+        if ($variantIds === []) {
+            return;
+        }
+        $this->quietly(function () use ($variantIds): void {
+            foreach (StockUnit::query()->whereIn('product_variant_id', $variantIds)->inStock()->get() as $unit) {
+                $unit->isBlank() ? $unit->delete() : $unit->update(['status' => StockUnit::WRITTEN_OFF]);
+            }
+            StockUnit::query()->whereIn('product_variant_id', $variantIds)->toBase()->update(['product_variant_id' => null]);
+        });
     }
 
     /** @param  array<int|string, array<string, mixed>>  $rows */
@@ -92,7 +138,7 @@ class StockUnits
                 $unit->update($details);
                 $kept[] = $unit->id;
             } else {
-                $kept[] = $variant->stockUnits()->create($details)->id;
+                $kept[] = $variant->stockUnits()->create([...$details, ...self::nameOf($variant)])->id;
             }
         }
         // A row the form no longer has: that unit left the stock.
@@ -107,7 +153,7 @@ class StockUnits
         $wanted = max(0, min(self::MOST_UNITS, (int) $variant->quantity));
         $inStock = $variant->stockUnits()->inStock()->orderBy('id')->get();
         for ($missing = $wanted - $inStock->count(); $missing > 0; $missing--) {
-            $variant->stockUnits()->create([]);
+            $variant->stockUnits()->create(self::nameOf($variant));
         }
         $surplus = $inStock->count() - $wanted;
         if ($surplus <= 0) {
@@ -129,12 +175,23 @@ class StockUnits
     /** The service's own writes do not come back to it as changes to react to. */
     private function quietly(callable $work): void
     {
+        $was = $this->busy;
         $this->busy = true;
         try {
             DB::transaction($work);
         } finally {
-            $this->busy = false;
+            $this->busy = $was;
         }
+    }
+
+    /**
+     * What a unit keeps of its product, so the books can read it once the product is gone.
+     *
+     * @return array{product_title: ?string, currency: ?string}
+     */
+    private static function nameOf(ProductVariant $variant): array
+    {
+        return ['product_title' => $variant->product?->title, 'currency' => $variant->currency];
     }
 
     private static function text(mixed $value): ?string

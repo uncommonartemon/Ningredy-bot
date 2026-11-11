@@ -81,11 +81,13 @@ class StockBooks
      */
     private function units(): array
     {
-        $rows = StockUnit::query()->join('product_variants', 'product_variants.id', '=', 'stock_units.product_variant_id')
+        // A sold unit outlives its product, so the configuration is joined only where it still exists.
+        $rows = StockUnit::query()->leftJoin('product_variants', 'product_variants.id', '=', 'stock_units.product_variant_id')
             ->get(['stock_units.status', 'stock_units.purchase_price', 'stock_units.purchased_at', 'stock_units.sold_at',
-                'stock_units.sold_price', 'product_variants.price as shelf_price', 'product_variants.currency'])
+                'stock_units.sold_price', 'stock_units.currency', 'product_variants.price as shelf_price',
+                'product_variants.currency as shelf_currency'])
             ->map(fn (StockUnit $unit): object => (object) [
-                'status' => $unit->status, 'currency' => $unit->getAttribute('currency') ?: 'CZK',
+                'status' => $unit->status, 'currency' => $unit->getAttribute('shelf_currency') ?: $unit->getAttribute('currency') ?: 'CZK',
                 'purchase_price' => $unit->getRawOriginal('purchase_price') === null ? null : (float) $unit->getRawOriginal('purchase_price'),
                 'sold_price' => $unit->getRawOriginal('sold_price') === null ? null : (float) $unit->getRawOriginal('sold_price'),
                 'shelf_price' => $unit->getAttribute('shelf_price') === null ? null : (float) $unit->getAttribute('shelf_price'),

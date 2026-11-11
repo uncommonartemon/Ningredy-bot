@@ -29,7 +29,7 @@ use UnitEnum;
 /**
  * Every physical item the shop has or had (operator, 2026-11-11). Units appear and leave with
  * a product's quantity, so there is nothing to create here: this is where the books are
- * filled in and corrected.
+ * filled in and corrected. A unit sold or written off stays here after its product is deleted.
  */
 class StockUnitResource extends Resource
 {
@@ -96,13 +96,15 @@ class StockUnitResource extends Resource
     public static function table(Table $table): Table
     {
         return $table
-            ->modifyQueryUsing(fn (Builder $query): Builder => $query->with('variant.product'))
+            ->modifyQueryUsing(fn (Builder $query): Builder => $query->with('variant'))
             ->defaultSort('id', 'desc')
             ->columns([
                 TextColumn::make('code')->label(__('Номер'))->searchable()->sortable()->copyable()->fontFamily(FontFamily::Mono),
-                TextColumn::make('variant.product.title')->label(__('Товар'))->searchable()->limit(46)
-                    ->tooltip(fn (StockUnit $record): ?string => $record->variant?->product?->title)
-                    ->description(fn (StockUnit $record): ?string => $record->variant?->sku)
+                // The unit's own copy of the name: it is still there when the product is deleted.
+                TextColumn::make('product_title')->label(__('Товар'))->searchable()->limit(46)->placeholder('—')
+                    ->tooltip(fn (StockUnit $record): ?string => $record->product_title)
+                    ->description(fn (StockUnit $record): ?string => $record->product_variant_id === null
+                        ? __('Товар удалён из каталога') : $record->variant?->sku)
                     ->url(fn (StockUnit $record): ?string => $record->variant?->product_id === null ? null
                         : ProductResource::getUrl('edit', ['record' => $record->variant->product_id])),
                 TextColumn::make('serial_number')->label(__('Серийный номер'))->searchable()->placeholder('—')->toggleable(),
@@ -124,7 +126,7 @@ class StockUnitResource extends Resource
                 TextColumn::make('note')->label(__('Заметка'))->limit(40)->placeholder('—')->toggleable(isToggledHiddenByDefault: true),
             ])
             ->groups([
-                Group::make('variant.product.title')->label(__('Товар'))->collapsible(),
+                Group::make('product_title')->label(__('Товар'))->collapsible(),
                 Group::make('supplier')->label(__('Поставщик'))->collapsible(),
             ])
             ->filters([
@@ -151,7 +153,8 @@ class StockUnitResource extends Resource
                         ->modalDescription(__('Единица уйдёт из наличия без продажи: потеряна, сломана, пошла на запчасти.'))
                         ->action(fn (StockUnit $record) => app(StockUnits::class)->writeOff($record)),
                     Action::make('restore')->label(__('Вернуть в наличие'))->icon(Heroicon::OutlinedArrowUturnLeft)->color('gray')
-                        ->visible(fn (StockUnit $record): bool => $record->status !== StockUnit::IN_STOCK)
+                        // A unit whose product was deleted has no shelf to return to.
+                        ->visible(fn (StockUnit $record): bool => $record->status !== StockUnit::IN_STOCK && $record->product_variant_id !== null)
                         ->requiresConfirmation()
                         ->modalDescription(__('Количество товара на сайте вырастет на одну штуку.'))
                         ->action(fn (StockUnit $record) => app(StockUnits::class)->restore($record)),

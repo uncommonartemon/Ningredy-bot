@@ -56,6 +56,8 @@ class ResetCatalogTestData extends Command
         // old numeric draft id.
         ProductDraftMedia::query()->eachById(fn (ProductDraftMedia $media) => $media->delete());
         ProductMedia::query()->eachById(fn (ProductMedia $media) => $media->delete());
+        // The books of a cleared catalog go with it; a product deleted one by one keeps what it sold.
+        $this->deleteIfPresent('stock_units');
         Product::query()->eachById(fn (Product $product) => $product->delete());
 
         DB::transaction(function (): void {

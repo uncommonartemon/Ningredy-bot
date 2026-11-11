@@ -51,6 +51,8 @@ class ProductVariant extends Model
                 ])));
             }
         });
+        // One configuration deleted by itself leaves the books what they know, as its product would.
+        static::deleting(fn (ProductVariant $variant) => app(StockUnits::class)->variantsLeaving([(int) $variant->id]));
         static::saved(function (ProductVariant $variant): void {
             $variant->writePendingGroupPrices();
             // The quantity and the units in stock are the same number, whoever changed either.

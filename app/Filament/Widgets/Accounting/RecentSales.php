@@ -22,13 +22,13 @@ class RecentSales extends TableWidget
         return $table
             ->heading(__('Последние продажи'))
             ->description(__('Единицы, ушедшие из наличия как проданные. Исправить продажу можно в «Единицах склада».'))
-            ->query(StockUnit::query()->where('status', StockUnit::SOLD)->with('variant.product')->latest('sold_at')->latest('id'))
+            ->query(StockUnit::query()->where('status', StockUnit::SOLD)->latest('sold_at')->latest('id'))
             ->paginated([10, 25])->defaultPaginationPageOption(10)
             ->columns([
                 TextColumn::make('sold_at')->label(__('Дата продажи'))->date('d.m.Y')->placeholder('—'),
                 TextColumn::make('code')->label(__('Номер'))->fontFamily(FontFamily::Mono)
                     ->url(fn (): string => StockUnitResource::getUrl()),
-                TextColumn::make('variant.product.title')->label(__('Товар'))->wrap()->limit(70),
+                TextColumn::make('product_title')->label(__('Товар'))->wrap()->limit(70)->placeholder('—'),
                 TextColumn::make('purchase_price')->label(__('Цена закупки'))->numeric(decimalPlaces: 2)->placeholder('—')->alignEnd(),
                 TextColumn::make('sold_price')->label(__('Цена продажи'))->numeric(decimalPlaces: 2)->placeholder('—')->alignEnd(),
                 TextColumn::make('profit')->label(__('Прибыль'))->alignEnd()->placeholder('—')

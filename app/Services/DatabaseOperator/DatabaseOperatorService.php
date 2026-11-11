@@ -639,6 +639,9 @@ class DatabaseOperatorService
         if ($row instanceof Product && isset($values['status']) && $values['status'] === 'published') {
             $this->assert($row->exists && $row->status === 'published', 'status', 'Публикация нового товара выполняется подтверждением готового черновика.');
         }
+        if ($row instanceof StockUnit && ($values['status'] ?? null) === StockUnit::IN_STOCK) {
+            $this->assert($row->product_variant_id !== null, 'status', 'Товар этой единицы удалён из каталога: вернуть её в наличие некуда.');
+        }
         if ($row instanceof Product && array_key_exists('category_id', $values) && $values['category_id'] === null) {
             $this->assert(false, 'category_id', 'Товару нужна категория.');
         }

@@ -10,6 +10,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 /**
  * One physical item (operator, 2026-11-11): its own number, what it was bought for, when and
  * from whom, and what became of it. Kept for the shop's own books; the storefront never shows it.
+ * A unit without a configuration is one whose product was deleted from the catalog: it stays as history.
  */
 class StockUnit extends Model
 {
@@ -23,6 +24,7 @@ class StockUnit extends Model
 
     protected $fillable = [
         'product_variant_id', 'serial_number', 'purchase_price', 'purchased_at', 'supplier', 'note', 'status', 'sold_at', 'sold_price',
+        'product_title', 'currency',
     ];
 
     protected $attributes = ['status' => self::IN_STOCK];
@@ -34,6 +36,14 @@ class StockUnit extends Model
 
     protected static function booted(): void
     {
+        // A unit carries its product's name and currency: the books read them when the product is gone.
+        static::creating(function (StockUnit $unit): void {
+            if ($unit->product_title === null || $unit->currency === null) {
+                $variant = $unit->variant()->with('product:id,title')->first();
+                $unit->product_title ??= $variant?->product?->title;
+                $unit->currency ??= $variant?->currency;
+            }
+        });
         // The number comes from the row's own id: unique, and never reused.
         static::created(function (StockUnit $unit): void {
             $unit->forceFill(['code' => 'U-'.str_pad((string) $unit->id, 6, '0', STR_PAD_LEFT)])->saveQuietly();
