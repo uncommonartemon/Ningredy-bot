@@ -4,6 +4,7 @@ namespace App\Filament\Schemas;
 
 use App\Filament\Resources\Products\ProductResource;
 use App\Filament\Support\ProductOptions;
+use App\Filament\Support\SupplierSelect;
 use App\Models\Product;
 use App\Models\StockUnit;
 use App\Services\Catalog\StockUnits;
@@ -82,7 +83,7 @@ final class ProductCommercialAction
                 Fieldset::make(__('Закупка новых штук'))->columns(3)->columnSpanFull()->schema([
                     TextInput::make('purchase_price')->label(__('Цена закупки'))->numeric()->minValue(0),
                     DatePicker::make('purchased_at')->label(__('Дата закупки'))->maxDate(now()),
-                    TextInput::make('supplier')->label(__('Поставщик'))->maxLength(255),
+                    SupplierSelect::make(),
                 ]),
             ])
             ->action(function (Product $record, array $data, Action $action, $livewire) use ($putsBack): void {

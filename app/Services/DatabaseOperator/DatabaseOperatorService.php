@@ -31,6 +31,7 @@ use App\Models\ProductSourceStat;
 use App\Models\ProductVariant;
 use App\Models\ReferenceSite;
 use App\Models\StockUnit;
+use App\Models\Supplier;
 use App\Models\TelegramUpdate;
 use App\Services\Products\CatalogEditRevision;
 use App\Services\Products\CatalogLocales;
@@ -177,6 +178,8 @@ class DatabaseOperatorService
                 'status' => [Rule::in(StockUnit::STATUSES)], 'sold_at' => 'nullable|date',
                 'sold_price' => 'nullable|numeric|min:0|max:9999999999.99',
             ]],
+            // Who the shop buys from: the list a unit's supplier is picked from. A new name used on a unit joins it by itself.
+            'suppliers' => ['model' => Supplier::class, 'writable' => ['name' => 'required|string|max:255', 'note' => 'nullable|string|max:2000']],
             // A rule is a regular expression the agent learns and checks on examples:
             // the chat switches it on or off and annotates it, never rewrites it.
             'image_rendition_rules' => ['model' => ImageRenditionRule::class, 'create' => false, 'delete' => false,

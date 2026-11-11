@@ -63,7 +63,9 @@ class FilamentProductWorkflowTest extends TestCase
         $variant = array_values($variants)[0];
         $this->assertEmpty($variant['sku'] ?? null);
         $this->assertEmpty($variant['price'] ?? null);
-        $this->assertEquals(0, $variant['quantity']);
+        // Not the first product's offer: a new card's own start - one item in stock (operator, 2026-11-11).
+        $this->assertEquals(1, $variant['quantity']);
+        $this->assertSame('in_stock', $variant['stock_status']);
         $this->assertTrue($variant['is_default']);
         $this->assertCount(3, $variant['attributes']);
         $page->fillForm(['title' => 'Second workflow product'])->call('create')->assertHasNoFormErrors();

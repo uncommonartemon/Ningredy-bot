@@ -9,10 +9,12 @@ use App\Filament\Schemas\RelatedCatalogForms;
 use App\Filament\Support\ProductOptions;
 use App\Filament\Support\ProductVariantFormState;
 use App\Filament\Support\StockUnitRows;
+use App\Filament\Support\SupplierSelect;
 use App\Models\Brand;
 use App\Models\Category;
 use App\Models\CustomerGroup;
 use App\Models\CustomerGroupPrice;
+use App\Services\Catalog\StockUnits;
 use App\Services\Products\ManualProductAttributes;
 use App\Services\Products\ProductCondition;
 use App\Services\Products\ProductSourceTypes;
@@ -124,8 +126,8 @@ class ProductForm
                         ->default('new')->required()->live(),
                     TextInput::make('price')->label(__('Цена'))->numeric()->minValue(0),
                     TextInput::make('currency')->label(__('Валюта'))->default('CZK')->length(3),
-                    Select::make('stock_status')->label(__('Наличие'))->options(ProductOptions::stockStatuses())->default('unknown')->required(),
-                    TextInput::make('quantity')->label(__('Количество'))->integer()->minValue(0)->default(0)->required()
+                    Select::make('stock_status')->label(__('Наличие'))->options(ProductOptions::stockStatuses())->default('in_stock')->required(),
+                    TextInput::make('quantity')->label(__('Количество'))->integer()->minValue(0)->default(1)->required()
                         ->live(onBlur: true)
                         ->afterStateUpdated(fn (Get $get, Set $set, mixed $state) => $set('stock_units',
                             StockUnitRows::resize($get('stock_units') ?? [], (int) $state))),
@@ -201,7 +203,8 @@ class ProductForm
      */
     private static function stockUnits(): Section
     {
-        return Section::make(fn (Get $get): string => __('Единицы на складе').': '.count($get('stock_units') ?? []))
+        // No count in the heading: after «Добавить единицу» only the table is drawn again, and a number here went stale.
+        return Section::make(__('Единицы на складе'))
             ->description(__('Каждая штука в наличии — своя строка со своим номером. Добавить штуку: кнопка «Добавить единицу» или количество выше. Для своего учёта: на сайте этого не видно. Убранная строка с данными считается проданной по текущей цене; исправить это можно в разделе «Учёт».'))
             ->schema([
                 Repeater::make('stock_units')->hiddenLabel()
@@ -215,11 +218,13 @@ class ProductForm
                     ])
                     ->schema([
                         Hidden::make('id'),
-                        TextInput::make('code')->hiddenLabel()->disabled()->dehydrated(false)->placeholder(__('новая')),
+                        // The number is there the moment the row is: «Добавить единицу» takes the next one.
+                        TextInput::make('code')->hiddenLabel()->disabled()->dehydrated()
+                            ->default(fn (): string => app(StockUnits::class)->nextCode())->placeholder(__('новая')),
                         TextInput::make('serial_number')->hiddenLabel()->maxLength(255),
                         TextInput::make('purchase_price')->hiddenLabel()->numeric()->minValue(0),
                         DatePicker::make('purchased_at')->hiddenLabel()->maxDate(now()),
-                        TextInput::make('supplier')->hiddenLabel()->maxLength(255),
+                        SupplierSelect::make()->hiddenLabel(),
                         TextInput::make('note')->hiddenLabel()->maxLength(2000),
                     ])
                     ->compact()->addActionLabel(__('Добавить единицу'))->reorderable(false)->defaultItems(0)

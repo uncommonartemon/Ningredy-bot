@@ -38,6 +38,8 @@ class StockUnit extends Model
     {
         // A unit carries its product's name and currency: the books read them when the product is gone.
         static::creating(function (StockUnit $unit): void {
+            // Its number is issued by the counter: unique, never given twice, and known before the unit is saved.
+            $unit->code ??= app(StockUnits::class)->nextCode();
             if ($unit->product_title === null || $unit->currency === null) {
                 $variant = $unit->variant()->with('product:id,title')->first();
                 $unit->product_title ??= $variant?->product?->title;
@@ -47,6 +49,10 @@ class StockUnit extends Model
         // Whoever changes the state - a button, the form, the chat - the sale's date and price follow it:
         // sold without a date is sold now, at the configuration's price; any other state has no sale to keep.
         static::saving(function (StockUnit $unit): void {
+            // A supplier is one of the list, spelt as the list spells it; a new name joins the list.
+            if ($unit->isDirty('supplier')) {
+                $unit->supplier = Supplier::named($unit->supplier);
+            }
             if ($unit->status === self::SOLD) {
                 $unit->sold_at ??= now();
                 $unit->sold_price ??= $unit->variant?->price;
@@ -54,10 +60,6 @@ class StockUnit extends Model
                 $unit->sold_at = null;
                 $unit->sold_price = null;
             }
-        });
-        // The number comes from the row's own id: unique, and never reused.
-        static::created(function (StockUnit $unit): void {
-            $unit->forceFill(['code' => 'U-'.str_pad((string) $unit->id, 6, '0', STR_PAD_LEFT)])->saveQuietly();
         });
         // A unit that left the stock or came back changes its configuration's quantity.
         static::saved(function (StockUnit $unit): void {

@@ -12,8 +12,9 @@ final class ProductVariantFormState
     public static function fresh(int|string|null $categoryId = null): array
     {
         return [Str::uuid()->toString() => [
-            'condition' => 'new', 'currency' => 'CZK', 'stock_status' => 'unknown',
-            'quantity' => 0, 'is_default' => true, 'is_active' => true,
+            // A card is made because the item is there (operator, 2026-11-11): one item in stock, with its row.
+            'condition' => 'new', 'currency' => 'CZK', 'stock_status' => 'in_stock',
+            'quantity' => 1, 'stock_units' => StockUnitRows::resize([], 1), 'is_default' => true, 'is_active' => true,
             'attributes' => app(ManualProductAttributes::class)->defaults($categoryId),
             'translations' => self::emptyTranslations(),
         ]];

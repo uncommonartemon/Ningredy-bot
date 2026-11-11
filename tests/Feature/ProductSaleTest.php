@@ -10,6 +10,7 @@ use App\Models\Category;
 use App\Models\Product;
 use App\Models\ProductVariant;
 use App\Models\StockUnit;
+use App\Models\Supplier;
 use App\Models\TelegramUpdate;
 use App\Models\User;
 use App\Services\Telegram\CatalogTelegramNavigation;
@@ -76,6 +77,7 @@ class ProductSaleTest extends TestCase
         $list->set('activeTab', 'all');
 
         // The same product came in again: one window puts it back with how many there are and the price.
+        Supplier::named('Petr');
         $list->mountTableAction('putBackOnSale', $asleep)
             ->assertTableActionDataSet(['quantity' => 1, 'stock_status' => 'in_stock'])
             ->setTableActionData(['quantity' => 2, 'price' => 4500, 'purchase_price' => 3000, 'purchased_at' => '2026-11-10', 'supplier' => 'Petr'])

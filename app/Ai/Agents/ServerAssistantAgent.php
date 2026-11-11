@@ -120,6 +120,8 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
               lowering the quantity adds or removes units by itself, and changing a unit's status moves the quantity, so
               never create or delete units to change a quantity. «Купили за 900 12 мая у Петра» is an update of that unit;
               a supplier is written as a name in a list, not as it was declined in the phrase («у Петра» → Пётр).
+              The list itself is the table suppliers (name, note): a name new to it is added when a unit is saved with it,
+              and renaming a supplier there renames it on its units.
               «Продана за 1400» is status sold with sold_price; the date is today's unless the operator names another.
               A unit names its product itself (product_title, currency): a unit sold or written off stays in the books
               after its product is deleted, then without product_variant_id, and cannot return to stock.

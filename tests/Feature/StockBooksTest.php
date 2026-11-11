@@ -12,6 +12,7 @@ use App\Models\Category;
 use App\Models\Product;
 use App\Models\ProductVariant;
 use App\Models\StockUnit;
+use App\Models\Supplier;
 use App\Models\User;
 use App\Services\Catalog\StockBooks;
 use App\Services\Catalog\StockUnits;
@@ -81,6 +82,7 @@ class StockBooksTest extends TestCase
         $this->assertNotContains(BooksStats::class, (new Dashboard)->getWidgets());
 
         $table = Livewire::test(ListStockUnits::class)->assertSet('activeTab', 'in_stock')->assertCanSeeTableRecords([$first, $second]);
+        Supplier::named('Petr');
         $table->callTableAction('edit', $first, ['purchase_price' => 1200, 'purchased_at' => '2026-11-01', 'supplier' => 'Petr'])
             ->assertHasNoTableActionErrors();
         $this->assertSame(['1200.00', 'Petr'], [$first->fresh()->purchase_price, $first->fresh()->supplier]);

@@ -24,6 +24,9 @@ class ProductVariant extends Model
         'warranty_months', 'is_default', 'is_active', 'group_prices', 'stock_units',
     ];
 
+    /** True between the insert and the «saved» that follows it: the one save that is the configuration's first. */
+    private bool $justInserted = false;
+
     /** The product form's rows for the units in stock, written once the configuration is saved. */
     private ?array $pendingStockUnits = null;
 
@@ -53,12 +56,17 @@ class ProductVariant extends Model
         });
         // One configuration deleted by itself leaves the books what they know, as its product would.
         static::deleting(fn (ProductVariant $variant) => app(StockUnits::class)->variantsLeaving([(int) $variant->id]));
+        static::created(function (ProductVariant $variant): void {
+            $variant->justInserted = true;
+        });
         static::saved(function (ProductVariant $variant): void {
             $variant->writePendingGroupPrices();
             // The quantity and the units in stock are the same number, whoever changed either.
             $rows = $variant->pendingStockUnits;
             $variant->pendingStockUnits = null;
-            app(StockUnits::class)->afterVariantSaved($variant, $rows);
+            $inserted = $variant->justInserted;
+            $variant->justInserted = false;
+            app(StockUnits::class)->afterVariantSaved($variant, $rows, $inserted);
         });
     }
 
