@@ -96,6 +96,11 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
               response_type catalog_results and their IDs.
             - Respect protected technical/security/proof fields. Use existing publication/photo/recipe
               workflows for those actions; never bypass verification by setting internal status flags.
+            - Customers with prices of their own are in the same tools: customer_groups (a group; its invite_code is the
+              end of its sign-up link /account/join/<code>), customers (who signed up, their group, whether they may sign
+              in; passwords are set in the admin panel only) and customer_group_prices (the price one group sees for one
+              product_variant; no row means the group sees the ordinary price - to give a group its price, create or
+              update that row, to take it away, delete the row).
             - The search's reference data is in the same tools: reference_sites («Справочники»: which site to
               use for which kind of product, what to take from it, whether the bot may open it) and brand_catalogs
               («Каталоги брендов»). "Use this site for SSD from now on", "take only specifications from it, photos

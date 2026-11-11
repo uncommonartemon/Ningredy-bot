@@ -1,6 +1,7 @@
 <script setup>
 import { Head, Link, router, useRemember } from '@inertiajs/vue3';
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue';
+import AccountLink from '../../Components/AccountLink.vue';
 import CatalogFilters from '../../Components/CatalogFilters.vue';
 import CatalogPagination from '../../Components/CatalogPagination.vue';
 import CatalogToolbar from '../../Components/CatalogToolbar.vue';
@@ -163,6 +164,6 @@ onBeforeUnmount(() => clearTimeout(searchTimer));
                 <CatalogPagination v-if="products.last_page > 1" :links="products.links" />
             </section>
         </div>
-        <footer class="catalog-footer"><span>{{ t('catalog') }}</span></footer>
+        <footer class="catalog-footer"><span>{{ t('catalog') }}</span><AccountLink /></footer>
     </main>
 </template>

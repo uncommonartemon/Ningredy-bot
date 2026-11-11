@@ -1,0 +1,29 @@
+/* The account pages: one quiet panel inside the catalog's frame. The button is the panel's
+   only accent; everything else is hairlines and muted text. */
+.account-page__body { display: grid; justify-items: center; padding: clamp(36px, 9vh, 96px) 0 24px; }
+.account-panel { width: min(100%, 440px); padding: clamp(22px, 4vw, 32px); border: 1px solid var(--line); border-radius: 16px; background: var(--panel); }
+.account-panel__eyebrow { margin: 0 0 8px; color: var(--muted); font-size: 13px; letter-spacing: .06em; text-transform: uppercase; overflow-wrap: anywhere; }
+.account-panel h1 { margin: 0 0 8px; font: 600 clamp(26px, 3vw, 32px)/1.15 var(--display); letter-spacing: -.03em; overflow-wrap: anywhere; }
+.account-panel__lead { margin: 0 0 24px; color: var(--muted); font-size: 14px; }
+.account-form { display: grid; gap: 16px; }
+.account-field { display: grid; gap: 6px; }
+.account-field > span { color: var(--muted); font-size: 13px; }
+.account-field input { width: 100%; min-height: 46px; padding: 0 14px; border: 1px solid var(--line); border-radius: 10px; color: var(--text); background: var(--bg); font: inherit; font-size: 15px; }
+.account-field input:focus-visible { border-color: var(--line-bright); outline-offset: 2px; }
+.account-field__hint { color: var(--muted); font-size: 13px; }
+.account-field__error { margin: 0; color: #ffb4b4; font-size: 13px; }
+.account-submit { display: inline-flex; align-items: center; justify-content: center; min-height: 48px; padding: 0 22px; border: 0; border-radius: 10px; color: #16161b !important; background: var(--accent); font: 650 15px/1 var(--display); transition: opacity 200ms ease; }
+.account-submit:disabled { opacity: .6; cursor: progress; }
+.account-secondary { min-height: 48px; padding: 0 22px; border: 1px solid var(--line); border-radius: 10px; color: var(--text); background: transparent; font: 500 15px/1 var(--display); transition: border-color 200ms ease; }
+.account-secondary:hover { border-color: var(--line-bright); }
+.account-note { margin: 20px 0 0; color: var(--muted); font-size: 13px; }
+.account-note a { color: var(--text); border-bottom: 1px solid var(--line); }
+.account-facts { margin: 0 0 24px; }
+.account-facts div { display: flex; justify-content: space-between; gap: 16px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.account-facts dt { color: var(--muted); font-size: 13px; }
+.account-facts dd { margin: 0; font: 500 14px/1.4 var(--display); text-align: right; overflow-wrap: anywhere; }
+.account-actions { display: flex; flex-wrap: wrap; gap: 12px; }
+
+@media (prefers-reduced-motion: reduce) {
+    .account-submit, .account-secondary { transition: none; }
+}

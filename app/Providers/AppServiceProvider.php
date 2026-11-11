@@ -3,6 +3,7 @@
 namespace App\Providers;
 
 use App\Services\Ai\AiSettings;
+use App\Services\Catalog\CustomerPricing;
 use App\Services\Playwright\BrowserRunner;
 use App\Services\Playwright\PlaywrightRunner;
 use App\Services\Products\BrowserProductImageTransferStore;
@@ -30,6 +31,8 @@ class AppServiceProvider extends ServiceProvider
         // one queue job and discarded before the next job.
         $this->app->scoped(ProductImageResolver::class);
         $this->app->scoped(BrowserProductImageTransferStore::class);
+        // The visitor's group and its price list are read once per request.
+        $this->app->scoped(CustomerPricing::class);
     }
 
     /**

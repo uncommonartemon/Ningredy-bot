@@ -12,6 +12,9 @@ use App\Models\Brand;
 use App\Models\BrandCatalog;
 use App\Models\Category;
 use App\Models\CategoryTranslation;
+use App\Models\Customer;
+use App\Models\CustomerGroup;
+use App\Models\CustomerGroupPrice;
 use App\Models\ImageRenditionRule;
 use App\Models\Product;
 use App\Models\ProductDraft;
@@ -149,6 +152,22 @@ class DatabaseOperatorService
                 'api_template' => 'nullable|string|max:1024', 'response_map' => 'nullable|array',
                 'instructions' => 'nullable|string|max:2000', 'enabled' => $bool,
             ]],
+            // Groups of customers and their prices (operator, 2026-11-11). A customer's password
+            // is neither read nor written here: it is set in the admin panel only.
+            'customer_groups' => ['model' => CustomerGroup::class, 'writable' => [
+                'name' => 'required|string|max:255', 'is_active' => $bool, 'registration_open' => $bool,
+                'note' => 'nullable|string|max:2000', 'sort_order' => $order,
+            ]],
+            'customer_group_prices' => ['model' => CustomerGroupPrice::class, 'writable' => [
+                'customer_group_id' => $fk('customer_groups', false), 'product_variant_id' => $fk('product_variants', false),
+                'price' => 'required|numeric|min:0|max:9999999999.99',
+            ]],
+            'customers' => ['model' => Customer::class, 'create' => false,
+                'read' => ['id', 'customer_group_id', 'name', 'email', 'phone', 'company', 'is_active', 'note', 'last_login_at', 'created_at', 'updated_at'],
+                'writable' => [
+                    'customer_group_id' => $fk('customer_groups'), 'name' => 'required|string|max:120', 'phone' => 'nullable|string|max:40',
+                    'company' => 'nullable|string|max:160', 'is_active' => $bool, 'note' => 'nullable|string|max:2000',
+                ]],
             // A rule is a regular expression the agent learns and checks on examples:
             // the chat switches it on or off and annotates it, never rewrites it.
             'image_rendition_rules' => ['model' => ImageRenditionRule::class, 'create' => false, 'delete' => false,
@@ -539,6 +558,7 @@ class DatabaseOperatorService
                 'attribute_definitions' => ['label'], 'attribute_groups', 'categories', 'brands' => ['name'],
                 'product_sources' => ['product_id', 'title', 'url'], 'product_source_domains' => ['domain'], 'product_drafts' => ['title'],
                 'reference_sites' => ['domain', 'applies_to'], 'brand_catalogs' => ['brand'],
+                'customer_groups' => ['name'], 'customer_group_prices' => ['customer_group_id', 'product_variant_id', 'price'],
                 default => [],
             };
             foreach ($required as $column) {

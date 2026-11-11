@@ -10,6 +10,8 @@ use App\Filament\Support\ProductOptions;
 use App\Filament\Support\ProductVariantFormState;
 use App\Models\Brand;
 use App\Models\Category;
+use App\Models\CustomerGroup;
+use App\Models\CustomerGroupPrice;
 use App\Services\Products\ManualProductAttributes;
 use App\Services\Products\ProductCondition;
 use App\Services\Products\ProductSourceTypes;
@@ -22,6 +24,7 @@ use Filament\Forms\Components\Select;
 use Filament\Forms\Components\Textarea;
 use Filament\Forms\Components\TextInput;
 use Filament\Forms\Components\Toggle;
+use Filament\Schemas\Components\Fieldset;
 use Filament\Schemas\Components\Grid;
 use Filament\Schemas\Components\Group;
 use Filament\Schemas\Components\Section;
@@ -124,6 +127,7 @@ class ProductForm
                     Toggle::make('is_default')->label(__('Основной вариант'))->fixIndistinctState()
                         ->default(fn (Get $get): bool => count($get('../../variants') ?? []) <= 1),
                 ])->columns(['default' => 1, 'sm' => 2, 'xl' => 3])->columnSpanFull(),
+                ...self::groupPrices(),
                 Section::make(__('Дополнительные данные конфигурации'))->schema([
                     TextInput::make('name')->label(__('Название конфигурации'))->maxLength(255)
                         ->placeholder(__('Например: 16 GB / 512 GB'))->columnSpanFull(),
@@ -142,6 +146,11 @@ class ProductForm
                 ])->compact()->columns(['default' => 1, 'md' => 3])->collapsed()->columnSpanFull(),
                 Section::make(__('Переводы конфигурации'))->compact()->schema([ProductTranslations::make()])->collapsed(),
             ])->defaultItems(1)->columns(1)
+            // The prices for groups are rows of their own; the form shows them as fields of the configuration.
+            ->mutateRelationshipDataBeforeFillUsing(fn (array $data): array => [...$data, 'group_prices' => isset($data['id'])
+                ? CustomerGroupPrice::query()->where('product_variant_id', $data['id'])->pluck('price', 'customer_group_id')
+                    ->map(fn (mixed $price): string => rtrim(rtrim((string) $price, '0'), '.'))->all()
+                : []])
             ->minItems(fn (string $operation): int => $operation === 'create' ? 1 : 0)
             ->deletable(fn (Repeater $component): bool => count($component->getRawState() ?? []) > 1)
             ->afterStateHydrated(fn (Repeater $component) => $component->rawState(ProductVariantFormState::ensureDefault($component->getRawState() ?? [])))
@@ -158,6 +167,23 @@ class ProductForm
                 }))
             ->itemLabel(fn (array $state): string => ($state['name'] ?? '') ?: (($state['sku'] ?? '') ?: __('Конфигурация товара')))
             ->addActionLabel(__('Добавить конфигурацию'))->collapsible()->columnSpanFull();
+    }
+
+    /**
+     * A price field for every group of customers (operator, 2026-11-11): as many prices as
+     * there are groups; one left empty means the group sees the ordinary price.
+     *
+     * @return list<Fieldset>
+     */
+    private static function groupPrices(): array
+    {
+        $fields = CustomerGroup::query()->orderBy('sort_order')->orderBy('id')->get()
+            ->map(fn (CustomerGroup $group): TextInput => TextInput::make("group_prices.{$group->id}")
+                ->label($group->name.($group->is_active ? '' : ' · '.__('выключена')))
+                ->numeric()->minValue(0)->placeholder(__('Как обычная цена')))->all();
+
+        return $fields === [] ? [] : [Fieldset::make(__('Цены для групп клиентов'))->schema($fields)
+            ->columns(['default' => 1, 'sm' => 2, 'xl' => 3])->columnSpanFull()];
     }
 
     private static function sourceData(array $data): array

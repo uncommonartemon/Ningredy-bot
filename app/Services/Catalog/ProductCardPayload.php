@@ -22,6 +22,7 @@ class ProductCardPayload
         $attributes = $product->relationLoaded('attributes')
             ? $product->attributes->whereNull('product_variant_id') : collect();
         $attributes = $attributes->concat($variant?->attributes ?? [])->keyBy('attribute_definition_id');
+        $pricing = app(CustomerPricing::class)->for($variant);
 
         return [
             'id' => $product->id,
@@ -39,8 +40,11 @@ class ProductCardPayload
                 'slug' => $product->category->slug,
                 'translations' => $product->category->translations->pluck('name', 'locale')->all(),
             ] : null,
-            'price' => $variant?->price !== null ? (float) $variant->price : null,
-            'compare_at_price' => $variant?->compare_at_price !== null ? (float) $variant->compare_at_price : null,
+            'price' => $pricing['price'],
+            // A customer of a group sees the group's price, with the ordinary one crossed out when it is higher.
+            'compare_at_price' => $pricing['regular_price'] !== null && $pricing['regular_price'] > $pricing['price']
+                ? $pricing['regular_price'] : ($variant?->compare_at_price !== null ? (float) $variant->compare_at_price : null),
+            'own_price' => $pricing['regular_price'] !== null,
             'currency' => $variant?->currency ?: 'CZK',
             'stock_status' => $variant?->stock_status ?: 'unknown',
             'image' => $this->imageUrl($product, $variant),
