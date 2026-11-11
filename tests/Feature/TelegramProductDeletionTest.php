@@ -11,6 +11,7 @@ use App\Models\Category;
 use App\Models\Product;
 use App\Models\TelegramUpdate;
 use App\Services\Ai\AiErrorPresenter;
+use App\Services\Telegram\TelegramCatalogDeletion;
 use App\Services\Telegram\TelegramClient;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request as HttpRequest;
@@ -68,7 +69,8 @@ class TelegramProductDeletionTest extends TestCase
 
         Http::assertSent(fn (HttpRequest $request): bool => str_ends_with($request->url(), '/sendMessage')
             && data_get($request->data(), 'reply_markup.inline_keyboard.0.0.callback_data') === "product:delete:confirm:{$prepared['operation_id']}"
-            && data_get($request->data(), 'reply_markup.inline_keyboard.0.1.callback_data') === "product:delete:cancel:{$prepared['operation_id']}");
+            // The fixture's product is off sale already: there is nothing to take off, so two buttons, one under the other.
+            && data_get($request->data(), 'reply_markup.inline_keyboard.1.0.callback_data') === "product:delete:cancel:{$prepared['operation_id']}");
         $this->assertDatabaseHas('products', ['id' => $product->id]);
     }
 
@@ -167,6 +169,55 @@ class TelegramProductDeletionTest extends TestCase
         foreach ([71008, 71009, 71010] as $id) {
             $this->assertDatabaseHas('telegram_updates', ['update_id' => $id, 'status' => 'rejected']);
         }
+    }
+
+    public function test_the_confirmation_offers_to_take_a_product_off_sale_instead_and_then_nothing_is_deleted(): void
+    {
+        [$product, $update, $path] = $this->productAndUpdate(withImage: true);
+        $product->putBackOnSale();
+        $prepared = json_decode((new PrepareProductDeletion($update))->handle(new Request(['product_id' => $product->id])), true);
+        [$question, $buttons] = app(TelegramCatalogDeletion::class)->confirmation(AiOperation::findOrFail($prepared['operation_id']));
+        $this->assertStringContainsString('продажи останутся в учёте', $question);
+        $this->assertSame(["product:delete:confirm:{$prepared['operation_id']}", "product:delete:sleep:{$prepared['operation_id']}",
+            "product:delete:cancel:{$prepared['operation_id']}"], collect($buttons['inline_keyboard'])->flatten(1)->pluck('callback_data')->all());
+
+        $this->postDeletionCallback(71011, "product:delete:sleep:{$prepared['operation_id']}");
+
+        $this->assertFalse($product->fresh()->isOnSale());
+        $this->assertDatabaseHas('ai_operations', ['id' => $prepared['operation_id'], 'status' => 'cancelled']);
+        Storage::disk('public')->assertExists($path);
+        Http::assertSent(fn (HttpRequest $request) => str_ends_with($request->url(), '/sendMessage')
+            && str_contains($request['text'], 'снят с продажи вместо удаления'));
+        // The «delete» button of that confirmation is dead now.
+        $this->postDeletionCallback(71012, "product:delete:confirm:{$prepared['operation_id']}");
+        $this->assertDatabaseHas('products', ['id' => $product->id]);
+    }
+
+    public function test_the_card_buttons_put_a_product_to_sleep_and_wake_it(): void
+    {
+        [$product] = $this->productAndUpdate();
+        $product->putBackOnSale();
+
+        $this->postDeletionCallback(71013, "product:sleep:{$product->id}");
+        $this->assertFalse($product->fresh()->isOnSale());
+        Http::assertSent(fn (HttpRequest $request) => str_ends_with($request->url(), '/sendMessage')
+            && str_contains($request['text'], 'снят с продажи')
+            && data_get($request->data(), 'reply_markup.inline_keyboard.1.0.callback_data') === "product:wake:{$product->id}");
+
+        $this->postDeletionCallback(71014, "product:wake:{$product->id}");
+        $this->assertTrue($product->fresh()->isOnSale());
+        Http::assertSent(fn (HttpRequest $request) => str_ends_with($request->url(), '/sendMessage')
+            && str_contains($request['text'], 'снова в продаже') && str_contains($request['text'], 'В наличии 0 шт.')
+            && data_get($request->data(), 'reply_markup.inline_keyboard.1.0.callback_data') === "product:sleep:{$product->id}");
+        // Each press is in the audit, as the assistant's own switch is.
+        $this->assertSame(['deactivate_product', 'activate_product'], AiOperation::query()->where('target_id', $product->id)
+            ->whereIn('action', ['deactivate_product', 'activate_product'])->orderBy('id')->pluck('action')->all());
+        foreach ([71013, 71014] as $id) {
+            $this->assertDatabaseHas('telegram_updates', ['update_id' => $id, 'status' => 'command']);
+        }
+        // A product that is gone is answered plainly.
+        $this->postDeletionCallback(71015, 'product:wake:999999');
+        Http::assertSent(fn (HttpRequest $request) => str_ends_with($request->url(), '/sendMessage') && str_contains($request['text'], 'Товар не найден'));
     }
 
     /** @return array{Product, TelegramUpdate, string} */

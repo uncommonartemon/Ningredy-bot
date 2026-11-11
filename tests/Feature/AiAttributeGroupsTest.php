@@ -49,7 +49,8 @@ class AiAttributeGroupsTest extends TestCase
         $group = AttributeGroup::query()->sole();
         $definition = AttributeDefinition::where('key', 'gpu_bus_width')->sole();
         $this->assertSame('Graphics', $group->name);
-        $this->assertSame(['cs' => 'Grafika'], $group->translations);
+        // The proposal's Czech name, and the English name copied as the group's own (CatalogNames).
+        $this->assertSame(['cs' => 'Grafika', 'en' => 'Graphics'], $group->translations);
         $this->assertTrue($group->highlight_in_filters);
         $this->assertSame(0, $group->sort_order);
         $this->assertSame($group->id, $definition->attribute_group_id);

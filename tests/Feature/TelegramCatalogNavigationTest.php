@@ -55,7 +55,9 @@ class TelegramCatalogNavigationTest extends TestCase
 
         $this->message('/catalog', 910003);
         Http::assertSent(fn (Request $request): bool => str_ends_with($request->url(), '/sendMessage')
-            && data_get($request->data(), 'reply_markup.inline_keyboard.2.0.url') === 'https://catalog.example/admin/products/'.$product->id.'/edit');
+            // Edit, off sale, delete - then the way into the admin form.
+            && data_get($request->data(), 'reply_markup.inline_keyboard.1.0.callback_data') === 'product:sleep:'.$product->id
+            && data_get($request->data(), 'reply_markup.inline_keyboard.3.0.url') === 'https://catalog.example/admin/products/'.$product->id.'/edit');
         Queue::assertNothingPushed();
         $this->assertDatabaseCount('ai_runs', 0);
     }

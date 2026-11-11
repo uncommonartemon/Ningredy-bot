@@ -1,6 +1,7 @@
 <script setup>
 import { Head, Link, router } from '@inertiajs/vue3';
 import { computed, ref, watch } from 'vue';
+import AccountLink from '../../Components/AccountLink.vue';
 import LocaleSwitcher from '../../Components/LocaleSwitcher.vue';
 import ProductGallery from '../../Components/ProductGallery.vue';
 import { useI18n } from '../../i18n';
@@ -129,7 +130,7 @@ const jumpTo = (id) => {
             <ProductGallery :key="`${product.id}-${variant?.id || 'shared'}`" class="product-show__gallery" :media="gallery" :title="title" />
             <div id="product-information" class="product-show__information" tabindex="-1">
                 <section class="product-show__offer" :aria-label="copy.configuration">
-                    <div class="product-show__price"><span>{{ t('price') }}</span><div><strong>{{ formatPrice(variant?.price ?? null, variant?.currency) }}</strong><del v-if="hasDiscount">{{ formatPrice(variant.compare_at_price, variant.currency) }}</del></div></div>
+                    <div class="product-show__price"><span>{{ t('price') }}</span><div><strong>{{ formatPrice(variant?.price ?? null, variant?.currency) }}</strong><del v-if="hasDiscount">{{ formatPrice(variant.compare_at_price, variant.currency) }}</del><span v-if="variant?.own_price" class="own-price">{{ t('account.yourPrice') }}</span></div></div>
                     <fieldset v-if="product.variants.length > 1" class="product-show__variant-picker">
                         <legend>{{ copy.configuration }}</legend>
                         <label v-for="(item, index) in product.variants" :key="item.id" :class="{ active: selectedVariant === index }">
@@ -166,6 +167,6 @@ const jumpTo = (id) => {
                 </section>
             </div>
         </div>
-        <footer class="catalog-footer"><Link href="/catalog">{{ copy.back }} <span aria-hidden="true">↗</span></Link></footer>
+        <footer class="catalog-footer"><Link href="/catalog">{{ copy.back }} <span aria-hidden="true">↗</span></Link><AccountLink /></footer>
     </main>
 </template>

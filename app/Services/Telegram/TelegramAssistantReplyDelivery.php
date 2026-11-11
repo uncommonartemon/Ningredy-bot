@@ -157,10 +157,8 @@ class TelegramAssistantReplyDelivery
                 ->where('telegram_user_id', $update->telegram_user_id)->where('action', 'delete_product')
                 ->where('status', 'awaiting_confirmation')->first();
             if ($deletion && (int) data_get($deletion->payload, 'expires_at', 0) > now()->getTimestamp()) {
-                $title = (string) data_get($deletion->payload, 'title', 'Товар');
-                $telegram->sendMessage($chat, "Подтвердите безвозвратное удаление:\n\n#{$deletion->target_id} · {$title}\n\nБудут удалены товар, варианты, характеристики и локальные фотографии.".$footnote,
-                    ['inline_keyboard' => [[['text' => 'Удалить навсегда', 'callback_data' => "product:delete:confirm:{$deletion->id}"],
-                        ['text' => 'Отмена', 'callback_data' => "product:delete:cancel:{$deletion->id}"]]]]);
+                [$question, $buttons] = app(TelegramCatalogDeletion::class)->confirmation($deletion);
+                $telegram->sendMessage($chat, $question.$footnote, $buttons);
 
                 return 'sent';
             }
@@ -184,7 +182,10 @@ class TelegramAssistantReplyDelivery
         }
         $this->sendText($telegram, $chat, (string) ($data['message'] ?? '').$footnote);
         if (($data['response_type'] ?? '') === 'catalog_results' && ! empty($data['product_ids'])) {
-            $cards->sendMany($telegram, $chat, $data['product_ids'], telegramUserId: $update->telegram_user_id);
+            // One product named is one the operator is about to act on (a repeat of a sleeping
+            // card, a price to change): its buttons come with it. A list stays a list.
+            $cards->sendMany($telegram, $chat, $data['product_ids'], withManagementLinks: count($data['product_ids']) === 1,
+                telegramUserId: $update->telegram_user_id);
         }
 
         return 'sent';

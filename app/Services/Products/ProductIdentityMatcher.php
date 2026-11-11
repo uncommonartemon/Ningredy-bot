@@ -491,7 +491,9 @@ class ProductIdentityMatcher
                 continue;
             }
 
-            $found = $this->nearbyIdentifier($identifier, $evidenceIdentifiers, $exactIdentifiers);
+            // A part's code with or without its revision tail is one part (PartNumberSuffix).
+            $found = $this->nearbyIdentifier($identifier, $evidenceIdentifiers, $exactIdentifiers,
+                tailIsSamePart: ProductPhotoIdentity::fromLabel($draft));
 
             if ($found !== null) {
                 return ['requested' => $identifier, 'found' => $found];
@@ -509,10 +511,13 @@ class ProductIdentityMatcher
      * @param  array<int, string>  $evidenceIdentifiers
      * @param  Collection<int, string>  $exactIdentifiers
      */
-    private function nearbyIdentifier(string $identifier, array $evidenceIdentifiers, Collection $exactIdentifiers, int $minimumDistance = 1): ?string
+    private function nearbyIdentifier(string $identifier, array $evidenceIdentifiers, Collection $exactIdentifiers, int $minimumDistance = 1, bool $tailIsSamePart = false): ?string
     {
         $slips = ReadingSlip::variants($identifier);
         foreach ($evidenceIdentifiers as $candidate) {
+            if ($tailIsSamePart && PartNumberSuffix::sameBase($candidate, $identifier)) {
+                continue;
+            }
             // The requested code read with a slip is that code, not its sibling.
             if ($candidate === $identifier || in_array($candidate, $slips, true) || abs(strlen($candidate) - strlen($identifier)) > 3) {
                 continue;

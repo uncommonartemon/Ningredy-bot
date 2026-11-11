@@ -218,7 +218,13 @@ button, input, select, label { -webkit-tap-highlight-color: transparent; }
 .pagination a:hover { border-color: var(--accent); }
 .pagination > .active { color: #192b24; border-color: var(--accent); background: var(--accent); font-weight: 700; }
 .pagination > .disabled { color: #848493; border-color: transparent; background: transparent; }
-.catalog-footer { display: flex; justify-content: space-between; gap: 16px; margin-top: 48px; padding-top: 22px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+.catalog-footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 16px; margin-top: 48px; padding-top: 22px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+/* The door to the accounts: a quiet link, not a call to action. */
+.account-link { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); transition: color 200ms ease; }
+.account-link:hover { color: var(--text); }
+.account-link__group { padding: 2px 8px; border: 1px solid var(--line); border-radius: 999px; color: var(--text); }
+/* A price that is the signed-in customer's own, not the shop's ordinary one. */
+.own-price { align-self: center; padding: 2px 8px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font: 500 12px/1.5 var(--display); white-space: nowrap; }
 @media (max-width: 1200px) {
     .catalog-layout { grid-template-columns: 220px minmax(0, 1fr); gap: 20px; }
     .products-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }

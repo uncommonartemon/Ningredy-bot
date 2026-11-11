@@ -107,7 +107,8 @@ class ProductCardPresenter
             AppSetting::TELEGRAM_PROXY_URL,
             (string) config('services.telegram.proxy_url'),
         ), '/');
-        $link = $publicUrl !== '' ? "{$publicUrl}/products/{$product->slug}" : null;
+        // A product taken off sale has no public page: the link would open «не найдено».
+        $link = $publicUrl !== '' && $product->isOnSale() ? "{$publicUrl}/products/{$product->slug}" : null;
 
         $header = implode("\n", array_filter([
             $prefixLine,
@@ -115,6 +116,7 @@ class ProductCardPresenter
             $identity !== '' && $identity !== $product->title ? $identity : null,
             $variant ? '📦 '.(ProductCondition::options()[$variant->condition] ?? $variant->condition) : null,
             implode(' · ', array_filter([$price, $stock])) ?: null,
+            $product->isOnSale() ? null : '💤 Снят с продажи: на сайте не показывается',
         ]));
 
         $attributes = collect($product->attributes)->whereNull('product_variant_id')

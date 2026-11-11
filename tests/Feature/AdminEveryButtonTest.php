@@ -176,6 +176,9 @@ class AdminEveryButtonTest extends TestCase
             $outcome = match (true) {
                 str_contains($message, 'is visible'), str_contains($message, 'not visible'), str_contains($message, 'hidden') => 'hidden for this record',
                 str_contains($message, 'is enabled'), str_contains($message, 'disabled') => 'disabled for this record',
+                // An earlier button moved the record to another tab of its list (a unit sold leaves «В наличии»):
+                // on the page there is no row left to press, which is not a button that threw.
+                str_contains($message, 'no longer exists') => 'the record left this tab of the list',
                 default => 'ERROR '.$message,
             };
         }

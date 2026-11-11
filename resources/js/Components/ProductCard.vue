@@ -25,7 +25,7 @@ const discount = computed(() => props.product.price !== null && Number(props.pro
             <div class="product-card__body">
                 <div class="product-card__intro"><div class="product-card__meta"><p>{{ product.brand || categoryName(product.category) || t('tech') }}</p><span :class="`stock stock--${product.stock_status}`">{{ t(`stock.${product.stock_status}`, product.stock_status) }}</span></div><h2>{{ title }}</h2></div>
                 <ul v-if="highlights.length" class="product-card__specs"><li v-for="attribute in highlights" :key="attribute.key || attribute.label"><span>{{ attributeLabel(attribute) }}</span><strong>{{ attributeValue(attribute) }}<template v-if="attributeUnit(attribute)"> {{ attributeUnit(attribute) }}</template></strong></li></ul>
-                <div class="product-card__bottom"><div class="product-card__price"><strong>{{ formatPrice(product.price, product.currency) }}</strong><del v-if="discount">{{ formatPrice(product.compare_at_price, product.currency) }}</del></div><span class="product-card__cta">{{ t('viewProduct') }}<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 10h13m-5-5 5 5-5 5" /></svg></span></div>
+                <div class="product-card__bottom"><div class="product-card__price"><strong>{{ formatPrice(product.price, product.currency) }}</strong><del v-if="discount">{{ formatPrice(product.compare_at_price, product.currency) }}</del><span v-if="product.own_price" class="own-price">{{ t('account.yourPrice') }}</span></div><span class="product-card__cta">{{ t('viewProduct') }}<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 10h13m-5-5 5 5-5 5" /></svg></span></div>
             </div>
         </article>
     </Link>

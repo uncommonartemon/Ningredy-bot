@@ -19,6 +19,7 @@ use App\Models\ProductSourceAttempt;
 use App\Models\ProductSourceDomain;
 use App\Models\TelegramUpdate;
 use App\Models\User;
+use App\Services\Catalog\StockUnits;
 use App\Services\Maintenance\CatalogCleanupService;
 use Database\Seeders\StarterCatalogSeeder;
 use Illuminate\Auth\Access\AuthorizationException;
@@ -118,6 +119,25 @@ class CatalogCleanupServiceTest extends TestCase
         $this->assertDatabaseHas('ai_operations', ['id' => $result['operation_id'], 'action' => 'admin_cleanup', 'status' => 'completed', 'telegram_update_id' => null]);
         $this->assertSame($result, $this->service()->execute($plan, $actor));
         $this->assertDatabaseCount('ai_operations', 1);
+    }
+
+    public function test_clearing_the_catalog_clears_its_books_and_the_preview_counts_them(): void
+    {
+        $actor = $this->actor();
+        $data = $this->fixture();
+        $data['variant']->update(['quantity' => 2, 'price' => 1000]);
+        $sold = $data['variant']->stockUnits()->orderBy('id')->firstOrFail();
+        $sold->update(['purchase_price' => 700]);
+        app(StockUnits::class)->sell($sold, '950', now());
+
+        $plan = $this->service()->prepare('catalog', [], $actor);
+        $this->assertSame(2, $plan['counts']['stock_units']);
+        $this->assertSame('Единицы склада и их история продаж', $plan['labels']['stock_units']);
+        $result = $this->service()->execute($plan, $actor);
+        // Deleting a product one by one keeps what it sold; clearing the whole catalog does not.
+        $this->assertSame(2, $result['deleted']['stock_units']);
+        $this->assertDatabaseCount('stock_units', 0);
+        $this->assertDatabaseCount('products', 0);
     }
 
     public function test_drafts_preset_keeps_catalog_and_audit_and_ids_are_not_reused(): void

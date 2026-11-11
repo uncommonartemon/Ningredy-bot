@@ -21,7 +21,6 @@ use Filament\Support\Colors\Color;
 use Filament\Support\Enums\Width;
 use Filament\Tables\Table;
 use Filament\View\PanelsRenderHook;
-use Filament\Widgets\AccountWidget;
 use Illuminate\Cookie\Middleware\AddQueuedCookiesToResponse;
 use Illuminate\Cookie\Middleware\EncryptCookies;
 use Illuminate\Foundation\Http\Middleware\PreventRequestForgery;
@@ -58,6 +57,8 @@ class AdminPanelProvider extends PanelProvider
             ->unsavedChangesAlerts()
             ->navigationGroups([
                 NavigationGroup::make()->label(fn (): string => __('Каталог')),
+                NavigationGroup::make()->label(fn (): string => __('Склад и учёт')),
+                NavigationGroup::make()->label(fn (): string => __('Клиенты')),
                 NavigationGroup::make()->label(fn (): string => __('Поиск и AI')),
                 NavigationGroup::make()->label(fn (): string => __('Настройки')),
                 NavigationGroup::make()->label(fn (): string => __('Система')),
@@ -83,9 +84,8 @@ class AdminPanelProvider extends PanelProvider
                 Dashboard::class,
             ])
             ->discoverWidgets(in: app_path('Filament/Widgets'), for: 'App\Filament\Widgets')
-            ->widgets([
-                AccountWidget::class,
-            ])
+            ->widgets([])
+            ->globalSearchKeyBindings(['command+k', 'ctrl+k'])
             ->middleware([
                 EncryptCookies::class,
                 AddQueuedCookiesToResponse::class,

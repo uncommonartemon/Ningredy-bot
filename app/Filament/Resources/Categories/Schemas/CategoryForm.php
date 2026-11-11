@@ -4,6 +4,8 @@ namespace App\Filament\Resources\Categories\Schemas;
 
 use App\Filament\Schemas\RelatedCatalogForms;
 use App\Models\Category;
+use App\Services\Catalog\CatalogNames;
+use App\Services\Products\CatalogLocales;
 use App\Services\Products\ProductPhotoIdentity;
 use Filament\Forms\Components\Repeater;
 use Filament\Forms\Components\Repeater\TableColumn;
@@ -174,11 +176,10 @@ class CategoryForm
                                     ])
                                     ->compact()
                                     ->schema([
-                                        Select::make('locale')->label(__('Язык'))->options([
-                                            'en' => 'English',
-                                            'cs' => 'Čeština',
-                                            'uk' => __('Українська'),
-                                        ])->disableOptionsWhenSelectedInSiblingRepeaterItems()->required(),
+                                        // The languages the shop needs; a missing one is filled by the bot.
+                                        Select::make('locale')->label(__('Язык'))
+                                            ->options(fn (): array => array_intersect_key(CatalogLocales::LABELS, array_flip(CatalogNames::locales())))
+                                            ->disableOptionsWhenSelectedInSiblingRepeaterItems()->required(),
                                         TextInput::make('name')->label(__('Название'))->required()->maxLength(255),
                                     ])
                                     ->defaultItems(0)

@@ -3,6 +3,7 @@
 namespace App\Filament\Resources;
 
 use Filament\Resources\Resource;
+use Illuminate\Support\Str;
 use UnitEnum;
 
 abstract class LocalizedResource extends Resource
@@ -17,6 +18,17 @@ abstract class LocalizedResource extends Resource
         $group = parent::getNavigationGroup();
 
         return is_string($group) ? __($group) : $group;
+    }
+
+    /** «Единицы склада», not «Единицы Склада»: the first letter only, as the language writes a title. */
+    public static function getTitleCaseModelLabel(): string
+    {
+        return Str::ucfirst(static::getModelLabel());
+    }
+
+    public static function getTitleCasePluralModelLabel(): string
+    {
+        return Str::ucfirst(static::getPluralModelLabel());
     }
 
     public static function getModelLabel(): string

@@ -4,6 +4,7 @@ namespace App\Models;
 
 use App\Jobs\DeleteUnreferencedMedia;
 use App\Models\Concerns\InvalidatesStaleTextTranslations;
+use App\Services\Catalog\StockUnits;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -38,6 +39,15 @@ class Product extends Model
     {
         static::deleted(function (Product $product): void {
             DeleteUnreferencedMedia::dispatch('public', "products/{$product->id}", (int) $product->id);
+        });
+        // The books are a history: what was sold stays when its product is deleted or renamed.
+        static::deleting(function (Product $product): void {
+            app(StockUnits::class)->variantsLeaving($product->variants()->pluck('id')->all());
+        });
+        static::updated(function (Product $product): void {
+            if ($product->wasChanged('title')) {
+                app(StockUnits::class)->productRenamed($product);
+            }
         });
 
         static::creating(function (Product $product): void {
@@ -121,5 +131,27 @@ class Product extends Model
         return $query
             ->where($query->getModel()->qualifyColumn('status'), 'published')
             ->where($query->getModel()->qualifyColumn('is_active'), true);
+    }
+
+    /** On the storefront: published and not taken off sale. */
+    public function isOnSale(): bool
+    {
+        return $this->status === 'published' && $this->is_active;
+    }
+
+    /**
+     * Off the storefront with everything kept (operator, 2026-11-11: «закинуть в сон или
+     * удалить, две разные кнопки… повторы будут однозначно»). The same product comes in
+     * again, and its card, photos, characteristics and translations were paid for; deleting
+     * is for a card that was a mistake.
+     */
+    public function takeOffSale(): void
+    {
+        $this->update(['is_active' => false]);
+    }
+
+    public function putBackOnSale(): void
+    {
+        $this->update(['is_active' => true, 'status' => 'published', 'published_at' => $this->published_at ?? now()]);
     }
 }

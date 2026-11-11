@@ -191,6 +191,9 @@ class SearchCatalog implements Tool
                     'category' => $product->category?->name,
                     'status' => $product->status,
                     'active' => $product->is_active,
+                    // false = taken off sale: the card sleeps until the same product comes in again.
+                    'on_sale' => $product->isOnSale(),
+                    'in_stock' => (int) $product->variants->sum('quantity'),
                     'variant_id' => $variant?->id,
                     'condition' => $variant?->condition,
                     'price' => $variant?->price,

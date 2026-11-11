@@ -12,6 +12,9 @@ use App\Models\Brand;
 use App\Models\BrandCatalog;
 use App\Models\Category;
 use App\Models\CategoryTranslation;
+use App\Models\Customer;
+use App\Models\CustomerGroup;
+use App\Models\CustomerGroupPrice;
 use App\Models\ImageRenditionRule;
 use App\Models\Product;
 use App\Models\ProductDraft;
@@ -27,6 +30,7 @@ use App\Models\ProductSourcePageRule;
 use App\Models\ProductSourceStat;
 use App\Models\ProductVariant;
 use App\Models\ReferenceSite;
+use App\Models\StockUnit;
 use App\Models\TelegramUpdate;
 use App\Services\Products\CatalogEditRevision;
 use App\Services\Products\CatalogLocales;
@@ -148,6 +152,30 @@ class DatabaseOperatorService
                 'search_hint' => 'nullable|string|max:500', 'lookup_template' => 'nullable|string|max:1024',
                 'api_template' => 'nullable|string|max:1024', 'response_map' => 'nullable|array',
                 'instructions' => 'nullable|string|max:2000', 'enabled' => $bool,
+            ]],
+            // Groups of customers and their prices (operator, 2026-11-11). A customer's password
+            // is neither read nor written here: it is set in the admin panel only.
+            'customer_groups' => ['model' => CustomerGroup::class, 'writable' => [
+                'name' => 'required|string|max:255', 'is_active' => $bool, 'registration_open' => $bool,
+                'note' => 'nullable|string|max:2000', 'sort_order' => $order,
+            ]],
+            'customer_group_prices' => ['model' => CustomerGroupPrice::class, 'writable' => [
+                'customer_group_id' => $fk('customer_groups', false), 'product_variant_id' => $fk('product_variants', false),
+                'price' => 'required|numeric|min:0|max:9999999999.99',
+            ]],
+            'customers' => ['model' => Customer::class, 'create' => false,
+                'read' => ['id', 'customer_group_id', 'name', 'email', 'phone', 'company', 'is_active', 'note', 'last_login_at', 'created_at', 'updated_at'],
+                'writable' => [
+                    'customer_group_id' => $fk('customer_groups'), 'name' => 'required|string|max:120', 'phone' => 'nullable|string|max:40',
+                    'company' => 'nullable|string|max:160', 'is_active' => $bool, 'note' => 'nullable|string|max:2000',
+                ]],
+            // The shop's own books (operator, 2026-11-11): one row per physical item. Rows appear
+            // and leave with the configuration's quantity, so they are changed here, not created.
+            'stock_units' => ['model' => StockUnit::class, 'create' => false, 'writable' => [
+                'serial_number' => $text, 'purchase_price' => 'nullable|numeric|min:0|max:9999999999.99',
+                'purchased_at' => 'nullable|date', 'supplier' => $text, 'note' => 'nullable|string|max:2000',
+                'status' => [Rule::in(StockUnit::STATUSES)], 'sold_at' => 'nullable|date',
+                'sold_price' => 'nullable|numeric|min:0|max:9999999999.99',
             ]],
             // A rule is a regular expression the agent learns and checks on examples:
             // the chat switches it on or off and annotates it, never rewrites it.
@@ -539,6 +567,7 @@ class DatabaseOperatorService
                 'attribute_definitions' => ['label'], 'attribute_groups', 'categories', 'brands' => ['name'],
                 'product_sources' => ['product_id', 'title', 'url'], 'product_source_domains' => ['domain'], 'product_drafts' => ['title'],
                 'reference_sites' => ['domain', 'applies_to'], 'brand_catalogs' => ['brand'],
+                'customer_groups' => ['name'], 'customer_group_prices' => ['customer_group_id', 'product_variant_id', 'price'],
                 default => [],
             };
             foreach ($required as $column) {
@@ -609,6 +638,9 @@ class DatabaseOperatorService
         }
         if ($row instanceof Product && isset($values['status']) && $values['status'] === 'published') {
             $this->assert($row->exists && $row->status === 'published', 'status', 'Публикация нового товара выполняется подтверждением готового черновика.');
+        }
+        if ($row instanceof StockUnit && ($values['status'] ?? null) === StockUnit::IN_STOCK) {
+            $this->assert($row->product_variant_id !== null, 'status', 'Товар этой единицы удалён из каталога: вернуть её в наличие некуда.');
         }
         if ($row instanceof Product && array_key_exists('category_id', $values) && $values['category_id'] === null) {
             $this->assert(false, 'category_id', 'Товару нужна категория.');

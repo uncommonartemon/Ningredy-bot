@@ -2,6 +2,7 @@
 
 namespace App\Filament\Resources\AttributeGroups\Tables;
 
+use App\Models\AttributeGroup;
 use Filament\Actions\DeleteAction;
 use Filament\Actions\EditAction;
 use Filament\Tables\Columns\TextColumn;
@@ -17,7 +18,9 @@ class AttributeGroupsTable
             ->reorderable('sort_order')
             ->columns([
                 TextColumn::make('name')->label(__('catalog-groups.english_name'))->searchable()->sortable(),
-                TextColumn::make('translations.cs')->label(__('catalog-groups.czech_name'))->placeholder('—'),
+                TextColumn::make('named_in')->label(__('Переводы'))->badge()->placeholder('—')
+                    ->state(fn (AttributeGroup $record): array => array_keys(array_filter($record->translations ?? [],
+                        fn (mixed $name): bool => is_string($name) && trim($name) !== ''))),
                 TextColumn::make('attribute_definitions_count')->label(__('catalog-groups.attributes'))->badge()->sortable(),
                 ToggleColumn::make('highlight_in_filters')->label(__('catalog-groups.highlight')),
                 TextColumn::make('sort_order')->label(__('Порядок'))->sortable(),

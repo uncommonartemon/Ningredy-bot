@@ -178,6 +178,45 @@ class DraftGalleryTopUpPolicyTest extends TestCase
         Http::assertSentCount(1);
     }
 
+    /**
+     * Operator, 2026-11-11: the admin sends a link as the right page. Its photos are taken on
+     * their word: into a gallery that is already full, and from a page set aside earlier.
+     */
+    public function test_photos_come_from_the_page_the_operator_named_even_into_a_full_gallery(): void
+    {
+        config(['product-images.max_images_by_type.component' => 1]);
+        $page = 'https://93.184.216.34/operator/page';
+        $newUrl = 'https://93.184.216.34/operator/label.jpg';
+        $draft = $this->draft();
+        $draft->update(['excluded_gallery_source_urls' => [$page]]);
+        $this->assertSame(0, app(ProductImageStorage::class)->topUpDraftMedia($draft));
+
+        $resolver = Mockery::mock(app(ProductImageResolver::class))->makePartial();
+        $resolver->shouldReceive('resolve')->once()
+            ->withArgs(fn (array $sources): bool => count($sources) === 1 && ($sources[0]['url'] ?? null) === $page)->andReturn([$newUrl]);
+        $this->app->instance(ProductImageResolver::class, $resolver);
+        $image = imagecreatetruecolor(800, 800);
+        imagefilledrectangle($image, 0, 0, 399, 799, imagecolorallocate($image, 255, 255, 255));
+        ob_start();
+        imagejpeg($image);
+        $bytes = ob_get_clean();
+        imagedestroy($image);
+        Http::fake([$newUrl => Http::response($bytes, 200, ['Content-Type' => 'image/jpeg'])]);
+        $this->mock(ProductImageVisionVerifier::class)->shouldReceive('select')->once()
+            ->andReturnUsing(function (ProductDraft $draft, array $candidates) use ($newUrl): array {
+                $this->assertSame($newUrl, $candidates[0]['source_url']);
+                // The operator's word stands for the page, as a maker's page stands for itself.
+                $this->assertTrue($candidates[0]['operator_page']);
+                $this->assertTrue($candidates[0]['source_identity_confirmed']);
+
+                return $candidates;
+            });
+
+        $this->assertSame(1, app(ProductImageStorage::class)->topUpDraftMedia($draft->fresh(), null, null, $page));
+        $this->assertSame(2, $draft->media()->count());
+        $this->assertTrue($draft->media()->where('source_url', $newUrl)->exists());
+    }
+
     public function test_missing_source_does_not_start_a_different_gallery_or_touch_existing_photos(): void
     {
         $draft = $this->draft();

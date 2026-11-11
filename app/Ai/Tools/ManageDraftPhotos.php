@@ -30,7 +30,9 @@ class ManageDraftPhotos implements Tool
             .'the product and its own markings stay), replace with a different non-duplicate internet photo, and delete. '
             .'Resolve every position against the original album before processing, so mixed operations are safe. '
             .'find_more_photos: the operator asks for more photos or to go on searching; a search stopped by a limit or with nothing found continues, a finished one is topped up and keeps its photos. '
-            .'find_other_photos: the operator asks for other photos instead of these; the gallery is searched again without its old sources. Both are asynchronous: leave draft_id null, the card comes back by itself.';
+            .'find_other_photos: the operator asks for other photos instead of these; the gallery is searched again without its old sources. '
+            .'photos_from_url: the operator sent the address of a page as the right place for this draft\'s photos; the photos are taken from that page on their word (a frame whose own label shows another code is still refused). '
+            .'All three are asynchronous: leave draft_id null, the card comes back by itself.';
     }
 
     public function handle(Request $request): Stringable|string
@@ -47,6 +49,13 @@ class ManageDraftPhotos implements Tool
         throw_unless(app(DraftAccess::class)->belongsToContext($draft, $this->update), RuntimeException::class,
             'Draft belongs to a different chat or user.');
         throw_unless($draft->status === 'pending_review', RuntimeException::class, 'Draft is no longer pending review.');
+        $page = trim((string) ($request['photos_from_url'] ?? ''));
+        if ($page !== '') {
+            throw_unless(filter_var($page, FILTER_VALIDATE_URL) !== false && in_array(parse_url($page, PHP_URL_SCHEME), ['http', 'https'], true),
+                RuntimeException::class, 'photos_from_url must be the http(s) address of a page.');
+
+            return $this->json($this->searchPhotos($draft, 'from-page', $page));
+        }
         if ($request->boolean('find_other_photos')) {
             return $this->json($this->searchPhotos($draft, 'restage'));
         }
@@ -101,7 +110,7 @@ class ManageDraftPhotos implements Tool
     }
 
     /** @return array<string, mixed> */
-    private function searchPhotos(ProductDraft $draft, string $button): array
+    private function searchPhotos(ProductDraft $draft, string $button, ?string $page = null): array
     {
         $origin = $draft->telegramUpdate()->first();
         if (DraftQueuedWork::has($draft->id) || ($origin !== null && $origin->processed_at === null)) {
@@ -113,13 +122,14 @@ class ManageDraftPhotos implements Tool
             class_basename(self::class),
             'search_draft_photos',
             ['draft_id' => $draft->id, 'button' => $button],
-            function () use ($draft, $button): array {
+            function () use ($draft, $button, $page): array {
                 $search = app(DraftPhotoSearch::class);
                 $press = $search->pressFor($this->update, "draft:{$button}:{$draft->id}");
                 $chatId = (string) $this->update->chat_id;
                 $outcome = match ($button) {
                     'continue-search' => $search->continue($draft, $chatId, $press->id),
                     'findmore' => $search->topUp($draft, $chatId, $press->id),
+                    'from-page' => $search->fromPage($draft, $chatId, $press->id, (string) $page),
                     default => $search->other($draft, $chatId, $press->id),
                 };
 
@@ -141,6 +151,7 @@ class ManageDraftPhotos implements Tool
             'delete_positions' => $schema->array()->items($schema->integer()),
             'find_more_photos' => $schema->boolean(),
             'find_other_photos' => $schema->boolean(),
+            'photos_from_url' => $schema->string()->description('The address of the page the operator named as the right one for this draft\'s photos.'),
         ];
     }
 }

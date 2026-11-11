@@ -18,6 +18,8 @@ class AttributeGroup extends Model
             if ($group->exists && $group->isDirty('name') && ! $group->isDirty('translations')) {
                 $group->translations = null;
             }
+            // A language's field left empty in the admin is no name at all: the bot fills it later.
+            $group->translations = array_filter($group->translations ?? [], fn (mixed $name): bool => is_string($name) && trim($name) !== '') ?: null;
         });
     }
 

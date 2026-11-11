@@ -24,6 +24,19 @@ const messages = {
         stock: { in_stock: 'In stock', out_of_stock: 'Out of stock', preorder: 'Pre-order', unknown: 'Check availability' },
         facets: { brands: 'Brand', types: 'Type', countries: 'Brand country', colors: 'Color', stock: 'Availability' },
         types: { laptop: 'Laptop', desktop: 'Desktop PC', component: 'Component', other: 'Other electronics' },
+        account: {
+            partnerLogin: 'Partner sign-in', partners: 'For partners', signInTitle: 'Sign in',
+            signInLead: 'Sign in to see the prices of your group.', email: 'Email', password: 'Password', signIn: 'Sign in',
+            inviteOnly: 'There is no open sign-up: an account is made through an invitation link. Ask us for yours.',
+            wrongCredentials: 'Wrong email or password.', throttled: 'Too many attempts. Try again in a minute.',
+            checkField: 'Check this field.', joinTitle: 'Sign up', joinLead: 'Your account will see the prices of this group.',
+            name: 'Your name', company: 'Company (optional)', companyLabel: 'Company', phone: 'Phone (optional)',
+            passwordConfirm: 'Repeat the password', passwordHint: 'At least 8 characters.',
+            passwordMismatch: 'The passwords do not match.', emailTaken: 'This email is already registered. Sign in instead.',
+            join: 'Create the account', haveAccount: 'Already registered? Sign in', accountTitle: 'Your account', group: 'Group',
+            groupPrices: 'You see the prices of your group.', regularPrices: 'You see the ordinary prices.',
+            toCatalog: 'To the catalog', signOut: 'Sign out', yourPrice: 'Your price',
+        },
         attributes: {
             cpu: 'Processor', gpu: 'Graphics card', ram: 'Memory', storage: 'Storage',
             display: 'Display', screen_size: 'Screen size', refresh_rate: 'Refresh rate',
@@ -80,6 +93,19 @@ const messages = {
         },
         types: {
             laptop: 'Notebook', desktop: 'Stolní počítač', component: 'Komponenta', other: 'Ostatní technika',
+        },
+        account: {
+            partnerLogin: 'Přihlášení pro partnery', partners: 'Pro partnery', signInTitle: 'Přihlášení',
+            signInLead: 'Po přihlášení uvidíte ceny své skupiny.', email: 'E-mail', password: 'Heslo', signIn: 'Přihlásit se',
+            inviteOnly: 'Volná registrace tu není: účet vzniká přes zvací odkaz. Požádejte nás o něj.',
+            wrongCredentials: 'Nesprávný e-mail nebo heslo.', throttled: 'Příliš mnoho pokusů. Zkuste to za minutu.',
+            checkField: 'Zkontrolujte toto pole.', joinTitle: 'Registrace', joinLead: 'Váš účet uvidí ceny této skupiny.',
+            name: 'Vaše jméno', company: 'Firma (nepovinné)', companyLabel: 'Firma', phone: 'Telefon (nepovinné)',
+            passwordConfirm: 'Heslo znovu', passwordHint: 'Alespoň 8 znaků.',
+            passwordMismatch: 'Hesla se neshodují.', emailTaken: 'Tento e-mail je už registrován. Přihlaste se.',
+            join: 'Vytvořit účet', haveAccount: 'Už máte účet? Přihlaste se', accountTitle: 'Váš účet', group: 'Skupina',
+            groupPrices: 'Vidíte ceny své skupiny.', regularPrices: 'Vidíte běžné ceny.',
+            toCatalog: 'Do katalogu', signOut: 'Odhlásit se', yourPrice: 'Vaše cena',
         },
         attributes: {
             cpu: 'Procesor', gpu: 'Grafická karta', ram: 'Operační paměť', storage: 'Úložiště',
@@ -138,6 +164,19 @@ const messages = {
         types: {
             laptop: 'Ноутбук', desktop: 'Готовий ПК', component: 'Комплектуюча', other: 'Інша техніка',
         },
+        account: {
+            partnerLogin: 'Вхід для партнерів', partners: 'Партнерам', signInTitle: 'Вхід',
+            signInLead: 'Після входу ви побачите ціни своєї групи.', email: 'Пошта', password: 'Пароль', signIn: 'Увійти',
+            inviteOnly: 'Відкритої реєстрації немає: акаунт створюється за посиланням-запрошенням. Попросіть його в нас.',
+            wrongCredentials: 'Неправильна пошта або пароль.', throttled: 'Забагато спроб. Спробуйте за хвилину.',
+            checkField: 'Перевірте це поле.', joinTitle: 'Реєстрація', joinLead: 'Ваш акаунт бачитиме ціни цієї групи.',
+            name: 'Ваше ім’я', company: 'Компанія (необов’язково)', companyLabel: 'Компанія', phone: 'Телефон (необов’язково)',
+            passwordConfirm: 'Пароль ще раз', passwordHint: 'Щонайменше 8 символів.',
+            passwordMismatch: 'Паролі не збігаються.', emailTaken: 'Ця пошта вже зареєстрована. Увійдіть.',
+            join: 'Створити акаунт', haveAccount: 'Вже зареєстровані? Увійдіть', accountTitle: 'Ваш акаунт', group: 'Група',
+            groupPrices: 'Ви бачите ціни своєї групи.', regularPrices: 'Ви бачите звичайні ціни.',
+            toCatalog: 'До каталогу', signOut: 'Вийти', yourPrice: 'Ваша ціна',
+        },
         attributes: {
             cpu: 'Процесор', gpu: 'Відеокарта', ram: 'Оперативна пам’ять', storage: 'Накопичувач',
             display: 'Дисплей', screen_size: 'Діагональ', refresh_rate: 'Частота оновлення',
@@ -175,10 +214,27 @@ const setLocale = (nextLocale) => {
     }
 };
 
-const categoryName = (category, fallback = '') => category?.translations?.[locale.value]
-    || category?.name
-    || category?.label
-    || fallback;
+// One rule for every name the catalog shows beside a product - a category, a group of
+// characteristics, a characteristic, a filter: the visitor's language, then the shop's main
+// language, then English, then the name as stored. Each kind used to have its own order,
+// so a missing translation showed a different language in each of them.
+const nameChain = computed(() => [...new Set([locale.value, shop.value.storefront[0], 'en'])]);
+const pickName = (translations, ...fallbacks) => {
+    for (const code of nameChain.value) {
+        if (translations?.[code]) return translations[code];
+    }
+    return fallbacks.find(Boolean) || '';
+};
+// A characteristic's name: the stored one, then the interface's own for the starter keys.
+const attributeName = (key, translations, label) => {
+    for (const code of nameChain.value) {
+        const found = translations?.[code] || read(messages[code], `attributes.${key}`);
+        if (found) return found;
+    }
+    return label || key || '';
+};
+
+const categoryName = (category, fallback = '') => pickName(category?.translations, category?.name, category?.label, fallback);
 
 const productCount = (count) => {
     if (locale.value === 'en') {
@@ -229,25 +285,15 @@ const translatedText = (translations, field) => {
     return null;
 };
 
-const attributeLabel = (attribute) => translatedValue(attribute?.label_translations)
-    || read(messages[contentLocale.value], `attributes.${attribute?.key}`)
-    || attribute?.label_translations?.en
-    || attribute?.label;
+const attributeLabel = (attribute) => attributeName(attribute?.key, attribute?.label_translations, attribute?.label);
 
 const attributeValue = (attribute) => translatedValue(attribute?.translations) || attribute?.value;
 
-// A filter is named like its attribute: the stored translation for this
-// language, then the interface's own label, then the English name. Before,
-// only the definition's single label was sent, so most Czech filters stayed English.
-const facetLabel = (facet) => facet?.label_translations?.[locale.value]
-    || read(messages[locale.value], `attributes.${facet?.key}`)
-    || translatedValue(facet?.label_translations)
-    || facet?.label_translations?.en
-    || facet?.label
-    || facet?.key;
+// A filter is named like its attribute.
+const facetLabel = (facet) => attributeName(facet?.key, facet?.label_translations, facet?.label);
 
 const facetOptionLabel = (option) => translatedValue(option?.translations) || option?.label;
-const attributeGroupName = (group) => translatedValue(group?.translations) || group?.name || '';
+const attributeGroupName = (group) => pickName(group?.translations, group?.name);
 
 // "15,6 inch" is spelled out in the value already; a unit is added only to a
 // bare number, so a value is never followed by its own unit twice.

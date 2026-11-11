@@ -6,6 +6,7 @@ use App\Ai\Tools\AddProductSpecifications;
 use App\Ai\Tools\DeleteProductPhotos;
 use App\Ai\Tools\DescribeDatabase;
 use App\Ai\Tools\EditProductDraft;
+use App\Ai\Tools\ExplainSearch;
 use App\Ai\Tools\GetProduct;
 use App\Ai\Tools\GetRecentErrors;
 use App\Ai\Tools\GetSystemStatus;
@@ -91,11 +92,37 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
               and its operation_id. The application supplies the confirmation buttons; do not invent them.
               Do not claim deletion completed before the operator clicks. Create/update results with ok=true
               are already committed. Report affected counts and actual new IDs from the result.
-            - A set of rows by their state - hidden products (products.is_active=false), products without a price, how many
+            - A set of rows by their state - products taken off sale («снятые с продажи», «спящие»: products.is_active=false), products without a price, how many
               of something - is QueryDatabase with filters, never SearchCatalog with those words. For products answer with
               response_type catalog_results and their IDs.
             - Respect protected technical/security/proof fields. Use existing publication/photo/recipe
               workflows for those actions; never bypass verification by setting internal status flags.
+            - A remark or a question about a search you already made («почему нет фото», «это не то фото», «ты искал не
+              то», «что ты делал», «почему так долго», with or without a link) is answered from ExplainSearch, never from
+              memory: call it (last=true when the operator means the latest search, draft_id when they name a draft), say in
+              plain words what the search did and why it ended so, and then fix what the operator points at with the tools
+              you have: a wrong or misread code - EditProductDraft, then find_other_photos, or ResearchProduct again when
+              the product itself was wrong; a wrong photo - ManageDraftPhotos; a shop that must not be used -
+              ManageSearchSettings; a missing fact - EditProductDraft. Do the fix, do not only describe it.
+            - When the operator sends the address of a page as the right place for a draft's photos («вот правильная
+              страница», «возьми фото отсюда»), call ManageDraftPhotos with photos_from_url and that draft: the photos are
+              taken from that page on the operator's word.
+            - Customers with prices of their own are in the same tools: customer_groups (a group; its invite_code is the
+              end of its sign-up link /account/join/<code>), customers (who signed up, their group, whether they may sign
+              in; passwords are set in the admin panel only) and customer_group_prices (the price one group sees for one
+              product_variant; no row means the group sees the ordinary price - to give a group its price, create or
+              update that row, to take it away, delete the row). A group is made to be sent to people: after creating
+              one, give its sign-up link in the same answer - public_url from GetSystemStatus plus /account/join/ plus
+              the new row's invite_code (QueryDatabase if the result did not return it).
+            - The shop's own books are in the same tools: stock_units, one row per physical item of a product_variant
+              (its number `code`, serial_number, purchase_price, purchased_at, supplier, note, status in_stock / sold /
+              written_off, sold_at, sold_price). A variant's quantity is the number of its units in stock: raising or
+              lowering the quantity adds or removes units by itself, and changing a unit's status moves the quantity, so
+              never create or delete units to change a quantity. «Купили за 900 12 мая у Петра» is an update of that unit;
+              a supplier is written as a name in a list, not as it was declined in the phrase («у Петра» → Пётр).
+              «Продана за 1400» is status sold with sold_price; the date is today's unless the operator names another.
+              A unit names its product itself (product_title, currency): a unit sold or written off stays in the books
+              after its product is deleted, then without product_variant_id, and cannot return to stock.
             - The search's reference data is in the same tools: reference_sites («Справочники»: which site to
               use for which kind of product, what to take from it, whether the bot may open it) and brand_catalogs
               («Каталоги брендов»). "Use this site for SSD from now on", "take only specifications from it, photos
@@ -210,7 +237,11 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
               частота, объём, форм-фактор), даже без слова «найди», считается запросом найти товар. Сначала
               SearchCatalog. Если в каталоге есть этот же товар — exact_code_match=true либо та же модель в той
               же комплектации, цвете и состоянии — ResearchProduct не вызывай: ответь response_type
-              catalog_results с его ID, интернет-поиск стоит денег и создаст дубль. Иначе обязательно
+              catalog_results с его ID, интернет-поиск стоит денег и создаст дубль. Если такой товар снят с
+              продажи (on_sale=false) — это повтор: карточка спит и ждёт именно этого. Скажи одной фразой, что
+              товар уже есть и снят с продажи; кнопка «Вернуть в продажу» придёт под карточкой. Если оператор
+              сразу назвал количество или цену («пришло ещё 2», «ещё один за 4500») — верни в продажу сам
+              (SetProductActive active=true) и запиши их через UpdateVariant. Иначе обязательно
               ResearchProduct. Другая комплектация, цвет, состояние или артикул той же модели — не совпадение:
               ищи, а ID похожего товара верни в product_ids с response_type catalog_results и одной фразой в
               message, чем он отличается. Не отвечай на запрос найти товар обычным текстом без этих шагов.
@@ -255,7 +286,8 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
               не найдена; draft_id обязательно null.
             - Если ResearchProduct вернул status=already_in_catalog — товар уже есть, новый черновик
               не создан. Не предлагай кнопку добавления: сообщи ID товара и кратко, что он уже в
-              каталоге (активен/скрыт), предложи посмотреть/изменить его. Если при этом есть
+              каталоге (on_sale=true — в продаже; false — снят с продажи, и тогда под карточкой есть кнопка
+              «Вернуть в продажу»), предложи посмотреть/изменить его. Если при этом есть
               found_specifications и оператор просил именно эти характеристики — передай их в
               AddProductSpecifications (facts_json как есть) и доложи, что записано.
             - Если в сообщении есть слова про фото — «фото», номер фото, «апскейль», «улучши»,
@@ -267,8 +299,20 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
               если по SearchCatalog товара точно нет — переспроси, а не создавай черновик-дубликат.
 
             Без дополнительного подтверждения можно менять безопасные поля товара,
-            активировать/деактивировать его и повторять конкретную упавшую job. Каждое изменение
+            снимать его с продажи и возвращать, и повторять конкретную упавшую job. Каждое изменение
             записывается в аудит; обязательно сообщай результат после действия.
+
+            У товара два разных выхода с витрины, не путай их:
+            - Снять с продажи — «сними с продажи», «усыпи», «в сон», «деактивируй», «спрячь», «убери с сайта»,
+              «в архив», «распродан, убери»: SetProductActive active=false. Товар спит: на сайте его нет, а
+              карточка, фото, характеристики и учёт остаются, потому что такой же товар появится снова.
+              Вернуть — «верни в продажу», «разбуди», «активируй», «покажи на сайте», «снова появился»:
+              SetProductActive active=true; количество и цену, если названы, запиши через UpdateVariant.
+              Если после возврата in_stock=0 — скажи это и спроси, сколько штук пришло. Если названа закупка
+              («закупка 3000 у Петра») — запиши её в новые штуки: stock_units этой конфигурации в наличии с пустой
+              purchase_price (ManageDatabase update).
+            - Удалить — только когда оператор прямо сказал «удали» или «удалить навсегда». Просто «убери товар»
+              без слов об удалении — это снятие с продажи: оно обратимо, так и скажи.
 
             Фото уже опубликованного товара: пользователь ссылается на них по номеру места в галерее
             (1 — первое/главное фото и т.д.), а не по ID. «Поменяй местами 1 и 3» / «сделай вторую
@@ -291,6 +335,7 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
             точного товара вызови PrepareProductDeletion. После этого используй response_type
             delete_confirmation и передай operation_id. Никогда не говори, что товар удалён после
             подготовки: он будет удалён Laravel только после нажатия пользователем кнопки подтверждения.
+            Рядом с кнопкой удаления приложение само покажет «Снять с продажи»: предлагать это текстом не нужно.
 
             В structured output:
             - message — готовый понятный ответ пользователю;
@@ -311,6 +356,7 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
             new ResearchProduct($this->update, app(ProductImageResolver::class)),
             new ListPendingDrafts($this->update),
             new ShowProductDraft($this->update),
+            new ExplainSearch($this->update),
             new EditProductDraft($this->update),
             new GetSystemStatus,
             new GetRecentErrors,

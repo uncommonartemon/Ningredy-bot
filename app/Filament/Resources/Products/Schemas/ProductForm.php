@@ -8,12 +8,16 @@ use App\Filament\Schemas\ProductTranslations;
 use App\Filament\Schemas\RelatedCatalogForms;
 use App\Filament\Support\ProductOptions;
 use App\Filament\Support\ProductVariantFormState;
+use App\Filament\Support\StockUnitRows;
 use App\Models\Brand;
 use App\Models\Category;
+use App\Models\CustomerGroup;
+use App\Models\CustomerGroupPrice;
 use App\Services\Products\ManualProductAttributes;
 use App\Services\Products\ProductCondition;
 use App\Services\Products\ProductSourceTypes;
 use Filament\Actions\Action;
+use Filament\Forms\Components\DatePicker;
 use Filament\Forms\Components\DateTimePicker;
 use Filament\Forms\Components\Hidden;
 use Filament\Forms\Components\Repeater;
@@ -22,6 +26,7 @@ use Filament\Forms\Components\Select;
 use Filament\Forms\Components\Textarea;
 use Filament\Forms\Components\TextInput;
 use Filament\Forms\Components\Toggle;
+use Filament\Schemas\Components\Fieldset;
 use Filament\Schemas\Components\Grid;
 use Filament\Schemas\Components\Group;
 use Filament\Schemas\Components\Section;
@@ -120,10 +125,15 @@ class ProductForm
                     TextInput::make('price')->label(__('Цена'))->numeric()->minValue(0),
                     TextInput::make('currency')->label(__('Валюта'))->default('CZK')->length(3),
                     Select::make('stock_status')->label(__('Наличие'))->options(ProductOptions::stockStatuses())->default('unknown')->required(),
-                    TextInput::make('quantity')->label(__('Количество'))->integer()->minValue(0)->default(0)->required(),
+                    TextInput::make('quantity')->label(__('Количество'))->integer()->minValue(0)->default(0)->required()
+                        ->live(onBlur: true)
+                        ->afterStateUpdated(fn (Get $get, Set $set, mixed $state) => $set('stock_units',
+                            StockUnitRows::resize($get('stock_units') ?? [], (int) $state))),
                     Toggle::make('is_default')->label(__('Основной вариант'))->fixIndistinctState()
                         ->default(fn (Get $get): bool => count($get('../../variants') ?? []) <= 1),
                 ])->columns(['default' => 1, 'sm' => 2, 'xl' => 3])->columnSpanFull(),
+                ...self::groupPrices(),
+                self::stockUnits(),
                 Section::make(__('Дополнительные данные конфигурации'))->schema([
                     TextInput::make('name')->label(__('Название конфигурации'))->maxLength(255)
                         ->placeholder(__('Например: 16 GB / 512 GB'))->columnSpanFull(),
@@ -142,6 +152,13 @@ class ProductForm
                 ])->compact()->columns(['default' => 1, 'md' => 3])->collapsed()->columnSpanFull(),
                 Section::make(__('Переводы конфигурации'))->compact()->schema([ProductTranslations::make()])->collapsed(),
             ])->defaultItems(1)->columns(1)
+            // The prices for groups are rows of their own; the form shows them as fields of the configuration.
+            ->mutateRelationshipDataBeforeFillUsing(fn (array $data): array => [...$data, 'group_prices' => isset($data['id'])
+                ? CustomerGroupPrice::query()->where('product_variant_id', $data['id'])->pluck('price', 'customer_group_id')
+                    ->map(fn (mixed $price): string => rtrim(rtrim((string) $price, '0'), '.'))->all()
+                : [],
+                // A row per unit in stock, as many as the quantity.
+                'stock_units' => StockUnitRows::resize(isset($data['id']) ? StockUnitRows::of((int) $data['id']) : [], (int) ($data['quantity'] ?? 0))])
             ->minItems(fn (string $operation): int => $operation === 'create' ? 1 : 0)
             ->deletable(fn (Repeater $component): bool => count($component->getRawState() ?? []) > 1)
             ->afterStateHydrated(fn (Repeater $component) => $component->rawState(ProductVariantFormState::ensureDefault($component->getRawState() ?? [])))
@@ -158,6 +175,61 @@ class ProductForm
                 }))
             ->itemLabel(fn (array $state): string => ($state['name'] ?? '') ?: (($state['sku'] ?? '') ?: __('Конфигурация товара')))
             ->addActionLabel(__('Добавить конфигурацию'))->collapsible()->columnSpanFull();
+    }
+
+    /**
+     * A price field for every group of customers (operator, 2026-11-11): as many prices as
+     * there are groups; one left empty means the group sees the ordinary price.
+     *
+     * @return list<Fieldset>
+     */
+    private static function groupPrices(): array
+    {
+        $fields = CustomerGroup::query()->orderBy('sort_order')->orderBy('id')->get()
+            ->map(fn (CustomerGroup $group): TextInput => TextInput::make("group_prices.{$group->id}")
+                ->label($group->name.($group->is_active ? '' : ' · '.__('выключена')))
+                ->numeric()->minValue(0)->placeholder(__('Как обычная цена')))->all();
+
+        return $fields === [] ? [] : [Fieldset::make(__('Цены для групп клиентов'))->schema($fields)
+            ->columns(['default' => 1, 'sm' => 2, 'xl' => 3])->columnSpanFull()];
+    }
+
+    /**
+     * A row per physical item in stock (operator, 2026-11-11: three near-identical used drives
+     * are three units, each with a number of its own). The rows follow the quantity, and
+     * removing a row lowers it.
+     */
+    private static function stockUnits(): Section
+    {
+        return Section::make(fn (Get $get): string => __('Единицы на складе').': '.count($get('stock_units') ?? []))
+            ->description(__('Каждая штука в наличии — своя строка со своим номером. Добавить штуку: кнопка «Добавить единицу» или количество выше. Для своего учёта: на сайте этого не видно. Убранная строка с данными считается проданной по текущей цене; исправить это можно в разделе «Учёт».'))
+            ->schema([
+                Repeater::make('stock_units')->hiddenLabel()
+                    ->table([
+                        TableColumn::make(__('Номер'))->width('7.5rem'),
+                        TableColumn::make(__('Серийный номер')),
+                        TableColumn::make(__('Цена закупки'))->width('9rem'),
+                        TableColumn::make(__('Дата закупки'))->width('11rem'),
+                        TableColumn::make(__('Поставщик')),
+                        TableColumn::make(__('Заметка')),
+                    ])
+                    ->schema([
+                        Hidden::make('id'),
+                        TextInput::make('code')->hiddenLabel()->disabled()->dehydrated(false)->placeholder(__('новая')),
+                        TextInput::make('serial_number')->hiddenLabel()->maxLength(255),
+                        TextInput::make('purchase_price')->hiddenLabel()->numeric()->minValue(0),
+                        DatePicker::make('purchased_at')->hiddenLabel()->maxDate(now()),
+                        TextInput::make('supplier')->hiddenLabel()->maxLength(255),
+                        TextInput::make('note')->hiddenLabel()->maxLength(2000),
+                    ])
+                    ->compact()->addActionLabel(__('Добавить единицу'))->reorderable(false)->defaultItems(0)
+                    // A row added is an item that came in, a row taken away is that item out of the stock:
+                    // the quantity follows either way.
+                    ->afterStateUpdated(fn (Set $set, ?array $state) => $set('quantity', count($state ?? []))),
+            ])
+            // Open by default: the table is what the operator looks for under the quantity (2026-11-11, «не вижу как устроено»).
+            // Always there, even with nothing in stock: this is where an item is added (2026-11-11, «не вижу где добавление единицы»).
+            ->compact()->collapsible()->columnSpanFull();
     }
 
     private static function sourceData(array $data): array

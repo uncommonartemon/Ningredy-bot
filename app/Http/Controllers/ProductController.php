@@ -6,6 +6,7 @@ use App\Models\Product;
 use App\Models\ProductMedia;
 use App\Models\ProductVariant;
 use App\Services\Catalog\AttributePresentation;
+use App\Services\Catalog\CustomerPricing;
 use App\Services\Products\PhotoSourceNotice;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
@@ -16,7 +17,7 @@ class ProductController extends Controller
 {
     public function __invoke(Product $product, Request $request): Response
     {
-        abort_unless($product->status === 'published' && $product->is_active, 404);
+        abort_unless($product->isOnSale(), 404);
 
         $product->load([
             'brand:id,name,country,website_url',
@@ -65,6 +66,7 @@ class ProductController extends Controller
                     ])->values(),
                 'attributes' => $this->attributes($product->attributes),
                 'variants' => $product->variants->map(fn ($variant) => [
+                    ...$this->prices($variant),
                     'id' => $variant->id,
                     'name' => $variant->name,
                     // The default configuration's stored name is Russian; the shop names it in its own language.
@@ -75,8 +77,6 @@ class ProductController extends Controller
                     'color' => $variant->color,
                     'condition' => $variant->condition,
                     'translations' => $variant->translations ?? [],
-                    'price' => $variant->price !== null ? (float) $variant->price : null,
-                    'compare_at_price' => $variant->compare_at_price !== null ? (float) $variant->compare_at_price : null,
                     'currency' => $variant->currency ?: 'CZK',
                     'stock_status' => $variant->stock_status,
                     'quantity' => $variant->quantity,
@@ -89,6 +89,24 @@ class ProductController extends Controller
                 ])->values(),
             ],
         ]);
+    }
+
+    /**
+     * The price the visitor sees: a customer of a group gets the group's price, with the
+     * ordinary one crossed out when it is higher.
+     *
+     * @return array{price: float|null, compare_at_price: float|null, own_price: bool}
+     */
+    private function prices(ProductVariant $variant): array
+    {
+        $pricing = app(CustomerPricing::class)->for($variant);
+
+        return [
+            'price' => $pricing['price'],
+            'compare_at_price' => $pricing['regular_price'] !== null && $pricing['regular_price'] > $pricing['price']
+                ? $pricing['regular_price'] : ($variant->compare_at_price !== null ? (float) $variant->compare_at_price : null),
+            'own_price' => $pricing['regular_price'] !== null,
+        ];
     }
 
     private function attributes($attributes): array

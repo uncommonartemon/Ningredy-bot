@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use App\Models\Concerns\InvalidatesStaleTextTranslations;
+use App\Services\Catalog\StockUnits;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -20,8 +21,14 @@ class ProductVariant extends Model
         'translations',
         'product_id', 'fingerprint', 'name', 'sku', 'mpn', 'gtin', 'color', 'condition',
         'price', 'compare_at_price', 'currency', 'stock_status', 'quantity',
-        'warranty_months', 'is_default', 'is_active',
+        'warranty_months', 'is_default', 'is_active', 'group_prices', 'stock_units',
     ];
+
+    /** The product form's rows for the units in stock, written once the configuration is saved. */
+    private ?array $pendingStockUnits = null;
+
+    /** Prices for groups of customers given with the configuration, written once it is saved. */
+    private ?array $pendingGroupPrices = null;
 
     protected function casts(): array
     {
@@ -44,6 +51,58 @@ class ProductVariant extends Model
                 ])));
             }
         });
+        // One configuration deleted by itself leaves the books what they know, as its product would.
+        static::deleting(fn (ProductVariant $variant) => app(StockUnits::class)->variantsLeaving([(int) $variant->id]));
+        static::saved(function (ProductVariant $variant): void {
+            $variant->writePendingGroupPrices();
+            // The quantity and the units in stock are the same number, whoever changed either.
+            $rows = $variant->pendingStockUnits;
+            $variant->pendingStockUnits = null;
+            app(StockUnits::class)->afterVariantSaved($variant, $rows);
+        });
+    }
+
+    public function stockUnits(): HasMany
+    {
+        return $this->hasMany(StockUnit::class);
+    }
+
+    /** The product form's rows for the units in stock; they are rows of their own, not a column. */
+    public function setStockUnitsAttribute(mixed $rows): void
+    {
+        $this->pendingStockUnits = is_array($rows) ? $rows : [];
+    }
+
+    public function groupPrices(): HasMany
+    {
+        return $this->hasMany(CustomerGroupPrice::class);
+    }
+
+    /**
+     * The admin form's «price for a group» fields: group id => price. They are not a column:
+     * the prices are kept until the configuration itself is saved.
+     */
+    public function setGroupPricesAttribute(mixed $prices): void
+    {
+        $this->pendingGroupPrices = is_array($prices) ? $prices : [];
+    }
+
+    /** An empty price removes the group's own one, so the group sees the ordinary price again. */
+    private function writePendingGroupPrices(): void
+    {
+        if ($this->pendingGroupPrices === null) {
+            return;
+        }
+        $prices = $this->pendingGroupPrices;
+        $this->pendingGroupPrices = null;
+        foreach (CustomerGroup::query()->whereIn('id', array_keys($prices))->pluck('id') as $groupId) {
+            $price = $prices[$groupId];
+            if (is_numeric($price) && (float) $price >= 0) {
+                $this->groupPrices()->updateOrCreate(['customer_group_id' => $groupId], ['price' => $price]);
+            } else {
+                $this->groupPrices()->where('customer_group_id', $groupId)->delete();
+            }
+        }
     }
 
     public function product(): BelongsTo

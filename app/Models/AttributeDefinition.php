@@ -42,6 +42,17 @@ class AttributeDefinition extends Model
         return ['is_filterable' => 'boolean', 'is_variant' => 'boolean', 'translations' => 'array'];
     }
 
+    protected static function booted(): void
+    {
+        // A language's field left empty in the admin is no name at all: the bot fills it later.
+        static::saving(function (AttributeDefinition $definition): void {
+            if ($definition->isDirty('translations')) {
+                $definition->translations = array_filter($definition->translations ?? [],
+                    fn (mixed $name): bool => is_string($name) && trim($name) !== '') ?: null;
+            }
+        });
+    }
+
     public function categories(): BelongsToMany
     {
         return $this->belongsToMany(Category::class)->withPivot(['is_required', 'sort_order']);
