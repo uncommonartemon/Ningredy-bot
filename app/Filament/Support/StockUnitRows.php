@@ -3,6 +3,7 @@
 namespace App\Filament\Support;
 
 use App\Models\StockUnit;
+use App\Services\Catalog\StockUnits;
 use Illuminate\Support\Str;
 
 /**
@@ -44,7 +45,8 @@ final class StockUnitRows
     {
         $quantity = max(0, min(1000, $quantity));
         while (count($rows) < $quantity) {
-            $rows[(string) Str::uuid()] = ['id' => null, 'code' => null, ...array_fill_keys(self::DETAILS, null)];
+            // A row is shown with its number at once (operator, 2026-11-11): the number is taken here.
+            $rows[(string) Str::uuid()] = ['id' => null, 'code' => app(StockUnits::class)->nextCode(), ...array_fill_keys(self::DETAILS, null)];
         }
         foreach (array_reverse(array_keys($rows)) as $key) {
             if (count($rows) > $quantity && self::isBlank($rows[$key])) {

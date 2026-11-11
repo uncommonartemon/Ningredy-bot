@@ -2,6 +2,7 @@
 
 namespace App\Services\Catalog;
 
+use App\Models\AppSetting;
 use App\Models\Product;
 use App\Models\ProductVariant;
 use App\Models\StockUnit;
@@ -26,7 +27,37 @@ class StockUnits
     /** The most units one configuration is given at once; a slip of the hand is not a warehouse. */
     private const int MOST_UNITS = 1000;
 
+    /** The setting that holds the last number given to a unit. */
+    private const string LAST_NUMBER = 'stock.last_unit_number';
+
     private bool $busy = false;
+
+    /**
+     * The next unit number, taken at once. The product form shows a number the moment a row is
+     * added (operator, 2026-11-11), so it is given before the unit is saved. A number is never
+     * given twice; one that was taken and not used is a gap, which costs nothing.
+     */
+    public function nextCode(): string
+    {
+        return DB::transaction(function (): string {
+            // Units a migration wrote by itself took their row's id: the counter never goes below those.
+            $number = max((int) AppSetting::valueFor(self::LAST_NUMBER, '0'), (int) StockUnit::query()->max('id')) + 1;
+            AppSetting::put(self::LAST_NUMBER, (string) $number);
+
+            return 'U-'.str_pad((string) $number, 6, '0', STR_PAD_LEFT);
+        });
+    }
+
+    /** A number the form brings back is used only if it was really given out and no unit has it. */
+    private function givenAndFree(mixed $code): ?string
+    {
+        if (! is_string($code) || preg_match('/^U-(\d{6,})$/D', $code, $number) !== 1
+            || (int) $number[1] > (int) AppSetting::valueFor(self::LAST_NUMBER, '0')) {
+            return null;
+        }
+
+        return StockUnit::query()->where('code', $code)->exists() ? null : $code;
+    }
 
     /**
      * After a configuration was saved. `$rows` are the product form's rows for its units in
@@ -165,7 +196,10 @@ class StockUnits
                 $unit->update($details);
                 $kept[] = $unit->id;
             } else {
-                $kept[] = $variant->stockUnits()->create([...$details, ...self::nameOf($variant)])->id;
+                // The row was shown with its number already: the unit keeps that number.
+                $unit = $variant->stockUnits()->make([...$details, ...self::nameOf($variant)]);
+                $unit->forceFill(['code' => $this->givenAndFree($row['code'] ?? null)])->save();
+                $kept[] = $unit->id;
             }
         }
         // A row the form no longer has: that unit left the stock.

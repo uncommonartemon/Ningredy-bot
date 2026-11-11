@@ -5,7 +5,9 @@ namespace App\Filament\Resources\StockUnits;
 use App\Filament\Resources\LocalizedResource as Resource;
 use App\Filament\Resources\Products\ProductResource;
 use App\Filament\Resources\StockUnits\Pages\ListStockUnits;
+use App\Filament\Support\SupplierSelect;
 use App\Models\StockUnit;
+use App\Models\Supplier;
 use App\Services\Catalog\StockUnits;
 use BackedEnum;
 use Filament\Actions\Action;
@@ -82,7 +84,7 @@ class StockUnitResource extends Resource
     {
         return $schema->columns(2)->components([
             TextInput::make('serial_number')->label(__('Серийный номер'))->maxLength(255),
-            TextInput::make('supplier')->label(__('Поставщик'))->maxLength(255),
+            SupplierSelect::make(),
             TextInput::make('purchase_price')->label(__('Цена закупки'))->numeric()->minValue(0),
             DatePicker::make('purchased_at')->label(__('Дата закупки'))->maxDate(now()),
             TextInput::make('sold_price')->label(__('Цена продажи'))->numeric()->minValue(0)
@@ -133,8 +135,7 @@ class StockUnitResource extends Resource
                 Filter::make('unpriced')->label(__('Без цены закупки'))->toggle()
                     ->query(fn (Builder $query): Builder => $query->whereNull('purchase_price')),
                 SelectFilter::make('supplier')->label(__('Поставщик'))
-                    ->options(fn (): array => StockUnit::query()->whereNotNull('supplier')->distinct()->orderBy('supplier')
-                        ->pluck('supplier', 'supplier')->all()),
+                    ->options(fn (): array => Supplier::options()),
             ])
             ->recordActions([
                 EditAction::make()->modalHeading(fn (StockUnit $record): string => __('Единица :code', ['code' => $record->code])),

@@ -9,10 +9,12 @@ use App\Filament\Schemas\RelatedCatalogForms;
 use App\Filament\Support\ProductOptions;
 use App\Filament\Support\ProductVariantFormState;
 use App\Filament\Support\StockUnitRows;
+use App\Filament\Support\SupplierSelect;
 use App\Models\Brand;
 use App\Models\Category;
 use App\Models\CustomerGroup;
 use App\Models\CustomerGroupPrice;
+use App\Services\Catalog\StockUnits;
 use App\Services\Products\ManualProductAttributes;
 use App\Services\Products\ProductCondition;
 use App\Services\Products\ProductSourceTypes;
@@ -215,11 +217,13 @@ class ProductForm
                     ])
                     ->schema([
                         Hidden::make('id'),
-                        TextInput::make('code')->hiddenLabel()->disabled()->dehydrated(false)->placeholder(__('новая')),
+                        // The number is there the moment the row is: «Добавить единицу» takes the next one.
+                        TextInput::make('code')->hiddenLabel()->disabled()->dehydrated()
+                            ->default(fn (): string => app(StockUnits::class)->nextCode())->placeholder(__('новая')),
                         TextInput::make('serial_number')->hiddenLabel()->maxLength(255),
                         TextInput::make('purchase_price')->hiddenLabel()->numeric()->minValue(0),
                         DatePicker::make('purchased_at')->hiddenLabel()->maxDate(now()),
-                        TextInput::make('supplier')->hiddenLabel()->maxLength(255),
+                        SupplierSelect::make()->hiddenLabel(),
                         TextInput::make('note')->hiddenLabel()->maxLength(2000),
                     ])
                     ->compact()->addActionLabel(__('Добавить единицу'))->reorderable(false)->defaultItems(0)

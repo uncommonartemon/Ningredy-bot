@@ -4,12 +4,14 @@ namespace Tests\Feature;
 
 use App\Filament\Resources\Products\Pages\EditProduct;
 use App\Filament\Resources\StockUnits\Pages\ListStockUnits;
+use App\Filament\Resources\Suppliers\Pages\ManageSuppliers;
 use App\Filament\Widgets\Accounting\RecentSales;
 use App\Models\AiOperation;
 use App\Models\Category;
 use App\Models\Product;
 use App\Models\ProductVariant;
 use App\Models\StockUnit;
+use App\Models\Supplier;
 use App\Models\TelegramUpdate;
 use App\Models\User;
 use App\Services\Catalog\StockBooks;
@@ -138,6 +140,7 @@ class StockUnitsTest extends TestCase
         $this->assertCount(1, $rows);
         // One more row is one more item: the quantity follows.
         $this->assertSame(1, $page->get("data.variants.$key.quantity"));
+        Supplier::named('Petr');
         $page->set("data.variants.$key.stock_units.".array_key_first($rows).'.purchase_price', '700')
             ->set("data.variants.$key.stock_units.".array_key_first($rows).'.supplier', 'Petr')
             ->call('save')->assertHasNoFormErrors();
@@ -170,6 +173,80 @@ class StockUnitsTest extends TestCase
         $this->assertSame([0, 0, 0], [$saidNone->fresh()->quantity, $asleep->fresh()->quantity, $soldOut->fresh()->quantity]);
         // Nor did saving the sold-out configuration again bring its sold item back as a new unit.
         $this->assertSame(1, StockUnit::query()->inStock()->count());
+    }
+
+    public function test_a_unit_gets_its_number_the_moment_its_row_appears(): void
+    {
+        // Operator, 2026-11-11: «пусть генерируется реактивно айдишник, если нажать добавить единицу».
+        $this->admin();
+        $variant = $this->variant(quantity: 1);
+        $first = $variant->stockUnits()->sole();
+        $books = app(StockUnits::class);
+        $number = fn (string $code): int => (int) substr($code, 2);
+
+        // Numbers go one after another and are never given twice, also after a unit is gone.
+        $next = $books->nextCode();
+        $this->assertSame($number($first->code) + 1, $number($next));
+        $first->delete();
+        $this->assertGreaterThan($number($next), $number($books->nextCode()));
+
+        $page = Livewire::test(EditProduct::class, ['record' => $variant->product_id]);
+        $key = array_key_first($page->get('data.variants'));
+        // «Добавить единицу»: the row is there with its number before anything is saved.
+        $page->callAction(TestAction::make('add')->schemaComponent("variants.$key.stock_units"));
+        $rows = $page->get("data.variants.$key.stock_units");
+        $shown = (string) $rows[array_key_first($rows)]['code'];
+        $this->assertMatchesRegularExpression('/^U-\d{6}$/', $shown);
+        $this->assertSame(0, StockUnit::query()->where('code', $shown)->count());
+        // A row that came from raising the quantity has its number too.
+        $page->set("data.variants.$key.quantity", 2);
+        $codes = array_column($page->get("data.variants.$key.stock_units"), 'code');
+        $this->assertCount(2, array_unique(array_filter($codes)));
+
+        $page->call('save')->assertHasNoFormErrors();
+        // The saved units carry exactly the numbers their rows showed.
+        $this->assertEqualsCanonicalizing($codes, $variant->stockUnits()->inStock()->pluck('code')->all());
+    }
+
+    public function test_a_supplier_is_one_of_a_list_that_takes_a_new_name_on_the_spot(): void
+    {
+        // Operator, 2026-11-11: «поставщик, пускай будет селект с + добавить на месте».
+        $this->admin();
+        $variant = $this->variant(quantity: 2);
+        [$first, $second] = $variant->stockUnits()->orderBy('id')->get()->all();
+
+        // A name written on a unit joins the list by itself, and is spelt one way from then on.
+        $first->update(['supplier' => 'Alza B2B', 'purchase_price' => 700]);
+        $second->update(['supplier' => ' alza  b2b ', 'purchase_price' => 800]);
+        $this->assertSame(['Alza B2B'], Supplier::query()->pluck('name')->all());
+        $this->assertSame('Alza B2B', $second->fresh()->supplier);
+        // From the chat too.
+        $operator = app(DatabaseOperatorService::class);
+        $operator->execute($operator->prepare([['action' => 'update', 'table' => 'stock_units', 'selection' => ['ids' => [$second->id]],
+            'values' => ['supplier' => 'Bazar CZ']]]));
+        $operator->execute($operator->prepare([['action' => 'create', 'table' => 'suppliers', 'values' => ['name' => 'Mironet', 'note' => 'опт']]]));
+        $this->assertSame(['Alza B2B', 'Bazar CZ', 'Mironet'], array_keys(Supplier::options()));
+
+        // What the form's «+» does: the new name is in the list and comes back as the value.
+        $this->assertSame('Petr', Supplier::named('Petr', 'частник'));
+        $this->assertSame('частник', Supplier::query()->where('name', 'Petr')->value('note'));
+        // The unit's own form picks from the list.
+        Livewire::test(ListStockUnits::class)->callTableAction('edit', $first, ['supplier' => 'Petr'])->assertHasNoTableActionErrors();
+        $this->assertSame('Petr', $first->fresh()->supplier);
+
+        // The list page: what was bought from whom; a supplier the books still name cannot be deleted.
+        $petr = Supplier::query()->where('name', 'Petr')->sole();
+        $unused = Supplier::query()->where('name', 'Mironet')->sole();
+        $list = Livewire::test(ManageSuppliers::class);
+        $list->assertCanSeeTableRecords(Supplier::query()->get())
+            ->assertTableActionHidden('delete', $petr)->assertTableActionVisible('delete', $unused);
+        $list->callAction('create', ['name' => 'Datart']);
+        $this->assertTrue(Supplier::query()->where('name', 'Datart')->exists());
+        $list->callTableAction('delete', $unused);
+        $this->assertNull($unused->fresh());
+        // Renamed in the list, renamed on its units.
+        $list->callTableAction('edit', $petr, ['name' => 'Пётр Новак']);
+        $this->assertSame('Пётр Новак', $first->fresh()->supplier);
     }
 
     public function test_what_was_in_stock_before_the_books_becomes_units_and_the_chat_can_write_them(): void

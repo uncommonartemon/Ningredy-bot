@@ -768,5 +768,13 @@
     "Удалятся карточка, конфигурации, характеристики и фото. Продажи останутся в учёте. Если такой товар может появиться снова, лучше снять его с продажи: карточка сохранится и не придётся искать заново.": "The card, its configurations, characteristics and photos will be deleted. Sales stay in the books. If the same product may come in again, take it off sale instead: the card is kept and nothing has to be searched for again.",
     "Закупка новых штук": "Purchase of the new items",
     "Добавить единицу": "Add a unit",
-    "Каждая штука в наличии — своя строка со своим номером. Добавить штуку: кнопка «Добавить единицу» или количество выше. Для своего учёта: на сайте этого не видно. Убранная строка с данными считается проданной по текущей цене; исправить это можно в разделе «Учёт».": "Every item in stock is a row of its own with its own number. To add an item, press “Add a unit” or raise the quantity above. For your own books: the site does not show this. A row with data that is taken away counts as sold at the current price; this is corrected under “Books”."
+    "Каждая штука в наличии — своя строка со своим номером. Добавить штуку: кнопка «Добавить единицу» или количество выше. Для своего учёта: на сайте этого не видно. Убранная строка с данными считается проданной по текущей цене; исправить это можно в разделе «Учёт».": "Every item in stock is a row of its own with its own number. To add an item, press “Add a unit” or raise the quantity above. For your own books: the site does not show this. A row with data that is taken away counts as sold at the current price; this is corrected under “Books”.",
+    "Поставщики": "Suppliers",
+    "поставщик": "supplier",
+    "поставщики": "suppliers",
+    "Название поставщика": "Supplier name",
+    "Новый поставщик": "New supplier",
+    "Куплено штук": "Items bought",
+    "На сумму закупки": "Purchase total",
+    "Переименование меняет название и у купленных у него единиц.": "Renaming also renames the supplier on the units bought from it."
 }
