@@ -202,7 +202,7 @@ class ProductForm
     private static function stockUnits(): Section
     {
         return Section::make(fn (Get $get): string => __('Единицы на складе').': '.count($get('stock_units') ?? []))
-            ->description(__('Строка на каждую штуку в наличии. Для своего учёта: на сайте этого не видно. Убранная строка с данными считается проданной по текущей цене; исправить это можно в разделе «Учёт».'))
+            ->description(__('Каждая штука в наличии — своя строка со своим номером. Добавить штуку: кнопка «Добавить единицу» или количество выше. Для своего учёта: на сайте этого не видно. Убранная строка с данными считается проданной по текущей цене; исправить это можно в разделе «Учёт».'))
             ->schema([
                 Repeater::make('stock_units')->hiddenLabel()
                     ->table([
@@ -222,13 +222,14 @@ class ProductForm
                         TextInput::make('supplier')->hiddenLabel()->maxLength(255),
                         TextInput::make('note')->hiddenLabel()->maxLength(2000),
                     ])
-                    ->compact()->addable(false)->reorderable(false)->defaultItems(0)
-                    // Taking a row away is taking that item out of the stock.
+                    ->compact()->addActionLabel(__('Добавить единицу'))->reorderable(false)->defaultItems(0)
+                    // A row added is an item that came in, a row taken away is that item out of the stock:
+                    // the quantity follows either way.
                     ->afterStateUpdated(fn (Set $set, ?array $state) => $set('quantity', count($state ?? []))),
             ])
             // Open by default: the table is what the operator looks for under the quantity (2026-11-11, «не вижу как устроено»).
-            ->compact()->collapsible()->columnSpanFull()
-            ->visible(fn (Get $get): bool => (int) $get('quantity') > 0 || ($get('stock_units') ?? []) !== []);
+            // Always there, even with nothing in stock: this is where an item is added (2026-11-11, «не вижу где добавление единицы»).
+            ->compact()->collapsible()->columnSpanFull();
     }
 
     private static function sourceData(array $data): array

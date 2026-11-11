@@ -766,5 +766,7 @@
     "Удалить товар навсегда?": "Smazat produkt natrvalo?",
     "Удалить навсегда": "Smazat natrvalo",
     "Удалятся карточка, конфигурации, характеристики и фото. Продажи останутся в учёте. Если такой товар может появиться снова, лучше снять его с продажи: карточка сохранится и не придётся искать заново.": "Smaže se karta, konfigurace, vlastnosti a fotky. Prodeje zůstanou v evidenci. Pokud se stejný produkt může objevit znovu, raději ho stáhněte z prodeje: karta zůstane a nebude třeba znovu hledat.",
-    "Закупка новых штук": "Nákup nových kusů"
+    "Закупка новых штук": "Nákup nových kusů",
+    "Добавить единицу": "Přidat kus",
+    "Каждая штука в наличии — своя строка со своим номером. Добавить штуку: кнопка «Добавить единицу» или количество выше. Для своего учёта: на сайте этого не видно. Убранная строка с данными считается проданной по текущей цене; исправить это можно в разделе «Учёт».": "Každý kus na skladě má vlastní řádek s vlastním číslem. Kus přidáte tlačítkem „Přidat kus“ nebo zvýšením množství výše. Pro vlastní evidenci: na webu to není vidět. Odebraný řádek s údaji se počítá jako prodaný za aktuální cenu; opravit to lze v sekci „Evidence“."
 }

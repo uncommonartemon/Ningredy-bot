@@ -122,6 +122,31 @@ class StockUnitsTest extends TestCase
         $this->assertSame(2, $variant->stockUnits()->inStock()->count());
     }
 
+    public function test_a_unit_is_added_by_its_own_button_even_when_nothing_is_in_stock(): void
+    {
+        $this->admin();
+        $variant = $this->variant(quantity: 0);
+
+        $page = Livewire::test(EditProduct::class, ['record' => $variant->product_id]);
+        $key = array_key_first($page->get('data.variants'));
+        // Nothing in stock: the table is there all the same, with its button.
+        $this->assertSame([], $page->get("data.variants.$key.stock_units"));
+        $page->assertSee('Единицы на складе: 0')->assertSee('Добавить единицу');
+
+        $page->callAction(TestAction::make('add')->schemaComponent("variants.$key.stock_units"));
+        $rows = $page->get("data.variants.$key.stock_units");
+        $this->assertCount(1, $rows);
+        // One more row is one more item: the quantity follows.
+        $this->assertSame(1, $page->get("data.variants.$key.quantity"));
+        $page->set("data.variants.$key.stock_units.".array_key_first($rows).'.purchase_price', '700')
+            ->set("data.variants.$key.stock_units.".array_key_first($rows).'.supplier', 'Petr')
+            ->call('save')->assertHasNoFormErrors();
+
+        $unit = $variant->stockUnits()->sole();
+        $this->assertSame([1, '700.00', 'Petr', StockUnit::IN_STOCK], [$variant->fresh()->quantity, $unit->purchase_price, $unit->supplier, $unit->status]);
+        $this->assertNotNull($unit->code);
+    }
+
     public function test_what_was_in_stock_before_the_books_becomes_units_and_the_chat_can_write_them(): void
     {
         $variant = $this->variant(quantity: 2);
