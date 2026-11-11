@@ -51,6 +51,20 @@ class StarterCatalogSeeder extends Seeder
         'refresh_rate' => ['label' => 'Частота экрана', 'data_type' => 'number', 'default_unit' => 'Hz', 'sort_order' => 70],
     ];
 
+    /**
+     * The shop's names of the starter characteristics. Without them each took the name of the
+     * first card that used it (live: «ram» became «Capacity» from a memory module).
+     */
+    public const ATTRIBUTE_NAMES = [
+        'cpu' => ['en' => 'Processor', 'cs' => 'Procesor', 'uk' => 'Процесор'],
+        'gpu' => ['en' => 'Graphics card', 'cs' => 'Grafická karta', 'uk' => 'Відеокарта'],
+        'ram' => ['en' => 'Memory', 'cs' => 'Operační paměť', 'uk' => 'Оперативна пам’ять'],
+        'storage' => ['en' => 'Storage', 'cs' => 'Úložiště', 'uk' => 'Накопичувач'],
+        'display' => ['en' => 'Display', 'cs' => 'Displej', 'uk' => 'Дисплей'],
+        'screen_size' => ['en' => 'Screen size', 'cs' => 'Úhlopříčka', 'uk' => 'Діагональ'],
+        'refresh_rate' => ['en' => 'Refresh rate', 'cs' => 'Obnovovací frekvence', 'uk' => 'Частота оновлення'],
+    ];
+
     /** The defaults laptops open with (add_default_category_attributes). */
     private const LAPTOP_DEFAULTS = ['gpu', 'cpu', 'display'];
 
@@ -154,7 +168,9 @@ class StarterCatalogSeeder extends Seeder
         foreach (self::ATTRIBUTES as $key => $row) {
             if (! DB::table('attribute_definitions')->where('key', $key)->exists()) {
                 DB::table('attribute_definitions')->insert([...$row, 'key' => $key, 'is_filterable' => true, 'is_variant' => true,
-                    'created_at' => $now, 'updated_at' => $now]);
+                    'created_at' => $now, 'updated_at' => $now,
+                    ...(Schema::hasColumn('attribute_definitions', 'translations')
+                        ? ['translations' => json_encode(self::ATTRIBUTE_NAMES[$key], JSON_UNESCAPED_UNICODE)] : [])]);
             }
         }
         if ($createdCategories !== [] && Schema::hasTable('attribute_definition_category')) {
@@ -197,8 +213,8 @@ class StarterCatalogSeeder extends Seeder
                     'key' => $key, 'label' => $row['label'], 'data_type' => $row['data_type'], 'default_unit' => $row['default_unit'],
                     'is_filterable' => AttributeDefinition::filterableByDefault($key), 'is_variant' => $row['is_variant'] ?? false,
                     'sort_order' => $row['sort_order'], 'created_at' => $now, 'updated_at' => $now,
-                    ...(isset($row['translations']) && Schema::hasColumn('attribute_definitions', 'translations')
-                        ? ['translations' => json_encode($row['translations'], JSON_UNESCAPED_UNICODE)] : []),
+                    ...((isset($row['translations']) || isset(self::ATTRIBUTE_NAMES[$key])) && Schema::hasColumn('attribute_definitions', 'translations')
+                        ? ['translations' => json_encode($row['translations'] ?? self::ATTRIBUTE_NAMES[$key], JSON_UNESCAPED_UNICODE)] : []),
                 ]);
             }
             $definitionIds[$key] = (int) $id;

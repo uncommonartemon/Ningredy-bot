@@ -3,7 +3,9 @@
 namespace App\Filament\Pages;
 
 use App\Filament\Pages\LocalizedPage as Page;
+use App\Jobs\TranslateCatalogNames;
 use App\Jobs\TranslateProductText;
+use App\Services\Catalog\CatalogNames;
 use App\Services\Products\CatalogLocales;
 use App\Services\Products\CatalogTextTranslator;
 use BackedEnum;
@@ -93,14 +95,23 @@ class CatalogLanguagesPage extends Page implements HasForms
                 ->icon(Heroicon::OutlinedLanguage)
                 ->requiresConfirmation()
                 ->modalDescription(__('Переведёт на отмеченные языки товары каталога, у которых перевода ещё нет. Это платные вызовы AI, меньше цента за товар.'))
-                ->action(function (CatalogTextTranslator $translator): void {
+                ->action(function (CatalogTextTranslator $translator, CatalogNames $names): void {
                     $ids = $translator->pendingProductIds();
                     foreach ($ids as $id) {
                         TranslateProductText::dispatch($id);
                     }
+                    // Names of categories, groups and characteristics: asked again even if an
+                    // earlier request left some of them unfilled.
+                    $unnamed = count($names->missing());
+                    if ($unnamed > 0) {
+                        TranslateCatalogNames::dispatch(askAgain: true);
+                    }
                     Notification::make()
-                        ->title($ids === [] ? __('Все товары уже переведены') : __('Перевод запущен'))
-                        ->body($ids === [] ? null : __('Товаров без перевода: :count. Переводы появятся на сайте по мере работы.', ['count' => count($ids)]))
+                        ->title($ids === [] && $unnamed === 0 ? __('Все товары уже переведены') : __('Перевод запущен'))
+                        ->body(implode(' ', array_filter([
+                            $ids === [] ? null : __('Товаров без перевода: :count. Переводы появятся на сайте по мере работы.', ['count' => count($ids)]),
+                            $unnamed === 0 ? null : __('Названий категорий, групп и характеристик без перевода: :count.', ['count' => $unnamed]),
+                        ])) ?: null)
                         ->success()
                         ->send();
                 }),

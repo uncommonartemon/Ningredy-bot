@@ -6,6 +6,7 @@ use App\Filament\Schemas\RelatedCatalogForms;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\TextInput;
 use Filament\Forms\Components\Toggle;
+use Filament\Schemas\Components\Fieldset;
 use Filament\Schemas\Components\Grid;
 use Filament\Schemas\Components\Section;
 use Filament\Schemas\Schema;
@@ -31,6 +32,9 @@ class AttributeDefinitionForm
                                 'boolean' => __('Да/нет'),
                             ])->default('text')->required(),
                             TextInput::make('default_unit')->label(__('Единица по умолчанию'))->maxLength(24),
+                            Fieldset::make(__('Названия на витрине'))
+                                ->schema(RelatedCatalogForms::nameFields())
+                                ->columns(['default' => 1, '@md' => 3])->columnSpanFull(),
                         ])
                         ->gridContainer()->columns(['default' => 1, '@md' => 2])
                         ->columnSpan(['default' => 1, 'lg' => 2]),

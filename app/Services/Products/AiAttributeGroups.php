@@ -2,6 +2,7 @@
 
 namespace App\Services\Products;
 
+use App\Jobs\TranslateCatalogNames;
 use App\Models\AttributeDefinition;
 use App\Models\AttributeGroup;
 use App\Services\Catalog\AttributePresentation;
@@ -78,11 +79,17 @@ final class AiAttributeGroups
             return $existing;
         }
 
-        return AttributeGroup::query()->firstOrCreate(['name' => $proposal['name']], [
+        $group = AttributeGroup::query()->firstOrCreate(['name' => $proposal['name']], [
             'translations' => $proposal['name_cs'] === null ? null : ['cs' => $proposal['name_cs']],
             'sort_order' => 0,
             'highlight_in_filters' => true,
         ]);
+        if ($group->wasRecentlyCreated) {
+            // The proposal names the group in English and Czech; the shop's other languages follow.
+            TranslateCatalogNames::dispatch()->afterCommit();
+        }
+
+        return $group;
     }
 
     /** Read-only draft headings, with stable identities for groups that do not exist yet. */

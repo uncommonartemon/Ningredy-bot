@@ -175,10 +175,27 @@ const setLocale = (nextLocale) => {
     }
 };
 
-const categoryName = (category, fallback = '') => category?.translations?.[locale.value]
-    || category?.name
-    || category?.label
-    || fallback;
+// One rule for every name the catalog shows beside a product - a category, a group of
+// characteristics, a characteristic, a filter: the visitor's language, then the shop's main
+// language, then English, then the name as stored. Each kind used to have its own order,
+// so a missing translation showed a different language in each of them.
+const nameChain = computed(() => [...new Set([locale.value, shop.value.storefront[0], 'en'])]);
+const pickName = (translations, ...fallbacks) => {
+    for (const code of nameChain.value) {
+        if (translations?.[code]) return translations[code];
+    }
+    return fallbacks.find(Boolean) || '';
+};
+// A characteristic's name: the stored one, then the interface's own for the starter keys.
+const attributeName = (key, translations, label) => {
+    for (const code of nameChain.value) {
+        const found = translations?.[code] || read(messages[code], `attributes.${key}`);
+        if (found) return found;
+    }
+    return label || key || '';
+};
+
+const categoryName = (category, fallback = '') => pickName(category?.translations, category?.name, category?.label, fallback);
 
 const productCount = (count) => {
     if (locale.value === 'en') {
@@ -229,25 +246,15 @@ const translatedText = (translations, field) => {
     return null;
 };
 
-const attributeLabel = (attribute) => translatedValue(attribute?.label_translations)
-    || read(messages[contentLocale.value], `attributes.${attribute?.key}`)
-    || attribute?.label_translations?.en
-    || attribute?.label;
+const attributeLabel = (attribute) => attributeName(attribute?.key, attribute?.label_translations, attribute?.label);
 
 const attributeValue = (attribute) => translatedValue(attribute?.translations) || attribute?.value;
 
-// A filter is named like its attribute: the stored translation for this
-// language, then the interface's own label, then the English name. Before,
-// only the definition's single label was sent, so most Czech filters stayed English.
-const facetLabel = (facet) => facet?.label_translations?.[locale.value]
-    || read(messages[locale.value], `attributes.${facet?.key}`)
-    || translatedValue(facet?.label_translations)
-    || facet?.label_translations?.en
-    || facet?.label
-    || facet?.key;
+// A filter is named like its attribute.
+const facetLabel = (facet) => attributeName(facet?.key, facet?.label_translations, facet?.label);
 
 const facetOptionLabel = (option) => translatedValue(option?.translations) || option?.label;
-const attributeGroupName = (group) => translatedValue(group?.translations) || group?.name || '';
+const attributeGroupName = (group) => pickName(group?.translations, group?.name);
 
 // "15,6 inch" is spelled out in the value already; a unit is added only to a
 // bare number, so a value is never followed by its own unit twice.

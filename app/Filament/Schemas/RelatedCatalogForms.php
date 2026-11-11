@@ -6,6 +6,8 @@ use App\Filament\Support\ProductOptions;
 use App\Models\AttributeDefinition;
 use App\Models\AttributeGroup;
 use App\Models\Category;
+use App\Services\Catalog\CatalogNames;
+use App\Services\Products\CatalogLocales;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\TextInput;
 use Filament\Forms\Components\Toggle;
@@ -38,11 +40,26 @@ final class RelatedCatalogForms
                         $fail(__('validation.unique', ['attribute' => __('catalog-groups.english_name')]));
                     }
                 }]),
-            TextInput::make('translations.cs')->label(__('catalog-groups.czech_name'))->maxLength(255),
+            // The English name is the field above; the other languages of the shop follow.
+            ...self::nameFields(except: [CatalogLocales::CONTENT_SOURCE]),
             TextInput::make('sort_order')->label(__('Порядок'))->integer()->minValue(0)->default(0)->required(),
             Toggle::make('highlight_in_filters')->label(__('catalog-groups.highlight'))->default(true)
                 ->helperText(__('catalog-groups.highlight_help')),
         ];
+    }
+
+    /**
+     * A field per language of the shop for the name of a group or a characteristic. An empty
+     * one is filled by the bot within minutes (CatalogNames), so none is required.
+     *
+     * @param  list<string>  $except
+     * @return list<TextInput>
+     */
+    public static function nameFields(array $except = []): array
+    {
+        return array_map(fn (string $locale): TextInput => TextInput::make("translations.{$locale}")
+            ->label(CatalogLocales::LABELS[$locale] ?? $locale)->maxLength(255)->placeholder(__('Переведёт бот')),
+            array_values(array_diff(CatalogNames::locales(), $except)));
     }
 
     public static function attributeGroupSelect(): Select
