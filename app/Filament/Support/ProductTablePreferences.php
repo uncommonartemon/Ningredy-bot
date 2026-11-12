@@ -5,6 +5,7 @@ namespace App\Filament\Support;
 use App\Models\Brand;
 use App\Models\Category;
 use App\Models\User;
+use App\Services\Catalog\ProductAttributeFilters;
 
 final class ProductTablePreferences
 {
@@ -61,6 +62,13 @@ final class ProductTablePreferences
             if ($value !== null) {
                 $normalized[$name] = ['value' => $value];
             }
+        }
+
+        // Characteristics only mean something within a category, and only those still filterable are kept.
+        $characteristics = isset($normalized['category_id']) ? CharacteristicsFilter::chosen($filters['characteristics'] ?? []) : [];
+        $characteristics = array_intersect_key($characteristics, app(ProductAttributeFilters::class)->labels());
+        if ($characteristics !== []) {
+            $normalized['characteristics'] = $characteristics;
         }
 
         return $normalized;

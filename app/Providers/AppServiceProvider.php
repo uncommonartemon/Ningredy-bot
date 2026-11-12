@@ -4,6 +4,7 @@ namespace App\Providers;
 
 use App\Services\Ai\AiSettings;
 use App\Services\Catalog\CustomerPricing;
+use App\Services\Catalog\ProductAttributeFilters;
 use App\Services\Catalog\StockUnits;
 use App\Services\Playwright\BrowserRunner;
 use App\Services\Playwright\PlaywrightRunner;
@@ -36,6 +37,8 @@ class AppServiceProvider extends ServiceProvider
         $this->app->scoped(CustomerPricing::class);
         // One instance, so its own writes to units are not taken for changes to react to.
         $this->app->scoped(StockUnits::class);
+        // The admin's filters form asks for the same category's characteristics many times while drawn.
+        $this->app->scoped(ProductAttributeFilters::class);
     }
 
     /**

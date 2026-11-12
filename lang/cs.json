@@ -776,5 +776,6 @@
     "Новый поставщик": "Nový dodavatel",
     "Куплено штук": "Koupeno kusů",
     "На сумму закупки": "Za nákupní cenu celkem",
-    "Переименование меняет название и у купленных у него единиц.": "Přejmenování změní název i u kusů koupených od tohoto dodavatele."
+    "Переименование меняет название и у купленных у него единиц.": "Přejmenování změní název i u kusů koupených od tohoto dodavatele.",
+    "Выберите категорию — здесь появятся фильтры по её характеристикам.": "Vyberte kategorii: zde se objeví filtry podle jejích vlastností."
 }

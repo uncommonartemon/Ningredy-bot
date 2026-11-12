@@ -75,10 +75,9 @@ class CatalogFacetBuilder
         $productsWith = $this->productsPerAttribute($filters['category'] ?? '');
         // A filter carried by one laptop in forty narrows almost nothing; the
         // catalog page then lists dozens of such sections.
-        $minimumCoverage = (int) ceil(0.1 * $this->products($this->normalize(['category' => $filters['category'] ?? '']))->count());
+        $minimumCoverage = FilterableAttributes::minimumCoverage($this->products($this->normalize(['category' => $filters['category'] ?? '']))->count());
         $attributes = AttributePresentation::sort($attributeRows->groupBy('key')
-            ->reject(fn (Collection $rows, string $key): bool => ($productsWith[$key] ?? 0) < $minimumCoverage
-                || $this->namesSingleProducts($rows, $productsWith[$key] ?? 0) || $this->readsLikeProse($rows))
+            ->filter(fn (Collection $rows, string $key): bool => FilterableAttributes::useful($rows, $productsWith[$key] ?? 0, $minimumCoverage))
             ->map(function (Collection $rows, string $key) use ($filters, $total, $groups, $labelTranslations, $valueTranslations): array {
                 $options = $rows->unique('normalized_value')->sortBy('option_label')
                     ->map(fn ($row) => ['label' => $row->option_label, 'value' => (string) $row->normalized_value,
@@ -108,26 +107,6 @@ class CatalogFacetBuilder
                 'currency' => $price?->min_currency === $price?->max_currency ? $price?->min_currency : null,
             ],
         ];
-    }
-
-    /**
-     * A filter whose every product has its own value (weight "1.86 kg",
-     * dimensions, a part number) only lists the catalog again as checkboxes;
-     * it is left out. Small lists stay, however unique their values.
-     */
-    private function namesSingleProducts(Collection $rows, int $productsWithAttribute): bool
-    {
-        $values = $rows->unique('normalized_value')->count();
-
-        return $values >= 12 && $values >= 0.9 * $productsWithAttribute;
-    }
-
-    /** A port list or an in-box sentence is a description, not a value to tick. */
-    private function readsLikeProse(Collection $rows): bool
-    {
-        $labels = $rows->unique('normalized_value')->pluck('option_label');
-
-        return $labels->filter(fn ($label): bool => mb_strlen((string) $label) > 60)->count() * 2 > $labels->count();
     }
 
     /** @return array<string, int> distinct visible products carrying each filterable attribute */

@@ -8,6 +8,8 @@
 // and printed when it is not given).
 
 use App\Models\AiRun;
+use App\Models\AttributeDefinition;
+use App\Models\AttributeValue;
 use App\Models\Brand;
 use App\Models\Category;
 use App\Models\Customer;
@@ -76,6 +78,14 @@ $catalog = [
     ['cpu', 'Intel', 'Intel Xeon Gold 5416S', 'component', 15900, 1, 'used'],
     ['gpu', 'MSI', 'MSI GeForce RTX 4060 VENTUS 2X BLACK 8G OC', 'component', 7990, 0, 'new'],
 ];
+// A few characteristics, so the cards and the characteristic filters have something to show.
+$characteristics = [
+    'Lenovo ThinkPad E14 Gen 5' => ['ram' => '16 GB', 'storage' => '512 GB', 'cpu' => 'Intel Core i5-1335U'],
+    'HP ProBook 450 G10' => ['ram' => '16 GB', 'storage' => '512 GB', 'cpu' => 'Intel Core i5-1334U'],
+    'MSI Vector 17 HX AI A2XWJG' => ['ram' => '32 GB', 'storage' => '1 TB', 'cpu' => 'Intel Core Ultra 9 275HX'],
+    'Samsung PM9A1 512 GB M.2 NVMe SSD' => ['storage' => '512 GB', 'interface' => 'PCIe 4.0 NVMe'],
+    'KIOXIA XG6 512GB M.2 2280 NVMe SSD' => ['storage' => '512 GB', 'interface' => 'PCIe 3.0 NVMe'],
+];
 $suppliers = ['Поставщик А', 'Поставщик Б', 'Поставщик В', 'Поставщик Г'];
 $books = app(StockUnits::class);
 foreach ($catalog as $index => [$slug, $brandName, $title, $type, $price, $quantity, $condition]) {
@@ -86,6 +96,10 @@ foreach ($catalog as $index => [$slug, $brandName, $title, $type, $price, $quant
     $variant = $product->variants()->create(['condition' => $condition, 'price' => $price, 'currency' => 'CZK', 'quantity' => $quantity + 2,
         'stock_status' => $quantity > 0 ? 'in_stock' : 'out_of_stock', 'sku' => strtoupper(substr(md5($title), 0, 8)), 'is_default' => true, 'is_active' => true,
         'group_prices' => [$wholesale->id => round($price * 0.9), $service->id => $index % 2 ? round($price * 0.93) : null]]);
+    foreach ($characteristics[$title] ?? [] as $key => $value) {
+        $definition = AttributeDefinition::query()->firstOrCreate(['key' => $key], ['label' => ucfirst($key), 'data_type' => 'text', 'is_filterable' => true]);
+        AttributeValue::query()->create(['attribute_definition_id' => $definition->id, 'product_id' => $product->id, 'value' => $value]);
+    }
     // Bought over the last months; two of each already sold, so the books have something to show.
     foreach ($variant->stockUnits()->orderBy('id')->get() as $n => $unit) {
         $unit->update(['purchase_price' => round($price * (0.62 + 0.03 * ($n % 4))), 'purchased_at' => now()->subDays(25 * ($n + 1) + $index * 3),

@@ -776,5 +776,6 @@
     "Новый поставщик": "New supplier",
     "Куплено штук": "Items bought",
     "На сумму закупки": "Purchase total",
-    "Переименование меняет название и у купленных у него единиц.": "Renaming also renames the supplier on the units bought from it."
+    "Переименование меняет название и у купленных у него единиц.": "Renaming also renames the supplier on the units bought from it.",
+    "Выберите категорию — здесь появятся фильтры по её характеристикам.": "Choose a category: filters by its characteristics will appear here."
 }
