@@ -27,6 +27,7 @@ use App\Services\ProductSearch\Recovery\ProductCardRecoverySupervisor;
 use App\Services\ProductSearch\Research\ResearchSourceRoles;
 use App\Services\ProductSearch\SourceQueueBuilder;
 use App\Services\ProductSearch\Supervision\SearchProgressSupervisor;
+use App\Services\Support\WorkerMemory;
 use GdImage;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
@@ -4008,6 +4009,18 @@ class ProductImageStorage
 
             $imagePixels = max(1, $download['width'] * $download['height']);
 
+            // What the worker has left decides too: a frame that does not fit is skipped,
+            // the next smaller one may still fit (the colleague's #343 died here at 512 MB).
+            if (! $this->encoder->fitsInMemory($download['width'], $download['height'])) {
+                Log::warning('Product image candidate skipped: not enough free memory to decode it now.', [
+                    'source_url' => $download['source_url'], 'width' => $download['width'], 'height' => $download['height'],
+                    'free_mb' => intdiv(min(PHP_INT_MAX, WorkerMemory::free()), 1048576),
+                ]);
+                $this->lastDownloadRejections[] = ['url' => $url, 'reason' => 'not_enough_memory'];
+
+                continue;
+            }
+
             // The first candidate is always attempted - isSafeToDecode() above
             // already bounds a single image, and returning nothing at all would
             // be worse than one big frame. Every later one has to fit the budget
@@ -4209,7 +4222,10 @@ class ProductImageStorage
             $download['confirmed_gallery'] = (bool) ($download['confirmed_gallery'] ?? false) || $this->isRecordGalleryImage($original);
             if ($this->dimensionRejectionReason($download['width'], $download['height'], $this->requiredImageWidth($draft),
                 $this->requiredImageHeight($draft), allowExtremeAspectRatio: $this->trustedGalleryImage($original)) !== null
-                || ! $this->encoder->isSafeToDecode($download['width'], $download['height'])) {
+                || ! $this->encoder->isSafeToDecode($download['width'], $download['height'])
+                // The larger renditions are the largest pictures a search decodes: the worker's
+                // free memory decides, not only their size (the colleague's #343 died on this line).
+                || ! $this->encoder->fitsInMemory($download['width'], $download['height'])) {
                 continue;
             }
             $larger[$guess] = true;
