@@ -46,7 +46,8 @@ class AiAttributeGroupFilamentTest extends TestCase
         $this->assertDatabaseMissing('attribute_definitions', ['key' => 'gpu_bus_width']);
     }
 
-    public function test_group_preview_shows_ai_proposals_but_existing_definitions_remain_authoritative(): void
+    /** A set group outranks the proposal; a characteristic without one shows the group approval will give it (2026-11-13). */
+    public function test_group_preview_shows_ai_proposals_but_a_set_group_remains_authoritative(): void
     {
         $draft = $this->draft();
         $page = Livewire::test(EditProductDraft::class, ['record' => $draft->id])
@@ -60,7 +61,7 @@ class AiAttributeGroupFilamentTest extends TestCase
         $page->call('$refresh')
             ->assertSee('Admin graphics: Graphics bus width')
             ->assertDontSee('Graphics details: Graphics bus width')
-            ->assertDontSee('Cooling details: Cooling fans');
+            ->assertSee('Cooling details: Cooling fans');
         $this->assertDatabaseCount('attribute_groups', 1);
     }
 
@@ -94,7 +95,7 @@ class AiAttributeGroupFilamentTest extends TestCase
         AttributeDefinition::create(['key' => 'gpu_bus_width', 'label' => 'Bus width', 'attribute_group_id' => $manual->id]);
         AttributeDefinition::create(['key' => 'cooling_fans', 'label' => 'Fan count']);
         Livewire::test(ViewProductDraft::class, ['record' => $draft->id])
-            ->assertSee('Admin graphics')->assertDontSee('Graphics details')->assertDontSee('Cooling details')
+            ->assertSee('Admin graphics')->assertDontSee('Graphics details')->assertSee('Cooling details')
             ->assertSee('Graphics bus width')->assertSee('Cooling fans');
         $this->assertDatabaseCount('attribute_groups', 1);
     }

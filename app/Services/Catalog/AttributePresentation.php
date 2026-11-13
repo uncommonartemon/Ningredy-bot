@@ -73,7 +73,8 @@ final class AttributePresentation
 
             return array_replace($specification, [
                 'sort_order' => (int) ($definition?->sort_order ?? 0),
-                'group' => $definition ? self::group($definition->group)
+                // A characteristic without a group shows the group the card proposes: approval gives it that one.
+                'group' => $definition?->group ? self::group($definition->group)
                     : AiAttributeGroups::preview($specification['group'] ?? null, $groups),
             ]);
         }));

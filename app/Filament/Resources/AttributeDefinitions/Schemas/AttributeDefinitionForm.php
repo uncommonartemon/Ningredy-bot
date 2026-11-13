@@ -32,6 +32,7 @@ class AttributeDefinitionForm
                                 'boolean' => __('Да/нет'),
                             ])->default('text')->required(),
                             TextInput::make('default_unit')->label(__('Единица по умолчанию'))->maxLength(24),
+                            RelatedCatalogForms::aliasesField(),
                             Fieldset::make(__('Названия на витрине'))
                                 ->schema(RelatedCatalogForms::nameFields())
                                 ->columns(['default' => 1, '@md' => 3])->columnSpanFull(),

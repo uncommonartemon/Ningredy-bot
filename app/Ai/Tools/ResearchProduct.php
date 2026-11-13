@@ -6,7 +6,6 @@ use App\Ai\Agents\ProductResearchAgent;
 use App\Ai\Tools\Concerns\RecordsOperations;
 use App\Jobs\ContinueDraftGallerySearch;
 use App\Models\AiRun;
-use App\Models\AttributeDefinition;
 use App\Models\AttributeValue;
 use App\Models\Category;
 use App\Models\Product;
@@ -20,6 +19,7 @@ use App\Services\Ai\ProductSearchCancellation;
 use App\Services\Ai\ProductSearchCostBudget;
 use App\Services\Ai\ProductSearchTimeBudget;
 use App\Services\Ai\StreamingProductResearch;
+use App\Services\Catalog\AttributeDictionary;
 use App\Services\Products\ProductCatalogIdentity;
 use App\Services\Products\ProductCategoryResolver;
 use App\Services\Products\ProductCondition;
@@ -187,10 +187,9 @@ class ResearchProduct implements Tool
             ->values()->all();
         // Research named one thing under two keys (display_size beside screen_size)
         // because it never saw which keys the catalog already has.
-        $vocabulary = AttributeDefinition::query()->has('values')->withCount('values')
-            ->orderByDesc('values_count')->limit(80)->get(['id', 'key', 'label', 'translations'])
-            ->map(fn (AttributeDefinition $definition): string => $definition->key.' ('.($definition->translations['en'] ?? $definition->label).')')
-            ->implode(', ');
+        // The whole dictionary with the other names each key answers to: a shortened list
+        // of the most used keys left the rest to be named again (decision of 2026-11-13).
+        $vocabulary = app(AttributeDictionary::class)->vocabulary();
         // The brand's own catalog for a brand named in the request: where it is and
         // how a code is found there. Icecat, when it answered, keeps its priority.
         $brandCatalogs = app(BrandCatalogs::class);

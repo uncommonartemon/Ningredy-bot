@@ -6,7 +6,6 @@ use App\Ai\Agents\ProductTextEvidenceAgent;
 use App\Ai\Tools\Concerns\RecordsOperations;
 use App\Jobs\TranslateProductText;
 use App\Models\AiRun;
-use App\Models\AttributeDefinition;
 use App\Models\AttributeValue;
 use App\Models\Product;
 use App\Models\ProductVariant;
@@ -17,6 +16,7 @@ use App\Services\Ai\ProductSearchCancellation;
 use App\Services\Ai\ProductSearchCostBudget;
 use App\Services\Ai\ProductSearchTimeBudget;
 use App\Services\Ai\StreamingProductResearch;
+use App\Services\Catalog\AttributeDictionary;
 use App\Services\Products\ProductDraftWorkflow;
 use App\Services\Products\ProductSourcePriority;
 use App\Services\Products\ProductSourceTypes;
@@ -100,6 +100,8 @@ class AddProductSpecifications implements Tool
 
                 continue;
             }
+            // A fact named another way than the product's characteristic is still that characteristic.
+            $fact['key'] = app(AttributeDictionary::class)->find($fact['key'], $fact['name'])?->key ?? $fact['key'];
             $current = $existing[$fact['key']] ?? null;
             // A correction is about a value the product has. Under a key it does not have
             // the new value would sit beside the wrong one as a second characteristic.
@@ -123,7 +125,7 @@ class AddProductSpecifications implements Tool
             try {
                 $result = $this->recordOperation($this->update, class_basename(self::class), 'add_product_specifications',
                     ['product_id' => $product->id, 'product_variant_id' => $configuration?->id, 'facts' => $added], function () use ($product, $configuration, $added): array {
-                        app(ProductDraftWorkflow::class)->addSpecifications($product, array_map(
+                        $written = app(ProductDraftWorkflow::class)->addSpecifications($product, array_map(
                             fn (array $fact): array => ['key' => $fact['key'], 'name' => $fact['name'], 'value' => $fact['value']], $added), $configuration);
                         foreach (collect($added)->whereNotNull('source_url')->unique('source_url') as $fact) {
                             $product->sources()->firstOrCreate(['url' => $fact['source_url'], 'product_variant_id' => $configuration?->id], [
@@ -134,7 +136,7 @@ class AddProductSpecifications implements Tool
                             ]);
                         }
 
-                        return ['product_id' => $product->id, 'added' => array_column($added, 'key')];
+                        return ['product_id' => $product->id, 'added' => $written];
                     }, Product::class, $product->id);
             } catch (Throwable $exception) {
                 report($exception);
@@ -349,7 +351,7 @@ class AddProductSpecifications implements Tool
             'existing_specifications' => array_map(fn (array $item): string => $item['name'].': '.$item['value'], $existing),
             'missing_or_conflicting_facts' => $wanted,
             'reference_sites' => app(ReferenceSites::class)->hints($codes, $product->model, $product->brand?->name),
-            'catalog_keys' => AttributeDefinition::query()->has('values')->withCount('values')->orderByDesc('values_count')->limit(80)->pluck('key')->all(),
+            'catalog_keys' => app(AttributeDictionary::class)->vocabulary(),
             'excluded_domains' => app(ProductSourcePriority::class)->blockedDomains(),
         ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
         $run = AiRun::query()->create(['telegram_update_id' => $updateId, 'provider' => $provider, 'model' => $model,

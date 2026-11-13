@@ -12,6 +12,7 @@ use App\Models\Category;
 use App\Models\Product;
 use App\Models\User;
 use App\Services\Ai\AiSettings;
+use App\Services\Catalog\AttributeDictionary;
 use Filament\Facades\Filament;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Cache;
@@ -249,8 +250,7 @@ class ProductFormAssistant
                 if (isset($attribute['definition_id']) && ! $definition) {
                     continue;
                 }
-                $definition ??= AttributeDefinition::where('key', $attribute['key'])->first()
-                    ?? AttributeDefinition::whereRaw('LOWER(label) = ?', [mb_strtolower(trim($attribute['label']))])->first();
+                $definition ??= app(AttributeDictionary::class)->find($attribute['key'], $attribute['label']);
                 $rowKey = $attribute['row_key'] ?? null;
                 if ($rowKey !== null && ! isset($base['variants'][$key]['attributes'][$rowKey], $form['variants'][$key]['attributes'][$rowKey])) {
                     $conflicts[] = 'variants.'.$key.'.attributes.'.$rowKey;
@@ -452,8 +452,7 @@ class ProductFormAssistant
                 throw ValidationException::withMessages(['data' => __('product-assistant.invalid_response')]);
             }
             if ($kind === 'attribute') {
-                $existing = AttributeDefinition::where('key', $proposal['key'])->first()
-                    ?? AttributeDefinition::whereRaw('LOWER(label) = ?', [mb_strtolower($proposal['label'])])->first();
+                $existing = app(AttributeDictionary::class)->find($proposal['key'], $proposal['label']);
 
                 return $existing?->id ?? AttributeDefinition::create([
                     'key' => preg_match('/^[a-z][a-z0-9_-]{0,254}$/', $proposal['key']) ? $proposal['key'] : null,

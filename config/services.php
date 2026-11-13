@@ -92,6 +92,14 @@ return [
         'timeout' => (int) env('AI_PRODUCT_SOURCE_IDENTITY_TIMEOUT', 40),
     ],
 
+    // The keeper of the characteristic dictionary: one short answer per approved card with
+    // characteristics the dictionary does not know, and the review of the whole dictionary.
+    'attribute_dictionary' => [
+        'provider' => 'openai',
+        'model' => env('AI_ATTRIBUTE_DICTIONARY_MODEL', 'gpt-5.4-mini'),
+        'timeout' => (int) env('AI_ATTRIBUTE_DICTIONARY_TIMEOUT', 60),
+    ],
+
     'product_specification_reconciliation' => [
         'provider' => 'openai',
         'model' => env('AI_PRODUCT_SPECIFICATION_RECONCILIATION_MODEL', 'gpt-5.4-mini'),

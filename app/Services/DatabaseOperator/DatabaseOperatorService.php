@@ -92,7 +92,7 @@ class DatabaseOperatorService
                 'key' => 'string|regex:/^[a-z0-9][a-z0-9_-]*$/|max:255', 'label' => 'required|string|max:255',
                 'data_type' => 'in:text,number,boolean', 'default_unit' => 'nullable|string|max:24',
                 'is_filterable' => $bool, 'is_variant' => $bool, 'sort_order' => $order,
-                'translations' => $translations, 'attribute_group_id' => $fk('attribute_groups'),
+                'translations' => $translations, 'attribute_group_id' => $fk('attribute_groups'), 'aliases' => 'nullable|array|max:100',
             ]],
             'attribute_values' => ['model' => AttributeValue::class, 'writable' => [
                 'attribute_definition_id' => $fk('attribute_definitions', false), 'product_id' => $fk('products'),

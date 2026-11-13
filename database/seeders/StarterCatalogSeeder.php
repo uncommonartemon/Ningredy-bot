@@ -107,6 +107,16 @@ class StarterCatalogSeeder extends Seeder
     ];
 
     /**
+     * The keys this seeder creates whenever they are missing: merging one away would only bring it back.
+     *
+     * @return list<string>
+     */
+    public static function attributeKeys(): array
+    {
+        return [...array_keys(self::ATTRIBUTES), ...array_keys(self::COMPONENT_ATTRIBUTES)];
+    }
+
+    /**
      * The characteristics of components, created only when a catalog has none
      * with that key (a definition research created earlier keeps its label and
      * type). Health rows are per unit: a used part's wear belongs to its item.

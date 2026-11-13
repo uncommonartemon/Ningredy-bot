@@ -11,6 +11,7 @@ use App\Ai\Tools\GetProduct;
 use App\Ai\Tools\GetRecentErrors;
 use App\Ai\Tools\GetSystemStatus;
 use App\Ai\Tools\ListPendingDrafts;
+use App\Ai\Tools\ManageCharacteristicDictionary;
 use App\Ai\Tools\ManageDatabase;
 use App\Ai\Tools\ManageDraftPhotos;
 use App\Ai\Tools\ManageSearchSettings;
@@ -86,6 +87,9 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
             - To create a group and assign attributes, query existing groups first, reuse a matching one,
               or create it with ref "ram" and set attribute_group_id to {"$ref":"ram.id"} in
               the same batch. Related commands commit together; failed validation rolls back the batch.
+            - One characteristic per meaning: «это одно и то же», «объедини характеристики» → ManageCharacteristicDictionary
+              merge; «проверь словарь характеристик», «найди дубли характеристик» → its review, show the proposals and apply
+              only what the operator confirms. Other names a characteristic answers to are its aliases column.
             - Use the original selector for a whole-set operation, not IDs from the first query page.
               Query results are paginated; the reported total may exceed the returned rows.
             - A batch containing deletion only prepares a preview. Return response_type database_confirmation
@@ -367,6 +371,7 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
             new UpdateVariant($this->update),
             new AddProductSpecifications($this->update),
             new ManageSearchSettings($this->update),
+            new ManageCharacteristicDictionary($this->update),
             new ReviewProductDraft($this->update, app(ProductDraftWorkflow::class)),
             new ManageDraftPhotos($this->update),
             new RetrainDraftGalleryRecipe($this->update),

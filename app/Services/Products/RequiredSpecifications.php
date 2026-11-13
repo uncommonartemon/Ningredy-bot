@@ -5,6 +5,7 @@ namespace App\Services\Products;
 use App\Models\AttributeDefinition;
 use App\Models\Category;
 use App\Models\ProductDraft;
+use App\Services\Catalog\AttributeDictionary;
 
 /**
  * The characteristics a category requires of every card (the «обязательные
@@ -26,9 +27,12 @@ final class RequiredSpecifications
         if ($category === null) {
             return [];
         }
+        // A required characteristic named another way is present all the same.
+        $dictionary = app(AttributeDictionary::class);
         $present = collect($specifications)
             ->filter(fn (mixed $row): bool => is_array($row) && is_scalar($row['value'] ?? null) && trim((string) $row['value']) !== '')
-            ->map(fn (array $row): string => strtolower(trim((string) ($row['key'] ?? ''))))
+            ->map(fn (array $row): string => strtolower(trim((string) ($dictionary->find(
+                is_string($row['key'] ?? null) ? $row['key'] : null, is_string($row['name'] ?? null) ? $row['name'] : null)?->key ?? ($row['key'] ?? '')))))
             ->flip();
 
         return $category->requiredAttributeDefinitions()->get()

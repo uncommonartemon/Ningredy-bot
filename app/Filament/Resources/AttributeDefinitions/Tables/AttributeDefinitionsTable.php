@@ -3,6 +3,8 @@
 namespace App\Filament\Resources\AttributeDefinitions\Tables;
 
 use App\Filament\Schemas\RelatedCatalogForms;
+use App\Filament\Support\CharacteristicDictionaryActions;
+use App\Models\AttributeDefinition;
 use Filament\Actions\BulkAction;
 use Filament\Actions\DeleteAction;
 use Filament\Actions\EditAction;
@@ -24,7 +26,8 @@ class AttributeDefinitionsTable
             ->columns([
                 TextColumn::make('id')->label('#')->sortable()->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('key')->label(__('Ключ'))->searchable()->sortable(),
-                TextColumn::make('label')->label(__('Название'))->searchable()->sortable(),
+                TextColumn::make('label')->label(__('Название'))->searchable(['label', 'aliases'])->sortable()
+                    ->description(fn (AttributeDefinition $record): ?string => $record->aliases ? __('также: :names', ['names' => implode(', ', $record->aliases)]) : null),
                 TextColumn::make('group.name')->label(__('catalog-groups.group'))->badge()->sortable()->searchable()
                     ->placeholder(__('catalog-groups.ungrouped')),
                 TextColumn::make('data_type')->label(__('Тип'))->badge(),
@@ -41,6 +44,7 @@ class AttributeDefinitionsTable
             ->groups([Group::make('group.name')->label(__('catalog-groups.group'))->collapsible()])
             ->recordActions([
                 EditAction::make(),
+                CharacteristicDictionaryActions::merge(),
                 DeleteAction::make(),
             ])
             ->toolbarActions([

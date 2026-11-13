@@ -17,6 +17,8 @@ use App\Models\ProductDraft;
 use App\Models\ProductVariant;
 use App\Models\User;
 use App\Services\Ai\AiSettings;
+use App\Services\Catalog\AttributeDictionary;
+use App\Services\Catalog\AttributeKeeper;
 use App\Services\Telegram\TelegramCatalogDraftMedia;
 use App\Services\Telegram\TelegramCatalogEditor;
 use Illuminate\Database\UniqueConstraintViolationException;
@@ -43,15 +45,105 @@ class ProductDraftWorkflow
         ?string $telegramReviewerId = null,
         bool $acceptUnreconciled = false,
     ): Product {
+        $verdicts = $this->dictionaryVerdicts($draft, $acceptUnreconciled);
         try {
-            return $this->doApprove($draft, $reviewer, $telegramReviewerId, $acceptUnreconciled);
+            return $this->doApprove($draft, $reviewer, $telegramReviewerId, $acceptUnreconciled, $verdicts);
         } catch (UniqueConstraintViolationException) {
             // Two approvals for the same product raced (near-simultaneous
             // double-click/retry): the other one committed first, so
             // canonical_key now exists. Retry once; the shared identity
             // lookup now sees the committed product and its variant.
-            return $this->doApprove($draft, $reviewer, $telegramReviewerId, $acceptUnreconciled);
+            return $this->doApprove($draft, $reviewer, $telegramReviewerId, $acceptUnreconciled, $verdicts);
         }
+    }
+
+    /**
+     * The dictionary keeper's word on the card's characteristics the dictionary does not know,
+     * asked before the approval's transaction so a model call never holds the database. A draft
+     * the approval would refuse asks nothing: the approval names the refusal itself.
+     *
+     * @return array<string, array{decision: string, key: string, name: ?string, group: ?array, remember: bool}>
+     */
+    private function dictionaryVerdicts(ProductDraft $draft, bool $acceptUnreconciled): array
+    {
+        $draft = ProductDraft::query()->find($draft->id);
+        if ($draft === null) {
+            return [];
+        }
+        try {
+            $this->assertReadyForApproval($draft, $acceptUnreconciled);
+        } catch (\Throwable) {
+            return [];
+        }
+        $category = filled($draft->category) ? Category::query()->where('slug', $draft->category)->first() : null;
+
+        return app(AttributeKeeper::class)->settle($this->dictionaryRows($draft->specifications ?? []),
+            $draft->title, $category, $draft->telegram_update_id);
+    }
+
+    /**
+     * The card's characteristics as the dictionary reads them, each under the key it came with.
+     *
+     * @return list<array{index: int|string, key: string, name: string, value: string}>
+     */
+    private function dictionaryRows(array $specifications): array
+    {
+        $rows = [];
+        foreach ($specifications as $index => $specification) {
+            $value = is_array($specification) ? ($specification['value'] ?? null) : null;
+            if (! is_scalar($value) || blank((string) $value)) {
+                continue;
+            }
+            $label = (string) ($specification['name'] ?? $specification['label'] ?? (is_string($index) ? $index : ''));
+            $supplied = $specification['key'] ?? null;
+            $rows[] = ['index' => $index, 'name' => $label, 'value' => (string) $value,
+                'key' => is_string($supplied) && preg_match('/^[a-z0-9_-]+$/', $supplied) === 1 ? $supplied : $this->canonicalAttributeKey($label)];
+        }
+
+        return $rows;
+    }
+
+    /**
+     * The card's specifications under the dictionary's keys, and its translations to match. The
+     * draft itself keeps the keys it was researched with.
+     *
+     * @param  array<string, array<string, array{name: string, value: string}>>  $translations  locale => key => name/value
+     * @return array{0: array, 1: array, 2: array<string, string>} specifications, translations, renamed keys
+     */
+    private function underDictionaryKeys(array $specifications, array $translations, array $verdicts): array
+    {
+        $rows = $this->dictionaryRows($specifications);
+        $places = app(AttributeDictionary::class)->place($rows, $verdicts);
+        $renamed = [];
+        foreach ($rows as $row) {
+            $place = $places[$row['index']];
+            $specification = $specifications[$row['index']];
+            $specification['key'] = $place['key'];
+            if ($place['name'] !== null) {
+                $specification['name'] = $place['name'];
+            }
+            if ($place['group'] !== null) {
+                $specification['group'] = $place['group'];
+            }
+            if ($place['remember'] !== []) {
+                $specification['_remember'] = $place['remember'];
+            }
+            $specifications[$row['index']] = $specification;
+            if ($place['key'] !== $row['key']) {
+                $renamed[$row['key']] = $place['key'];
+            }
+        }
+        foreach ($translations as $locale => $items) {
+            foreach ($renamed as $from => $to) {
+                if (isset($items[$from]) && ! isset($items[$to])) {
+                    $items[$to] = $items[$from];
+                }
+                unset($items[$from]);
+            }
+            $translations[$locale] = $items;
+        }
+
+        return [$specifications, $translations, $renamed];
     }
 
     /**
@@ -65,13 +157,23 @@ class ProductDraftWorkflow
      *
      * @param  list<array{key: string, name: string, value: string}>  $specifications
      */
-    public function addSpecifications(Product $product, array $specifications, ?ProductVariant $configuration = null): void
+    public function addSpecifications(Product $product, array $specifications, ?ProductVariant $configuration = null): array
     {
         $variant = $configuration ?? $product->defaultVariant()->first() ?? $product->variants()->orderBy('id')->first();
         $category = $product->category()->first();
         throw_if($variant === null || $category === null, \RuntimeException::class, 'У товара нет конфигурации или категории.');
         throw_if($configuration !== null && (int) $configuration->product_id !== (int) $product->id, \RuntimeException::class, 'Конфигурация принадлежит другому товару.');
+        $verdicts = app(AttributeKeeper::class)->settle($this->dictionaryRows($specifications), $product->title, $category);
+        [$specifications, , $renamed] = $this->underDictionaryKeys($specifications, [], $verdicts);
+        // A fact the dictionary places under a characteristic the product already has is that
+        // characteristic: the caller adds only what the product lacks, so it is not written twice.
+        $present = $product->attributes()->with('definition')->get()->concat($variant->attributes()->with('definition')->get())
+            ->map(fn ($value): ?string => $value->definition?->key)->filter()->flip();
+        $specifications = array_filter($specifications, fn (mixed $specification): bool => ! is_array($specification)
+            || ! in_array($specification['key'] ?? null, $renamed, true) || ! $present->has($specification['key']));
         $this->syncAttributes($product, $variant, $category, $specifications, variantScoped: $configuration !== null);
+
+        return array_values(array_filter(array_map(fn (mixed $specification): ?string => is_array($specification) ? ($specification['key'] ?? null) : null, $specifications)));
     }
 
     private function assertReadyForApproval(ProductDraft $draft, bool $acceptUnreconciled = false): void
@@ -142,8 +244,9 @@ class ProductDraftWorkflow
         ?User $reviewer,
         ?string $telegramReviewerId,
         bool $acceptUnreconciled = false,
+        array $verdicts = [],
     ): Product {
-        return DB::transaction(function () use ($draft, $reviewer, $telegramReviewerId, $acceptUnreconciled): Product {
+        return DB::transaction(function () use ($draft, $reviewer, $telegramReviewerId, $acceptUnreconciled, $verdicts): Product {
             $draft = ProductDraft::query()->lockForUpdate()->with(['telegramUpdate', 'media'])->findOrFail($draft->id);
             $this->assertReadyForApproval($draft, $acceptUnreconciled);
             $normalizedDescription = $this->publicDescription->normalize([
@@ -210,14 +313,16 @@ class ProductDraftWorkflow
             ])->save();
 
             $variant = $this->upsertVariant($product, $draft);
+            [$specifications, $specificationTranslations] = $this->underDictionaryKeys($draft->specifications ?? [],
+                CatalogLocales::specificationTranslations($draft->translations), $verdicts);
             $unchangedGlobalKeys = [];
             if ($targetId) {
-                $keys = collect($draft->specifications ?? [])->map(fn ($spec) => $spec['key'] ?? $this->canonicalAttributeKey($spec['name']))->all();
+                $keys = collect($specifications)->map(fn ($spec) => $spec['key'] ?? $this->canonicalAttributeKey($spec['name']))->all();
                 $variant->attributes()->whereHas('definition', fn ($definition) => $definition->whereNotIn('key', $keys))->delete();
-                $unchangedGlobalKeys = $this->preserveOtherVariantAttributes($product, $variant, $draft->specifications ?? []);
+                $unchangedGlobalKeys = $this->preserveOtherVariantAttributes($product, $variant, $specifications);
             }
-            $this->syncAttributes($product, $variant, $category, $draft->specifications ?? [],
-                CatalogLocales::specificationTranslations($draft->translations), (bool) $targetId, $unchangedGlobalKeys);
+            $this->syncAttributes($product, $variant, $category, $specifications,
+                $specificationTranslations, (bool) $targetId, $unchangedGlobalKeys);
             $this->syncSources($product, $variant, $draft);
 
             $draft->update([
@@ -456,11 +561,16 @@ class ProductDraftWorkflow
             if ($numericValue === null && $definition->data_type === 'number') {
                 [$dataType, $numericValue, $unit] = $this->numberByDefinition($definition, (string) $rawValue);
             }
-            if ($definition->wasRecentlyCreated && is_array($specification)) {
+            // A characteristic without a group gets the one proposed for it, new or not (decision
+            // of 2026-11-13); a group someone set stays.
+            if ($definition->attribute_group_id === null && is_array($specification)) {
                 $group = AiAttributeGroups::resolve($specification['group'] ?? null);
                 if ($group !== null) {
                     $definition->update(['attribute_group_id' => $group->id]);
                 }
+            }
+            if (is_array($specification) && ($specification['_remember'] ?? []) !== []) {
+                app(AttributeDictionary::class)->remember($definition, ...array_map('strval', $specification['_remember']));
             }
             $definition->categories()->syncWithoutDetaching([$category->id]);
             // A definition is shared by every product, and its label may have
@@ -560,6 +670,10 @@ class ProductDraftWorkflow
 
     private function canonicalAttributeKey(string $label): string
     {
+        // A name the dictionary knows is its key; the word table below is for names it does not.
+        if (($known = app(AttributeDictionary::class)->find(null, $label)) !== null) {
+            return $known->key;
+        }
         $label = Str::lower($label);
 
         return match (true) {
