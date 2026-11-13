@@ -25,6 +25,7 @@ use App\Services\Telegram\DraftPhotoSearch;
 use App\Services\Telegram\DraftTelegramActionConfirmation;
 use App\Services\Telegram\DraftTelegramInteractionState;
 use App\Services\Telegram\DraftTelegramPresenter;
+use App\Services\Telegram\PhotoReadingCheck;
 use App\Services\Telegram\TelegramCatalogDeletion;
 use App\Services\Telegram\TelegramClient;
 use App\Services\Telegram\TelegramDatabaseOperator;
@@ -62,6 +63,20 @@ class TelegramCallbackHandler
                 $this->telegram->editMessageText($chatId, (int) $messageId, $audit->questionText($asked)."\n\n".$result);
             }
             $this->answerAndClose($callbackId, $update, mb_substr($result, 0, 190));
+
+            return;
+        }
+
+        // The operator's answer about what the bot read on a photo (module 107).
+        if (preg_match('/^pr:(ok|fix|again|no):(\d+)$/', $data, $press) === 1) {
+            $result = app(PhotoReadingCheck::class)->answer((int) $press[2], $press[1], $chatId, (string) $update->telegram_user_id);
+            if ($press[1] === 'fix' && ! $result['closes'] && str_starts_with($result['text'], '✏️')) {
+                // The question stays with its buttons; the request for the correction is its own message.
+                $this->telegram->sendMessage($chatId, $result['text']);
+            } elseif ($result['closes'] && is_numeric($messageId)) {
+                $this->telegram->editMessageText($chatId, (int) $messageId, "📷 Прочитано с фото:\n".$result['reading']."\n\n".$result['text']);
+            }
+            $this->answerAndClose($callbackId, $update, mb_substr($result['text'], 0, 190));
 
             return;
         }

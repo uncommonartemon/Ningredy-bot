@@ -7,6 +7,7 @@ use App\Services\Ai\AiErrorPresenter;
 use App\Services\Ai\AiSettings;
 use App\Services\Products\ProductInputContext;
 use App\Services\Products\ProductSearchIntentDetector;
+use App\Services\Telegram\PhotoReadingCheck;
 use App\Services\Telegram\TelegramClient;
 use App\Services\Telegram\TelegramProductUploadIntake;
 use App\Services\Vision\VisionCallContext;
@@ -34,19 +35,24 @@ class TranscribeTelegramPhoto implements ShouldQueue
     public function handle(TelegramClient $telegram, AiErrorPresenter $errors): void
     {
         $update = TelegramUpdate::query()->find($this->telegramUpdateId);
-        if (! $update || $update->processed_at || $update->status === 'cancelled') {
+        if (! $update || $update->processed_at || $update->status === 'cancelled' || $update->status === PhotoReadingCheck::AWAITING) {
             return;
         }
         $caption = trim((string) data_get($update->payload, 'message.caption', ''));
         $detector = app(ProductSearchIntentDetector::class);
         $routing = app(AiSettings::class)->photoCaptionRouting();
+        // Module 107: the operator checks the reading before the search. «Read once more»
+        // and a correction come back here; neither asks again what the photo is for.
+        $reading = (array) data_get($update->payload, PhotoReadingCheck::PAYLOAD_KEY, []);
+        $correction = trim((string) ($reading['correction'] ?? ''));
+        $again = (int) ($reading['reads'] ?? 0) >= 1;
         // Albums, the /add flow, an explicit refusal to search and the setting «всегда
         // ручная загрузка» are the operator's own product without reading the photo.
         // Everything else is read first, and the reader says what the operator wants;
         // the caption stays their request, not extracted evidence.
-        if (data_get($update->payload, '_manual_product_upload')
+        if (! $again && $correction === '' && (data_get($update->payload, '_manual_product_upload')
             || data_get($update->payload, 'message.media_group_id')
-            || $detector->photoIsManualBeforeReading($caption, $routing)) {
+            || $detector->photoIsManualBeforeReading($caption, $routing))) {
             app(TelegramProductUploadIntake::class)->queue($update);
 
             return;
@@ -84,7 +90,7 @@ class TranscribeTelegramPhoto implements ShouldQueue
                 new VisionCallContext($update->id,
                     timeoutSeconds: (int) config('services.product_image_vision.timeout', 45),
                     useSearchBudget: false),
-                self::prompt($caption),
+                self::prompt($caption, $correction, $again),
             );
             $text = trim((string) ($data['text'] ?? ''));
             throw_if($text === '', RuntimeException::class, 'Photo text extraction is empty.');
@@ -92,7 +98,7 @@ class TranscribeTelegramPhoto implements ShouldQueue
             // operator wants - a search or their own product to upload. Their explicit
             // words and the setting outrank its verdict; without one, a picture with no
             // product code is their own item (the colleague's #140 was a label: a search).
-            if (self::uploadsOwnProduct($caption, $data, $routing, $detector)) {
+            if (! $again && $correction === '' && self::uploadsOwnProduct($caption, $data, $routing, $detector)) {
                 $reason = trim((string) ($data['intent_reason'] ?? ''));
                 $telegram->sendMessage($update->chat_id, '📷 Принял как свой товар'.($reason !== '' ? ": {$reason}" : '.')
                     ."\nЕсли его нужно найти в интернете, отправьте фото ещё раз с подписью «найди».");
@@ -104,6 +110,10 @@ class TranscribeTelegramPhoto implements ShouldQueue
             if ($caption !== '') {
                 $text = "{$text}\n{$caption}";
             }
+            // The operator's correction is their own word, kept beside the reading like the caption.
+            if ($correction !== '') {
+                $text = "{$text}\nИсправление оператора: {$correction}";
+            }
 
             $update->refresh();
             $payload = is_array($update->payload) ? $update->payload : [];
@@ -111,6 +121,16 @@ class TranscribeTelegramPhoto implements ShouldQueue
                 'sha256' => hash('sha256', $bytes),
                 'file_unique_id' => is_array($largest) ? ($largest['file_unique_id'] ?? null) : null,
             ]);
+            // Asked once more, the operator sees the new reading whatever the setting: they asked for it.
+            $check = app(PhotoReadingCheck::class);
+            if ($correction === '' && ($again || $check->wanted($data))) {
+                $note = ! $again ? null : (trim((string) ($reading['text'] ?? '')) === $text
+                    ? '🔁 Прочитал ещё раз — вышло то же самое.'
+                    : '🔁 Прочитал ещё раз — теперь иначе.');
+                $check->ask($update, $data, $text, $payload, $note);
+
+                return;
+            }
             $saved = TelegramUpdate::query()->whereKey($update->id)->whereNull('processed_at')
                 ->where('status', '!=', 'cancelled')
                 ->update(['text' => $text, 'status' => 'transcribed', 'error' => null,
@@ -118,11 +138,29 @@ class TranscribeTelegramPhoto implements ShouldQueue
             if (! $saved) {
                 return;
             }
-            $label = ($data['has_text'] ?? false) ? '📷 Распознан текст на фото' : '📷 Описание фото';
+            $label = match (true) {
+                $correction !== '' => '✏️ Исправлено, ищу',
+                (bool) ($data['has_text'] ?? false) => '📷 Распознан текст на фото',
+                default => '📷 Описание фото',
+            };
             $telegram->sendMessage($update->chat_id, "{$label}:\n{$text}");
             ProcessTelegramMessage::dispatch($update->id)->afterCommit();
         } catch (Throwable $exception) {
             if ($update->refresh()->processed_at || $update->status === 'cancelled') {
+                return;
+            }
+            // A correction is the operator's own word: if the photo cannot be read again, the
+            // search goes on what was read before, with the correction - the request is not lost.
+            if ($correction !== '' && trim((string) ($reading['text'] ?? '')) !== '') {
+                report($exception);
+                $text = trim((string) $reading['text'])."\nИсправление оператора: {$correction}";
+                $saved = TelegramUpdate::query()->whereKey($update->id)->whereNull('processed_at')
+                    ->where('status', '!=', 'cancelled')->update(['text' => $text, 'status' => 'transcribed', 'error' => null]);
+                if ($saved) {
+                    $telegram->sendMessage($update->chat_id, "✏️ Исправление принято, ищу (фото ещё раз прочитать не удалось):\n{$text}");
+                    ProcessTelegramMessage::dispatch($update->id)->afterCommit();
+                }
+
                 return;
             }
             $presented = $errors->present($exception);
@@ -144,14 +182,27 @@ class TranscribeTelegramPhoto implements ShouldQueue
         }
     }
 
-    /** The reader's task, with the operator's caption quoted as their words, apart from what the label says. */
-    private static function prompt(string $caption): string
+    /**
+     * The reader's task, with the operator's caption quoted as their words, apart from what the
+     * label says; a second reading asks for every character anew, a correction is the operator's
+     * own comparison with the label.
+     */
+    private static function prompt(string $caption, string $correction = '', bool $again = false): string
     {
-        $task = 'Extract product-identifying text or describe the visible product, and say what the operator wants (operator_intent).';
+        $lines = ['Extract product-identifying text or describe the visible product, and say what the operator wants (operator_intent).',
+            $caption === ''
+                ? 'The operator sent this photo without a caption.'
+                : "The operator's caption to this photo, their own words and not label evidence: «".mb_substr($caption, 0, 1000).'»'];
+        if ($again) {
+            $lines[] = 'The operator asked to read this photo once more: read every character of every code anew, do not trust a first '
+                .'impression, and list in uncertain_characters every character you cannot tell apart (0/O, 1/I/l, 4/A, 5/S, 8/B, 6/G).';
+        }
+        if ($correction !== '') {
+            $lines[] = 'The operator compared the reading with the label and corrected it, in their own words: «'.mb_substr($correction, 0, 1000)
+                .'». Where the correction differs from what you read, the operator is right: use their characters in the identifiers.';
+        }
 
-        return $caption === ''
-            ? "{$task}\nThe operator sent this photo without a caption."
-            : "{$task}\nThe operator's caption to this photo, their own words and not label evidence: «".mb_substr($caption, 0, 1000).'»';
+        return implode("\n", $lines);
     }
 
     /**

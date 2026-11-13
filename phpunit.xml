@@ -28,6 +28,9 @@
         <env name="DB_URL" value="" force="true"/>
         <env name="MAIL_MAILER" value="array"/>
         <env name="QUEUE_CONNECTION" value="sync"/>
+        <!-- A photo's reading goes straight to the search in tests about routing and searching;
+             PhotoReadingCheckTest sets the operator's check itself. -->
+        <env name="TELEGRAM_PHOTO_READING_CHECK" value="never"/>
         <env name="SESSION_DRIVER" value="array"/>
         <env name="PRODUCT_IMAGE_BLIND_LABEL_READ" value="false" force="true"/>
         <env name="PULSE_ENABLED" value="false"/>

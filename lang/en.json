@@ -816,5 +816,10 @@
     "✅ Поставлено в группу «:group».": "✅ Put into the group «:group».",
     "Аудит характеристик": "Characteristic audit",
     "Модель прочитала все характеристики с их значениями и товарами. Бесспорное уже отмечено, сомнительное помечено ⚠ — решите сами. Объединение переносит значения и делает старое название другим названием оставшейся характеристики; группа ставится только характеристикам без группы. Без галочки — значит «нет»: это больше не предложу.": "The model read every characteristic with its values and products. What is beyond doubt is ticked, doubtful ones are marked ⚠: decide yourself. A merge moves the values and keeps the old name as another name of the characteristic that stays; a group is set only on characteristics without one. Unticked means «no»: it will not be proposed again.",
-    "сомнительно": "doubtful"
+    "сомнительно": "doubtful",
+    "Проверка прочитанного с фото": "Check what was read on a photo",
+    "Всегда спрашивать, верно ли прочитано": "Always ask whether it was read right",
+    "Только когда бот сам не уверен": "Only when the bot itself is unsure",
+    "Не спрашивать, сразу искать": "Do not ask, search at once",
+    "Перед поиском бот присылает прочитанный с фото текст с кнопками: верно, исправить, прочитать ещё раз, отмена. Читалка бывает уверена и неправа: один неверный символ в коде стоит двадцати минут поиска чужого товара, поэтому по умолчанию — всегда.": "Before the search the bot sends what it read on the photo with buttons: right, correct, read once more, cancel. The reader can be sure and wrong: one wrong character in a code costs twenty minutes of searching for another product, so the default is always."
 }

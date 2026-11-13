@@ -816,5 +816,10 @@
     "✅ Поставлено в группу «:group».": "✅ Zařazeno do skupiny «:group».",
     "Аудит характеристик": "Audit vlastností",
     "Модель прочитала все характеристики с их значениями и товарами. Бесспорное уже отмечено, сомнительное помечено ⚠ — решите сами. Объединение переносит значения и делает старое название другим названием оставшейся характеристики; группа ставится только характеристикам без группы. Без галочки — значит «нет»: это больше не предложу.": "Model přečetl všechny vlastnosti s jejich hodnotami a produkty. Nesporné je zaškrtnuto, sporné označeno ⚠: rozhodněte sami. Sloučení přesune hodnoty a starý název ponechá jako další název zbývající vlastnosti; skupina se nastaví jen vlastnostem bez skupiny. Bez zaškrtnutí znamená «ne»: znovu to nenavrhnu.",
-    "сомнительно": "sporné"
+    "сомнительно": "sporné",
+    "Проверка прочитанного с фото": "Kontrola přečteného z fotky",
+    "Всегда спрашивать, верно ли прочитано": "Vždy se zeptat, zda je přečteno správně",
+    "Только когда бот сам не уверен": "Jen když si bot sám není jistý",
+    "Не спрашивать, сразу искать": "Neptat se, hned hledat",
+    "Перед поиском бот присылает прочитанный с фото текст с кнопками: верно, исправить, прочитать ещё раз, отмена. Читалка бывает уверена и неправа: один неверный символ в коде стоит двадцати минут поиска чужого товара, поэтому по умолчанию — всегда.": "Před hledáním bot pošle text přečtený z fotky s tlačítky: správně, opravit, přečíst znovu, zrušit. Čtečka může být jistá a mýlit se: jeden špatný znak v kódu stojí dvacet minut hledání cizího produktu, proto je výchozí vždy."
 }

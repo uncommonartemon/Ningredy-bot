@@ -34,6 +34,8 @@ class ManageSearchSettings implements Tool
         'stronger_model_enabled' => ['boolean', 'Более сильная модель для сложных шагов.'],
         'photo_caption_routing' => ['in:label,manual,search', 'Фото с подписью без слова «найди»: label — бот читает фото и сам решает по подписи и снимку (код или модель — поиск, свой товар — ручная загрузка); '
             .'manual — всегда ручная загрузка; search — всегда поиск. Явное «не ищи» или /add всегда означает свой товар.'],
+        'photo_reading_check' => ['in:always,unsure,never', 'Проверка прочитанного с фото перед поиском: always — всегда спрашивать оператора кнопками (верно, исправить, '
+            .'прочитать ещё раз, отмена); unsure — только когда читалка сама не уверена в символах; never — не спрашивать, сразу искать.'],
         'icecat_enabled' => ['boolean', 'База Icecat: выключена — бот не спрашивает её и не берёт страницы и фото с её сайта, поиск идёт по остальным источникам.'],
         'upcitemdb_enabled' => ['boolean', 'База штрихкодов UPCitemdb: выключена — бот не спрашивает её.'],
     ];
@@ -43,7 +45,7 @@ class ManageSearchSettings implements Tool
     public function description(): Stringable|string
     {
         return 'Search settings and banned sites, from the chat. action=show returns the current values and every banned site; '
-            .'action=set changes one setting (max_search_cost_usd, search_max_seconds, product_search_country, fallback_sources_enabled, stronger_model_enabled, photo_caption_routing, icecat_enabled, upcitemdb_enabled); '
+            .'action=set changes one setting (max_search_cost_usd, search_max_seconds, product_search_country, fallback_sources_enabled, stronger_model_enabled, photo_caption_routing, photo_reading_check, icecat_enabled, upcitemdb_enabled); '
             .'action=block_site bans a site from every future search (no page, photo or fact from it), action=unblock_site lifts the ban. '
             .'API keys and logins are not here: they are changed only in the admin («Настройки → Сервисы», «Настройки → AI»).';
     }
@@ -74,6 +76,7 @@ class ManageSearchSettings implements Tool
             'fallback_sources_enabled' => $settings->fallbackSourcesEnabled(),
             'stronger_model_enabled' => $settings->strongerModelEnabled(),
             'photo_caption_routing' => $settings->photoCaptionRouting(),
+            'photo_reading_check' => $settings->photoReadingCheck(),
             'icecat_enabled' => CodeDatabases::enabled('icecat'),
             'upcitemdb_enabled' => CodeDatabases::enabled('upcitemdb'),
         ], 'meaning' => array_map(fn (array $setting): string => $setting[1], self::SETTINGS),
@@ -113,6 +116,7 @@ class ManageSearchSettings implements Tool
                     'fallback_sources_enabled' => $settings->saveFallbackSourcesEnabled(filter_var($value, FILTER_VALIDATE_BOOLEAN)),
                     'stronger_model_enabled' => $settings->saveStrongerModelEnabled(filter_var($value, FILTER_VALIDATE_BOOLEAN)),
                     'photo_caption_routing' => $settings->savePhotoCaptionRouting((string) $value),
+                    'photo_reading_check' => $settings->savePhotoReadingCheck((string) $value),
                     'icecat_enabled' => CodeDatabases::setEnabled('icecat', filter_var($value, FILTER_VALIDATE_BOOLEAN)),
                     'upcitemdb_enabled' => CodeDatabases::setEnabled('upcitemdb', filter_var($value, FILTER_VALIDATE_BOOLEAN)),
                 };

@@ -332,6 +332,42 @@ class AiSettings
         AppSetting::put('telegram.photo_caption_routing', in_array($routing, self::PHOTO_CAPTION_ROUTINGS, true) ? $routing : null);
     }
 
+    /** The operator checks every reading of a photo before the search (decision of 2026-11-13). */
+    public const string PHOTO_CHECK_ALWAYS = 'always';
+
+    /** Only a reading the reader itself doubts: a character it marked or a confidence under 0.8. */
+    public const string PHOTO_CHECK_UNSURE = 'unsure';
+
+    /** No question: the reading goes straight to the search, as before module 107. */
+    public const string PHOTO_CHECK_NEVER = 'never';
+
+    public const array PHOTO_CHECKS = [self::PHOTO_CHECK_ALWAYS, self::PHOTO_CHECK_UNSURE, self::PHOTO_CHECK_NEVER];
+
+    /**
+     * When the operator is asked whether a photo was read right. «Always» by default: the
+     * colleague's #333 was read with one wrong code at confidence 0.99 and no doubtful
+     * character, so asking only when the reader doubts would have missed it.
+     */
+    public function photoReadingCheck(): string
+    {
+        try {
+            $value = trim((string) AppSetting::valueFor('telegram.photo_reading_check'));
+        } catch (Throwable) {
+            $value = '';
+        }
+        if (in_array($value, self::PHOTO_CHECKS, true)) {
+            return $value;
+        }
+        $default = (string) config('services.telegram_photo.reading_check', self::PHOTO_CHECK_ALWAYS);
+
+        return in_array($default, self::PHOTO_CHECKS, true) ? $default : self::PHOTO_CHECK_ALWAYS;
+    }
+
+    public function savePhotoReadingCheck(?string $check): void
+    {
+        AppSetting::put('telegram.photo_reading_check', in_array($check, self::PHOTO_CHECKS, true) ? $check : null);
+    }
+
     /**
      * On by default: a fast literal text match (ProductIdentityMatcher)
      * rejects an exact source whose page wording lists the same model/SKU in
