@@ -806,5 +806,15 @@
     "«:name» уже называет характеристику «:other».": "«:name» already names the characteristic «:other».",
     "также: :names": "also: :names",
     "Характеристика для всех товаров": "Characteristic for every product",
-    "Открыть характеристику": "Open the characteristic"
+    "Открыть характеристику": "Open the characteristic",
+    "У :count товаров есть обе, и значения разные.": "On :count products both are present with different values.",
+    "Уже решено.": "Already decided.",
+    "Уже не актуально: характеристика изменилась после вопроса.": "No longer relevant: the characteristic changed after the question.",
+    "Оставлены раздельно. Больше не спрошу.": "Kept apart. I will not ask again.",
+    "Не трогаю. Больше не спрошу.": "Left as is. I will not ask again.",
+    "✅ Объединено: :from → :into, перенесено значений: :moved.": "✅ Merged: :from → :into, values moved: :moved.",
+    "✅ Поставлено в группу «:group».": "✅ Put into the group «:group».",
+    "Аудит характеристик": "Characteristic audit",
+    "Модель прочитала все характеристики с их значениями и товарами. Бесспорное уже отмечено, сомнительное помечено ⚠ — решите сами. Объединение переносит значения и делает старое название другим названием оставшейся характеристики; группа ставится только характеристикам без группы. Без галочки — значит «нет»: это больше не предложу.": "The model read every characteristic with its values and products. What is beyond doubt is ticked, doubtful ones are marked ⚠: decide yourself. A merge moves the values and keeps the old name as another name of the characteristic that stays; a group is set only on characteristics without one. Unticked means «no»: it will not be proposed again.",
+    "сомнительно": "doubtful"
 }

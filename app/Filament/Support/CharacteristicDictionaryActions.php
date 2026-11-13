@@ -4,6 +4,7 @@ namespace App\Filament\Support;
 
 use App\Filament\Schemas\RelatedCatalogForms;
 use App\Models\AttributeDefinition;
+use App\Models\CharacteristicQuestion;
 use App\Services\Catalog\AttributeDictionary;
 use App\Services\Catalog\AttributeKeeper;
 use Filament\Actions\Action;
@@ -53,15 +54,19 @@ final class CharacteristicDictionaryActions
 
     public static function review(): Action
     {
-        return Action::make('reviewDictionary')->label(__('Проверить словарь'))->icon('heroicon-o-sparkles')->color('gray')
-            ->modalHeading(__('Проверка словаря характеристик'))
-            ->modalDescription(__('Модель прочитала весь словарь. Отметьте, что применить: объединение переносит значения и делает старое название другим названием оставшейся характеристики; группа ставится только характеристикам без группы.'))
+        // The same audit as /audit in Telegram (decision of 2026-11-13): what the model is sure of is
+        // ticked, what it doubts is marked and left to the operator; an unticked proposal is a «no».
+        $sure = fn (array $items): array => array_keys(array_filter($items, fn (array $item): bool => ($item['certainty'] ?? null) === 'sure'));
+
+        return Action::make('reviewDictionary')->label(__('Аудит характеристик'))->icon('heroicon-o-sparkles')->color('gray')
+            ->modalHeading(__('Аудит характеристик'))
+            ->modalDescription(__('Модель прочитала все характеристики с их значениями и товарами. Бесспорное уже отмечено, сомнительное помечено ⚠ — решите сами. Объединение переносит значения и делает старое название другим названием оставшейся характеристики; группа ставится только характеристикам без группы. Без галочки — значит «нет»: это больше не предложу.'))
             ->modalSubmitActionLabel(__('Применить отмеченное'))
-            ->mountUsing(function (Schema $schema): void {
+            ->mountUsing(function (Schema $schema) use ($sure): void {
                 try {
                     $review = app(AttributeKeeper::class)->review();
                     $schema->fill(['review' => json_encode($review, JSON_UNESCAPED_UNICODE), 'error' => null,
-                        'merges' => array_keys($review['merges']), 'groups' => array_keys($review['groups'])]);
+                        'merges' => $sure($review['merges']), 'groups' => $sure($review['groups'])]);
                 } catch (Throwable $exception) {
                     report($exception);
                     $schema->fill(['review' => json_encode(['merges' => [], 'groups' => []]), 'merges' => [], 'groups' => [],
@@ -74,11 +79,11 @@ final class CharacteristicDictionaryActions
                 Text::make(fn (Get $get): string => (string) ($get('error') ?: __('Модель не нашла дублей и характеристик, которым нужна группа.')))
                     ->visible(fn (Get $get): bool => filled($get('error')) || self::proposals($get, 'merges') === [] && self::proposals($get, 'groups') === []),
                 CheckboxList::make('merges')->label(__('Объединить'))->bulkToggleable()
-                    ->options(fn (Get $get): array => array_map(fn (array $merge): string => $merge['from'].' → '.$merge['into'].' — '.$merge['reason'],
+                    ->options(fn (Get $get): array => array_map(fn (array $merge): string => self::doubt($merge).$merge['from'].' → '.$merge['into'].' — '.$merge['reason'],
                         self::proposals($get, 'merges')))
                     ->visible(fn (Get $get): bool => self::proposals($get, 'merges') !== []),
                 CheckboxList::make('groups')->label(__('Поставить в группу'))->bulkToggleable()
-                    ->options(fn (Get $get): array => array_map(fn (array $group): string => $group['key'].' → '.$group['group']['name'].' — '.$group['reason'],
+                    ->options(fn (Get $get): array => array_map(fn (array $group): string => self::doubt($group).$group['key'].' → '.$group['group']['name'].' — '.$group['reason'],
                         self::proposals($get, 'groups')))
                     ->visible(fn (Get $get): bool => self::proposals($get, 'groups') !== []),
             ])
@@ -87,12 +92,28 @@ final class CharacteristicDictionaryActions
                 $picked = fn (string $kind): array => array_values(array_intersect_key((array) ($review[$kind] ?? []),
                     array_flip(array_map('intval', (array) ($data[$kind] ?? [])))));
                 $result = app(AttributeKeeper::class)->apply($picked('merges'), $picked('groups'));
+                // What was left unticked is a «no», kept like a «no» pressed in Telegram.
+                foreach ([CharacteristicQuestion::MERGE => 'merges', CharacteristicQuestion::GROUP => 'groups'] as $kind => $field) {
+                    $ticked = array_flip(array_map('intval', (array) ($data[$field] ?? [])));
+                    foreach ((array) ($review[$field] ?? []) as $index => $proposal) {
+                        if (! isset($ticked[$index])) {
+                            unset($proposal['certainty']);
+                            CharacteristicQuestion::query()->create(['kind' => $kind, 'payload' => $proposal, 'status' => 'declined',
+                                'answered_by' => (string) auth()->user()?->name, 'answered_at' => now()]);
+                        }
+                    }
+                }
                 $lines = array_map(fn (array $merge): string => $merge['from'].' → '.$merge['into'].': '.self::mergeLine($merge), $result['merged']);
                 $lines[] = __('Поставлено в группы: :count.', ['count' => $result['grouped']]);
                 array_push($lines, ...array_map(fn (string $skipped): string => __('Не сделано: :what', ['what' => $skipped]), $result['skipped']));
                 Notification::make()->title(__('Словарь обновлён'))->body(implode("\n", $lines))
                     ->{$result['skipped'] === [] ? 'success' : 'warning'}()->send();
             });
+    }
+
+    private static function doubt(array $proposal): string
+    {
+        return ($proposal['certainty'] ?? null) === 'sure' ? '' : '⚠ '.__('сомнительно').': ';
     }
 
     /** @return array<int, array<string, mixed>> */

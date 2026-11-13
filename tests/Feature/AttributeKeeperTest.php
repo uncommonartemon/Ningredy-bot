@@ -139,7 +139,9 @@ class AttributeKeeperTest extends TestCase
         $page = Livewire::test(ListAttributeDefinitions::class)->mountAction('reviewDictionary');
         // Two built-in keys are never offered for a merge; a characteristic going away gets no group.
         $review = json_decode((string) $page->get('mountedActions.0.data.review'), true);
-        $this->assertSame([['from' => 'fans', 'into' => 'cooling_fan_count', 'reason' => 'Одно и то же.']], $review['merges']);
+        // Without a certainty the model gave, a proposal counts as doubtful: nothing is ticked for the operator.
+        $this->assertSame([['from' => 'fans', 'into' => 'cooling_fan_count', 'certainty' => 'doubtful', 'reason' => 'Одно и то же.']], $review['merges']);
+        $this->assertSame([], $page->get('mountedActions.0.data.merges'));
         $this->assertSame(['cooling_noise', 'cooling_fan_count'], array_column($review['groups'], 'key'));
         $page->setActionData(['merges' => [0], 'groups' => [0]])
             ->callMountedAction()

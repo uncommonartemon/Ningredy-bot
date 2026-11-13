@@ -806,5 +806,15 @@
     "«:name» уже называет характеристику «:other».": "«:name» už pojmenovává vlastnost «:other».",
     "также: :names": "také: :names",
     "Характеристика для всех товаров": "Vlastnost pro všechny produkty",
-    "Открыть характеристику": "Otevřít vlastnost"
+    "Открыть характеристику": "Otevřít vlastnost",
+    "У :count товаров есть обе, и значения разные.": "U :count produktů jsou obě a hodnoty se liší.",
+    "Уже решено.": "Už rozhodnuto.",
+    "Уже не актуально: характеристика изменилась после вопроса.": "Už neplatí: vlastnost se po otázce změnila.",
+    "Оставлены раздельно. Больше не спрошу.": "Ponechány odděleně. Už se nezeptám.",
+    "Не трогаю. Больше не спрошу.": "Nechávám být. Už se nezeptám.",
+    "✅ Объединено: :from → :into, перенесено значений: :moved.": "✅ Sloučeno: :from → :into, přesunuto hodnot: :moved.",
+    "✅ Поставлено в группу «:group».": "✅ Zařazeno do skupiny «:group».",
+    "Аудит характеристик": "Audit vlastností",
+    "Модель прочитала все характеристики с их значениями и товарами. Бесспорное уже отмечено, сомнительное помечено ⚠ — решите сами. Объединение переносит значения и делает старое название другим названием оставшейся характеристики; группа ставится только характеристикам без группы. Без галочки — значит «нет»: это больше не предложу.": "Model přečetl všechny vlastnosti s jejich hodnotami a produkty. Nesporné je zaškrtnuto, sporné označeno ⚠: rozhodněte sami. Sloučení přesune hodnoty a starý název ponechá jako další název zbývající vlastnosti; skupina se nastaví jen vlastnostem bez skupiny. Bez zaškrtnutí znamená «ne»: znovu to nenavrhnu.",
+    "сомнительно": "sporné"
 }

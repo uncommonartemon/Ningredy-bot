@@ -8,6 +8,7 @@ use App\Models\AiRun;
 use App\Models\AttributeDefinition;
 use App\Models\AttributeGroup;
 use App\Models\Category;
+use App\Models\CharacteristicQuestion;
 use App\Services\Ai\AiSettings;
 use App\Services\Products\AiAttributeGroups;
 use Illuminate\Support\Facades\DB;
@@ -79,17 +80,21 @@ class AttributeKeeper
      */
     public function review(): array
     {
+        $declined = CharacteristicQuestion::declined();
         $answer = $this->ask(new AttributeDictionaryReviewAgent, [
             'dictionary' => $this->dictionary->entries(),
             'groups' => AttributeGroup::query()->orderBy('id')->get(['id', 'name'])->toArray(),
-        ], 'attribute_dictionary_review', null, max(120, (int) config('services.attribute_dictionary.timeout', 60)), true);
+            'declined_by_the_operator' => CharacteristicQuestion::query()->where('status', 'declined')->get()
+                ->map(fn (CharacteristicQuestion $question): array => ['kind' => $question->kind] + $question->payload)->all(),
+        ], 'attribute_dictionary_review', null, max(300, (int) config('services.attribute_dictionary.timeout', 60)), true);
         $keys = $this->dictionary->all()->pluck('key')->flip();
         $protected = array_flip(AttributeDictionary::protectedKeys());
         $target = [];
-        $reasons = [];
+        $notes = [];
         foreach ((array) ($answer['merges'] ?? []) as $merge) {
             [$from, $into] = [(string) ($merge['from'] ?? ''), (string) ($merge['into'] ?? '')];
-            if (! $keys->has($from) || ! $keys->has($into) || $from === $into) {
+            if (! $keys->has($from) || ! $keys->has($into) || $from === $into
+                || isset($declined[CharacteristicQuestion::identity(CharacteristicQuestion::MERGE, ['from' => $from, 'into' => $into])])) {
                 continue;
             }
             if (isset($protected[$from])) {
@@ -106,23 +111,36 @@ class AttributeKeeper
                 continue;
             }
             $target[$from] = $into;
-            $reasons[$from] = mb_substr((string) ($merge['reason'] ?? ''), 0, 300);
+            $notes[$from] = ['reason' => mb_substr((string) ($merge['reason'] ?? ''), 0, 300),
+                'certainty' => ($merge['certainty'] ?? null) === 'sure' ? 'sure' : 'doubtful'];
         }
         $merges = [];
         foreach ($target as $from => $into) {
+            $certainty = $notes[$from]['certainty'];
             while (isset($target[$into])) {
+                // A chain is as sure as its least sure link.
+                $certainty = $notes[$into]['certainty'] === 'sure' ? $certainty : 'doubtful';
                 $into = $target[$into];
             }
-            $merges[] = ['from' => (string) $from, 'into' => (string) $into, 'reason' => $reasons[$from]];
+            $reason = $notes[$from]['reason'];
+            // Values that differ on one product say these were two properties: a person decides.
+            if ($certainty === 'sure' && ($differ = $this->dictionary->conflicts((string) $from, (string) $into)) > 0) {
+                $certainty = 'doubtful';
+                $reason = trim($reason.' '.__('У :count товаров есть обе, и значения разные.', ['count' => $differ]));
+            }
+            $merges[] = ['from' => (string) $from, 'into' => (string) $into, 'certainty' => $certainty, 'reason' => $reason];
         }
         $groups = [];
         foreach ((array) ($answer['groups'] ?? []) as $proposal) {
             $definition = $this->dictionary->all()->firstWhere('key', (string) ($proposal['key'] ?? ''));
             $group = AiAttributeGroups::normalize($proposal['group'] ?? null);
-            if ($definition === null || $definition->attribute_group_id !== null || $group === null || isset($target[$definition->key])) {
+            if ($definition === null || $definition->attribute_group_id !== null || $group === null || isset($target[$definition->key])
+                || isset($declined[CharacteristicQuestion::identity(CharacteristicQuestion::GROUP, ['key' => $definition->key, 'group' => $group])])) {
                 continue;
             }
-            $groups[$definition->key] = ['key' => $definition->key, 'group' => $group, 'reason' => mb_substr((string) ($proposal['reason'] ?? ''), 0, 300)];
+            $groups[$definition->key] = ['key' => $definition->key, 'group' => $group,
+                'certainty' => ($proposal['certainty'] ?? null) === 'sure' ? 'sure' : 'doubtful',
+                'reason' => mb_substr((string) ($proposal['reason'] ?? ''), 0, 300)];
         }
 
         return ['merges' => $merges, 'groups' => array_values($groups)];

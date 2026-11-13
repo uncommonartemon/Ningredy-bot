@@ -12,9 +12,11 @@ use App\Jobs\ProcessTelegramMessage;
 use App\Jobs\ProposeTelegramDraftEdit;
 use App\Jobs\TrainDraftGalleryRecipe;
 use App\Models\AiOperation;
+use App\Models\CharacteristicQuestion;
 use App\Models\ProductDraft;
 use App\Models\ProductDraftMedia;
 use App\Models\TelegramUpdate;
+use App\Services\Catalog\CharacteristicAudit;
 use App\Services\Products\ProductDraftWorkflow;
 use App\Services\Products\ProductGalleryRecipeRouter;
 use App\Services\Products\ProductSourcePriority;
@@ -50,6 +52,19 @@ class TelegramCallbackHandler
         $data = (string) data_get($callback, 'data');
         $chatId = (string) data_get($callback, 'message.chat.id');
         $messageId = data_get($callback, 'message.message_id');
+
+        // An answer to a doubtful proposal of the characteristic audit.
+        if (preg_match('/^chq:(y|n):(\d+)$/', $data, $question) === 1) {
+            $audit = app(CharacteristicAudit::class);
+            $asked = CharacteristicQuestion::query()->find((int) $question[2]);
+            $result = $asked === null ? 'Этого вопроса уже нет.' : $audit->answer($asked, $question[1] === 'y', (string) $update->telegram_user_id);
+            if ($asked !== null && is_numeric($messageId)) {
+                $this->telegram->editMessageText($chatId, (int) $messageId, $audit->questionText($asked)."\n\n".$result);
+            }
+            $this->answerAndClose($callbackId, $update, mb_substr($result, 0, 190));
+
+            return;
+        }
 
         if (str_starts_with($data, 'product:')) {
             $this->clearManualCreate($chatId, (string) $update->telegram_user_id);

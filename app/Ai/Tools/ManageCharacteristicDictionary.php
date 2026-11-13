@@ -3,6 +3,7 @@
 namespace App\Ai\Tools;
 
 use App\Ai\Tools\Concerns\RecordsOperations;
+use App\Jobs\AuditCharacteristics;
 use App\Models\AttributeDefinition;
 use App\Models\TelegramUpdate;
 use App\Services\Catalog\AttributeDictionary;
@@ -27,7 +28,9 @@ class ManageCharacteristicDictionary implements Tool
 
     public function description(): Stringable|string
     {
-        return 'The characteristic dictionary keeps one characteristic per meaning. action=merge with from_key and into_key moves every '
+        return 'The characteristic dictionary keeps one characteristic per meaning. action=audit («аудит характеристик», «наведи '
+            .'порядок в характеристиках») starts the audit: the model reads every characteristic with its values and products, '
+            .'fixes what it is sure of and sends the doubtful cases to this chat with buttons. action=merge with from_key and into_key moves every '
             .'value of from_key into into_key (a value the product already has under into_key stays), keeps from_key and its names as '
             .'other names of into_key so the bot never creates it again, and removes from_key; a built-in key always stays, so the '
             .'merge may go the other way (the result says swapped). Merge when the operator says two characteristics are one. '
@@ -42,6 +45,12 @@ class ManageCharacteristicDictionary implements Tool
         try {
             app(TelegramDatabaseOperator::class)->assertAuthorized($this->update);
             $action = (string) ($request['action'] ?? '');
+            if ($action === 'audit') {
+                AuditCharacteristics::dispatch((string) $this->update->chat_id);
+
+                return $this->json(['ok' => true, 'started' => true,
+                    'to_do' => 'The audit runs now. Tell the operator in one sentence that the bot sends the result here itself: what was fixed at once and buttons for each doubtful case.']);
+            }
             if ($action === 'review') {
                 return $this->json(['ok' => true, ...app(AttributeKeeper::class)->review(),
                     'to_do' => 'Nothing is applied yet. Show these proposals to the operator and apply only what they confirm.']);
@@ -74,7 +83,7 @@ class ManageCharacteristicDictionary implements Tool
     public function schema(JsonSchema $schema): array
     {
         return [
-            'action' => $schema->string()->enum(['merge', 'review', 'apply'])->required(),
+            'action' => $schema->string()->enum(['audit', 'merge', 'review', 'apply'])->required(),
             'from_key' => $schema->string()->max(255),
             'into_key' => $schema->string()->max(255),
             'proposals_json' => $schema->string()->max(100000),

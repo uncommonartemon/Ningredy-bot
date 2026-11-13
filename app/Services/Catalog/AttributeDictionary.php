@@ -7,6 +7,7 @@ use App\Models\AttributeValue;
 use App\Models\Product;
 use App\Services\Products\ManualProductAttributes;
 use Database\Seeders\StarterCatalogSeeder;
+use Illuminate\Database\Query\Builder;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use RuntimeException;
@@ -187,27 +188,115 @@ class AttributeDictionary
      */
     public function entries(): array
     {
-        $values = AttributeValue::query()->selectRaw('attribute_definition_id, COUNT(*) as used, MIN(value) as low, MAX(value) as high')
-            ->groupBy('attribute_definition_id')->get()->keyBy('attribute_definition_id');
+        // Its values as they are written, the most frequent first, and how many products carry it:
+        // a model that sees only a name cannot tell a module's capacity from a drive's.
+        $values = DB::table('attribute_values')->selectRaw('attribute_definition_id, value, unit, COUNT(*) as n')
+            ->groupBy('attribute_definition_id', 'value', 'unit')->get()->groupBy('attribute_definition_id');
+        $products = $this->ownedValues()->selectRaw('attribute_values.attribute_definition_id as definition, COUNT(DISTINCT '.self::OWNER.') as n')
+            ->groupBy('attribute_values.attribute_definition_id')->pluck('n', 'definition');
         $categories = DB::table('attribute_definition_category')->join('categories', 'categories.id', '=', 'attribute_definition_category.category_id')
             ->get(['attribute_definition_category.attribute_definition_id as definition', 'categories.slug'])->groupBy('definition');
 
-        return $this->all()->map(function (AttributeDefinition $definition) use ($values, $categories): array {
-            $usage = $values->get($definition->id);
-            $examples = array_values(array_unique(array_filter([
-                mb_substr((string) ($usage->low ?? ''), 0, 60), mb_substr((string) ($usage->high ?? ''), 0, 60)])));
+        return $this->all()->map(function (AttributeDefinition $definition) use ($values, $products, $categories): array {
+            $written = $values->get($definition->id, collect());
 
             return array_filter([
                 'key' => $definition->key,
                 'name' => (string) ($definition->translations['en'] ?? $definition->label),
                 'group' => $definition->group?->name,
                 'unit' => $definition->default_unit,
-                'examples' => $examples,
-                'used' => (int) ($usage->used ?? 0),
+                'values' => $written->sortByDesc('n')->take(8)
+                    ->map(fn (object $row): string => mb_substr(trim($row->value.' '.($row->unit ?? '')), 0, 60).' ×'.$row->n)->values()->all(),
+                'used' => (int) $written->sum('n'),
+                'products' => (int) ($products[$definition->id] ?? 0),
                 'categories' => $categories->get($definition->id)?->pluck('slug')->unique()->values()->all(),
                 'also' => $definition->aliases,
             ], fn (mixed $value): bool => $value !== null && $value !== [] && $value !== '');
         })->values()->all();
+    }
+
+    /** The product a value belongs to: a configuration's value belongs to its product. */
+    private const string OWNER = 'COALESCE(attribute_values.product_id, product_variants.product_id)';
+
+    private function ownedValues(): Builder
+    {
+        return DB::table('attribute_values')
+            ->leftJoin('product_variants', 'product_variants.id', '=', 'attribute_values.product_variant_id')
+            ->join('attribute_definitions', 'attribute_definitions.id', '=', 'attribute_values.attribute_definition_id');
+    }
+
+    /**
+     * Everything about one characteristic: every value as written with its count, the products
+     * that carry it, its categories, and which characteristics stand on the same products.
+     *
+     * @return array<string, mixed>|null
+     */
+    public function detail(string $key): ?array
+    {
+        $definition = $this->known($key);
+        if ($definition === null) {
+            return null;
+        }
+        $base = fn (): Builder => $this->ownedValues()->where('attribute_values.attribute_definition_id', $definition->id);
+        $productIds = $base()->selectRaw('DISTINCT '.self::OWNER.' as id')->pluck('id')->filter()->values();
+        $links = DB::table('attribute_definition_category')->join('categories', 'categories.id', '=', 'attribute_definition_category.category_id')
+            ->where('attribute_definition_id', $definition->id)->get(['categories.slug', 'attribute_definition_category.is_required']);
+
+        return [
+            'key' => $definition->key,
+            'label' => $definition->label,
+            'names' => $definition->translations,
+            'also' => $definition->aliases,
+            'group' => $definition->group?->name,
+            'type' => $definition->data_type,
+            'unit' => $definition->default_unit,
+            'values' => $base()->selectRaw('attribute_values.value, attribute_values.unit, COUNT(*) as n')
+                ->groupBy('attribute_values.value', 'attribute_values.unit')->orderByDesc('n')->limit(60)->get()
+                ->map(fn (object $row): string => mb_substr(trim($row->value.' '.($row->unit ?? '')), 0, 120).' ×'.$row->n)->all(),
+            'products_count' => $productIds->count(),
+            'products' => Product::query()->with('category:id,slug')->whereIn('id', $productIds->take(25))->get(['id', 'title', 'category_id'])
+                ->map(fn (Product $product): string => '#'.$product->id.' '.$product->title.' ['.$product->category?->slug.']')->all(),
+            'categories' => $links->pluck('slug')->unique()->values()->all(),
+            'required_in' => $links->where('is_required', true)->pluck('slug')->values()->all(),
+            'on_the_same_products_as' => $productIds->isEmpty() ? [] : $this->ownedValues()
+                ->whereIn(DB::raw(self::OWNER), $productIds)->where('attribute_values.attribute_definition_id', '!=', $definition->id)
+                ->selectRaw('attribute_definitions.key, COUNT(DISTINCT '.self::OWNER.') as n')->groupBy('attribute_definitions.key')
+                ->orderByDesc('n')->limit(60)->pluck('n', 'key')->all(),
+        ];
+    }
+
+    /**
+     * Several characteristics side by side on the products that carry more than one of them. A
+     * product with two of them at different values had them as two properties.
+     *
+     * @param  list<string>  $keys
+     * @return array<string, mixed>
+     */
+    public function compare(array $keys): array
+    {
+        $definitions = collect($keys)->map(fn (mixed $key): ?AttributeDefinition => $this->known((string) $key))->filter()->unique('id');
+        if ($definitions->count() < 2) {
+            return ['error' => 'Name at least two existing keys.'];
+        }
+        $rows = $this->ownedValues()->whereIn('attribute_values.attribute_definition_id', $definitions->pluck('id'))
+            ->selectRaw(self::OWNER.' as product, attribute_definitions.key as k, attribute_values.value as v, attribute_values.unit as u')->get();
+        $several = $rows->groupBy('product')->filter(fn ($group): bool => $group->pluck('k')->unique()->count() > 1);
+        $plain = fn (object $row): string => (string) preg_replace('/\s+/u', '', mb_strtolower(trim($row->v.' '.($row->u ?? ''))));
+        $titles = Product::query()->whereIn('id', $several->keys()->take(25))->pluck('title', 'id');
+
+        return [
+            'products_per_key' => $rows->groupBy('k')->map(fn ($group): int => $group->pluck('product')->unique()->count())->all(),
+            'products_with_several' => $several->count(),
+            'products_where_they_differ' => $several->filter(fn ($group): bool => $group->map($plain)->unique()->count() > 1)->count(),
+            'side_by_side' => $several->take(25)->map(fn ($group, $product): array => ['product' => (string) ($titles[$product] ?? '#'.$product)]
+                + $group->mapWithKeys(fn (object $row): array => [$row->k => trim($row->v.' '.($row->u ?? ''))])->all())->values()->all(),
+        ];
+    }
+
+    /** How many products carry both characteristics at different values. */
+    public function conflicts(string $from, string $into): int
+    {
+        return (int) ($this->compare([$from, $into])['products_where_they_differ'] ?? 0);
     }
 
     /**
