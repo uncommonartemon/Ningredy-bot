@@ -54,11 +54,12 @@ class FilamentCatalogConvenienceTest extends TestCase
     {
         $category = Category::query()->where('slug', 'laptops')->sole();
         $page = Livewire::test(EditCategory::class, ['record' => $category->id])
-            ->callAction(TestAction::make('createOption')->schemaComponent('default_attribute_ids'), data: [
+            ->set('data.standard_form.new-row', ['attribute_definition_id' => null, 'example' => null, 'is_required' => '0', 'section' => 'main'])
+            ->callAction(TestAction::make('createOption')->schemaComponent('standard_form.new-row.attribute_definition_id'), data: [
                 'label' => 'Keyboard backlight zones', 'data_type' => 'number', 'default_unit' => 'zones',
             ])->assertHasNoActionErrors();
         $definition = AttributeDefinition::query()->where('label', 'Keyboard backlight zones')->sole();
-        $this->assertContains((string) $definition->id, array_map('strval', $page->get('data.default_attribute_ids')));
+        $this->assertSame((string) $definition->id, (string) $page->get('data.standard_form.new-row.attribute_definition_id'));
         $page->call('save')->assertHasNoFormErrors();
         $this->assertTrue($category->attributeDefinitions()->wherePivot('is_default', true)->whereKey($definition->id)->exists());
     }

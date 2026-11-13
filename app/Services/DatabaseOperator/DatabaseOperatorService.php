@@ -107,6 +107,7 @@ class DatabaseOperatorService
                 'photo_identity' => 'in:page,label', 'photo_identity_hint' => 'nullable|string|max:2000',
                 'minimum_verified_images' => 'integer|min:1|max:10', 'minimum_image_width' => 'nullable|integer|min:100|max:4000',
                 'minimum_image_height' => 'nullable|integer|min:0|max:4000', 'product_search_hint' => 'nullable|string|max:10000',
+                'title_parts' => 'nullable|array|max:20', 'card_standard' => 'nullable|string|max:1000', 'form_only' => $bool,
             ]],
             'category_translations' => ['model' => CategoryTranslation::class, 'writable' => [
                 'category_id' => $fk('categories', false), 'locale' => 'in:en,cs,uk', 'name' => 'required|string|max:255',
@@ -114,6 +115,7 @@ class DatabaseOperatorService
             'attribute_definition_category' => ['model' => AttributeCategoryLink::class, 'writable' => [
                 'attribute_definition_id' => $fk('attribute_definitions', false), 'category_id' => $fk('categories', false),
                 'is_required' => $bool, 'is_default' => $bool, 'sort_order' => $order,
+                'example' => 'nullable|string|max:255', 'section' => 'in:main,extra',
             ]],
             'brands' => ['model' => Brand::class, 'writable' => [
                 'name' => 'required|string|max:255', 'slug' => 'string|max:255', 'country' => $text,

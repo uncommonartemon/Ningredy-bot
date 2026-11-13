@@ -82,7 +82,8 @@ class AttributeGroupsTest extends TestCase
         $category = Category::where('slug', 'laptops')->sole();
         $page = Livewire::test(EditCategory::class, ['record' => $category->id])
             ->fillForm(['name' => 'Unsaved category title'])
-            ->mountAction(TestAction::make('createOption')->schemaComponent('default_attribute_ids'))
+            ->set('data.standard_form.new-row', ['attribute_definition_id' => null, 'example' => null, 'is_required' => '0', 'section' => 'main'])
+            ->mountAction(TestAction::make('createOption')->schemaComponent('standard_form.new-row.attribute_definition_id'))
             ->fillForm(['label' => 'Keyboard illumination', 'data_type' => 'text'])
             ->callAction(TestAction::make('createOption')->schemaComponent('attribute_group_id'), data: [
                 'name' => 'Input devices', 'highlight_in_filters' => true,
@@ -94,7 +95,7 @@ class AttributeGroupsTest extends TestCase
         $page->callMountedAction()->assertHasNoActionErrors();
         $definition = AttributeDefinition::where('label', 'Keyboard illumination')->sole();
         $this->assertEquals($group->id, $definition->attribute_group_id);
-        $this->assertContains((string) $definition->id, array_map('strval', $page->get('data.default_attribute_ids')));
+        $this->assertSame((string) $definition->id, (string) $page->get('data.standard_form.new-row.attribute_definition_id'));
         $page->call('save')->assertHasNoFormErrors();
         $this->assertTrue($category->attributeDefinitions()->wherePivot('is_default', true)->whereKey($definition->id)->exists());
     }

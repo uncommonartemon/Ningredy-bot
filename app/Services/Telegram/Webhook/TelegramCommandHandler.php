@@ -10,12 +10,15 @@ use App\Jobs\ProcessTelegramMessage;
 use App\Jobs\SendDiagnosticReport;
 use App\Models\AiOperation;
 use App\Models\AppSetting;
+use App\Models\AttributeDefinition;
 use App\Models\Product;
 use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
 use App\Services\Telegram\CatalogTelegramNavigation;
+use App\Services\Telegram\DraftFormActions;
 use App\Services\Telegram\DraftTelegramInteractionState;
 use App\Services\Telegram\DraftTelegramPresenter;
+use App\Services\Telegram\PhotoReadingCheck;
 use App\Services\Telegram\ProductCardPresenter;
 use App\Services\Telegram\TelegramCatalogDeletion;
 use App\Services\Telegram\TelegramCatalogEditor;
@@ -39,6 +42,33 @@ class TelegramCommandHandler
 
     public function handle(string $text, string $chatId, string $telegramUserId, TelegramUpdate $update): bool
     {
+        // Module 107: after «✏️ Исправить» under a photo's reading, the next plain message of this
+        // operator is the correction. A command or a keyboard button is not one: it ends the wait.
+        $readingCheck = app(PhotoReadingCheck::class);
+        if (str_starts_with($text, '/') || in_array($text, $this->keyboardTexts(), true)) {
+            $readingCheck->forget($chatId, $telegramUserId);
+        } elseif (($reply = $readingCheck->correct($chatId, $telegramUserId, $text)) !== null) {
+            $this->telegram->sendMessage($chatId, $reply);
+            $this->markCommandProcessed($update);
+
+            return true;
+        }
+        // The value of a form field the operator chose to write (decision of 2026-11-13).
+        $formActions = app(DraftFormActions::class);
+        if (str_starts_with($text, '/') || in_array($text, $this->keyboardTexts(), true)) {
+            $formActions->forget($chatId, $telegramUserId);
+        } elseif (($awaited = $formActions->awaited($chatId, $telegramUserId)) !== null) {
+            $draft = ProductDraft::query()->find($awaited['draft']);
+            $definition = AttributeDefinition::query()->find($awaited['definition']);
+            if ($draft?->status === 'pending_review' && $definition !== null) {
+                $formActions->write($draft, $update, $definition, $text);
+                $this->telegram->sendMessage($chatId, '✍️ Записано: '.__($definition->label).' — '.trim($text));
+                app(DraftTelegramPresenter::class)->sendReview($this->telegram, $chatId, $draft->fresh());
+                $this->markCommandProcessed($update);
+
+                return true;
+            }
+        }
         $createKey = "telegram-manual-create:{$chatId}:{$telegramUserId}";
         // /errors is answered by the assistant, so it must not stay behind as the
         // awaited hint, refined query or manual edit.
@@ -371,6 +401,12 @@ class TelegramCommandHandler
             /report — отчёт для разработчика одним файлом: журнал поисков, ошибки, выученные правила сайтов за 7 дней (без ключей)
             /report full — то же плюс копия базы без ключей (если не влезет в лимит Telegram — скачайте в админке)
             TEXT;
+    }
+
+    /** @return list<string> what the buttons of the main keyboard send */
+    private function keyboardTexts(): array
+    {
+        return array_column(array_merge(...$this->mainKeyboard()['keyboard']), 'text');
     }
 
     public function openCatalogEditor(int $productId, TelegramUpdate $update, ?int $variantId = null, int $page = 0): void

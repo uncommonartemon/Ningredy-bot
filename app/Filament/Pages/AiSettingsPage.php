@@ -62,6 +62,7 @@ class AiSettingsPage extends Page implements HasForms
             'gallery_agent_write_tools_enabled' => $settings->galleryAgentWriteToolsEnabled(),
             'product_search_country' => $settings->productSearchCountry(),
             'photo_caption_routing' => $settings->photoCaptionRouting(),
+            'photo_reading_check' => $settings->photoReadingCheck(),
             'source_identity_agent_enabled' => $settings->sourceIdentityAgentEnabled(),
             'specification_reconciliation_enabled' => $settings->specificationReconciliationEnabled(),
             'max_search_cost_usd' => $settings->maxSearchCostUsd(),
@@ -213,6 +214,16 @@ class AiSettingsPage extends Page implements HasForms
                                             ])
                                             ->hintIcon('heroicon-o-question-mark-circle', tooltip: __('Явное «не ищи» или /add всегда означает свой товар. В остальных случаях бот читает фото и, видя подпись и снимок вместе, сам решает: искать товар или принять его как свой; свой выбор и причину он называет в ответе.'))
                                             ->default(AiSettings::PHOTO_CAPTION_LABEL)
+                                            ->required(),
+                                        Select::make('photo_reading_check')
+                                            ->label(__('Проверка прочитанного с фото'))
+                                            ->options([
+                                                AiSettings::PHOTO_CHECK_ALWAYS => __('Всегда спрашивать, верно ли прочитано'),
+                                                AiSettings::PHOTO_CHECK_UNSURE => __('Только когда бот сам не уверен'),
+                                                AiSettings::PHOTO_CHECK_NEVER => __('Не спрашивать, сразу искать'),
+                                            ])
+                                            ->hintIcon('heroicon-o-question-mark-circle', tooltip: __('Перед поиском бот присылает прочитанный с фото текст с кнопками: верно, исправить, прочитать ещё раз, отмена. Читалка бывает уверена и неправа: один неверный символ в коде стоит двадцати минут поиска чужого товара, поэтому по умолчанию — всегда.'))
+                                            ->default(AiSettings::PHOTO_CHECK_ALWAYS)
                                             ->required(),
                                         Toggle::make('specification_reconciliation_enabled')
                                             ->label(__('Сборка карточки перед подтверждением'))
@@ -437,6 +448,7 @@ class AiSettingsPage extends Page implements HasForms
         $settings->saveGalleryAgentWriteToolsEnabled((bool) ($data['gallery_agent_write_tools_enabled'] ?? false));
         $settings->saveProductSearchCountry($data['product_search_country'] ?? null);
         $settings->savePhotoCaptionRouting($data['photo_caption_routing'] ?? null);
+        $settings->savePhotoReadingCheck($data['photo_reading_check'] ?? null);
         $settings->saveSourceIdentityAgentEnabled((bool) ($data['source_identity_agent_enabled'] ?? false));
         $settings->saveSpecificationReconciliationEnabled((bool) ($data['specification_reconciliation_enabled'] ?? true));
         $settings->saveMaxSearchCostUsd(

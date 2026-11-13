@@ -45,6 +45,7 @@ use App\Services\ProductSearch\Research\ResearchSourceRoles;
 use App\Services\ProductSearch\Research\ResearchWebSearchTrace;
 use App\Services\ProductSearch\Supervision\SearchProgressSupervisor;
 use App\Services\Telegram\CatalogTelegramNavigation;
+use App\Services\Telegram\PhotoReadingCheck;
 use App\Services\Telegram\ProductCardPresenter;
 use App\Services\Telegram\TelegramClient;
 use App\Services\Telegram\TelegramProgressReporter;
@@ -452,6 +453,12 @@ class ResearchProduct implements Tool
             // for the closest real product instead of stopping (live #429-#431).
             $unconfirmedCodes = array_values(array_filter((array) ($data['unconfirmed_operator_codes'] ?? []),
                 fn (mixed $code): bool => is_string($code) && trim($code) !== ''));
+            $misread = ProductResearchConfigurationGuard::misreadLabelCode($data, $this->typedByOperator());
+            if ($data['status'] === 'found' && $misread !== null) {
+                $progress->info('⚠️ Код с этикетки прочитан как '.$misread[0].' — такого нет ни на одной странице. На страницах этого товара — '
+                    .$misread[1].', всё остальное с этикетки совпадает: ищу по нему. Расхождение покажу у кнопки «Добавить».');
+                $unconfirmedCodes = array_values(array_filter($unconfirmedCodes, fn (string $code): bool => $code !== $misread[0]));
+            }
             if ($data['status'] === 'found' && $unconfirmedCodes !== []) {
                 $progress->info('⚠️ Не найдено ни на одной странице: '.implode(', ', $unconfirmedCodes)
                     .'. Продолжаю поиск по ближайшему товару: '.($data['title'] ?? $data['model'] ?? 'без названия')
@@ -861,6 +868,10 @@ class ResearchProduct implements Tool
             'description' => ['nullable', 'string', 'max:5000'],
             'research_notes' => ['nullable', 'string', 'max:5000'],
             'unconfirmed_operator_codes' => ['sometimes', 'array', 'max:10'],
+            'label_code_misread' => ['sometimes', 'nullable', 'array'],
+            'label_code_misread.label_code' => ['required_with:label_code_misread', 'string', 'max:100'],
+            'label_code_misread.page_code' => ['required_with:label_code_misread', 'string', 'max:100'],
+            'label_code_misread.reason' => ['required_with:label_code_misread', 'string', 'max:500'],
             'code_lookup_verdict' => ['sometimes', 'nullable', 'array'],
             'code_lookup_verdict.decision' => ['required_with:code_lookup_verdict', 'in:used,ignored,not_applicable'],
             'code_lookup_verdict.reason' => ['required_with:code_lookup_verdict', 'string', 'max:500'],
@@ -974,7 +985,7 @@ class ResearchProduct implements Tool
             ], ['primary_source.required' => 'The found result has no unblocked source that identifies the exact product. Keep observed URLs and facts and add the page or record that shows this exact product; do not invent or relabel its source type.'])->validate();
 
             $category = app(ProductCategoryResolver::class)->resolve($data['product_type'] ?? null, $data['category'] ?? null);
-            $issues = app(ProductResearchConfigurationGuard::class)->issues($data, trim($this->query.' '.(string) $this->update->text));
+            $issues = app(ProductResearchConfigurationGuard::class)->issues($data, trim($this->query.' '.(string) $this->update->text), $this->typedByOperator());
             if (! $category) {
                 $issues[] = 'Category and product_type are incompatible or ambiguous in the live category configuration.';
             }
@@ -1164,6 +1175,20 @@ class ResearchProduct implements Tool
                 && ! in_array($spec['key'] ?? null, $known, true))
             ->map(fn (array $spec): array => array_intersect_key($spec, array_flip(['key', 'name', 'value', 'source_url', 'source_excerpt'])))
             ->take(40)->values()->all();
+    }
+
+    /**
+     * What the operator typed themselves: for a photo, its caption and their correction (the
+     * rest of the request is the bot's reading of the label); otherwise the whole request.
+     */
+    private function typedByOperator(): string
+    {
+        $payload = (array) ($this->update->payload ?? []);
+        if (data_get($payload, 'message.photo') === null) {
+            return trim($this->query.' '.(string) $this->update->text);
+        }
+
+        return trim((string) data_get($payload, 'message.caption', '').' '.(string) data_get($payload, PhotoReadingCheck::PAYLOAD_KEY.'.correction', ''));
     }
 
     private function primarySource(array $sources): ?array

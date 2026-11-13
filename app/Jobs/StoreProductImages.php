@@ -9,6 +9,7 @@ use App\Models\ProductVariant;
 use App\Services\Ai\AiUsageReporter;
 use App\Services\Products\ProductImageStorage;
 use App\Services\Products\ProductPhotoManager;
+use App\Services\Support\WorkerMemory;
 use App\Services\Telegram\DraftTelegramMessageLifecycle;
 use App\Services\Telegram\TelegramCatalogDraftMedia;
 use App\Services\Telegram\TelegramClient;
@@ -44,10 +45,10 @@ class StoreProductImages implements ShouldQueue
         DraftTelegramMessageLifecycle $messageLifecycle,
     ): void {
         // Decoding several full-size candidate images into GD bitmaps in the
-        // same pass can exceed the default 128M CLI limit even after
-        // filtering absurdly large ones; give this job more headroom so a
-        // memory spike fails the job cleanly instead of killing the worker.
-        ini_set('memory_limit', '512M');
+        // same pass needs more than the default CLI limit. Every queued job gets
+        // the workers' image limit (AppServiceProvider); this one asks for it
+        // too, for a run outside the queue.
+        WorkerMemory::raise((string) config('product-images.worker_memory_limit', '1024M'));
 
         // A duplicate dispatch (double photos:refind callback tap or a queue
         // retry) would rerun the whole AI image pipeline for the same

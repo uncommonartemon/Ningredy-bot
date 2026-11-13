@@ -125,6 +125,13 @@ class ProductSpecificationReconciliationAgent implements Agent, HasStructuredOut
             PDF information can be researched with SearchProductTextEvidence. Check identity/applicability
             of each document. Same host, same series or similar photo does not prove the same configuration.
 
+            category_standard, when present, is the operator's form for this category: fill its fields first,
+            under their exact keys, and write each value the way its example is written; where an example
+            names variants separated by " / ", the value is one of them. A field without evidence stays out:
+            the card reports it as not found, which is honest; never invent it to complete the form. A field
+            that follows by definition from another supported fact of this card (registered memory has ECC;
+            an RDIMM is registered) may be filled citing that same source and excerpt. Follow operator_note
+            in the title, values and description. Missing form fields are worth one targeted text search.
             Collect useful detail for the product category: installed components, interfaces and counts,
             supported expansion, connectivity, dimensions/materials and power where actually documented.
             These are examples, not a mandatory list. Keep installed RAM, maximum RAM and GPU VRAM separate.

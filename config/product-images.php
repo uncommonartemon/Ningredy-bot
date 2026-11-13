@@ -1,10 +1,18 @@
 <?php
 
 // Note: the image pipeline decodes full-size photos into GD bitmaps, so the
-// queue workers need a raised memory limit. StoreProductImages sets 512M
-// inside the job; the worker environment is responsible for the rest.
+// queue workers need a raised memory limit. Every queued job raises it to
+// worker_memory_limit (AppServiceProvider); before each decode the free
+// memory is checked as well (ProductImageEncoder::fitsInMemory).
 
 return [
+    // The PHP memory limit of every queued job. It was 512M, set only by the job
+    // that stores a product's photos, and a search worker died at 512 MB on the
+    // colleague's bot (#343, 2026-11-13). A limit, not a reservation: a worker
+    // takes only what it uses.
+    'worker_memory_limit' => env('PRODUCT_IMAGES_WORKER_MEMORY', '1024M'),
+    // What a job keeps free for itself besides the frame it decodes.
+    'decode_memory_reserve' => 64 * 1024 * 1024,
     // Public catalog limits. The original files are stored locally as WebP.
     'max_images' => 10,
     'max_images_by_type' => [

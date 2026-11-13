@@ -6,12 +6,14 @@ use App\Ai\Agents\ProductSpecificationReconciliationAgent;
 use App\Ai\Agents\ProductSpecificationRepairAgent;
 use App\Exceptions\ProductSearchCancelled;
 use App\Models\AiRun;
+use App\Models\Category;
 use App\Models\ProductDraft;
 use App\Models\ProductSourcePageEvidence;
 use App\Services\Ai\AiSettings;
 use App\Services\Ai\OpenAiHeavyOperationGate;
 use App\Services\Ai\ProductSearchCancellation;
 use App\Services\Ai\ProductSearchTimeBudget;
+use App\Services\Catalog\CategoryStandard;
 use App\Services\Photos\ImageUrls;
 use App\Services\ProductSearch\Recovery\CardOfferSelection;
 use App\Services\ProductSearch\Recovery\CardRepairPatch;
@@ -172,6 +174,7 @@ class ProductSpecificationReconciler
             ]),
             'current_description' => (string) $draft->description,
             'current_specifications' => $inputSpecifications,
+            'category_standard' => app(CategoryStandard::class)->forAgents(filled($draft->category) ? Category::query()->where('slug', $draft->category)->first() : null),
             'source_url' => $url,
             'source_title' => is_string($source['title'] ?? null) ? $source['title'] : null,
             'source_identity_snippet' => mb_substr(

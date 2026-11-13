@@ -2,6 +2,7 @@
 
 namespace App\Services\Products;
 
+use App\Services\Support\WorkerMemory;
 use GdImage;
 use RuntimeException;
 
@@ -42,6 +43,18 @@ class ProductImageEncoder
     public function isSafeToDecode(int $width, int $height): bool
     {
         return $width * $height <= (int) config('product-images.decode_pixel_ceiling', 40_000_000);
+    }
+
+    /**
+     * Whether decoding a frame of this size fits in what the worker has left right now. The
+     * ceiling above bounds one frame; this bounds the sum with everything the job already
+     * holds. A truecolor GD bitmap costs four bytes a pixel and the decoder a fifth; the job
+     * keeps a reserve for itself. Without it a worker died at 512 MB in the middle of a
+     * search (the colleague's #343) instead of skipping one picture.
+     */
+    public function fitsInMemory(int $width, int $height): bool
+    {
+        return WorkerMemory::free() >= $width * $height * 5 + (int) config('product-images.decode_memory_reserve', 64 * 1024 * 1024);
     }
 
     /** @return array{bytes: string, width: int, height: int} */

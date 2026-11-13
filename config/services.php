@@ -180,6 +180,9 @@ return [
 
     'telegram_photo' => [
         'max_bytes' => (int) env('TELEGRAM_PHOTO_MAX_BYTES', 10485760),
+        // When the operator checks a photo's reading before the search, until the
+        // admin («Поиск и AI») or the chat sets it: always, unsure or never.
+        'reading_check' => env('TELEGRAM_PHOTO_READING_CHECK', 'always'),
     ],
 
     'ai_usage' => [

@@ -11,7 +11,9 @@ use App\Services\Playwright\BrowserRunner;
 use App\Services\Playwright\PlaywrightRunner;
 use App\Services\Products\BrowserProductImageTransferStore;
 use App\Services\Products\ProductImageResolver;
+use App\Services\Support\WorkerMemory;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\ServiceProvider;
 use Illuminate\Support\Str;
@@ -69,6 +71,10 @@ class AppServiceProvider extends ServiceProvider
         // conversation memory (a draft_id mentioned hours ago, etc.) into
         // an unrelated new message.
         config(['app.boot_id' => (string) Str::uuid()]);
+
+        // Every queued job may decode photos (a search, the photo menu, storing a product):
+        // one memory limit for all of them, not only for the job that stores photos.
+        Queue::before(fn () => WorkerMemory::raise((string) config('product-images.worker_memory_limit', '1024M')));
     }
 
     /**

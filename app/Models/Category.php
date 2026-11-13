@@ -3,7 +3,7 @@
 namespace App\Models;
 
 use App\Models\Concerns\GeneratesCatalogCode;
-use App\Services\Products\CatalogLocales;
+use App\Services\Catalog\CategoryStandard;
 use App\Services\Products\ProductPhotoIdentity;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -29,6 +29,7 @@ class Category extends Model
         'parent_id', 'name', 'slug', 'product_type_affinity', 'icon', 'sort_order', 'is_active', 'gallery_search_strategy',
         'photo_identity', 'photo_identity_hint',
         'minimum_verified_images', 'product_search_hint', 'minimum_image_width', 'minimum_image_height',
+        'title_parts', 'card_standard', 'form_only',
     ];
 
     protected static function booted(): void
@@ -91,6 +92,8 @@ class Category extends Model
             'minimum_verified_images' => 'integer',
             'minimum_image_width' => 'integer',
             'minimum_image_height' => 'integer',
+            'title_parts' => 'array',
+            'form_only' => 'boolean',
         ];
     }
 
@@ -150,17 +153,19 @@ class Category extends Model
     {
         $hint = trim((string) $this->product_search_hint);
         $parent = $this->parent_id === null ? null : $this->parent;
-        $required = $this->requiredAttributeDefinitions
-            ->map(fn (AttributeDefinition $definition): string => $definition->key.' ('.(
-                is_array($definition->translations) && filled($definition->translations[CatalogLocales::CONTENT_SOURCE] ?? null)
-                    ? $definition->translations[CatalogLocales::CONTENT_SOURCE] : $definition->label).')')
+        // The operator's form for the category (decision of 2026-11-13): every field with how it is
+        // written and whether it is required, and the operator's note.
+        $standard = app(CategoryStandard::class)->forAgents($this);
+        $form = collect($standard['form'] ?? [])->map(fn (array $field): string => $field['key'].' ('.$field['name']
+            .(isset($field['example']) ? '; write like: '.$field['example'] : '').(($field['importance'] ?? '') === 'required' ? '; required' : '').')')
             ->implode(', ');
 
         return '- '.$this->slug.': '.$this->name
             .($parent ? ' (a kind of '.$parent->slug.': prefer it over the parent when it fits)' : '')
             .($this->product_type_affinity ? ' | product_type='.$this->product_type_affinity : '')
             .($hint !== '' ? ' | trusted category search hint: '.$hint : '')
-            .($required !== '' ? ' | required specifications, use these exact keys: '.$required : '');
+            .($form !== '' ? ' | the form of this category, fill these with these exact keys: '.$form : '')
+            .(isset($standard['operator_note']) ? ' | the operator\'s note for this category: '.$standard['operator_note'] : '');
     }
 
     /**
@@ -209,8 +214,38 @@ class Category extends Model
     public function attributeDefinitions(): BelongsToMany
     {
         return $this->belongsToMany(AttributeDefinition::class)
-            ->withPivot(['is_required', 'sort_order', 'is_default'])
+            ->withPivot(['is_required', 'sort_order', 'is_default', 'example', 'section'])
             ->orderByPivot('sort_order');
+    }
+
+    /** The form of the category: the characteristics a card of it carries, in their order (decision of 2026-11-13). */
+    public function formDefinitions(): BelongsToMany
+    {
+        return $this->attributeDefinitions()->where(fn ($query) => $query->where('attribute_definition_category.is_default', true)
+            ->orWhere('attribute_definition_category.is_required', true));
+    }
+
+    /** The category whose standard applies here: this one, or the nearest parent that has one. */
+    public function standardSource(string $part = 'form'): ?self
+    {
+        // A category read with a few columns (the research list) does not hold its standard: read it whole.
+        $category = array_key_exists('card_standard', $this->getAttributes()) && array_key_exists('title_parts', $this->getAttributes())
+            ? $this : (self::query()->find($this->id) ?? $this);
+        $seen = [];
+        while ($category !== null && ! isset($seen[$category->id])) {
+            $seen[$category->id] = true;
+            $has = match ($part) {
+                'title' => filled($category->title_parts),
+                'note' => filled($category->card_standard),
+                default => $category->formDefinitions()->exists(),
+            };
+            if ($has) {
+                return $category;
+            }
+            $category = $category->parent_id === null ? null : $category->parent()->first();
+        }
+
+        return null;
     }
 
     /** The characteristics every card of this category must carry, in the category's order. */

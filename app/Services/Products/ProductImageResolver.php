@@ -8,6 +8,7 @@ use App\Services\Ai\ProductSearchCostBudget;
 use App\Services\Ai\ProductSearchTimeBudget;
 use App\Services\Photos\ImageUrls;
 use App\Services\ProductSearch\Supervision\SearchProgressSupervisor;
+use App\Services\Support\WorkerMemory;
 use DOMDocument;
 use DOMXPath;
 use Illuminate\Http\Client\RequestException;
@@ -874,12 +875,9 @@ class ProductImageResolver
         if (($configured = (int) config('product-images.http.download_concurrency', 0)) > 0) {
             return $configured;
         }
-        $raw = strtolower(trim((string) ini_get('memory_limit')));
-        $limit = (int) $raw * match (substr($raw, -1)) {
-            'g' => 1024 ** 3, 'm' => 1024 ** 2, 'k' => 1024, default => 1,
-        };
         $perPhoto = max(1, (int) config('product-images.http.image_max_bytes', 26_214_400));
-        $fits = $limit <= 0 ? PHP_INT_MAX : intdiv(max(0, $limit - memory_get_usage(true) - $reservedBytes), $perPhoto);
+        $free = WorkerMemory::free();
+        $fits = $free === PHP_INT_MAX ? PHP_INT_MAX : intdiv(max(0, $free - $reservedBytes), $perPhoto);
 
         // A pass never needs more at once than the candidates it takes.
         return max(1, min((int) config('product-images.download_candidates', 10), $fits));

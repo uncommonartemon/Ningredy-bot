@@ -53,6 +53,9 @@ class CharacteristicAudit
     /** The operator's answer to a question; the text says what was done. */
     public function answer(CharacteristicQuestion $question, bool $yes, ?string $answeredBy = null): string
     {
+        if ($question->kind === CharacteristicQuestion::FORM) {
+            return app(FormProposals::class)->answer($question, $yes, $answeredBy);
+        }
         if ($question->status !== 'open') {
             return __('Уже решено.');
         }

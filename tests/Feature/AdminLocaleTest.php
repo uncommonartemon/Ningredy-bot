@@ -50,7 +50,7 @@ class AdminLocaleTest extends TestCase
         $this->get('/admin/products/create')->assertOk()->assertSee('Parametry a konfigurace')->assertSee('Název')
             ->assertSee('Zveřejnění')->assertDontSee('Ключ дедупликации');
         $this->assertSame($initialLocale, app()->getLocale());
-        $this->get('/admin/categories/create')->assertOk()->assertSee('Výchozí parametry');
+        $this->get('/admin/categories/create')->assertOk()->assertSee('Formulář kategorie');
         $this->get('/admin/ai-settings-page')->assertOk()->assertSee('Uložit nastavení AI');
         $this->post('/admin/locale/ru')->assertSessionHas('admin_locale', 'ru');
         $this->get('/admin/products/create')->assertOk()->assertSee('Характеристики и конфигурации');

@@ -3,6 +3,7 @@
 namespace App\Filament\Resources\Categories\Schemas;
 
 use App\Filament\Schemas\RelatedCatalogForms;
+use App\Filament\Support\CategoryStandardFields;
 use App\Models\Category;
 use App\Services\Catalog\CatalogNames;
 use App\Services\Products\CatalogLocales;
@@ -69,19 +70,15 @@ class CategoryForm
                                 Toggle::make('is_active')->label(__('Активна'))->default(true),
                                 TextInput::make('sort_order')->label(__('Порядок'))->numeric()->minValue(0)->default(0),
                             ]),
-                        Section::make(__('Характеристики нового товара'))
-                            ->description(__('Эти строки появятся пустыми после выбора категории. Значения заполняются у товара; состав и порядок можно изменить здесь.'))
+                        // The standard of the category (decision of 2026-11-13): its form, title and note.
+                        // The form's rows also appear empty in a new product of the category.
+                        Section::make(__('Стандарт карточки'))
+                            ->description(__('Форма — что бот ищет и заполняет у каждого товара этой категории; название собирается из её элементов; пометку бот учитывает у каждого товара.'))
                             ->schema([
-                                RelatedCatalogForms::defaultAttributes()->dehydrated(false)
-                                    ->afterStateHydrated(fn (Select $component, ?Category $record) => $component->state(
-                                        $record?->attributeDefinitions()->wherePivot('is_default', true)->pluck('attribute_definitions.id')->all() ?? []
-                                    ))
-                                    ->saveRelationshipsUsing(fn (Category $record, ?array $state) => $record->syncDefaultAttributes($state ?? [])),
-                                RelatedCatalogForms::requiredAttributes()->dehydrated(false)
-                                    ->afterStateHydrated(fn (Select $component, ?Category $record) => $component->state(
-                                        $record?->attributeDefinitions()->wherePivot('is_required', true)->pluck('attribute_definitions.id')->all() ?? []
-                                    ))
-                                    ->saveRelationshipsUsing(fn (Category $record, ?array $state) => $record->syncRequiredAttributes($state ?? [])),
+                                CategoryStandardFields::form(),
+                                CategoryStandardFields::title(),
+                                CategoryStandardFields::note(),
+                                CategoryStandardFields::formOnly(),
                             ])
                             ->columnSpanFull(),
                         Section::make(__('Поиск фотографий'))
