@@ -63,6 +63,9 @@ final class CharacteristicDictionaryActions
             ->modalDescription(__('Модель прочитала все характеристики с их значениями и товарами. Бесспорное уже отмечено, сомнительное помечено ⚠ — решите сами. Объединение переносит значения и делает старое название другим названием оставшейся характеристики; группа ставится только характеристикам без группы. Без галочки — значит «нет»: это больше не предложу.'))
             ->modalSubmitActionLabel(__('Применить отмеченное'))
             ->mountUsing(function (Schema $schema) use ($sure): void {
+                // The model looks deeper with its tools for minutes, and a web request is cut at
+                // 30 seconds of wall time on Windows: this one waits for its answer.
+                set_time_limit(600);
                 try {
                     $review = app(AttributeKeeper::class)->review();
                     $schema->fill(['review' => json_encode($review, JSON_UNESCAPED_UNICODE), 'error' => null,

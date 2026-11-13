@@ -93,11 +93,14 @@ return [
     ],
 
     // The keeper of the characteristic dictionary: one short answer per approved card with
-    // characteristics the dictionary does not know, and the review of the whole dictionary.
+    // characteristics the dictionary does not know, and the audit of the whole dictionary.
+    // An approval waits for the keeper inside a web request, which Windows cuts at 30 seconds
+    // of wall time: past this timeout the card is written as before the keeper.
     'attribute_dictionary' => [
         'provider' => 'openai',
         'model' => env('AI_ATTRIBUTE_DICTIONARY_MODEL', 'gpt-5.4-mini'),
-        'timeout' => (int) env('AI_ATTRIBUTE_DICTIONARY_TIMEOUT', 60),
+        'timeout' => (int) env('AI_ATTRIBUTE_DICTIONARY_TIMEOUT', 20),
+        'audit_timeout' => (int) env('AI_ATTRIBUTE_DICTIONARY_AUDIT_TIMEOUT', 300),
     ],
 
     'product_specification_reconciliation' => [

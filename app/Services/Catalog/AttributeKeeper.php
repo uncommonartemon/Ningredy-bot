@@ -67,7 +67,7 @@ class AttributeKeeper
             'candidates' => array_values($candidates),
             'dictionary' => $this->dictionary->entries(),
             'groups' => AttributeGroup::query()->orderBy('id')->get(['id', 'name'])->toArray(),
-        ], 'attribute_dictionary', $updateId, (int) config('services.attribute_dictionary.timeout', 60), false);
+        ], 'attribute_dictionary', $updateId, (int) config('services.attribute_dictionary.timeout', 20), false);
 
         return $answer === null ? [] : $this->verdicts((array) ($answer['verdicts'] ?? []), $candidates);
     }
@@ -86,7 +86,7 @@ class AttributeKeeper
             'groups' => AttributeGroup::query()->orderBy('id')->get(['id', 'name'])->toArray(),
             'declined_by_the_operator' => CharacteristicQuestion::query()->where('status', 'declined')->get()
                 ->map(fn (CharacteristicQuestion $question): array => ['kind' => $question->kind] + $question->payload)->all(),
-        ], 'attribute_dictionary_review', null, max(300, (int) config('services.attribute_dictionary.timeout', 60)), true);
+        ], 'attribute_dictionary_review', null, (int) config('services.attribute_dictionary.audit_timeout', 300), true);
         $keys = $this->dictionary->all()->pluck('key')->flip();
         $protected = array_flip(AttributeDictionary::protectedKeys());
         $target = [];
