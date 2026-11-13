@@ -7,6 +7,7 @@ use App\Exceptions\MissingDraftMediaException;
 use App\Exceptions\UnreconciledDraftSpecificationsException;
 use App\Exceptions\UnverifiedDraftMediaException;
 use App\Jobs\ChooseCardHighlights;
+use App\Jobs\ProposeFormAdditions;
 use App\Jobs\StoreProductImages;
 use App\Jobs\TranslateProductText;
 use App\Models\AttributeDefinition;
@@ -30,6 +31,9 @@ use Illuminate\Support\Str;
 
 class ProductDraftWorkflow
 {
+    /** @var list<array{definition_id: int, value: string, unit: ?string, variant_id: ?int}> what the strict mode held back from the product being written */
+    private array $heldBack = [];
+
     private const FILTERABLE_ATTRIBUTE_KEYS = [
         'cpu', 'gpu', 'ram', 'storage', 'display', 'screen_size', 'refresh_rate',
     ];
@@ -247,6 +251,8 @@ class ProductDraftWorkflow
         bool $acceptUnreconciled = false,
         array $verdicts = [],
     ): Product {
+        $this->heldBack = [];
+
         return DB::transaction(function () use ($draft, $reviewer, $telegramReviewerId, $acceptUnreconciled, $verdicts): Product {
             $draft = ProductDraft::query()->lockForUpdate()->with(['telegramUpdate', 'media'])->findOrFail($draft->id);
             $this->assertReadyForApproval($draft, $acceptUnreconciled);
@@ -346,6 +352,8 @@ class ProductDraftWorkflow
 
             StoreProductImages::dispatch($product->id, $variant->id, $draft->id)->afterCommit();
             ChooseCardHighlights::dispatch($product->id)->afterCommit();
+            // What the product has beyond its category's form is put to the operator (decision of 2026-11-13).
+            ProposeFormAdditions::dispatch($product->id, (string) ($draft->telegramUpdate?->chat_id ?: $draft->telegram_review_chat_id) ?: null, $this->heldBack)->afterCommit();
             // A correction in the operator's words dropped the translations of what it
             // changed: the published card gets them back from its English text.
             if (filled($draft->translations) && app(CatalogTextTranslator::class)->lacksTranslations($product->fresh())) {
@@ -527,7 +535,9 @@ class ProductDraftWorkflow
     private function syncAttributes(Product $product, ProductVariant $variant, Category $category, array $specifications, array $translations = [], bool $variantScoped = false, array $unchangedGlobalKeys = []): void
     {
         $standard = app(CategoryStandard::class);
-        $examples = $standard->form($category)->mapWithKeys(fn (AttributeDefinition $definition): array => [$definition->id => $definition->pivot->example])->all();
+        $form = $standard->form($category);
+        $examples = $form->mapWithKeys(fn (AttributeDefinition $definition): array => [$definition->id => $definition->pivot->example])->all();
+        $formOnly = $form->isNotEmpty() && (bool) ($category->standardSource('form')?->form_only ?? false);
         foreach ($specifications as $key => $specification) {
             $label = is_array($specification)
                 ? ($specification['name'] ?? $specification['label'] ?? (is_string($key) ? $key : 'Характеристика'))
@@ -577,6 +587,13 @@ class ProductDraftWorkflow
             }
             if (is_array($specification) && ($specification['_remember'] ?? []) !== []) {
                 app(AttributeDictionary::class)->remember($definition, ...array_map('strval', $specification['_remember']));
+            }
+            // «Only the form's fields» (decision of 2026-11-13): the rest waits for the operator's word.
+            if ($formOnly && ! isset($examples[$definition->id]) && ! in_array($definition->key, AttributeDefinition::IDENTIFIER_KEYS, true)) {
+                $this->heldBack[] = ['definition_id' => $definition->id, 'value' => (string) $rawValue, 'unit' => $unit,
+                    'variant_id' => $variantScoped || $isVariantAttribute ? $variant->id : null];
+
+                continue;
             }
             $definition->categories()->syncWithoutDetaching([$category->id]);
             // A definition is shared by every product, and its label may have

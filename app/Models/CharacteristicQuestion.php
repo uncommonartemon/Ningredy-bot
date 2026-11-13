@@ -15,6 +15,9 @@ class CharacteristicQuestion extends Model
 
     public const string GROUP = 'group';
 
+    /** A characteristic a product has beyond its category's form (decision of 2026-11-13). */
+    public const string FORM = 'form';
+
     protected $fillable = ['kind', 'payload', 'status', 'chat_id', 'message_id', 'answered_by', 'answered_at'];
 
     protected function casts(): array
@@ -35,6 +38,10 @@ class CharacteristicQuestion extends Model
             sort($pair);
 
             return 'merge:'.implode('|', $pair);
+        }
+
+        if ($kind === self::FORM) {
+            return 'form:'.($payload['category_id'] ?? '').'|'.($payload['definition_id'] ?? '');
         }
 
         return 'group:'.($payload['key'] ?? '').'|'.mb_strtolower((string) ($payload['group']['name'] ?? ''));

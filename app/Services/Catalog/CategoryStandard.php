@@ -2,12 +2,15 @@
 
 namespace App\Services\Catalog;
 
+use App\Jobs\TranslateProductText;
 use App\Models\AttributeDefinition;
+use App\Models\AttributeValue;
 use App\Models\Category;
 use App\Models\Product;
 use App\Models\ProductDraft;
 use App\Services\Products\AiAttributeGroups;
 use App\Services\Products\CatalogLocales;
+use App\Services\Products\ManualProductAttributes;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -418,6 +421,89 @@ class CategoryStandard
         $name = $definition->translations[$locale] ?? null;
 
         return is_string($name) && trim($name) !== '' ? trim($name) : (string) __($definition->label);
+    }
+
+    /**
+     * The category's products against its form: how many fields each has, which it lacks and
+     * which are written off the standard. At most 200 products, the newest first.
+     *
+     * @return list<array{id: int, title: string, filled: int, total: int, missing: list<string>, inexact: list<string>}>
+     */
+    public function productReport(Category $category): array
+    {
+        $form = $this->form($category);
+        if ($form->isEmpty()) {
+            return [];
+        }
+        $locale = CatalogLocales::telegramCardLocale();
+        $report = [];
+        $products = Product::query()->whereIn('category_id', $this->treeIds($category))->with(['attributes.definition', 'variants.attributes.definition'])
+            ->latest('id')->limit(200)->get();
+        foreach ($products as $product) {
+            $values = [];
+            foreach ($product->attributes->concat($product->variants->flatMap->attributes) as $value) {
+                if ($value->definition !== null) {
+                    $values[$value->definition->key] ??= self::written((string) $value->value, $value->unit);
+                }
+            }
+            $missing = [];
+            $inexact = [];
+            foreach ($form as $definition) {
+                $value = $values[$definition->key] ?? null;
+                $variants = self::variants($definition->pivot->example);
+                if ($value === null) {
+                    $missing[] = self::name($definition, $locale);
+                } elseif ($variants !== [] && self::variant($value, $variants) === null) {
+                    $inexact[] = self::name($definition, $locale).' «'.mb_substr($value, 0, 30).'»';
+                }
+            }
+            $report[] = ['id' => (int) $product->id, 'title' => (string) $product->title, 'filled' => $form->count() - count($missing),
+                'total' => $form->count(), 'missing' => $missing, 'inexact' => $inexact];
+        }
+
+        return $report;
+    }
+
+    /**
+     * The values of the category's products brought to the form's standard, as a card being
+     * written would be: what changes, and with $apply the change itself.
+     *
+     * @return list<array{product: int, name: string, from: string, to: string}>
+     */
+    public function standardizeValues(Category $category, bool $apply): array
+    {
+        $form = $this->form($category)->keyBy('id');
+        if ($form->isEmpty()) {
+            return [];
+        }
+        $productIds = Product::query()->whereIn('category_id', $this->treeIds($category))->pluck('id');
+        $changes = [];
+        $values = DB::table('attribute_values')->leftJoin('product_variants', 'product_variants.id', '=', 'attribute_values.product_variant_id')
+            ->whereIn('attribute_values.attribute_definition_id', $form->keys())
+            ->whereIn(DB::raw('COALESCE(attribute_values.product_id, product_variants.product_id)'), $productIds)
+            ->select(['attribute_values.id', 'attribute_values.attribute_definition_id', 'attribute_values.value',
+                DB::raw('COALESCE(attribute_values.product_id, product_variants.product_id) as product')])->get();
+        foreach ($values as $row) {
+            $definition = $form[$row->attribute_definition_id];
+            $standard = $this->standardValue($definition, (string) $row->value, $definition->pivot->example);
+            if ($standard === (string) $row->value) {
+                continue;
+            }
+            $changes[] = ['product' => (int) $row->product, 'name' => self::name($definition, CatalogLocales::telegramCardLocale()),
+                'from' => (string) $row->value, 'to' => $standard];
+            if ($apply && ($value = AttributeValue::query()->find($row->id)) !== null) {
+                // Written as an operator's value is: typed by its characteristic; its translations are made again.
+                $typed = app(ManualProductAttributes::class)->normalize(['attribute_definition_id' => $definition->id, 'value' => $standard, 'unit' => $value->unit]) ?? [];
+                $value->update(array_intersect_key($typed, array_flip(['value', 'normalized_value', 'numeric_value', 'boolean_value', 'unit'])));
+            }
+        }
+        if ($apply) {
+            foreach (array_unique(array_column($changes, 'product')) as $productId) {
+                TranslateProductText::dispatch($productId);
+            }
+        }
+
+        return $changes;
     }
 
     /** @return list<int> this category and every kind under it */

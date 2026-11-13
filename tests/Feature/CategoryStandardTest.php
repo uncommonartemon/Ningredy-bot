@@ -200,6 +200,35 @@ class CategoryStandardTest extends TestCase
             ->assertSet('data.title', 'Samsung M378A1K43CB2-CTD');
     }
 
+    public function test_the_category_checks_its_products_by_the_form_and_brings_values_to_the_standard(): void
+    {
+        $module = $this->definition('module_type');
+        $capacity = AttributeDefinition::query()->where('key', 'ram')->firstOrFail();
+        app(CategoryStandard::class)->syncForm($this->ram, [
+            ['attribute_definition_id' => $capacity->id, 'example' => '16 GB', 'is_required' => true],
+            ['attribute_definition_id' => $module->id, 'example' => 'UDIMM / RDIMM / SO-DIMM', 'is_required' => true],
+        ]);
+        $product = $this->product('Kingston module', 'KVR24N17S8/8', 'Kingston');
+        $this->value($product, $capacity, '8гб');
+        $this->value($product, $module, '260-pin SODIMM');
+        $other = $this->product('Second module', 'X-1', 'Micron');
+        $this->value($other, $module, 'Unbuffered');
+
+        $report = collect(app(CategoryStandard::class)->productReport($this->ram))->keyBy('id');
+        $this->assertSame(2, $report[$product->id]['filled']);
+        $this->assertSame(1, $report[$other->id]['filled']);
+        $this->assertCount(1, $report[$other->id]['missing']);
+        $this->assertCount(1, $report[$other->id]['inexact']);
+
+        Livewire::test(EditCategory::class, ['record' => $this->ram->id])
+            ->mountAction('checkProducts')->assertSee('8гб')->callMountedAction()->assertHasNoActionErrors();
+
+        $values = $product->attributes()->with('definition')->get()->mapWithKeys(fn ($value): array => [$value->definition->key => $value->value]);
+        $this->assertSame('8 GB', $values['ram']);
+        $this->assertSame('SO-DIMM', $values['module_type']);
+        $this->assertSame('Unbuffered', $other->attributes()->sole()->value);
+    }
+
     private function definition(string $key, ?string $label = null): AttributeDefinition
     {
         return AttributeDefinition::query()->firstOrCreate(['key' => $key], ['label' => $label ?? ucfirst(str_replace('_', ' ', $key)), 'data_type' => 'text']);

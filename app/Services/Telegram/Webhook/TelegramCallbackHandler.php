@@ -20,6 +20,7 @@ use App\Models\ProductDraftMedia;
 use App\Models\TelegramUpdate;
 use App\Services\Catalog\CategoryStandard;
 use App\Services\Catalog\CharacteristicAudit;
+use App\Services\Catalog\FormProposals;
 use App\Services\Products\ProductDraftWorkflow;
 use App\Services\Products\ProductGalleryRecipeRouter;
 use App\Services\Products\ProductSourcePriority;
@@ -59,13 +60,29 @@ class TelegramCallbackHandler
         $chatId = (string) data_get($callback, 'message.chat.id');
         $messageId = data_get($callback, 'message.message_id');
 
+        // All proposals to the form about one product at once (decision of 2026-11-13).
+        if (preg_match('/^chqp:(y|n):(\d+)$/', $data, $all) === 1) {
+            $proposals = app(FormProposals::class);
+            $done = array_map(fn (CharacteristicQuestion $asked): string => $proposals->answer($asked, $all[1] === 'y', (string) $update->telegram_user_id),
+                $proposals->open((int) $all[2]));
+            if (is_numeric($messageId)) {
+                $this->telegram->editMessageText($chatId, (int) $messageId, implode("\n", $done) ?: 'Этих вопросов уже нет.');
+            }
+            $this->answerAndClose($callbackId, $update, $all[1] === 'y' ? 'Добавлено в форму.' : 'Не добавлено.');
+
+            return;
+        }
         // An answer to a doubtful proposal of the characteristic audit.
         if (preg_match('/^chq:(y|n):(\d+)$/', $data, $question) === 1) {
             $audit = app(CharacteristicAudit::class);
             $asked = CharacteristicQuestion::query()->find((int) $question[2]);
             $result = $asked === null ? 'Этого вопроса уже нет.' : $audit->answer($asked, $question[1] === 'y', (string) $update->telegram_user_id);
             if ($asked !== null && is_numeric($messageId)) {
-                $this->telegram->editMessageText($chatId, (int) $messageId, $audit->questionText($asked)."\n\n".$result);
+                // A proposal to the form shares its message with the rest about that product: the message shows what is left.
+                $left = $asked->kind === CharacteristicQuestion::FORM ? app(FormProposals::class)->message((int) ($asked->payload['product_id'] ?? 0)) : null;
+                $asked->kind === CharacteristicQuestion::FORM
+                    ? $this->telegram->editMessageText($chatId, (int) $messageId, $result.($left === null ? '' : "\n\n".$left['text']), null, $left['keyboard'] ?? null)
+                    : $this->telegram->editMessageText($chatId, (int) $messageId, $audit->questionText($asked)."\n\n".$result);
             }
             $this->answerAndClose($callbackId, $update, mb_substr($result, 0, 190));
 

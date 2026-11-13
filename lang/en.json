@@ -872,5 +872,20 @@
     "Переименовано товаров: :count.": "Products renamed: :count.",
     "Собрать по шаблону": "Build by the template",
     "Не собралось: у товара нет ни производителя, ни модели, ни кода.": "Not built: the product has no manufacturer, model or code.",
-    "Название собрано. Нажмите «Сохранить», чтобы оставить его.": "Title built. Press «Save» to keep it."
+    "Название собрано. Нажмите «Сохранить», чтобы оставить его.": "Title built. Press «Save» to keep it.",
+    "Бот предлагает добавить (:count)": "The bot proposes to add (:count)",
+    "Бот предлагает добавить в форму": "The bot proposes to add to the form",
+    "Эти характеристики нашлись у товаров категории, а в форме их нет. Отмеченные войдут в форму; без галочки — «нет», больше не предложу.": "These characteristics were found on the category's products but are not in the form. The ticked ones join the form; unticked means «no», it will not be proposed again.",
+    "Применить": "Apply",
+    "Добавить в форму": "Add to the form",
+    "Форма обновлена.": "Form updated.",
+    "Проверить товары по форме": "Check products by the form",
+    "Товары категории по форме": "The category's products by the form",
+    "Приведение меняет только запись значений: вариант из примера, число с единицей. Недостающее у товара бот доищет по просьбе в чате: «допиши в товар #15 буферизацию».": "Bringing to the standard changes only how values are written: a variant from the example, a number with its unit. The bot finds what a product lacks when asked in the chat: «add buffering to product #15».",
+    "нет": "missing",
+    "неточно": "inexact",
+    "В категории нет товаров.": "The category has no products.",
+    "Приведётся значений: :count": "Values to bring to the standard: :count",
+    "Привести значения к форме": "Bring values to the form",
+    "Приведено значений: :count.": "Values brought to the standard: :count."
 }
