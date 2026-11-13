@@ -426,6 +426,9 @@ class DraftTelegramPresenter
                 ['text' => '🖼 Фото', 'callback_data' => "draft:photos:{$draft->id}"],
                 ['text' => '🔗 Источник', 'callback_data' => "draft:source:{$draft->id}"],
             ];
+        if (! $draft->isManualUpload() && ($formRow = app(DraftFormActions::class)->cardButton($draft)) !== null) {
+            $rows[] = $formRow;
+        }
         if ($mediaCount === 0 && $draft->images_staged_at !== null) {
             $rows[] = [['text' => '📋 Все характеристики', 'callback_data' => "draft:details:{$draft->id}"]];
         }

@@ -7,20 +7,25 @@ use App\Exceptions\MissingDraftMediaException;
 use App\Exceptions\UnreconciledDraftSpecificationsException;
 use App\Exceptions\UnverifiedDraftMediaException;
 use App\Jobs\EnrichTelegramProductDraft;
+use App\Jobs\FindDraftFormFields;
 use App\Jobs\ProcessDraftPhotoActions;
 use App\Jobs\ProcessTelegramMessage;
 use App\Jobs\ProposeTelegramDraftEdit;
 use App\Jobs\TrainDraftGalleryRecipe;
 use App\Models\AiOperation;
+use App\Models\AttributeDefinition;
 use App\Models\CharacteristicQuestion;
 use App\Models\ProductDraft;
 use App\Models\ProductDraftMedia;
 use App\Models\TelegramUpdate;
+use App\Services\Catalog\CategoryStandard;
 use App\Services\Catalog\CharacteristicAudit;
 use App\Services\Products\ProductDraftWorkflow;
 use App\Services\Products\ProductGalleryRecipeRouter;
 use App\Services\Products\ProductSourcePriority;
 use App\Services\ProductSearch\Recovery\RequestGuardian;
+use App\Services\Telegram\DraftAccess;
+use App\Services\Telegram\DraftFormActions;
 use App\Services\Telegram\DraftPhotoSearch;
 use App\Services\Telegram\DraftTelegramActionConfirmation;
 use App\Services\Telegram\DraftTelegramInteractionState;
@@ -282,6 +287,22 @@ class TelegramCallbackHandler
             return;
         }
 
+        // The form report of a draft, field by field (decision of 2026-11-13).
+        if (preg_match('/^draft:form:(\d+)$/', $data, $formMenu) === 1) {
+            $draft = ProductDraft::query()->find((int) $formMenu[1]);
+            if ($draft?->status === 'pending_review') {
+                $menu = app(DraftFormActions::class)->menu($draft);
+                $this->telegram->sendMessage($chatId, $menu['text'], $menu['keyboard']);
+            }
+            $this->answerAndClose($callbackId, $update, $draft?->status === 'pending_review' ? 'Поля формы.' : 'Черновик уже обработан.');
+
+            return;
+        }
+        if (preg_match('/^df:(all|find|write|set|ok):(\d+)(?::(\d+))?(?::(\d+))?$/', $data, $field) === 1) {
+            $this->answerFormField($field, $chatId, $update, $callbackId);
+
+            return;
+        }
         if (preg_match('/^draft:details:(\d+)$/', $data, $details) === 1) {
             $draft = ProductDraft::find((int) $details[1]);
             if ($draft?->status === 'pending_review') {
@@ -673,6 +694,62 @@ class TelegramCallbackHandler
                 $this->telegram->sendMessage($chatId, $result, $this->mainKeyboard());
             }
         }
+    }
+
+    /**
+     * A press under the form report: look for what is missing, write a value, pick a variant or
+     * keep a value as it is. Writing and picking bring the card back at once; a search answers
+     * when it ends.
+     *
+     * @param  array<int, string>  $field  the matched callback: action, draft id, characteristic id, variant
+     */
+    private function answerFormField(array $field, string $chatId, TelegramUpdate $update, string $callbackId): void
+    {
+        $draft = ProductDraft::query()->find((int) $field[2]);
+        $definition = isset($field[3]) && $field[3] !== '' ? AttributeDefinition::query()->find((int) $field[3]) : null;
+        $userId = (string) $update->telegram_user_id;
+        if ($draft?->status !== 'pending_review' || ! app(DraftAccess::class)->belongsToContext($draft, $update)) {
+            $this->answerAndClose($callbackId, $update, 'Черновик уже обработан.');
+
+            return;
+        }
+        $actions = app(DraftFormActions::class);
+        $answer = match ($field[1]) {
+            'all', 'find' => (function () use ($draft, $update, $definition): string {
+                FindDraftFormFields::dispatch($draft->id, $update->id, $definition === null ? [] : [$definition->key]);
+
+                return 'Ищу.';
+            })(),
+            'write' => (function () use ($actions, $chatId, $userId, $draft, $definition): string {
+                if ($definition === null) {
+                    return 'Поле не найдено.';
+                }
+                $actions->awaitValue($chatId, $userId, $draft->id, $definition->id);
+                $this->telegram->sendMessage($chatId, '✍️ Пришлите значение для «'.($definition->translations['ru'] ?? __($definition->label)).'» одним сообщением.');
+
+                return 'Жду значение.';
+            })(),
+            'set' => (function () use ($actions, $draft, $update, $definition, $field, $chatId): string {
+                $variant = $definition === null ? null : (collect(app(CategoryStandard::class)->statuses($draft))
+                    ->firstWhere('key', $definition->key)['variants'][(int) ($field[4] ?? -1)] ?? null);
+                if ($variant === null) {
+                    return 'Вариант не найден.';
+                }
+                $actions->write($draft, $update, $definition, $variant);
+                $this->draftPresenter->sendReview($this->telegram, $chatId, $draft->fresh());
+
+                return 'Записано: '.$variant;
+            })(),
+            default => (function () use ($actions, $draft, $definition, $chatId): string {
+                if ($definition !== null) {
+                    $actions->accept($draft, $definition->key);
+                }
+                $this->draftPresenter->sendReview($this->telegram, $chatId, $draft->fresh());
+
+                return 'Оставлено как есть.';
+            })(),
+        };
+        $this->answerAndClose($callbackId, $update, $answer);
     }
 
     private function rejectStaleDraftCallback(

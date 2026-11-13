@@ -10,10 +10,12 @@ use App\Jobs\ProcessTelegramMessage;
 use App\Jobs\SendDiagnosticReport;
 use App\Models\AiOperation;
 use App\Models\AppSetting;
+use App\Models\AttributeDefinition;
 use App\Models\Product;
 use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
 use App\Services\Telegram\CatalogTelegramNavigation;
+use App\Services\Telegram\DraftFormActions;
 use App\Services\Telegram\DraftTelegramInteractionState;
 use App\Services\Telegram\DraftTelegramPresenter;
 use App\Services\Telegram\PhotoReadingCheck;
@@ -50,6 +52,22 @@ class TelegramCommandHandler
             $this->markCommandProcessed($update);
 
             return true;
+        }
+        // The value of a form field the operator chose to write (decision of 2026-11-13).
+        $formActions = app(DraftFormActions::class);
+        if (str_starts_with($text, '/') || in_array($text, $this->keyboardTexts(), true)) {
+            $formActions->forget($chatId, $telegramUserId);
+        } elseif (($awaited = $formActions->awaited($chatId, $telegramUserId)) !== null) {
+            $draft = ProductDraft::query()->find($awaited['draft']);
+            $definition = AttributeDefinition::query()->find($awaited['definition']);
+            if ($draft?->status === 'pending_review' && $definition !== null) {
+                $formActions->write($draft, $update, $definition, $text);
+                $this->telegram->sendMessage($chatId, '✍️ Записано: '.__($definition->label).' — '.trim($text));
+                app(DraftTelegramPresenter::class)->sendReview($this->telegram, $chatId, $draft->fresh());
+                $this->markCommandProcessed($update);
+
+                return true;
+            }
         }
         $createKey = "telegram-manual-create:{$chatId}:{$telegramUserId}";
         // /errors is answered by the assistant, so it must not stay behind as the
