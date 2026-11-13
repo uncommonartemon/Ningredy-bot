@@ -5,7 +5,9 @@ namespace App\Services\Catalog;
 use App\Models\AttributeDefinition;
 use App\Models\Category;
 use App\Models\Product;
+use App\Models\ProductDraft;
 use App\Services\Products\AiAttributeGroups;
+use App\Services\Products\CatalogLocales;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -236,6 +238,186 @@ class CategoryStandard
         }
 
         return ['rows' => $result, 'created' => $created, 'skipped' => $skipped];
+    }
+
+    /**
+     * The category's standard as the research and the card assembly read it: the form with the
+     * operator's examples and importance, and the note. Null when the category has neither.
+     *
+     * @return array<string, mixed>|null
+     */
+    public function forAgents(?Category $category): ?array
+    {
+        $form = $this->form($category);
+        $note = trim((string) ($category?->standardSource('note')?->card_standard ?? ''));
+        if ($form->isEmpty() && $note === '') {
+            return null;
+        }
+
+        return array_filter([
+            'category' => $category?->name,
+            'form' => $form->map(fn (AttributeDefinition $definition): array => array_filter([
+                'key' => $definition->key,
+                'name' => (string) ($definition->translations['en'] ?? $definition->label),
+                'example' => $definition->pivot->example,
+                'importance' => $definition->pivot->is_required ? 'required' : 'desired',
+            ], fn (mixed $value): bool => $value !== null && $value !== ''))->values()->all(),
+            'operator_note' => $note === '' ? null : $note,
+        ], fn (mixed $value): bool => $value !== null && $value !== []);
+    }
+
+    /**
+     * Each field of the form against a draft's card: filled, not found, or inexact - the card
+     * assembly could not settle it, or the value is none of the variants the example names.
+     *
+     * @return list<array{key: string, name: string, required: bool, status: string, value: ?string, variants: list<string>, reason: ?string}>
+     */
+    public function statuses(ProductDraft $draft): array
+    {
+        $category = filled($draft->category) ? Category::query()->where('slug', $draft->category)->first() : null;
+        $form = $this->form($category);
+        if ($form->isEmpty()) {
+            return [];
+        }
+        $values = [];
+        foreach ((array) ($draft->specifications ?? []) as $specification) {
+            if (! is_array($specification) || ! is_scalar($specification['value'] ?? null) || trim((string) $specification['value']) === '') {
+                continue;
+            }
+            $key = $this->dictionary->find(is_string($specification['key'] ?? null) ? $specification['key'] : null,
+                is_string($specification['name'] ?? null) ? $specification['name'] : null)?->key ?? (string) ($specification['key'] ?? '');
+            $values[$key] ??= trim((string) $specification['value']);
+        }
+        $unsettled = collect((array) data_get($draft->card_repair_state, 'last_failure.repair_context.unresolved_fields', []))
+            ->filter(fn (mixed $field): bool => is_array($field))->keyBy(fn (array $field): string => (string) ($field['key'] ?? ''));
+        $accepted = (array) data_get($draft->form_review, 'accepted', []);
+        $locale = CatalogLocales::telegramCardLocale();
+
+        return $form->map(function (AttributeDefinition $definition) use ($values, $unsettled, $accepted, $locale): array {
+            $variants = self::variants($definition->pivot->example);
+            $value = $values[$definition->key] ?? null;
+            [$status, $reason] = match (true) {
+                $value === null => ['missing', null],
+                in_array($definition->key, $accepted, true) => ['filled', null],
+                $unsettled->has($definition->key) => ['inexact', (string) ($unsettled[$definition->key]['reason'] ?? '')],
+                $variants !== [] && self::variant($value, $variants) === null => ['inexact', 'не из вариантов: '.implode(' / ', $variants)],
+                default => ['filled', null],
+            };
+
+            return ['key' => $definition->key, 'name' => self::name($definition, $locale), 'required' => (bool) $definition->pivot->is_required,
+                'status' => $status, 'value' => $value, 'variants' => $variants, 'reason' => $reason];
+        })->values()->all();
+    }
+
+    /** The form's line on a draft's card; null when the category has no form. */
+    public function reportLine(ProductDraft $draft): ?string
+    {
+        $statuses = $this->statuses($draft);
+        if ($statuses === []) {
+            return null;
+        }
+        $filled = count(array_filter($statuses, fn (array $field): bool => $field['status'] === 'filled'));
+        $missing = array_filter($statuses, fn (array $field): bool => $field['status'] === 'missing');
+        $inexact = array_filter($statuses, fn (array $field): bool => $field['status'] === 'inexact');
+        $category = Category::query()->where('slug', (string) $draft->category)->first();
+        $lines = ['🧩 Форма «'.($category?->name ?? $draft->category).'»: '.($missing === [] && $inexact === []
+            ? 'заполнена, '.$filled.' из '.count($statuses) : 'заполнено '.$filled.' из '.count($statuses))];
+        if ($missing !== []) {
+            $lines[] = '❓ Не найдено: '.implode(', ', array_map(fn (array $field): string => $field['name'].($field['required'] ? ' (обязательное)' : ''), $missing));
+        }
+        if ($inexact !== []) {
+            $lines[] = '⚠️ Неточность: '.implode('; ', array_map(fn (array $field): string => $field['name'].' — «'.mb_substr((string) $field['value'], 0, 40).'»'
+                .($field['reason'] ? ', '.mb_substr($field['reason'], 0, 80) : ''), $inexact));
+        }
+
+        return implode("\n", $lines);
+    }
+
+    /**
+     * A value written the way the category's standard says: one of the example's variants when
+     * the value names exactly one of them, a number with the characteristic's unit spaced and
+     * spelled as the characteristic spells it. Anything else stays as it was written.
+     */
+    public function standardValue(AttributeDefinition $definition, string $value, ?string $example): string
+    {
+        $value = trim($value);
+        $variants = self::variants($example);
+        if ($variants !== [] && ($variant = self::variant($value, $variants)) !== null) {
+            return $variant;
+        }
+        $unit = trim((string) ($definition->default_unit ?: self::unitOf($example)));
+        if ($unit !== '' && preg_match('/^(\d+(?:[.,]\d+)?)\s*(\p{L}+)$/u', $value, $match) === 1
+            && self::sameUnit($match[2], $unit)) {
+            return $match[1].' '.$unit;
+        }
+
+        return $value;
+    }
+
+    /**
+     * The four rows a catalog card shows for a category with a form: the first filled fields of
+     * its main section, in the form's order. Empty without a form.
+     *
+     * @return list<string>
+     */
+    public function cardKeys(Product $product): array
+    {
+        $form = $this->form($product->category()->first())->filter(fn (AttributeDefinition $definition): bool => $definition->pivot->section !== self::EXTRA);
+        if ($form->isEmpty()) {
+            return [];
+        }
+        $product->loadMissing(['attributes.definition', 'variants.attributes.definition']);
+        $present = $product->attributes->concat($product->variants->flatMap->attributes)
+            ->map(fn ($value): ?string => $value->definition?->key)->filter()->flip();
+
+        return $form->filter(fn (AttributeDefinition $definition): bool => $present->has($definition->key))
+            ->take(4)->pluck('key')->values()->all();
+    }
+
+    /** @return list<string> the variants an example names: «DIMM / SO-DIMM» */
+    public static function variants(?string $example): array
+    {
+        $parts = array_values(array_filter(array_map('trim', explode('/', (string) $example)), fn (string $part): bool => $part !== ''));
+
+        return count($parts) > 1 && str_contains((string) $example, ' / ') ? $parts : [];
+    }
+
+    /** The one variant a value names, compared without case, spaces or dashes; the longest when one contains another. */
+    public static function variant(string $value, array $variants): ?string
+    {
+        $plain = fn (string $text): string => (string) preg_replace('/[\s\-_.]+/u', '', mb_strtolower($text));
+        $value = $plain($value);
+        $named = array_values(array_filter($variants, fn (string $variant): bool => $plain($variant) !== '' && str_contains($value, $plain($variant))));
+        usort($named, fn (string $a, string $b): int => mb_strlen($plain($b)) <=> mb_strlen($plain($a)));
+        if ($named === []) {
+            return null;
+        }
+        // «DIMM» inside «SO-DIMM» is not a second variant.
+        $longest = $plain($named[0]);
+        $others = array_filter(array_slice($named, 1), fn (string $variant): bool => ! str_contains($longest, $plain($variant)));
+
+        return $others === [] ? $named[0] : null;
+    }
+
+    private static function unitOf(?string $example): string
+    {
+        return preg_match('/^\s*\d+(?:[.,]\d+)?\s*(\p{L}+)\s*$/u', (string) $example, $match) === 1 ? $match[1] : '';
+    }
+
+    /** The same unit written in Latin or Cyrillic letters, in any case: «гб» is «GB». */
+    private static function sameUnit(string $written, string $unit): bool
+    {
+        $latin = fn (string $text): string => strtr(mb_strtolower($text), ['гб' => 'gb', 'мб' => 'mb', 'тб' => 'tb', 'кб' => 'kb', 'ггц' => 'ghz',
+            'мгц' => 'mhz', 'гц' => 'hz', 'вт' => 'w', 'в' => 'v', 'мм' => 'mm', 'г' => 'g', 'дюйм' => 'inch', 'шт' => 'pcs']);
+
+        return $latin($written) === $latin($unit);
+    }
+
+    private static function name(AttributeDefinition $definition, string $locale): string
+    {
+        $name = $definition->translations[$locale] ?? null;
+
+        return is_string($name) && trim($name) !== '' ? trim($name) : (string) __($definition->label);
     }
 
     /** @return list<int> this category and every kind under it */

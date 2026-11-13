@@ -12,6 +12,7 @@ use App\Services\Ai\AiSettings;
 use App\Services\Ai\ProductSearchCancellation;
 use App\Services\Ai\ProductSearchCostBudget;
 use App\Services\Catalog\AttributePresentation;
+use App\Services\Catalog\CategoryStandard;
 use App\Services\Products\CatalogLocales;
 use App\Services\Products\PhotoSourceNotice;
 use App\Services\Products\ProductCatalogIdentity;
@@ -610,7 +611,7 @@ class DraftTelegramPresenter
             ($photoNotice = $this->photoNotice($draft)) !== '' ? 'ℹ️ '.$photoNotice : null,
             // What the category requires and research did not find (a part without its
             // form factor or interface): named here, in the fixed part of the card.
-            $draft->isManualUpload() ? null : RequiredSpecifications::cardLine($draft),
+            $draft->isManualUpload() ? null : (app(CategoryStandard::class)->reportLine($draft) ?? RequiredSpecifications::cardLine($draft)),
             $primarySourceUrl !== '' ? "🔗 Источник: {$primarySourceUrl}" : null,
         ]));
         $header = implode("\n", array_filter([

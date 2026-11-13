@@ -5,6 +5,7 @@ namespace App\Services\Products;
 use App\Models\AttributeDefinition;
 use App\Models\AttributeValue;
 use App\Models\Category;
+use App\Services\Catalog\CategoryStandard;
 use Illuminate\Support\Str;
 
 /** Form helpers only: no AI, no changes to automatic card assembly. */
@@ -16,14 +17,13 @@ class ManualProductAttributes
             return [];
         }
 
-        return Category::find($categoryId)?->attributeDefinitions()
-            ->wherePivot('is_default', true)->get()
+        return app(CategoryStandard::class)->form(Category::find($categoryId))
             ->mapWithKeys(fn (AttributeDefinition $definition): array => [Str::uuid()->toString() => [
                 'attribute_definition_id' => $definition->id,
                 'value' => null,
                 'unit' => $definition->default_unit,
                 '_category_default' => true,
-            ]])->all() ?? [];
+            ]])->all();
     }
 
     /** Replace only untouched preset rows; never delete entered or persisted data. */

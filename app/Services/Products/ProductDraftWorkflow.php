@@ -19,6 +19,7 @@ use App\Models\User;
 use App\Services\Ai\AiSettings;
 use App\Services\Catalog\AttributeDictionary;
 use App\Services\Catalog\AttributeKeeper;
+use App\Services\Catalog\CategoryStandard;
 use App\Services\Telegram\TelegramCatalogDraftMedia;
 use App\Services\Telegram\TelegramCatalogEditor;
 use Illuminate\Database\UniqueConstraintViolationException;
@@ -525,6 +526,8 @@ class ProductDraftWorkflow
      */
     private function syncAttributes(Product $product, ProductVariant $variant, Category $category, array $specifications, array $translations = [], bool $variantScoped = false, array $unchangedGlobalKeys = []): void
     {
+        $standard = app(CategoryStandard::class);
+        $examples = $standard->form($category)->mapWithKeys(fn (AttributeDefinition $definition): array => [$definition->id => $definition->pivot->example])->all();
         foreach ($specifications as $key => $specification) {
             $label = is_array($specification)
                 ? ($specification['name'] ?? $specification['label'] ?? (is_string($key) ? $key : 'Характеристика'))
@@ -558,6 +561,9 @@ class ProductDraftWorkflow
             // (an HDD's 5400 rpm, a module's 16 GB), the configuration or the product by its
             // scope. The seven laptop keys above only shape a definition created on the spot.
             $isVariantAttribute = (bool) $definition->is_variant;
+            // The category's standard writes the value (decision of 2026-11-13): the variant its example
+            // names, a number with the characteristic's own unit («16гб» is «16 GB»).
+            $rawValue = $standard->standardValue($definition, (string) $rawValue, $examples[$definition->id] ?? null);
             if ($numericValue === null && $definition->data_type === 'number') {
                 [$dataType, $numericValue, $unit] = $this->numberByDefinition($definition, (string) $rawValue);
             }

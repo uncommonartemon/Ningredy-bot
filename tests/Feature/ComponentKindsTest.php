@@ -11,6 +11,7 @@ use App\Models\Category;
 use App\Models\Product;
 use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
+use App\Services\Catalog\CategoryStandard;
 use App\Services\Products\ProductCategoryResolver;
 use App\Services\Products\ProductDraftWorkflow;
 use App\Services\Products\RequiredSpecifications;
@@ -81,7 +82,7 @@ class ComponentKindsTest extends TestCase
         $instructions = (string) (new ProductResearchAgent)->instructions();
 
         $this->assertStringContainsString('- ram: Оперативная память (a kind of components: prefer it over the parent when it fits) | product_type=component', $instructions);
-        $this->assertStringContainsString('required specifications, use these exact keys: mpn (Manufacturer part number), ram (Memory), memory_type (Memory type), data_rate (Data rate), module_type (Module type)', $instructions);
+        $this->assertStringContainsString('the form of this category, fill these with these exact keys: mpn (Manufacturer part number; required), ram (Memory; required), memory_type (Memory type; required), data_rate (Data rate; required), module_type (Module type; required)', $instructions);
         preg_match('/^[ \t]*- laptops: Ноутбуки[^\n]*/mu', $instructions, $laptops);
         $this->assertStringNotContainsString('required specifications', $laptops[0] ?? 'no laptops line');
         $this->assertStringContainsString('one you cannot find on any page', $instructions);
@@ -96,8 +97,10 @@ class ComponentKindsTest extends TestCase
         ]);
 
         $this->assertSame(['form_factor', 'interface'], array_column(RequiredSpecifications::forDraft($draft), 'key'));
-        $line = (string) RequiredSpecifications::cardLine($draft);
-        $this->assertStringStartsWith('❓ Не найдено: ', $line);
+        $this->assertStringStartsWith('❓ Не найдено: ', (string) RequiredSpecifications::cardLine($draft));
+        // The card shows the category's form report (decision of 2026-11-13), naming the same missing fields.
+        $line = (string) app(CategoryStandard::class)->reportLine($draft);
+        $this->assertStringContainsString('❓ Не найдено: ', $line);
         app(DraftTelegramPresenter::class)->sendReview(app(TelegramClient::class), '98765', $draft->fresh());
         Http::assertSent(fn (Request $request): bool => str_ends_with($request->url(), '/sendMessage')
             && str_contains((string) $request['text'], $line));
