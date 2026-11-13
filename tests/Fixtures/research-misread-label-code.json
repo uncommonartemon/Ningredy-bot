@@ -1,0 +1,96 @@
+{
+    "status": "found",
+    "title": "Samsung M471A1AG43MB1-CTD 32GB DDR4-2666 SO-DIMM Memory",
+    "brand": "Samsung",
+    "model": "M471A1AG43MB1-CTD",
+    "product_type": "component",
+    "category": "ram",
+    "condition": "new",
+    "code_aliases": [],
+    "selected_identity": {
+        "basis": "full_model",
+        "model_scope": "single_product",
+        "observed_model": "M471A4G43MB1-CTD",
+        "source_url": "https://download.semiconductor.samsung.com/resources/data-sheet/DDR4_16Gb_M_die_Unbuffered_SODIMM_Rev1.1_Jul.18.pdf",
+        "source_excerpt": "M471A4G43MB1-CTD",
+        "reason": "This complete part number identifies one observed Samsung 32GB DDR4 SO-DIMM model and is the closest observed match to the label's capacity, rank organization, and speed. It differs from the operator-supplied code."
+    },
+    "unconfirmed_operator_codes": [
+        "M471A1AG43MB1-CTD"
+    ],
+    "request_differences": [
+        {
+            "requirement": "model",
+            "requested": "M471A1AG43MB1-CTD",
+            "found": "M471A4G43MB1-CTD",
+            "evidence": "The observed Samsung datasheet and matching product pages identify M471A4G43MB1-CTD; no observed page identifies the requested code."
+        }
+    ],
+    "specifications": [
+        {
+            "key": "mpn",
+            "name": "Manufacturer part number",
+            "value": "M471A1AG43MB1-CTD"
+        },
+        {
+            "key": "ram",
+            "name": "Memory",
+            "value": "32 GB"
+        },
+        {
+            "key": "memory_type",
+            "name": "Memory type",
+            "value": "DDR4 SDRAM"
+        },
+        {
+            "key": "data_rate",
+            "name": "Data rate",
+            "value": "2666 MT/s"
+        },
+        {
+            "key": "module_type",
+            "name": "Module type",
+            "value": "260-pin SO-DIMM"
+        },
+        {
+            "key": "memory_layout",
+            "name": "Memory layout",
+            "value": "2Rx8"
+        },
+        {
+            "key": "ecc_memory",
+            "name": "ECC memory support",
+            "value": "No (non-ECC)"
+        },
+        {
+            "key": "buffered",
+            "name": "Buffered",
+            "value": "No (unbuffered)"
+        },
+        {
+            "key": "cas_latency",
+            "name": "CAS latency",
+            "value": "CL19"
+        },
+        {
+            "key": "voltage",
+            "name": "Memory voltage",
+            "value": "1.2 V"
+        },
+        {
+            "key": "pin_count",
+            "name": "Pin count",
+            "value": "260"
+        },
+        {
+            "key": "country_of_origin",
+            "name": "Country of origin",
+            "value": "Korea"
+        },
+        {
+            "key": "manufacture_year",
+            "name": "Manufacture year",
+            "value": "2019"
+        }
+    ]
+}

@@ -22,7 +22,7 @@ class ProductResearchConfigurationGuard
      * @param  string  $request  what the operator wrote (message, label, query); used only when a code of theirs was observed nowhere
      * @return array<int, string>
      */
-    public function issues(array $data, string $request = ''): array
+    public function issues(array $data, string $request = '', ?string $typedByOperator = null): array
     {
         if (($data['status'] ?? null) !== 'found') {
             return [];
@@ -56,7 +56,7 @@ class ProductResearchConfigurationGuard
             }
         }
 
-        return [...$issues, ...$this->operatorCodeIssues($data, $specifications, $request)];
+        return [...$issues, ...$this->operatorCodeIssues($data, $specifications, $request, $typedByOperator ?? $request)];
     }
 
     /**
@@ -71,14 +71,47 @@ class ProductResearchConfigurationGuard
      * @param  Collection<string, array<string, mixed>>  $specifications
      * @return array<int, string>
      */
-    private function operatorCodeIssues(array $data, Collection $specifications, string $request): array
+    /**
+     * A code read from a photographed label that no page shows, while the product matching every
+     * other fact of the label shows a code differing from it as a misreading would (decision of
+     * 2026-11-13, the colleague's #333: «M471A1AG43MB1-CTD» read, «M471A4G43MB1-CTD» on every
+     * page). Accepted only for a code the operator did not type themselves, and only when the two
+     * codes are a few characters apart; the research names the product by the page code then.
+     *
+     * @return array{0: string, 1: string}|null the label reading and the page code
+     */
+    public static function misreadLabelCode(array $data, string $typedByOperator): ?array
     {
         $normal = static fn (string $value): string => strtoupper((string) preg_replace('/[^A-Za-z0-9]/', '', $value));
+        $reported = $data['label_code_misread'] ?? null;
+        if (! is_array($reported)) {
+            return null;
+        }
+        $label = trim((string) ($reported['label_code'] ?? ''));
+        $page = trim((string) ($reported['page_code'] ?? ''));
+        [$labelPlain, $pagePlain] = [$normal($label), $normal($page)];
+        $unconfirmed = collect((array) ($data['unconfirmed_operator_codes'] ?? []))->map(fn (mixed $code): string => $normal((string) $code));
+        if (strlen($labelPlain) < 6 || strlen($pagePlain) < 6 || $labelPlain === $pagePlain
+            || ! $unconfirmed->contains($labelPlain)
+            || str_contains($normal($typedByOperator), $labelPlain)
+            || levenshtein($labelPlain, $pagePlain) > 3) {
+            return null;
+        }
+
+        return [$label, $page];
+    }
+
+    private function operatorCodeIssues(array $data, Collection $specifications, string $request, string $typedByOperator): array
+    {
+        $normal = static fn (string $value): string => strtoupper((string) preg_replace('/[^A-Za-z0-9]/', '', $value));
+        $misread = self::misreadLabelCode($data, $typedByOperator);
         $unconfirmed = collect((array) ($data['unconfirmed_operator_codes'] ?? []))
             ->filter(fn (mixed $code): bool => is_string($code) && trim($code) !== '')
             ->map(fn (string $code): string => trim($code))
             // A barcode names no product line: an unobserved EAN leaves the model alone.
             ->reject(fn (string $code): bool => ctype_digit($normal($code)))
+            // A misread label code is no code of the operator's: the page code takes its place.
+            ->reject(fn (string $code): bool => $misread !== null && $normal($code) === $normal($misread[0]))
             ->values();
         if ($unconfirmed->isEmpty()) {
             return [];
@@ -90,7 +123,7 @@ class ProductResearchConfigurationGuard
                 $issues[] = "Operator code {$code} is unconfirmed but missing from specifications: keep it as their label fact in its own sku/mpn/model row, and name the observed sibling's code in research_notes.";
             }
         }
-        $written = $normal($request);
+        $written = $normal($request).($misread === null ? '' : $normal($misread[1]));
         if ($written === '') {
             return $issues;
         }

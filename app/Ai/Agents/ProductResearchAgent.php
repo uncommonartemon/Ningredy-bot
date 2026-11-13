@@ -197,7 +197,15 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
             on that page, keep the operator's code unchanged as their label fact in specifications (never replace it
             with another page's code), and name the closest product's own code and page in research_notes. model and
             title name the operator's product by their own code; the sibling's code appears only in research_notes and
-            selected_identity (the tool refuses an answer whose sku, mpn or model is a code the operator did not write). When even
+            selected_identity (the tool refuses an answer whose sku, mpn or model is a code the operator did not write).
+            One exception: a code read from a photographed label (input provenance photo_label, not typed by the
+            operator) can be misread. When no page shows it while the product matching every other fact of that
+            label (brand, capacity, type, speed, organisation) shows a code that differs from it only as a misreading
+            would (a few characters such as 4/A, 1/I/l, 0/O, 5/S, 8/B, 6/G, or one character more or less), fill
+            label_code_misread with both codes and name the product by the page code in model, title and its mpn or
+            sku row; still list the label reading in unconfirmed_operator_codes and in request_differences (requirement
+            model) so the operator sees it. A code the operator typed is never treated so; otherwise label_code_misread
+            is null. When even
             the exact model suffix is on no page but a sibling configuration of the same model line is (another
             regional suffix or SKU of the same chassis: 14-fm0001na for a requested 14-fm0001nn), that sibling is the
             closest observed product - select it the same way and say so; unresolved is for the case where no
@@ -350,6 +358,12 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
                 'result' => $schema->string()->enum(['found', 'not_found', 'not_applicable'])->required(),
             ])->withoutAdditionalProperties())->required()
                 ->description('One entry per reference site listed in the prompt: found, not_found, or not_applicable when the product is not of its kind. Empty when the prompt lists none.'),
+            'label_code_misread' => $schema->object([
+                'label_code' => $schema->string()->max(100)->required(),
+                'page_code' => $schema->string()->max(100)->required(),
+                'reason' => $schema->string()->max(500)->required(),
+            ])->withoutAdditionalProperties()->nullable()->required()
+                ->description('A code read from a photographed label that no page shows, while the product matching every other label fact shows a code differing from it only as a misreading would; null otherwise.'),
             'unconfirmed_operator_codes' => $schema->array()->max(10)->items($schema->string()->max(100))->required()
                 ->description('Operator-supplied EAN/UPC, SKU or part numbers that no observed page shows; empty when all were observed.'),
             'code_aliases' => $schema->array()->max(6)->items($schema->string()->max(100))->required()
