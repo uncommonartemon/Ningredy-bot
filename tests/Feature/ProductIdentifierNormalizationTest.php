@@ -37,9 +37,11 @@ class ProductIdentifierNormalizationTest extends TestCase
         $this->assertSame($translations, $variant->translations);
         $this->assertSame($translations, $product->translations);
         $this->assertDatabaseHas('product_sources', ['product_variant_id' => $variant->id, 'url' => 'https://maker.example/specs']);
-        $this->assertDatabaseHas('attribute_definitions', ['key' => 'video_memory']);
+        // «VRAM» is the catalog's video memory (decision of 2026-11-13): no second characteristic beside it, never the system memory.
+        $this->assertDatabaseMissing('attribute_definitions', ['key' => 'video_memory']);
+        $this->assertSame('vram', $variant->attributes()->with('definition')->get()->concat($product->attributes()->with('definition')->get())
+            ->firstWhere('value', '8 GB')?->definition->key);
         $this->assertDatabaseHas('attribute_definitions', ['key' => 'maximum_memory']);
-        $this->assertDatabaseMissing('attribute_definitions', ['key' => 'video_memory', 'label' => 'Оперативная память']);
         $newDraft = $this->draftWithIdentifiers([['key' => 'sku', 'name' => 'SKU', 'value' => 'SAME-123']]);
         $second = app(ProductDraftWorkflow::class)->approve($newDraft);
         $this->assertSame($product->id, $second->id);
