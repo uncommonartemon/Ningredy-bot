@@ -804,5 +804,7 @@
     "Добавьте название": "Přidejte název",
     "Так эту характеристику могут назвать в карточке: бот запишет значение сюда и не создаст вторую характеристику.": "Takto může karta tuto vlastnost nazvat: bot zapíše hodnotu sem a nevytvoří druhou vlastnost.",
     "«:name» уже называет характеристику «:other».": "«:name» už pojmenovává vlastnost «:other».",
-    "также: :names": "také: :names"
+    "также: :names": "také: :names",
+    "Характеристика для всех товаров": "Vlastnost pro všechny produkty",
+    "Открыть характеристику": "Otevřít vlastnost"
 }

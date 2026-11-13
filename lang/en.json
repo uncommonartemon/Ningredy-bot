@@ -804,5 +804,7 @@
     "Добавьте название": "Add a name",
     "Так эту характеристику могут назвать в карточке: бот запишет значение сюда и не создаст вторую характеристику.": "A card may call this characteristic so: the bot writes the value here and does not create a second characteristic.",
     "«:name» уже называет характеристику «:other».": "«:name» already names the characteristic «:other».",
-    "также: :names": "also: :names"
+    "также: :names": "also: :names",
+    "Характеристика для всех товаров": "Characteristic for every product",
+    "Открыть характеристику": "Open the characteristic"
 }
