@@ -9,8 +9,7 @@ use App\Models\StockUnit;
 use Illuminate\Support\Facades\DB;
 
 /**
- * Keeps a configuration's quantity and its units in stock the same number (operator,
- * 2026-11-11: «репитер, отталкивающийся от кол-ва»). Whoever changes the quantity - the admin
+ * Keeps a configuration's quantity and its units in stock the same number (operator's decision, 2026-11-11). Whoever changes the quantity - the admin
  * form, a button, the bot in Telegram - gets units added or taken away; whoever changes a
  * unit - the books, the chat - gets the quantity moved.
  *

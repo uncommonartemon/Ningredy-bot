@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use App\Models\Concerns\GeneratesCatalogCode;
+use App\Services\Catalog\AttributeDictionary;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
@@ -35,11 +36,12 @@ class AttributeDefinition extends Model
 
     protected $fillable = [
         'key', 'label', 'data_type', 'default_unit', 'is_filterable', 'is_variant', 'sort_order', 'translations', 'attribute_group_id',
+        'aliases',
     ];
 
     protected function casts(): array
     {
-        return ['is_filterable' => 'boolean', 'is_variant' => 'boolean', 'translations' => 'array'];
+        return ['is_filterable' => 'boolean', 'is_variant' => 'boolean', 'translations' => 'array', 'aliases' => 'array'];
     }
 
     protected static function booted(): void
@@ -50,7 +52,19 @@ class AttributeDefinition extends Model
                 $definition->translations = array_filter($definition->translations ?? [],
                     fn (mixed $name): bool => is_string($name) && trim($name) !== '') ?: null;
             }
+            // Other names are kept in the dictionary's form, once each, never the characteristic's own key or name.
+            if ($definition->isDirty('aliases') || $definition->isDirty('key') || $definition->isDirty('label')) {
+                $own = [AttributeDictionary::normalize((string) $definition->key), AttributeDictionary::normalize((string) $definition->label)];
+                $definition->aliases = collect((array) ($definition->aliases ?? []))
+                    ->filter(fn (mixed $name): bool => is_string($name))
+                    ->map(fn (string $name): string => mb_substr(AttributeDictionary::normalize($name), 0, 255))
+                    ->filter(fn (string $name): bool => $name !== '' && ! in_array($name, $own, true))
+                    ->unique()->values()->all() ?: null;
+            }
         });
+        // The dictionary reads every characteristic once per request; any change makes it read them again.
+        static::saved(fn () => app(AttributeDictionary::class)->forget());
+        static::deleted(fn () => app(AttributeDictionary::class)->forget());
     }
 
     public function categories(): BelongsToMany

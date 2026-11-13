@@ -30,7 +30,7 @@ final class CatalogLocales
     /** The languages the storefront has its own interface texts for. */
     public const STOREFRONT_OPTIONS = ['cs' => 'Čeština', 'uk' => 'Українська', 'en' => 'English'];
 
-    /** Operator, 2026-11-01: «англ не обязателен» - English is the source, not a shop language by default. */
+    /** Operator's decision, 2026-11-01 - English is the source, not a shop language by default. */
     public const DEFAULT_STOREFRONT = ['cs', 'uk'];
 
     /** The languages the operator reads, in the order a Telegram card prefers them. */

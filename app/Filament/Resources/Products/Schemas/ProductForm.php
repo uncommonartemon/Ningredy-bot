@@ -232,7 +232,7 @@ class ProductForm
                     // the quantity follows either way.
                     ->afterStateUpdated(fn (Set $set, ?array $state) => $set('quantity', count($state ?? []))),
             ])
-            // Open by default: the table is what the operator looks for under the quantity (2026-11-11, «не вижу как устроено»).
+            // Open by default: the table is what one looks for under the quantity (decision of 2026-11-11).
             // Always there, even with nothing in stock: this is where an item is added (2026-11-11, «не вижу где добавление единицы»).
             ->compact()->collapsible()->columnSpanFull();
     }

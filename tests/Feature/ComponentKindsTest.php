@@ -27,8 +27,7 @@ use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 
 /**
- * Module 69: the kinds of components under «Комплектующие» (operator, 2026-11-04:
- * «подкатегории? да»), each naming the characteristics its card must carry;
+ * Module 69: the kinds of components under «Комплектующие» (operator's decision, 2026-11-04), each naming the characteristics its card must carry;
  * what research did not find, the card says instead of staying silent.
  */
 class ComponentKindsTest extends TestCase

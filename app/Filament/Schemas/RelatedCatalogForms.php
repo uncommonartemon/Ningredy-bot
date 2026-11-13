@@ -6,11 +6,14 @@ use App\Filament\Support\ProductOptions;
 use App\Models\AttributeDefinition;
 use App\Models\AttributeGroup;
 use App\Models\Category;
+use App\Services\Catalog\AttributeDictionary;
 use App\Services\Catalog\CatalogNames;
 use App\Services\Products\CatalogLocales;
 use Filament\Forms\Components\Select;
+use Filament\Forms\Components\TagsInput;
 use Filament\Forms\Components\TextInput;
 use Filament\Forms\Components\Toggle;
+use Filament\Schemas\Components\Utilities\Get;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
 
@@ -26,7 +29,35 @@ final class RelatedCatalogForms
                 'text' => __('Текст'), 'number' => __('Число'), 'boolean' => __('Да/нет'),
             ])->default('text')->required(),
             TextInput::make('default_unit')->label(__('Единица по умолчанию'))->maxLength(24),
+            self::aliasesField(),
         ];
+    }
+
+    /**
+     * Other names the characteristic answers to (decision of 2026-11-13): a card naming it so
+     * writes its value here instead of creating a second characteristic. A name another
+     * characteristic answers to is refused, or one name would mean two of them.
+     */
+    public static function aliasesField(): TagsInput
+    {
+        return TagsInput::make('aliases')->label(__('Другие названия'))->placeholder(__('Добавьте название'))
+            ->helperText(__('Так эту характеристику могут назвать в карточке: бот запишет значение сюда и не создаст вторую характеристику.'))
+            ->nestedRecursiveRules(['string', 'max:255'])
+            ->rules([fn (?Model $record, Get $get): \Closure => function (string $attribute, mixed $value, \Closure $fail) use ($record, $get): void {
+                $id = $record instanceof AttributeDefinition ? $record->id : $get('id');
+                $dictionary = app(AttributeDictionary::class);
+                foreach ((array) $value as $name) {
+                    $normalized = AttributeDictionary::normalize((string) $name);
+                    $other = $dictionary->all()->first(fn (AttributeDefinition $definition): bool => (int) $definition->id !== (int) $id
+                        && in_array($normalized, $dictionary->names($definition), true));
+                    if ($other !== null) {
+                        $fail(__('«:name» уже называет характеристику «:other».', ['name' => $name, 'other' => __($other->label)]));
+
+                        return;
+                    }
+                }
+            }])
+            ->columnSpanFull();
     }
 
     public static function attributeGroup(): array

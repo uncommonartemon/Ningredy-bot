@@ -23,8 +23,7 @@ use Throwable;
 /**
  * The operator corrects a pending draft in words - a characteristic the bot missed
  * or got wrong, a field, the condition - or asks the bot to find one on the web, and
- * the draft changes (module 72; operator, 2026-11-06: «заметил, сказал, и тот
- * поправил»). A draft is not public, the changes are named in the chat and the card
+ * the draft changes (module 72; operator's decision, 2026-11-06). A draft is not public, the changes are named in the chat and the card
  * comes back at once, so no button stands between the words and the change.
  */
 class EditProductDraft implements Tool

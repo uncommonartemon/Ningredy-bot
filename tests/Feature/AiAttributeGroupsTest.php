@@ -102,7 +102,8 @@ class AiAttributeGroupsTest extends TestCase
         $this->assertSame(2, AttributeDefinition::where('attribute_group_id', $group->id)->count());
     }
 
-    public function test_existing_grouped_and_explicitly_ungrouped_definitions_keep_their_admin_assignments(): void
+    /** Decision of 2026-11-13: a group someone set stays; a characteristic without one gets the proposed group. */
+    public function test_a_set_group_stays_and_a_characteristic_without_one_gets_the_proposed_group(): void
     {
         $manualGroup = AttributeGroup::create(['name' => 'Admin graphics']);
         $grouped = AttributeDefinition::create(['key' => 'gpu_bus_width', 'label' => 'GPU bus width',
@@ -116,14 +117,13 @@ class AiAttributeGroupsTest extends TestCase
 
         $preview = AttributePresentation::specifications($draft->specifications)->keyBy('key');
         $this->assertSame($manualGroup->id, $preview[$grouped->key]['group']['id']);
-        $this->assertNull($preview[$ungrouped->key]['group']);
+        $this->assertSame('AI graphics', $preview[$ungrouped->key]['group']['name']);
         app(ProductDraftWorkflow::class)->approve($draft);
 
         $this->assertSame($manualGroup->id, $grouped->fresh()->attribute_group_id);
-        $this->assertNull($ungrouped->fresh()->attribute_group_id);
+        $this->assertSame('AI graphics', $ungrouped->fresh()->group?->name);
         $this->assertFalse($ungrouped->fresh()->is_filterable);
-        $this->assertDatabaseCount('attribute_groups', 1);
-        $this->assertDatabaseMissing('attribute_groups', ['name' => 'AI graphics']);
+        $this->assertDatabaseCount('attribute_groups', 2);
     }
 
     public function test_malformed_or_deleted_group_references_do_not_block_publication_or_create_replacement_groups(): void

@@ -5,6 +5,7 @@ namespace App\Filament\Schemas;
 use App\Filament\Support\PastedProductAttributes;
 use App\Models\AttributeDefinition;
 use App\Models\AttributeValue;
+use App\Services\Catalog\AttributeDictionary;
 use App\Services\Products\ManualProductAttributes;
 use Filament\Actions\Action;
 use Filament\Forms\Components\Hidden;
@@ -14,9 +15,11 @@ use Filament\Forms\Components\Select;
 use Filament\Forms\Components\Textarea;
 use Filament\Forms\Components\TextInput;
 use Filament\Forms\Components\Toggle;
+use Filament\Infolists\Components\TextEntry;
 use Filament\Notifications\Notification;
 use Filament\Schemas\Components\Utilities\Get;
 use Filament\Schemas\Components\Utilities\Set;
+use Illuminate\Support\Arr;
 use Illuminate\Validation\ValidationException;
 
 class ProductAttributeFields
@@ -26,7 +29,8 @@ class ProductAttributeFields
         return Repeater::make('attributes')->relationship()->label(__('Характеристики'))
             ->hintAction(fn (Repeater $component): Action => self::pasteAction($component))
             ->table([
-                TableColumn::make(__('Характеристика'))->width('45%'),
+                TableColumn::make(__('Характеристика'))->width('38%'),
+                TableColumn::make(__('catalog-groups.group'))->width('10rem'),
                 TableColumn::make(__('Значение')),
                 TableColumn::make(__('Единица'))->width('6rem'),
             ])->compact()
@@ -52,7 +56,25 @@ class ProductAttributeFields
                         $set('_category_default', false);
                     })
                     ->createOptionForm(RelatedCatalogForms::attribute())
-                    ->createOptionUsing(fn (array $data): int => AttributeDefinition::create($data)->id),
+                    ->createOptionUsing(fn (array $data): int => AttributeDefinition::create($data)->id)
+                    // The pencil opens the characteristic itself (decision of 2026-11-13): its name,
+                    // group, type, unit and other names belong to every product that has it, so they
+                    // are saved at once, not with this product.
+                    ->editOptionForm(fn (): array => [Hidden::make('id'), ...RelatedCatalogForms::attribute()])
+                    ->editOptionModalHeading(__('Характеристика для всех товаров'))
+                    ->fillEditOptionActionFormUsing(fn (Select $component): ?array => is_numeric($component->getState())
+                        ? AttributeDefinition::query()->find($component->getState())?->only(['id', 'label', 'attribute_group_id', 'data_type', 'default_unit', 'aliases'])
+                        : null)
+                    ->updateOptionUsing(function (array $data, Select $component): void {
+                        AttributeDefinition::query()->find($component->getState())
+                            ?->update(Arr::only($data, ['label', 'attribute_group_id', 'data_type', 'default_unit', 'aliases']));
+                    })
+                    ->editOptionAction(fn (Action $action): Action => $action->tooltip(__('Открыть характеристику'))
+                        ->visible(fn (Select $component): bool => is_numeric($component->getState()))),
+                TextEntry::make('characteristic_group')->hiddenLabel()->placeholder('—')
+                    ->state(fn (Get $get): ?string => is_numeric($get('attribute_definition_id'))
+                        ? app(AttributeDictionary::class)->all()->firstWhere('id', (int) $get('attribute_definition_id'))?->group?->localizedName()
+                        : null),
                 TextInput::make('value')->label(__('Значение'))
                     ->extraInputAttributes(['aria-label' => __('Значение')])
                     ->placeholder(__('Введите или выберите из подсказок'))

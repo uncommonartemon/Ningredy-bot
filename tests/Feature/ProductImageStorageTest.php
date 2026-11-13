@@ -332,7 +332,7 @@ class ProductImageStorageTest extends TestCase
     }
 
     /**
-     * Operator, 2026-11-07: «если даст коробку - норм, если даст фото детали - лучше». A component's
+     * Operator's decision, 2026-11-07. A component's
      * box is an ordinary photo with no rule of its own, and the part itself comes first.
      */
     public function test_a_components_box_is_an_ordinary_photo_after_the_part_itself(): void

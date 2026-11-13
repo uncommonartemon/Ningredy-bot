@@ -37,7 +37,7 @@ class ProductDraftTypeTest extends TestCase
 
     public function test_a_card_approved_with_no_quantity_stated_is_one_item_in_stock(): void
     {
-        // Operator, 2026-11-11: «если позиция есть, значит по дефолту 1 есть».
+        // Operator's decision, 2026-11-11.
         $product = app(ProductDraftWorkflow::class)->approve(
             $this->draft('Lenovo IdeaPad Slim 3 15AMN8', 'IdeaPad Slim 3 15AMN8', 'laptop'),
         );

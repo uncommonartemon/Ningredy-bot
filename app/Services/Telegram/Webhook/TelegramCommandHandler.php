@@ -5,6 +5,7 @@ namespace App\Services\Telegram\Webhook;
 use App\Ai\Tools\GetSystemStatus;
 use App\Ai\Tools\PrepareProductDeletion;
 use App\Ai\Tools\SetProductActive;
+use App\Jobs\AuditCharacteristics;
 use App\Jobs\ProcessTelegramMessage;
 use App\Jobs\SendDiagnosticReport;
 use App\Models\AiOperation;
@@ -41,8 +42,8 @@ class TelegramCommandHandler
         $createKey = "telegram-manual-create:{$chatId}:{$telegramUserId}";
         // /errors is answered by the assistant, so it must not stay behind as the
         // awaited hint, refined query or manual edit.
-        if (preg_match('/^\/(?:edit|delete|product|catalog|drafts|find|new|reset|errors)(?:@\w+)?(?:\s|$)/iu', $text) === 1
-            || in_array($text, ['📦 Каталог', '📋 Черновики', '🔎 Найти товар', '🔄 Сброс', '⚠️ Ошибки'], true)) {
+        if (preg_match('/^\/(?:edit|delete|product|catalog|drafts|find|new|reset|errors|audit)(?:@\w+)?(?:\s|$)/iu', $text) === 1
+            || in_array($text, ['📦 Каталог', '📋 Черновики', '🔎 Найти товар', '🔄 Сброс', '⚠️ Ошибки', '🧹 Аудит характеристик'], true)) {
             $this->clearManualCreate($chatId, $telegramUserId);
             app(DraftTelegramInteractionState::class)->clear($chatId, $telegramUserId);
         }
@@ -243,6 +244,16 @@ class TelegramCommandHandler
             return true;
         }
 
+        // The characteristic audit (decision of 2026-11-13): the model reads the whole dictionary,
+        // fixes what it is sure of and sends the doubtful ones here with buttons.
+        if (preg_match('/^\/audit(?:@\w+)?$/iu', $text) === 1 || $text === '🧹 Аудит характеристик') {
+            $this->telegram->sendMessage($chatId, "🧹 Аудит характеристик начат: модель читает все характеристики с их значениями и товарами и сама проверяет, где не уверена. Это до нескольких минут.\nБесспорное исправлю сам, сомнительное пришлю сюда с кнопками.", $this->mainKeyboard());
+            AuditCharacteristics::dispatch($chatId);
+            $this->markCommandProcessed($update);
+
+            return true;
+        }
+
         $preset = match (true) {
             preg_match('/^\/errors(?:@\w+)?$/iu', $text) === 1, $text === '⚠️ Ошибки' => 'Покажи последние ошибки AI и очереди.',
             default => null,
@@ -354,6 +365,7 @@ class TelegramCommandHandler
             /draft номер — открыть черновик без обращения к AI
             /status — состояние системы без обращения к AI
             /errors — ошибки
+            /audit — аудит характеристик: дубли и группы; сомнительное спрошу кнопками
             /new — очистить контекст диалога
             /reset — отменить зависшие запросы и очистить контекст (если поиск завис, например когда воркер очереди был выключен)
             /report — отчёт для разработчика одним файлом: журнал поисков, ошибки, выученные правила сайтов за 7 дней (без ключей)

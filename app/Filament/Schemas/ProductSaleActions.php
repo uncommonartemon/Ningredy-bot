@@ -12,8 +12,7 @@ use Filament\Support\Icons\Heroicon;
 use Illuminate\Database\Eloquent\Collection;
 
 /**
- * Two different ways out of the shop's window (operator, 2026-11-11: «можно закинуть в сон или
- * удалить, две разные кнопки… повторы будут однозначно»). Taken off sale, a product sleeps:
+ * Two different ways out of the shop's window (operator's decision, 2026-11-11). Taken off sale, a product sleeps:
  * the storefront no longer shows it and nothing of it is lost, because the same product comes
  * in again. Deleting is for a card that was a mistake, and it says so before it happens.
  */

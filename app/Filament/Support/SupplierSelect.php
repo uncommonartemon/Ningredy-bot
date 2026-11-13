@@ -8,8 +8,7 @@ use Filament\Forms\Components\Textarea;
 use Filament\Forms\Components\TextInput;
 
 /**
- * The supplier of a unit, picked from the list or added on the spot (operator, 2026-11-11:
- * «селект с + добавить на месте, селект ор криейт»). One definition for every form that
+ * The supplier of a unit, picked from the list or added on the spot (operator's decision, 2026-11-11). One definition for every form that
  * names a supplier: the product's table of units, a unit's own form, the purchase of new items.
  */
 final class SupplierSelect

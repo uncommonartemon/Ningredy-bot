@@ -38,7 +38,18 @@ class CatalogFilterQuery
         if (filled($filters['search'] ?? null)) {
             $this->variantSearch($query, $filters['search']);
         }
-        foreach ($filters['attributes'] ?? [] as $key => $values) {
+        $this->attributes($query, $filters['attributes'] ?? []);
+    }
+
+    /**
+     * Configurations carrying each chosen characteristic value, their own or inherited from the
+     * product. Shared by the storefront and the admin's product list.
+     *
+     * @param  array<string, list<string>>  $attributes  key => normalized values
+     */
+    public function attributes(Builder $query, array $attributes): void
+    {
+        foreach ($attributes as $key => $values) {
             if (is_array($values) && $values !== []) {
                 $definition = fn (Builder $attribute) => $attribute
                     ->whereHas('definition', fn (Builder $definition) => $definition->where('key', $key));

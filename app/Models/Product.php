@@ -140,8 +140,7 @@ class Product extends Model
     }
 
     /**
-     * Off the storefront with everything kept (operator, 2026-11-11: «закинуть в сон или
-     * удалить, две разные кнопки… повторы будут однозначно»). The same product comes in
+     * Off the storefront with everything kept (operator's decision, 2026-11-11). The same product comes in
      * again, and its card, photos, characteristics and translations were paid for; deleting
      * is for a card that was a mistake.
      */

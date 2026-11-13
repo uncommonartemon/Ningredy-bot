@@ -11,8 +11,7 @@ use Laravel\Ai\Promptable;
 use Stringable;
 
 /**
- * Chooses the characteristics a product's catalog card shows (operator, 2026-11-08:
- * «чтобы он во время формирования просто сам выбрал, что отображать»). The card took the
+ * Chooses the characteristics a product's catalog card shows (operator's decision, 2026-11-08). The card took the
  * first four in the order of their groups, and a laptop showed its camera, Bluetooth, card
  * reader and Ethernet instead of its processor and screen.
  */

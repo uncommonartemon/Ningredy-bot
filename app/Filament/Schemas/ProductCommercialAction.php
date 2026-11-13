@@ -32,7 +32,7 @@ final class ProductCommercialAction
     }
 
     /**
-     * The same product came in again (operator, 2026-11-11: «повторы будут однозначно»): its
+     * The same product came in again (operator's decision, 2026-11-11): its
      * sleeping card goes back on sale together with how many items there are now and what
      * they cost, in one step.
      */

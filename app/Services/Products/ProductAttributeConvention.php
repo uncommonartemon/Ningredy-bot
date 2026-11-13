@@ -17,7 +17,7 @@ final class ProductAttributeConvention
             group describes the product's own properties. Do not invent a nested component or unrelated
             laptop groups. Keep product brand/model/SKU in their identity fields; a GPU chip model is
             distinct from the retail graphics card's brand/model. Use only flat groups, never subgroups.
-            Reuse existing semantic attribute keys, labels and group assignments, including null.
+            Reuse existing semantic attribute keys, labels and group assignments; a key without a group may get one.
             Preserve this task's established headline keys such as cpu/gpu/ram/storage; do not create
             duplicate aliases. For new granular facts use stable component-qualified snake_case keys
             where the schema supports keys, and concise, globally unambiguous labels such as GPU memory

@@ -4,7 +4,7 @@ use Illuminate\Database\Migrations\Migration;
 use Illuminate\Support\Facades\DB;
 
 /**
- * Operator, 2026-11-11: «если позиция есть, значит по дефолту 1 есть». A card is made because
+ * Operator's decision, 2026-11-11. A card is made because
  * the item is there, so a configuration on sale whose stock nobody ever stated (nothing in
  * stock, availability «уточнить», no unit ever written for it) is one item in stock. What was
  * stated - «нет», a sold unit, a product taken off sale - stays as it is.

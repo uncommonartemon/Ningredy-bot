@@ -177,7 +177,7 @@ class StockUnitsTest extends TestCase
 
     public function test_a_unit_gets_its_number_the_moment_its_row_appears(): void
     {
-        // Operator, 2026-11-11: «пусть генерируется реактивно айдишник, если нажать добавить единицу».
+        // Operator's decision, 2026-11-11.
         $this->admin();
         $variant = $this->variant(quantity: 1);
         $first = $variant->stockUnits()->sole();
@@ -210,7 +210,7 @@ class StockUnitsTest extends TestCase
 
     public function test_a_supplier_is_one_of_a_list_that_takes_a_new_name_on_the_spot(): void
     {
-        // Operator, 2026-11-11: «поставщик, пускай будет селект с + добавить на месте».
+        // Operator's decision, 2026-11-11.
         $this->admin();
         $variant = $this->variant(quantity: 2);
         [$first, $second] = $variant->stockUnits()->orderBy('id')->get()->all();

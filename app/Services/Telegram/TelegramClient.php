@@ -353,6 +353,7 @@ class TelegramClient
                 ['command' => 'add', 'description' => 'Загрузить свой товар'],
                 ['command' => 'drafts', 'description' => 'Показать черновики'],
                 ['command' => 'draft', 'description' => 'Открыть черновик по номеру'],
+                ['command' => 'audit', 'description' => 'Аудит характеристик'],
                 ['command' => 'cancel', 'description' => 'Отменить ожидаемый ввод'],
                 ['command' => 'status', 'description' => 'Статус сервера'],
                 ['command' => 'url', 'description' => 'Текущий адрес сайта'],

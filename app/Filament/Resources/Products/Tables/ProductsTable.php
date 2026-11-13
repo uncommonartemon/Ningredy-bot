@@ -5,14 +5,19 @@ namespace App\Filament\Resources\Products\Tables;
 use App\Filament\Resources\Products\ProductResource;
 use App\Filament\Schemas\ProductCommercialAction;
 use App\Filament\Schemas\ProductSaleActions;
+use App\Filament\Support\CharacteristicsFilter;
 use App\Filament\Support\ProductOptions;
+use App\Models\Category;
 use App\Models\Product;
 use Filament\Actions\ActionGroup;
 use Filament\Actions\DeleteAction;
 use Filament\Actions\EditAction;
 use Filament\Actions\ViewAction;
+use Filament\Forms\Components\Select;
+use Filament\Schemas\Components\Utilities\Set;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Columns\ToggleColumn;
+use Filament\Tables\Enums\FiltersLayout;
 use Filament\Tables\Filters\SelectFilter;
 use Filament\Tables\Filters\TernaryFilter;
 use Filament\Tables\Table;
@@ -82,12 +87,22 @@ class ProductsTable
                 TextColumn::make('updated_at')->label(__('Изменён'))->since()->sortable()->toggleable(isToggledHiddenByDefault: true),
             ])->filters([
                 SelectFilter::make('status')->label(__('Статус'))->options(ProductOptions::statuses()),
-                SelectFilter::make('category_id')->label(__('Категория'))->relationship('category', 'name'),
+                SelectFilter::make('category_id')->label(__('Категория'))->relationship('category', 'name')
+                    // A category lists the kinds under it too, as on the storefront: «Комплектующие» shows the SSDs.
+                    ->query(fn (Builder $query, array $data): Builder => blank($data['value'] ?? null) ? $query
+                        : $query->whereIn('category_id', Category::treeIdsBySlug((string) Category::query()->whereKey($data['value'])->value('slug'))))
+                    // The characteristics below depend on it: another category, other fields, nothing left chosen.
+                    ->modifyFormFieldUsing(fn (Select $field): Select => $field->live()
+                        ->afterStateUpdated(fn (Set $set) => $set('../characteristics', []))),
                 SelectFilter::make('brand_id')->label(__('Бренд'))->relationship('brand', 'name'),
                 SelectFilter::make('product_type')->label(__('Тип'))->options(ProductOptions::types()),
                 TernaryFilter::make('is_active')->label(__('product-table.show_on_site')),
                 TernaryFilter::make('is_featured')->label(__('Рекомендуемый')),
-            ])->recordActions([ActionGroup::make([
+                CharacteristicsFilter::make(),
+            ])
+            // A block above the list, folded away when not needed: a category brings a dozen characteristic
+            // fields, too many for the small filters menu.
+            ->filtersLayout(FiltersLayout::AboveContentCollapsible)->filtersFormColumns(['default' => 1, 'md' => 3])->recordActions([ActionGroup::make([
                 ProductCommercialAction::make(), ViewAction::make(), EditAction::make(),
                 // Two different ways out (operator, 2026-11-11): to sleep and back, or deleted for good.
                 ProductSaleActions::takeOff(), ProductCommercialAction::putBackOnSale(),

@@ -3,6 +3,9 @@
 namespace App\Filament\Support;
 
 use App\Models\AttributeDefinition;
+use App\Services\Catalog\AttributeDictionary;
+use App\Services\Catalog\AttributeKeeper;
+use App\Services\Products\AiAttributeGroups;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
@@ -14,7 +17,8 @@ final class PastedProductAttributes
     public function merge(string $text, array $existing, bool $replaceFilled = false, bool $createMissing = false): array
     {
         $rows = $this->parse($text);
-        $definitions = AttributeDefinition::query()->get();
+        $dictionary = app(AttributeDictionary::class);
+        $definitions = $dictionary->all();
         $resolved = [];
         $seen = [];
         $missing = [];
@@ -22,12 +26,9 @@ final class PastedProductAttributes
             $name = $this->normalize($row['label']);
             $matches = $definitions->filter(fn (AttributeDefinition $definition): bool => $this->normalize($definition->key) === $name);
             if ($matches->isEmpty()) {
-                $matches = $definitions->filter(function (AttributeDefinition $definition) use ($name): bool {
-                    $labels = [$definition->label, __($definition->label), ...array_values($definition->translations ?? [])];
-
-                    return collect($labels)->filter(fn ($label): bool => is_string($label))
-                        ->contains(fn (string $label): bool => $this->normalize($label) === $name);
-                });
+                // Its name in any language or another name it was given (decision of 2026-11-13).
+                $normalized = AttributeDictionary::normalize($row['label']);
+                $matches = $definitions->filter(fn (AttributeDefinition $definition): bool => in_array($normalized, $dictionary->names($definition), true));
             }
             if ($matches->count() > 1) {
                 $this->fail(__('catalog-form.ambiguous_attribute', ['name' => $row['label']]));
@@ -46,16 +47,35 @@ final class PastedProductAttributes
         if ($missing !== [] && ! $createMissing) {
             $this->fail(__('catalog-form.missing_attributes', ['names' => implode(', ', $missing)]));
         }
+        // Before anything is created, the dictionary's keeper reads the names it does not know:
+        // one may be a characteristic under another name, a new one gets its group.
+        $verdicts = $missing === [] ? [] : app(AttributeKeeper::class)->settle(collect($resolved)
+            ->filter(fn (array $pair): bool => $pair[1] === null)
+            ->map(fn (array $pair, int $index): array => ['index' => $index, 'key' => $this->pastedKey($pair[0]['label']),
+                'name' => $pair[0]['label'], 'value' => $pair[0]['value']])->values()->all());
 
         // Validate the entire clipboard before creating any dictionary records.
-        return DB::transaction(function () use ($resolved, $existing, $replaceFilled): array {
+        return DB::transaction(function () use ($resolved, $existing, $replaceFilled, $verdicts, $dictionary): array {
             $result = ['rows' => $existing, 'added' => 0, 'updated' => 0, 'skipped' => 0, 'created' => 0];
             foreach ($resolved as [$row, $definition]) {
                 if (! $definition) {
-                    $definition = AttributeDefinition::query()->create([
-                        'label' => $row['label'], 'data_type' => 'text', 'default_unit' => $row['unit'],
-                    ]);
-                    $result['created']++;
+                    $verdict = $verdicts[$this->pastedKey($row['label'])] ?? null;
+                    $definition = ($verdict['decision'] ?? null) === 'same'
+                        ? AttributeDefinition::query()->where('key', $verdict['key'])->first() : null;
+                    if ($definition === null) {
+                        // The operator's own name stays the label; the keeper's English name is the English one.
+                        $definition = ($verdict['decision'] ?? null) === 'new'
+                            ? AttributeDefinition::query()->firstOrCreate(['key' => $verdict['key']], ['label' => $row['label'], 'data_type' => 'text',
+                                'default_unit' => $row['unit'], 'translations' => filled($verdict['name']) ? ['en' => $verdict['name']] : null])
+                            : AttributeDefinition::query()->create(['label' => $row['label'], 'data_type' => 'text', 'default_unit' => $row['unit']]);
+                        $result['created']++;
+                    }
+                    if ($definition->attribute_group_id === null && ($group = AiAttributeGroups::resolve($verdict['group'] ?? null)) !== null) {
+                        $definition->update(['attribute_group_id' => $group->id]);
+                    }
+                    if ($verdict['remember'] ?? false) {
+                        $dictionary->remember($definition, $row['label']);
+                    }
                 }
                 $key = null;
                 foreach ($result['rows'] as $candidateKey => $candidate) {
@@ -188,6 +208,12 @@ final class PastedProductAttributes
         return count($columns) >= 2
             && in_array($this->normalize((string) $columns[0]), ['attribute', 'name', 'label', 'характеристика', 'название', 'атрибут', 'назва', 'atribut', 'název'])
             && in_array($this->normalize((string) $columns[1]), ['value', 'значение', 'значення', 'hodnota']);
+    }
+
+    /** The key a pasted name is asked about under: its own words in snake_case. */
+    private function pastedKey(string $label): string
+    {
+        return Str::slug($label, '_') ?: 'attribute_'.substr(sha1($label), 0, 12);
     }
 
     private function normalize(string $value): string

@@ -2,6 +2,8 @@
 
 namespace Tests;
 
+use App\Ai\Agents\AttributeDictionaryReviewAgent;
+use App\Ai\Agents\AttributeKeeperAgent;
 use App\Ai\Agents\GalleryFrameReviewAgent;
 use App\Ai\Agents\GalleryTextLanguageAgent;
 use App\Ai\Agents\ProductCardRecoveryAgent;
@@ -92,6 +94,12 @@ abstract class TestCase extends BaseTestCase
         RenditionRuleAgent::fake(fn (): array => [
             'decision' => 'none', 'find' => '', 'flags' => '', 'replace' => '', 'reason' => 'No rendition rule configured by this test.',
         ])->preventStrayPrompts();
+
+        // Every approval of a card with an unknown characteristic asks the dictionary's keeper.
+        // Without a verdict the card is written as it was before the keeper; tests of the
+        // keeper give their own.
+        AttributeKeeperAgent::fake(fn (): array => ['verdicts' => []])->preventStrayPrompts();
+        AttributeDictionaryReviewAgent::fake(fn (): array => ['merges' => [], 'groups' => []])->preventStrayPrompts();
     }
 
     /** Research answer evidence that the source page names this one complete model. */

@@ -7,8 +7,7 @@ use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
 
 /**
- * The shop's books in numbers (operator, 2026-11-11: «интерфейс для бухгалтера, страничку,
- * виджеты»): what is on the shelf and what it cost, what was bought and sold lately, and what
+ * The shop's books in numbers (operator's decision, 2026-11-11): what is on the shelf and what it cost, what was bought and sold lately, and what
  * was earned. Everything is counted from the units; a unit without a purchase price is
  * counted apart instead of as a free one.
  */

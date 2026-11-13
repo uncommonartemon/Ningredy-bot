@@ -92,7 +92,7 @@ class DatabaseOperatorService
                 'key' => 'string|regex:/^[a-z0-9][a-z0-9_-]*$/|max:255', 'label' => 'required|string|max:255',
                 'data_type' => 'in:text,number,boolean', 'default_unit' => 'nullable|string|max:24',
                 'is_filterable' => $bool, 'is_variant' => $bool, 'sort_order' => $order,
-                'translations' => $translations, 'attribute_group_id' => $fk('attribute_groups'),
+                'translations' => $translations, 'attribute_group_id' => $fk('attribute_groups'), 'aliases' => 'nullable|array|max:100',
             ]],
             'attribute_values' => ['model' => AttributeValue::class, 'writable' => [
                 'attribute_definition_id' => $fk('attribute_definitions', false), 'product_id' => $fk('products'),
@@ -141,7 +141,7 @@ class DatabaseOperatorService
                 'domain' => 'required|string|max:255', 'agent_hint' => 'nullable|string|max:20000',
             ]],
             // The search's reference data is the operator's to change from the chat as well
-            // (operator, 2026-11-02: «сделать гибким бота в телеграме, чтобы он всё мог делать с бд по запросу»).
+            // (operator's decision, 2026-11-02).
             'reference_sites' => ['model' => ReferenceSite::class, 'writable' => [
                 'domain' => 'required|string|max:255', 'applies_to' => 'required|string|max:500',
                 'use_for_facts' => $bool, 'use_for_photos' => $bool, 'access' => [Rule::in(ReferenceSite::ACCESS)],

@@ -24,8 +24,7 @@ use UnitEnum;
 /**
  * The outside services the bot looks products up in: each can be switched off and
  * logged in to here, with what it did lately, and what exists for the components
- * they do not cover (operator, 2026-11-06: «страничка с сервисами, вот айскет где
- * можно откл или включить, залогиниться»).
+ * they do not cover (operator's decision, 2026-11-06).
  */
 class ServicesPage extends Page implements HasForms
 {

@@ -6,13 +6,13 @@ use App\Ai\Agents\TelegramDraftEditAgent;
 use App\Ai\Tools\AddProductSpecifications;
 use App\Exceptions\ProductSearchCancelled;
 use App\Models\AiRun;
-use App\Models\AttributeDefinition;
 use App\Models\Category;
 use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
 use App\Services\Ai\AiSettings;
 use App\Services\Ai\OpenAiHeavyOperationGate;
 use App\Services\Ai\ProductSearchCancellation;
+use App\Services\Catalog\AttributeDictionary;
 use App\Services\Products\AiAttributeGroups;
 use App\Services\Products\ProductCondition;
 use App\Services\Products\RequiredSpecifications;
@@ -70,7 +70,7 @@ class TelegramDraftEditor
                     'commercial' => $draft->manualIntake()['commercial'] ?? [],
                     'active_categories' => Category::query()->where('is_active', true)->pluck('name', 'slug')->all(),
                     'missing_required_specifications' => RequiredSpecifications::forDraft($draft),
-                    'catalog_keys' => AttributeDefinition::query()->has('values')->withCount('values')->orderByDesc('values_count')->limit(80)->pluck('key')->all(),
+                    'catalog_keys' => app(AttributeDictionary::class)->vocabulary(),
                 ], JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
                 $run = AiRun::query()->create([
                     'telegram_update_id' => $update->id, 'provider' => $provider, 'model' => $model,

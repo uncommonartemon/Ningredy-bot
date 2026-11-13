@@ -13,8 +13,7 @@ use Illuminate\Validation\ValidationException;
 use Tests\TestCase;
 
 /**
- * Operator, 2026-11-02: «добавить таблицу с запросами + ссылки… использовать при поиске
- * ссд и хард диск»; a colleague had asked the bot to take SSD speeds from
+ * Operator's decision, 2026-11-02; a colleague had asked the bot to take SSD speeds from
  * harddrivebenchmark.net for good and photos from other sites.
  */
 class ReferenceSitesTest extends TestCase
