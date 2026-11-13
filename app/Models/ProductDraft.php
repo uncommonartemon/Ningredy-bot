@@ -11,7 +11,7 @@ use Illuminate\Support\Facades\Storage;
 class ProductDraft extends Model
 {
     protected $fillable = [
-        'condition', 'translations', 'specification_evidence', 'photo_source_context', 'card_repair_state',
+        'condition', 'translations', 'specification_evidence', 'photo_source_context', 'card_repair_state', 'form_review',
         'telegram_update_id', 'ai_run_id', 'status', 'reviewed_at', 'reviewed_by_user_id',
         'reviewed_by_telegram_user_id', 'rejection_reason', 'requested_by_telegram_user_id',
         'approved_product_id', 'approved_variant_id',
@@ -28,6 +28,7 @@ class ProductDraft extends Model
     {
         return [
             'translations' => 'array', 'specification_evidence' => 'array', 'photo_source_context' => 'array', 'card_repair_state' => 'array',
+            'form_review' => 'array',
             'specifications' => 'array', 'sources' => 'array', 'image_urls' => 'array',
             'excluded_gallery_source_urls' => 'array',
             'excluded_gallery_image_urls' => 'array',

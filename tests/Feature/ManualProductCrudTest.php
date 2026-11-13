@@ -134,11 +134,13 @@ class ManualProductCrudTest extends TestCase
         $cpuId = AttributeDefinition::where('key', 'cpu')->value('id');
         $count = $category->attributeDefinitions()->count();
         Livewire::test(EditCategory::class, ['record' => $category->id])
-            ->fillForm(['default_attribute_ids' => [$ramId, $cpuId]])->call('save')->assertHasNoFormErrors();
+            ->set('data.standard_form', ['a' => ['attribute_definition_id' => $ramId, 'example' => '16 GB', 'is_required' => '1', 'section' => 'main'],
+                'b' => ['attribute_definition_id' => $cpuId, 'example' => null, 'is_required' => '0', 'section' => 'main']])
+            ->call('save')->assertHasNoFormErrors();
         $this->assertSame($count, $category->attributeDefinitions()->count());
         $this->assertSame([$ramId, $cpuId], $category->attributeDefinitions()->wherePivot('is_default', true)->pluck('attribute_definitions.id')->all());
         Livewire::test(EditCategory::class, ['record' => $category->id])
-            ->fillForm(['default_attribute_ids' => []])->call('save')->assertHasNoFormErrors();
+            ->set('data.standard_form', [])->call('save')->assertHasNoFormErrors();
         $this->assertSame([], app(ManualProductAttributes::class)->defaults($category->id));
     }
 

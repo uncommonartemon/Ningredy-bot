@@ -29,6 +29,7 @@ class Category extends Model
         'parent_id', 'name', 'slug', 'product_type_affinity', 'icon', 'sort_order', 'is_active', 'gallery_search_strategy',
         'photo_identity', 'photo_identity_hint',
         'minimum_verified_images', 'product_search_hint', 'minimum_image_width', 'minimum_image_height',
+        'title_parts', 'card_standard', 'form_only',
     ];
 
     protected static function booted(): void
@@ -91,6 +92,8 @@ class Category extends Model
             'minimum_verified_images' => 'integer',
             'minimum_image_width' => 'integer',
             'minimum_image_height' => 'integer',
+            'title_parts' => 'array',
+            'form_only' => 'boolean',
         ];
     }
 
@@ -209,8 +212,35 @@ class Category extends Model
     public function attributeDefinitions(): BelongsToMany
     {
         return $this->belongsToMany(AttributeDefinition::class)
-            ->withPivot(['is_required', 'sort_order', 'is_default'])
+            ->withPivot(['is_required', 'sort_order', 'is_default', 'example', 'section'])
             ->orderByPivot('sort_order');
+    }
+
+    /** The form of the category: the characteristics a card of it carries, in their order (decision of 2026-11-13). */
+    public function formDefinitions(): BelongsToMany
+    {
+        return $this->attributeDefinitions()->wherePivot('is_default', true);
+    }
+
+    /** The category whose standard applies here: this one, or the nearest parent that has one. */
+    public function standardSource(string $part = 'form'): ?self
+    {
+        $category = $this;
+        $seen = [];
+        while ($category !== null && ! isset($seen[$category->id])) {
+            $seen[$category->id] = true;
+            $has = match ($part) {
+                'title' => filled($category->title_parts),
+                'note' => filled($category->card_standard),
+                default => $category->formDefinitions()->exists(),
+            };
+            if ($has) {
+                return $category;
+            }
+            $category = $category->parent_id === null ? null : $category->parent()->first();
+        }
+
+        return null;
     }
 
     /** The characteristics every card of this category must carry, in the category's order. */

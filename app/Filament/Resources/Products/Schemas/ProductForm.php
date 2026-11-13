@@ -14,7 +14,9 @@ use App\Models\Brand;
 use App\Models\Category;
 use App\Models\CustomerGroup;
 use App\Models\CustomerGroupPrice;
+use App\Models\Product;
 use App\Services\Catalog\StockUnits;
+use App\Services\Catalog\TitleComposer;
 use App\Services\Products\ManualProductAttributes;
 use App\Services\Products\ProductCondition;
 use App\Services\Products\ProductSourceTypes;
@@ -28,6 +30,7 @@ use Filament\Forms\Components\Select;
 use Filament\Forms\Components\Textarea;
 use Filament\Forms\Components\TextInput;
 use Filament\Forms\Components\Toggle;
+use Filament\Notifications\Notification;
 use Filament\Schemas\Components\Fieldset;
 use Filament\Schemas\Components\Grid;
 use Filament\Schemas\Components\Group;
@@ -47,7 +50,20 @@ class ProductForm
                     ? ['wire:poll.3s' => 'pollProductAi'] : [])
                 ->schema([
                     Section::make(__('Товар'))->schema([
-                        TextInput::make('title')->label(__('Название'))->required()->maxLength(255)->columnSpanFull(),
+                        TextInput::make('title')->label(__('Название'))->required()->maxLength(255)->columnSpanFull()
+                            // The title from the category's template (decision of 2026-11-13), from what is saved.
+                            ->hintAction(Action::make('composeTitle')->label(__('Собрать по шаблону'))->icon('heroicon-o-sparkles')
+                                ->visible(fn (?Product $record): bool => $record !== null && filled($record->category?->standardSource('title')?->title_parts))
+                                ->action(function (Set $set, Product $record): void {
+                                    $title = app(TitleComposer::class)->forProduct($record);
+                                    if ($title === null) {
+                                        Notification::make()->warning()->title(__('Не собралось: у товара нет ни производителя, ни модели, ни кода.'))->send();
+
+                                        return;
+                                    }
+                                    $set('title', $title);
+                                    Notification::make()->success()->title(__('Название собрано. Нажмите «Сохранить», чтобы оставить его.'))->send();
+                                })),
                         Select::make('category_id')->label(__('Категория'))->relationship('category', 'name')
                             ->options(fn ($livewire): array => Category::query()->orderBy('name')->pluck('name', 'id')->all() + (method_exists($livewire, 'getProductAiOptions') ? $livewire->getProductAiOptions('category') : []))
                             ->getOptionLabelUsing(fn ($value, $livewire): ?string => (method_exists($livewire, 'getProductAiOptions') ? ($livewire->getProductAiOptions('category')[$value] ?? null) : null) ?? Category::find($value)?->name)
