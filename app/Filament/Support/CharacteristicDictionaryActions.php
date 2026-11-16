@@ -64,8 +64,12 @@ final class CharacteristicDictionaryActions
             ->modalSubmitActionLabel(__('Применить отмеченное'))
             ->mountUsing(function (Schema $schema) use ($sure): void {
                 // The model looks deeper with its tools for minutes, and a web request is cut at
-                // 30 seconds of wall time on Windows: this one waits for its answer.
-                set_time_limit(600);
+                // 30 seconds of wall time on Windows: this one waits for its answer. Only a web
+                // request: the console has no limit, and one set here would cut the whole process
+                // ten minutes later - a full test run died that way in another test.
+                if (! app()->runningInConsole()) {
+                    set_time_limit(600);
+                }
                 try {
                     $review = app(AttributeKeeper::class)->review();
                     $schema->fill(['review' => json_encode($review, JSON_UNESCAPED_UNICODE), 'error' => null,

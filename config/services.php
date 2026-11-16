@@ -101,6 +101,8 @@ return [
         'model' => env('AI_ATTRIBUTE_DICTIONARY_MODEL', 'gpt-5.4-mini'),
         'timeout' => (int) env('AI_ATTRIBUTE_DICTIONARY_TIMEOUT', 20),
         'audit_timeout' => (int) env('AI_ATTRIBUTE_DICTIONARY_AUDIT_TIMEOUT', 300),
+        // The choice of what to propose to a category's form runs in the queue after an approval.
+        'form_timeout' => (int) env('AI_ATTRIBUTE_DICTIONARY_FORM_TIMEOUT', 60),
     ],
 
     'product_specification_reconciliation' => [

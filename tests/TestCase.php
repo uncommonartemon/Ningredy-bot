@@ -4,6 +4,7 @@ namespace Tests;
 
 use App\Ai\Agents\AttributeDictionaryReviewAgent;
 use App\Ai\Agents\AttributeKeeperAgent;
+use App\Ai\Agents\FormAdvisorAgent;
 use App\Ai\Agents\GalleryFrameReviewAgent;
 use App\Ai\Agents\GalleryTextLanguageAgent;
 use App\Ai\Agents\ProductCardRecoveryAgent;
@@ -100,6 +101,9 @@ abstract class TestCase extends BaseTestCase
         // keeper give their own.
         AttributeKeeperAgent::fake(fn (): array => ['verdicts' => []])->preventStrayPrompts();
         AttributeDictionaryReviewAgent::fake(fn (): array => ['merges' => [], 'groups' => []])->preventStrayPrompts();
+        // After every approval the form advisor looks at what the product has beyond its category's form;
+        // it proposes nothing unless a test says what it picks.
+        FormAdvisorAgent::fake(fn (): array => ['proposals' => []])->preventStrayPrompts();
     }
 
     /** Research answer evidence that the source page names this one complete model. */
