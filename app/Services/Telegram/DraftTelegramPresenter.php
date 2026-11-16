@@ -817,14 +817,26 @@ class DraftTelegramPresenter
     {
         $stored = ProductRequestContext::stored($draft);
         $labels = ['color' => 'Цвет', 'model' => 'Модель', 'configuration' => 'Комплектация', 'condition' => 'Состояние'];
+        // A label code the research found misread (module 113) is said as it is, not as a mismatch
+        // with the request: the operator's own words never named it.
+        $misread = $stored['misread'];
+        $plain = fn (mixed $text): string => strtoupper((string) preg_replace('/[^A-Za-z0-9]/', '', (string) $text));
+        $differences = array_filter($stored['differences'], fn (array $item): bool => $misread === null
+            || ! str_contains($plain($item['requested'] ?? ''), $plain($misread['read'])));
+        $codes = array_filter($stored['codes'], fn (string $code): bool => $misread === null || $plain($code) !== $plain($misread['read']));
         $lines = array_map(fn (array $item): string => ($labels[$item['requirement'] ?? ''] ?? 'Требование')
-            .': в запросе «'.$item['requested'].'», найдено «'.$item['found'].'».', $stored['differences']);
-        if ($stored['codes'] !== []) {
-            $lines[] = 'Код из запроса не найден ни на одной странице: '.implode(', ', $stored['codes'])
+            .': в запросе «'.$item['requested'].'», найдено «'.$item['found'].'».', $differences);
+        if ($codes !== []) {
+            $lines[] = 'Код из запроса не найден ни на одной странице: '.implode(', ', $codes)
                 .'. Карточка собрана по ближайшей найденной конфигурации.';
         }
+        $notice = $lines === [] ? '' : 'Не совпадает с запросом. '.implode(' ', $lines);
+        if ($misread !== null) {
+            $notice = trim('Код с этикетки прочитан как «'.$misread['read'].'», такого нет ни на одной странице; у производителя и на страницах — «'
+                .$misread['page'].'», карточка собрана по нему. Сверьте с наклейкой. '.$notice);
+        }
 
-        return $lines === [] ? '' : 'Не совпадает с запросом. '.implode(' ', $lines);
+        return $notice;
     }
 
     /**

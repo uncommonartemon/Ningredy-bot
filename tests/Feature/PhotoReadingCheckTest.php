@@ -8,6 +8,7 @@ use App\Jobs\TranscribeTelegramPhoto;
 use App\Models\TelegramUpdate;
 use App\Services\Ai\AiErrorPresenter;
 use App\Services\Ai\AiSettings;
+use App\Services\Products\ProductInputContext;
 use App\Services\ProductSearch\Recovery\RequestGuardian;
 use App\Services\Telegram\PhotoReadingCheck;
 use App\Services\Telegram\TelegramClient;
@@ -207,6 +208,56 @@ class PhotoReadingCheckTest extends TestCase
 
         $this->assertSame(PhotoReadingCheck::AWAITING, $photo->fresh()->status);
         $this->assertNull($photo->fresh()->processed_at);
+    }
+
+    /** The colleague's #381: «PVVR» corrected, the reader kept «PVWR» as visible and the card called it the request. */
+    public function test_the_operators_correction_replaces_the_misreading_in_what_the_agents_see(): void
+    {
+        $photo = $this->photo();
+        TelegramPhotoTextAgent::fake(fn (): array => ['text' => '9DE00368-PWR532G600C30K; EAN 4711378428209', 'has_text' => true,
+            'operator_intent' => 'search', 'intent_reason' => 'Этикетка с кодом.', 'observations' => [], 'identifiers' => [
+                ['kind' => 'mpn', 'value' => '9DE00368-PWR532G600C30K', 'raw_value' => '9DE00368-PWR532G600C30K', 'source_excerpt' => '9DE00368-PWR532G600C30K',
+                    'source_kind' => 'photo_label', 'confidence' => 0.98, 'uncertain_characters' => null]]])->preventStrayPrompts();
+        $this->read($photo);
+        $this->press("pr:fix:{$photo->id}", 5020);
+        $this->say('PVVR532G600C30K', 5021);
+        TelegramPhotoTextAgent::fake(fn (): array => ['text' => '9DE00368-PVVR532G600C30K; штрихкод: 4 711378 428209', 'has_text' => true,
+            'operator_intent' => 'search', 'intent_reason' => 'Этикетка с кодом.', 'observations' => [], 'identifiers' => [
+                ['kind' => 'other', 'value' => '9DE00368', 'raw_value' => '9DE00368', 'source_excerpt' => '9DE00368', 'source_kind' => 'photo_label', 'confidence' => 0.98, 'uncertain_characters' => null],
+                ['kind' => 'sku', 'value' => 'PVVR532G600C30K', 'raw_value' => 'PVWR532G600C30K', 'source_excerpt' => '9DE00368-PVWR532G600C30K',
+                    'source_kind' => 'photo_label', 'confidence' => 0.98, 'uncertain_characters' => null]]])->preventStrayPrompts();
+
+        $this->read($photo);
+
+        $evidence = json_encode(data_get($photo->fresh()->payload, ProductInputContext::PAYLOAD_KEY), JSON_UNESCAPED_UNICODE);
+        $this->assertStringNotContainsString('PVWR', $evidence);
+        $this->assertStringContainsString('PVVR532G600C30K', $evidence);
+        $this->assertStringNotContainsString('PVWR', (string) $photo->fresh()->text);
+    }
+
+    public function test_a_correction_reaches_a_code_joined_to_another_on_the_label(): void
+    {
+        $data = PhotoReadingCheck::applyCorrection(['text' => '9DE00368-PWR532G600C30K; EAN 4711378428209', 'identifiers' => [
+            ['kind' => 'mpn', 'value' => '9DE00368-PWR532G600C30K', 'raw_value' => '9DE00368-PWR532G600C30K', 'source_excerpt' => '9DE00368-PWR532G600C30K', 'uncertain_characters' => 'W'],
+            ['kind' => 'ean', 'value' => '4711378428209', 'raw_value' => '4 711378 428209', 'source_excerpt' => '4 711378 428209', 'uncertain_characters' => null],
+        ]], 'код PVVR532G600C30K');
+
+        $this->assertSame('9DE00368-PVVR532G600C30K; EAN 4711378428209', $data['text']);
+        $this->assertSame('9DE00368-PVVR532G600C30K', $data['identifiers'][0]['raw_value']);
+        $this->assertTrue($data['identifiers'][0]['operator_corrected']);
+        $this->assertNull($data['identifiers'][0]['uncertain_characters']);
+        $this->assertSame('4 711378 428209', $data['identifiers'][1]['raw_value']);
+        $this->assertArrayNotHasKey('operator_corrected', $data['identifiers'][1]);
+    }
+
+    public function test_a_correction_with_a_hyphen_fixes_only_what_differs(): void
+    {
+        $data = PhotoReadingCheck::applyCorrection(['text' => 'M471A4G43MB1-CTO; M471A4G43MB1-CTD; M471A4G43MB1; M471A4G43MB1 CTD; 9DE00368-PVWR532G600C30K'],
+            'M471A4G43MB1-CTD и 9DE00368-PVVR532G600C30K');
+
+        $this->assertSame('M471A4G43MB1-CTD; M471A4G43MB1-CTD; M471A4G43MB1; M471A4G43MB1 CTD; 9DE00368-PVVR532G600C30K', $data['text']);
+        // Words alone change nothing.
+        $this->assertSame(['text' => 'PVWR532G600C30K'], PhotoReadingCheck::applyCorrection(['text' => 'PVWR532G600C30K'], 'цвет чёрный'));
     }
 
     private function reader(string $text, string $code, ?string $unsure, float $confidence): void

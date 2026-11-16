@@ -40,6 +40,9 @@ final class ProductRequestContext
 
     public const string UNCONFIRMED_CODES_KEY = '_unconfirmed_operator_codes';
 
+    /** A label code the research found misread, and the page code the card took instead (module 113). */
+    public const string MISREAD_KEY = '_label_code_misread';
+
     private const string DIFFERENCES_NOTE = 'Research observed none of these operator requirements on any page of the requested model and built the card for the closest observed configuration; the operator sees each difference beside the add button and decides. Judge pages and frames against selected_product on these points: a listed difference is not by itself a reason to reject a source, a frame or the card.';
 
     /** The same identifier keys ProductIdentityMatcher and ProductSourceIdentityJudge read. */
@@ -100,7 +103,7 @@ final class ProductRequestContext
      * kept on the request so a continued search, every agent and the card read
      * the same list. Written on each research answer, so a new answer replaces it.
      */
-    public static function rememberDifferences(TelegramUpdate $update, array $research): void
+    public static function rememberDifferences(TelegramUpdate $update, array $research, ?array $misread = null): void
     {
         $differences = collect((array) ($research['request_differences'] ?? []))
             ->filter(fn (mixed $item): bool => is_array($item) && self::text($item['requested'] ?? null) !== null && self::text($item['found'] ?? null) !== null)
@@ -112,16 +115,19 @@ final class ProductRequestContext
             ->map(fn (mixed $code): ?string => self::text($code))->filter()->values()->all();
         $fresh = $update->fresh() ?? $update;
         $payload = is_array($fresh->payload) ? $fresh->payload : [];
-        if (($payload[self::DIFFERENCES_KEY] ?? []) === $differences && ($payload[self::UNCONFIRMED_CODES_KEY] ?? []) === $codes) {
+        $misread = $misread === null ? null : ['read' => (string) $misread[0], 'page' => (string) $misread[1]];
+        if (($payload[self::DIFFERENCES_KEY] ?? []) === $differences && ($payload[self::UNCONFIRMED_CODES_KEY] ?? []) === $codes
+            && ($payload[self::MISREAD_KEY] ?? null) === $misread) {
             return;
         }
         $payload[self::DIFFERENCES_KEY] = $differences;
         $payload[self::UNCONFIRMED_CODES_KEY] = $codes;
+        $payload[self::MISREAD_KEY] = $misread;
         $fresh->update(['payload' => $payload]);
         $update->setAttribute('payload', $payload);
     }
 
-    /** @return array{differences: list<array{requirement: string, requested: string, found: string, evidence: ?string}>, codes: list<string>} */
+    /** @return array{differences: list<array{requirement: string, requested: string, found: string, evidence: ?string}>, codes: list<string>, misread: array{read: string, page: string}|null} */
     public static function stored(ProductDraft $draft): array
     {
         $payload = $draft->telegramUpdate?->payload;
@@ -130,6 +136,8 @@ final class ProductRequestContext
         return [
             'differences' => array_values(array_filter(is_array($payload[self::DIFFERENCES_KEY] ?? null) ? $payload[self::DIFFERENCES_KEY] : [], 'is_array')),
             'codes' => array_values(array_filter(is_array($payload[self::UNCONFIRMED_CODES_KEY] ?? null) ? $payload[self::UNCONFIRMED_CODES_KEY] : [], 'is_string')),
+            'misread' => is_array($payload[self::MISREAD_KEY] ?? null) && filled($payload[self::MISREAD_KEY]['read'] ?? null)
+                ? ['read' => (string) $payload[self::MISREAD_KEY]['read'], 'page' => (string) ($payload[self::MISREAD_KEY]['page'] ?? '')] : null,
         ];
     }
 
