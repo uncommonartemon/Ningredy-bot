@@ -92,6 +92,9 @@ class TranscribeTelegramPhoto implements ShouldQueue
                     useSearchBudget: false),
                 self::prompt($caption, $correction, $again),
             );
+            if ($correction !== '') {
+                $data = PhotoReadingCheck::applyCorrection($data, $correction);
+            }
             $text = trim((string) ($data['text'] ?? ''));
             throw_if($text === '', RuntimeException::class, 'Photo text extraction is empty.');
             // Module 71: the reader saw the caption and the picture and said what the
@@ -199,7 +202,8 @@ class TranscribeTelegramPhoto implements ShouldQueue
         }
         if ($correction !== '') {
             $lines[] = 'The operator compared the reading with the label and corrected it, in their own words: «'.mb_substr($correction, 0, 1000)
-                .'». Where the correction differs from what you read, the operator is right: use their characters in the identifiers.';
+                .'». Where the correction differs from what you read, the operator is right: write their characters in value and in raw_value -'
+                .' their comparison with the label is what is visible.';
         }
 
         return implode("\n", $lines);

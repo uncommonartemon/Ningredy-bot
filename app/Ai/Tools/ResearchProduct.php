@@ -467,7 +467,7 @@ class ResearchProduct implements Tool
             if ($data['status'] === 'found') {
                 // Every later agent and the card beside the add button read the
                 // differences from the request itself (live #215).
-                ProductRequestContext::rememberDifferences($this->update, $data);
+                ProductRequestContext::rememberDifferences($this->update, $data, $misread);
             }
 
             if ($data['status'] === 'found') {

@@ -166,6 +166,95 @@ class PhotoReadingCheck
         return '✏️ Принял исправление: сверяю его с этикеткой и запускаю поиск.';
     }
 
+    /**
+     * The operator's correction applied to what the reader saw: a code the operator wrote
+     * replaces each reading it corrects - in the text, the value and what is «visible» - so no
+     * agent takes the misreading for the label any more. The colleague's #381: «PVVR532G600C30K»
+     * corrected, the reader kept «PVWR532G600C30K» as visible, and the card called it the request.
+     *
+     * @param  array<string, mixed>  $data  the reader's answer
+     * @return array<string, mixed>
+     */
+    public static function applyCorrection(array $data, string $correction): array
+    {
+        // Each code the operator wrote, and each of its parts that is a code by itself: a label may
+        // carry «9DE00368-PVVR532G600C30K» as one string or the two codes apart.
+        $codes = [];
+        foreach (preg_split('/\s+/u', $correction) ?: [] as $token) {
+            $token = trim($token, " .,;:«»\"'()");
+            foreach ([$token, ...(preg_split('/[-.\/]/', $token) ?: [])] as $code) {
+                if (strlen(self::plain($code)) >= 6 && preg_match('/\d/', $code) === 1 && preg_match('/[A-Za-z]/', $code) === 1) {
+                    $codes[self::plain($code)] = $code;
+                }
+            }
+        }
+        if ($codes === []) {
+            return $data;
+        }
+        $data['text'] = self::corrected((string) ($data['text'] ?? ''), $codes);
+        foreach (['identifiers', 'observations'] as $list) {
+            foreach ((array) ($data[$list] ?? []) as $index => $item) {
+                if (! is_array($item)) {
+                    continue;
+                }
+                foreach (['value', 'raw_value', 'source_excerpt'] as $field) {
+                    $text = (string) ($item[$field] ?? '');
+                    if (($fixed = self::corrected($text, $codes)) !== $text) {
+                        $item[$field] = $fixed;
+                        $item['operator_corrected'] = true;
+                        $item['uncertain_characters'] = null;
+                    }
+                }
+                $data[$list][$index] = $item;
+            }
+        }
+
+        return $data;
+    }
+
+    /**
+     * In each code of a text («9DE00368-PWR532G600C30K»: parts joined by a hyphen, dot or slash),
+     * the run of parts closest to one of the operator's codes - one to three characters apart, about
+     * as long - becomes that code; a code already written as the operator wrote it, and anything
+     * else, stays as it is.
+     *
+     * @param  array<string, string>  $codes  the operator's codes by their plain form
+     */
+    private static function corrected(string $text, array $codes): string
+    {
+        return (string) preg_replace_callback('/[A-Za-z0-9]+(?:[-.\/][A-Za-z0-9]+)*/', function (array $match) use ($codes): string {
+            $compound = $match[0];
+            preg_match_all('/[A-Za-z0-9]+/', $compound, $found, PREG_OFFSET_CAPTURE);
+            $parts = $found[0];
+            $runs = [];
+            foreach (array_keys($parts) as $first) {
+                $plain = '';
+                for ($last = $first; $last < count($parts); $last++) {
+                    $plain .= strtoupper($parts[$last][0]);
+                    $runs[] = ['plain' => $plain, 'start' => $parts[$first][1], 'end' => $parts[$last][1] + strlen($parts[$last][0])];
+                }
+            }
+            $written = array_intersect_key($codes, array_flip(array_column($runs, 'plain')));
+            $best = null;
+            foreach ($runs as $run) {
+                foreach (array_diff_key($codes, $written) as $plainCode => $code) {
+                    $distance = levenshtein($run['plain'], (string) $plainCode);
+                    if (strlen($run['plain']) >= 6 && $distance <= 3 && abs(strlen($run['plain']) - strlen((string) $plainCode)) <= 2
+                        && ($best === null || $distance < $best['distance'] || ($distance === $best['distance'] && strlen($run['plain']) > strlen($best['plain'])))) {
+                        $best = [...$run, 'distance' => $distance, 'code' => $code];
+                    }
+                }
+            }
+
+            return $best === null ? $compound : substr($compound, 0, $best['start']).$best['code'].substr($compound, $best['end']);
+        }, $text);
+    }
+
+    private static function plain(string $text): string
+    {
+        return strtoupper((string) preg_replace('/[^A-Za-z0-9]/', '', $text));
+    }
+
     /** No correction is awaited any more: the operator moved on to something else. */
     public function forget(string $chatId, string $userId): void
     {

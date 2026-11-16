@@ -127,6 +127,38 @@ class RequestDifferencesTest extends TestCase
         });
     }
 
+    /**
+     * The colleague's #381: research found the label code misread and built the card on the page code,
+     * yet the card called the misreading the request. It now says what happened; a real difference stays.
+     */
+    public function test_a_misread_label_code_is_named_as_a_misreading_not_as_the_request(): void
+    {
+        [$update, $draft] = $this->draft(photoCount: 1);
+        ProductRequestContext::rememberDifferences($update, [
+            'request_differences' => [self::COLOUR, ['requirement' => 'model', 'requested' => 'PVWR532G600C30K (photographed label reading)',
+                'found' => 'PVVR532G600C30K', 'evidence' => 'Every page names PVVR532G600C30K.']],
+            'unconfirmed_operator_codes' => ['PVWR532G600C30K'],
+        ], ['PVWR532G600C30K', 'PVVR532G600C30K']);
+        Http::fake(fn () => Http::response(['ok' => true, 'result' => ['message_id' => 71]]));
+
+        app(DraftTelegramPresenter::class)->sendControls(app(TelegramClient::class), '98765', $draft->fresh());
+
+        Http::assertSent(function (Request $request): bool {
+            $text = (string) ($request['text'] ?? '');
+
+            return str_ends_with($request->url(), '/sendMessage')
+                && str_contains($text, '⚠️ Код с этикетки прочитан как «PVWR532G600C30K», такого нет ни на одной странице; у производителя и на страницах — «PVVR532G600C30K», карточка собрана по нему. Сверьте с наклейкой.')
+                && str_contains($text, 'Не совпадает с запросом. Цвет: в запросе «Luna Grey», найдено «Storm Grey».')
+                && ! str_contains($text, 'Модель: в запросе')
+                && ! str_contains($text, 'Код из запроса не найден');
+        });
+        $this->assertSame(['read' => 'PVWR532G600C30K', 'page' => 'PVVR532G600C30K'], ProductRequestContext::stored($draft->fresh())['misread']);
+
+        // The next research answer without a misreading takes the line away.
+        ProductRequestContext::rememberDifferences($update, ['request_differences' => [], 'unconfirmed_operator_codes' => []]);
+        $this->assertNull(ProductRequestContext::stored($draft->fresh())['misread']);
+    }
+
     public function test_a_request_without_differences_shows_no_notice(): void
     {
         [, $draft] = $this->draft(photoCount: 1);
