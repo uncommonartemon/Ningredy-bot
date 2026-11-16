@@ -43,7 +43,8 @@ class EditCategory extends EditRecord
             ->schema(fn (): array => [
                 CheckboxList::make('add')->label(__('Добавить в форму'))->bulkToggleable()->columns(1)
                     ->options(collect($open())->mapWithKeys(fn (CharacteristicQuestion $question): array => [$question->id => $question->payload['name']
-                        .' — '.mb_substr((string) $question->payload['value'], 0, 60).' (#'.$question->payload['product_id'].')'])->all()),
+                        .' — '.mb_substr((string) $question->payload['value'], 0, 60).' (#'.$question->payload['product_id'].')'
+                        .(filled($question->payload['reason'] ?? null) ? ' · '.$question->payload['reason'] : '')])->all()),
             ])
             ->action(function (array $data) use ($open): void {
                 $ticked = array_flip(array_map('intval', (array) ($data['add'] ?? [])));

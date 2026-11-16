@@ -62,11 +62,10 @@ class TelegramCallbackHandler
 
         // All proposals to the form about one product at once (decision of 2026-11-13).
         if (preg_match('/^chqp:(y|n):(\d+)$/', $data, $all) === 1) {
-            $proposals = app(FormProposals::class);
-            $done = array_map(fn (CharacteristicQuestion $asked): string => $proposals->answer($asked, $all[1] === 'y', (string) $update->telegram_user_id),
-                $proposals->open((int) $all[2]));
+            // Only the proposals the message shows; the ones after them come next with their own buttons.
+            $result = app(FormProposals::class)->answerShown((int) $all[2], $all[1] === 'y', (string) $update->telegram_user_id);
             if (is_numeric($messageId)) {
-                $this->telegram->editMessageText($chatId, (int) $messageId, implode("\n", $done) ?: 'Этих вопросов уже нет.');
+                $this->telegram->editMessageText($chatId, (int) $messageId, $result['text'], null, $result['keyboard']);
             }
             $this->answerAndClose($callbackId, $update, $all[1] === 'y' ? 'Добавлено в форму.' : 'Не добавлено.');
 
