@@ -136,7 +136,10 @@ class AttributeKeeperTest extends TestCase
                 ['key' => 'cooling_fan_count', 'group' => ['id' => null, 'name' => 'Cooling', 'name_cs' => null], 'reason' => 'Охлаждение.']],
         ])->preventStrayPrompts();
 
+        $limit = ini_get('max_execution_time');
         $page = Livewire::test(ListAttributeDefinitions::class)->mountAction('reviewDictionary');
+        // The web limit is lifted for a web request only: a console run keeps its own (none).
+        $this->assertSame($limit, ini_get('max_execution_time'));
         // Two built-in keys are never offered for a merge; a characteristic going away gets no group.
         $review = json_decode((string) $page->get('mountedActions.0.data.review'), true);
         // Without a certainty the model gave, a proposal counts as doubtful: nothing is ticked for the operator.
