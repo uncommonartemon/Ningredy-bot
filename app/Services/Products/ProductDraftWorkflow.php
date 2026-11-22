@@ -311,7 +311,9 @@ class ProductDraftWorkflow
                 'product_type' => $productType,
                 'status' => $targetId ? $product->status : 'published',
                 'title' => $draft->title,
-                'model' => $draft->model,
+                // A known product keeps its model code when the card writes it inside a sticker's line.
+                'model' => $product->exists && ! $targetId && filled($draft->model)
+                    ? ProductCatalogIdentity::keptCode($product->model, $draft->model) : $draft->model,
                 'description' => $normalizedDescription['description'],
                 'translations' => CatalogLocales::textTranslations($draft->translations),
                 'confidence' => max((float) $product->confidence, (float) $draft->confidence),
@@ -450,8 +452,10 @@ class ProductDraftWorkflow
 
         $variant->fill([
             'name' => $targetVariantId ? $variant->name : ($draft->color ?: ProductVariant::DEFAULT_NAME),
-            'sku' => $identifiers->get('sku') ?? ($keepCodes ? $variant->sku : null),
-            'mpn' => $identifiers->get('mpn') ?? ($keepCodes ? $variant->mpn : null),
+            // A card joined to a known item may write its code as the line a sticker prints around
+            // it (a lot or serial with the part number): the stored code stays (decision of 2026-11-22).
+            'sku' => $keepCodes ? ProductCatalogIdentity::keptCode($variant->sku, $identifiers->get('sku')) : $identifiers->get('sku'),
+            'mpn' => $keepCodes ? ProductCatalogIdentity::keptCode($variant->mpn, $identifiers->get('mpn')) : $identifiers->get('mpn'),
             'gtin' => ($identifiers->get('gtin') ?: $identifiers->get('ean') ?: $identifiers->get('upc')) ?: ($keepCodes ? $variant->gtin : null),
             'color' => $draft->color,
             'condition' => $draft->condition ?? 'new',
@@ -467,7 +471,19 @@ class ProductDraftWorkflow
             ...(array_key_exists('price_amount', $commercial) ? ['price' => $commercial['price_amount']] : []),
             ...(isset($commercial['quantity']) ? ['quantity' => $commercial['quantity']] : ($firstItem ? ['quantity' => 1] : [])),
             ...(array_key_exists('warranty_months', $commercial) ? ['warranty_months' => $commercial['warranty_months']] : []),
-        ])->save();
+        ]);
+        // One EAN is one item in one condition, and the catalog holds it once. A card whose other
+        // codes say it is not the item already holding its EAN stops here with both named, instead
+        // of the database refusing the row (#454 on the second installation, decision of 2026-11-22).
+        if (filled($variant->gtin)) {
+            $holder = ProductVariant::query()->with('product:id,title')->where('gtin', $variant->gtin)->where('condition', $variant->condition)
+                ->when($variant->exists, fn ($query) => $query->whereKeyNot($variant->id))->first();
+            throw_if($holder !== null, \RuntimeException::class, 'Товар не добавлен: EAN '.$variant->gtin.' уже у товара #'.$holder?->product_id
+                .' «'.$holder?->product?->title.'»'.(filled($holder?->mpn) ? ', артикул '.$holder?->mpn : '')
+                .'. Коды этой карточки с ним не сходятся, а один EAN — это один товар. Проверьте EAN и артикул в карточке или откройте товар #'
+                .$holder?->product_id.'.');
+        }
+        $variant->save();
 
         return $variant;
     }

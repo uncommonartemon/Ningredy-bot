@@ -198,6 +198,13 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
             with another page's code), and name the closest product's own code and page in research_notes. model and
             title name the operator's product by their own code; the sibling's code appears only in research_notes and
             selected_identity (the tool refuses an answer whose sku, mpn or model is a code the operator did not write).
+            A line from a sticker is not always one code: when the operator's text joins the product's code with
+            characters no page shows - a lot, batch, date or serial printed beside the part number
+            (9DE00441-VEUR548G6028K: lot 9DE00441, part number VEUR548G6028K) - the product's code is the part the
+            pages show. Write that part in its mpn or sku row, model and title, and keep the whole line unchanged as the
+            operator's label fact in a label_code row; the line is then neither an unconfirmed code nor a request
+            difference. A prefix or suffix that names the product itself - speed, revision, region, capacity,
+            configuration - is part of the code, and the rule above applies.
             One exception: a code read from a photographed label (input provenance photo_label, not typed by the
             operator) can be misread. When no page shows it while the product matching every other fact of that
             label (brand, capacity, type, speed, organisation) shows a code that differs from it only as a misreading

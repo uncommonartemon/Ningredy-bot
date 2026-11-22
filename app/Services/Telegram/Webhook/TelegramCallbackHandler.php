@@ -36,6 +36,7 @@ use App\Services\Telegram\TelegramCatalogDeletion;
 use App\Services\Telegram\TelegramClient;
 use App\Services\Telegram\TelegramDatabaseOperator;
 use App\Services\Telegram\TelegramDraftEditor;
+use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Validation\ValidationException;
@@ -651,6 +652,17 @@ class TelegramCallbackHandler
             }
             $this->draftPresenter->sendReview($this->telegram, $chatId, $draft);
             $update->update(['status' => 'completed', 'error' => null, 'processed_at' => now()]);
+
+            return;
+        } catch (QueryException $exception) {
+            // A refusal of the database is the server's, not the operator's words: it goes to the log,
+            // and the chat gets its cause without the query or the machine's paths (#454 on the second
+            // installation sent both and logged nothing).
+            report($exception);
+            $cause = trim((string) preg_replace('/\s*\(Connection:.*$/s', '', $exception->getMessage()));
+            $this->telegram->answerCallbackQuery($callbackId, 'Товар не добавлен: ошибка базы данных.');
+            $this->telegram->sendMessage($chatId, '⚠️ Товар не добавлен: база данных отказала в записи ('.mb_substr($cause, 0, 200).'). Ошибка записана в журнал.');
+            $update->update(['status' => 'rejected', 'error' => mb_substr($exception->getMessage(), 0, 5000), 'processed_at' => now()]);
 
             return;
         } catch (\RuntimeException $exception) {
