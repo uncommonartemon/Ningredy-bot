@@ -824,6 +824,20 @@ class DraftTelegramPresenter
         $differences = array_filter($stored['differences'], fn (array $item): bool => $misread === null
             || ! str_contains($plain($item['requested'] ?? ''), $plain($misread['read'])));
         $codes = array_filter($stored['codes'], fn (string $code): bool => $misread === null || $plain($code) !== $plain($misread['read']));
+        // A requested code holding the found one whole - the line a sticker prints around a part number,
+        // with a lot or serial (decision of 2026-11-22; #454 on the second installation) - is said as it is.
+        $stickerLines = [];
+        $differences = array_filter($differences, function (array $item) use (&$stickerLines, $plain): bool {
+            $requested = ProductCatalogIdentity::cleanIdentifier((string) ($item['requested'] ?? ''));
+            $found = ProductCatalogIdentity::cleanIdentifier((string) ($item['found'] ?? ''));
+            if ($requested === '' || $found === '' || ! ProductCatalogIdentity::isWholePartOf($found, $requested)) {
+                return true;
+            }
+            $stickerLines[$plain($requested)] = [$requested, $found];
+
+            return false;
+        });
+        $codes = array_filter($codes, fn (string $code): bool => ! isset($stickerLines[$plain(ProductCatalogIdentity::cleanIdentifier($code))]));
         $lines = array_map(fn (array $item): string => ($labels[$item['requirement'] ?? ''] ?? 'Требование')
             .': в запросе «'.$item['requested'].'», найдено «'.$item['found'].'».', $differences);
         if ($codes !== []) {
@@ -834,6 +848,10 @@ class DraftTelegramPresenter
         if ($misread !== null) {
             $notice = trim('Код с этикетки прочитан как «'.$misread['read'].'», такого нет ни на одной странице; у производителя и на страницах — «'
                 .$misread['page'].'», карточка собрана по нему. Сверьте с наклейкой. '.$notice);
+        }
+        foreach ($stickerLines as [$line, $found]) {
+            $notice = trim('Код из запроса «'.$line.'» содержит код товара «'.$found.'»; «'.trim(str_ireplace($found, '', $line), '-./ ')
+                .'» на страницах нет — обычно это партия или серийный номер с наклейки. Карточка собрана по товару с кодом '.$found.'. '.$notice);
         }
 
         return $notice;

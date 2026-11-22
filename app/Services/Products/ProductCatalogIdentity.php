@@ -72,11 +72,22 @@ final class ProductCatalogIdentity
                 return true;
             }
             $matched = false;
+            // One EAN names one trade item (and the catalog keeps one variant per EAN and condition).
+            $sameGtin = isset($wanted['gtin']) && filled($variant->gtin)
+                && self::normalized($wanted['gtin'], 'gtin') === self::normalized(self::cleanIdentifier($variant->gtin), 'gtin');
             foreach ($wanted as $kind => $value) {
                 if (blank($variant->{$kind})) {
                     continue;
                 }
-                if (self::normalized($value, $kind) !== self::normalized(self::cleanIdentifier($variant->{$kind}), $kind)) {
+                $stored = self::cleanIdentifier($variant->{$kind});
+                if (self::normalized($value, $kind) !== self::normalized($stored, $kind)) {
+                    // Under the same EAN, a code written around the stored one - the line a sticker
+                    // prints, with a lot or serial beside the part number - is that item, not another
+                    // (decision of 2026-11-22; #454 on the second installation).
+                    if ($sameGtin && (self::isWholePartOf($stored, $value) || self::isWholePartOf($value, $stored))) {
+                        continue;
+                    }
+
                     return false;
                 }
                 $matched = true;
@@ -111,6 +122,44 @@ final class ProductCatalogIdentity
         // At least one side of each equal pair must be a real identifier: two
         // equal model codes alone are the shared-family case this class refuses.
         return array_intersect($cardIdentifiers, $stored) !== [] || array_intersect($card, $storedIdentifiers) !== [];
+    }
+
+    /**
+     * One code standing whole inside another: the part number inside the line a sticker prints
+     * around it - a lot, date or serial joined by a hyphen, dot, slash or space
+     * («9DE00441-VEUR548G6028K» holds «VEUR548G6028K»). Whole segments only, in their order:
+     * «VEUR548G6028» is not inside it, and an equal code is not a part of itself.
+     */
+    public static function isWholePartOf(string $part, string $line): bool
+    {
+        $segments = fn (string $code): array => array_values(array_filter(
+            preg_split('/[-.\/\s]+/u', mb_strtolower(trim($code))) ?: [], fn (string $segment): bool => $segment !== ''));
+        $inner = $segments($part);
+        $outer = $segments($line);
+        if ($inner === [] || count($inner) >= count($outer) || strlen(implode('', $inner)) < 5 || preg_match('/\d/', implode('', $inner)) !== 1) {
+            return false;
+        }
+        for ($start = 0; $start + count($inner) <= count($outer); $start++) {
+            if (array_slice($outer, $start, count($inner)) === $inner) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * The code a known item keeps when a card joined to it writes it another way: the line a
+     * sticker prints around it, or a shorter part of it, does not replace what the catalog holds.
+     */
+    public static function keptCode(?string $stored, ?string $incoming): ?string
+    {
+        if (filled($stored) && filled($incoming) && $stored !== $incoming
+            && (self::isWholePartOf((string) $stored, (string) $incoming) || self::isWholePartOf((string) $incoming, (string) $stored))) {
+            return $stored;
+        }
+
+        return $incoming ?? $stored;
     }
 
     private static function comparableCode(string $value): string

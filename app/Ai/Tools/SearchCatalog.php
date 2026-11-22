@@ -21,7 +21,7 @@ class SearchCatalog implements Tool
 
     public function description(): Stringable|string
     {
-        return 'Search the complete local electronics catalog, including product attributes and variants. Use this before web research. Pass structured brand, type, CPU, GPU, RAM, color or price filters when the request contains them. Results explicitly show whether a product is published and active. A product whose model, SKU, MPN or EAN exactly equals a code in the query is listed first with exact_code_match=true.';
+        return 'Search the complete local electronics catalog, including product attributes and variants. Use this before web research. Pass structured brand, type, CPU, GPU, RAM, color or price filters when the request contains them. Results explicitly show whether a product is published and active. A product whose model, SKU, MPN or EAN exactly equals a code in the query is listed first with exact_code_match=true; one whose code stands whole inside a longer code of the query (a sticker line with a lot or serial) follows with code_part_match=true and the rest in extra_in_query.';
     }
 
     /**
@@ -69,7 +69,67 @@ class SearchCatalog implements Tool
                 $matches[$product->id] ??= ['code' => (string) $product->model, 'variant_id' => null];
             });
 
+        // A sticker prints the part number inside a longer line - a lot, date or serial joined to
+        // it («9DE00441-VEUR548G6028K»). A catalog code standing whole inside a code of the query is
+        // listed too, marked as a part with the rest named: the assistant sees the item before it
+        // pays for research and judges the rest (decision of 2026-11-22; #449 and #454 on the second
+        // installation searched a kit the catalog held).
+        $parts = [];
+        foreach ($codes as $code) {
+            foreach (self::wholeParts($code) as $part) {
+                $parts[$part] ??= $code;
+            }
+        }
+        $parts = array_diff_key($parts, array_flip($codes));
+        if ($parts === []) {
+            return $matches;
+        }
+        ProductVariant::query()
+            ->when($activeOnly, fn ($variant) => $variant->where('is_active', true)->whereHas('product', fn ($product) => $product->visibleInCatalog()))
+            ->where(fn ($variant) => $variant->whereIn(DB::raw('lower(sku)'), array_keys($parts))->orWhereIn(DB::raw('lower(mpn)'), array_keys($parts)))
+            ->orderBy('id')
+            ->get(['id', 'product_id', 'sku', 'mpn'])
+            ->each(function (ProductVariant $variant) use (&$matches, $parts): void {
+                $code = (string) collect([$variant->sku, $variant->mpn])->first(fn ($value): bool => isset($parts[Str::lower((string) $value)]));
+                $matches[$variant->product_id] ??= ['code' => $code, 'variant_id' => $variant->id, 'part_of' => $parts[Str::lower($code)]];
+            });
+        Product::query()
+            ->when($activeOnly, fn ($product) => $product->visibleInCatalog())
+            ->whereIn(DB::raw('lower(model)'), array_keys($parts))
+            ->orderBy('id')
+            ->get(['id', 'model'])
+            ->each(function (Product $product) use (&$matches, $parts): void {
+                $matches[$product->id] ??= ['code' => (string) $product->model, 'variant_id' => null, 'part_of' => $parts[Str::lower((string) $product->model)]];
+            });
+
         return $matches;
+    }
+
+    /**
+     * The runs of whole segments of a code joined by a hyphen, dot or slash, except the code
+     * itself: «9de00441-veur548g6028k» gives «9de00441» and «veur548g6028k». A part has a digit
+     * and five characters at least.
+     *
+     * @return list<string>
+     */
+    private static function wholeParts(string $code): array
+    {
+        preg_match_all('/[^-.\/]+/u', $code, $found, PREG_OFFSET_CAPTURE);
+        $segments = $found[0];
+        $parts = [];
+        foreach (array_keys($segments) as $first) {
+            for ($last = $first; $last < count($segments); $last++) {
+                if ($first === 0 && $last === count($segments) - 1) {
+                    continue;
+                }
+                $part = substr($code, $segments[$first][1], $segments[$last][1] + strlen($segments[$last][0]) - $segments[$first][1]);
+                if (mb_strlen($part) >= 5 && preg_match('/\d/', $part) === 1) {
+                    $parts[] = $part;
+                }
+            }
+        }
+
+        return array_values(array_unique($parts));
     }
 
     public function handle(Request $request): Stringable|string
@@ -173,7 +233,7 @@ class SearchCatalog implements Tool
                     'variants.attributes.definition:id,key,label'])
                 ->whereKey(array_diff(array_keys($exact), $products->modelKeys()))->get()
                 ->merge($products)
-                ->sortByDesc(fn (Product $product): bool => isset($exact[$product->id]))
+                ->sortByDesc(fn (Product $product): int => isset($exact[$product->id]) ? (isset($exact[$product->id]['part_of']) ? 1 : 2) : 0)
                 ->take($limit)->values();
         }
         $products = $products
@@ -182,7 +242,10 @@ class SearchCatalog implements Tool
                 $variant = ($match ? $product->variants->firstWhere('id', $match['variant_id']) : null) ?? $product->variants->first();
 
                 return [
-                    ...($match ? ['exact_code_match' => true, 'matched_code' => $match['code']] : []),
+                    ...($match === null ? [] : (isset($match['part_of'])
+                        ? ['code_part_match' => true, 'matched_code' => $match['code'], 'query_code' => Str::upper($match['part_of']),
+                            'extra_in_query' => Str::upper(trim(str_ireplace($match['code'], '', $match['part_of']), '-./ '))]
+                        : ['exact_code_match' => true, 'matched_code' => $match['code']])),
                     'id' => $product->id,
                     'title' => $product->title,
                     'brand' => $product->brand?->name,
