@@ -95,3 +95,8 @@ ends or the next navigation will find two elements claiming one name.
 - [ ] `prefers-reduced-motion` produces a still, usable page.
 - [ ] No text below 13px, no contrast below WCAG AA on `--bg`.
 - [ ] A screen with one product and a screen with fifty both look deliberate.
+
+## References
+
+Ideas borrowed from other sites, with their sources, are in [references.md](references.md).
+To collect new ones, screenshot the sites with `scripts/shoot-refs.mjs` and look before borrowing.

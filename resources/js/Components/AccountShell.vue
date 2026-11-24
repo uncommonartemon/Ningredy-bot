@@ -1,6 +1,6 @@
 <script setup>
 import { Head, Link } from '@inertiajs/vue3';
-import LocaleSwitcher from './LocaleSwitcher.vue';
+import StoreMasthead from './StoreMasthead.vue';
 import { useI18n } from '../i18n';
 import '../../css/account.css';
 
@@ -12,10 +12,7 @@ const { t } = useI18n();
 <template>
     <Head :title="title" />
     <main class="catalog-page account-page">
-        <header class="catalog-masthead">
-            <nav :aria-label="t('navigation')"><Link href="/catalog">{{ t('catalog') }}</Link></nav>
-            <LocaleSwitcher />
-        </header>
+        <StoreMasthead />
         <div class="account-page__body">
             <section class="account-panel">
                 <p v-if="eyebrow" class="account-panel__eyebrow">{{ eyebrow }}</p>
