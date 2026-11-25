@@ -1,12 +1,12 @@
 <script setup>
-import { Head, Link, router, useRemember } from '@inertiajs/vue3';
+import { Head, router, useRemember } from '@inertiajs/vue3';
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue';
 import AccountLink from '../../Components/AccountLink.vue';
 import CatalogFilters from '../../Components/CatalogFilters.vue';
 import CatalogPagination from '../../Components/CatalogPagination.vue';
 import CatalogToolbar from '../../Components/CatalogToolbar.vue';
-import LocaleSwitcher from '../../Components/LocaleSwitcher.vue';
 import ProductCard from '../../Components/ProductCard.vue';
+import StoreMasthead from '../../Components/StoreMasthead.vue';
 import { useI18n } from '../../i18n';
 
 const props = defineProps({ products: { type: Object, required: true }, filters: { type: Object, required: true }, facets: { type: Object, required: true } });
@@ -130,10 +130,7 @@ onBeforeUnmount(() => clearTimeout(searchTimer));
     <Head :title="heading" />
     <main class="catalog-page">
         <a class="skip-link" href="#catalog-results">{{ t('skipToProducts') }}</a>
-        <header class="catalog-masthead">
-            <nav :aria-label="t('navigation')"><Link href="/catalog" aria-current="page">{{ t('catalog') }}</Link></nav>
-            <LocaleSwitcher />
-        </header>
+        <StoreMasthead />
         <div class="catalog-heading">
             <div><p class="catalog-eyebrow">NINGREDY / {{ t('tech') }}</p><h1>{{ heading }}</h1></div>
             <p class="catalog-count" role="status" aria-live="polite">{{ productCount(products.total) }}</p>

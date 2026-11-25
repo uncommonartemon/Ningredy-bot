@@ -29,3 +29,7 @@ html[data-page-transition] :is(.catalog-cards-enter-from, .catalog-cards-leave-t
 @media (prefers-reduced-motion: reduce) {
     ::view-transition-group(*), ::view-transition-old(*), ::view-transition-new(*) { animation: none !important; }
 }
+/* The clicked product's photo lands on the gallery of its page. */
+html[data-page-transition='forward'] .product-gallery__frame { view-transition-name: product-photo; }
+::view-transition-group(product-photo) { animation-duration: 420ms; animation-timing-function: cubic-bezier(.2, .7, .2, 1); }
+::view-transition-old(product-photo), ::view-transition-new(product-photo) { height: 100%; object-fit: contain; }

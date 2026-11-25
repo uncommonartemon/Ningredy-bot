@@ -4,13 +4,17 @@ use App\Http\Controllers\Account\AccountController;
 use App\Http\Controllers\Admin\AdminerController;
 use App\Http\Controllers\AdminLocaleController;
 use App\Http\Controllers\CatalogController;
+use App\Http\Controllers\HomeController;
 use App\Http\Controllers\ProductController;
+use App\Http\Controllers\SearchSuggestController;
 use App\Http\Middleware\AdminerAccess;
 use App\Services\Products\CatalogLocales;
 use Illuminate\Foundation\Http\Middleware\ValidateCsrfToken;
 use Illuminate\Support\Facades\Route;
 
-Route::get('/', CatalogController::class);
+// The start page shows the shop; the catalog with its filters lives at /catalog.
+Route::get('/', HomeController::class)->name('home');
+Route::get('/search/suggest', SearchSuggestController::class)->middleware('throttle:120,1')->name('search.suggest');
 Route::get('/catalog', CatalogController::class)->name('catalog');
 Route::get('/products/{product:slug}', ProductController::class)->name('products.show');
 
