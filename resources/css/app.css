@@ -18,7 +18,8 @@
     --accent: #52f6da;
     --violet: #9277ff;
     --blue: #50a8ff;
-    --display: 'Space Grotesk Variable', sans-serif;
+    /* Space Grotesk has no Cyrillic: a Ukrainian heading takes those letters from Manrope, not from a system font. */
+    --display: 'Space Grotesk Variable', 'Manrope Variable', sans-serif;
     font-family: 'Manrope Variable', ui-sans-serif, system-ui, sans-serif;
     background: var(--bg);
     color: var(--text);
