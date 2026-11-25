@@ -16,11 +16,14 @@ let previousFocus;
 let previousOverflow;
 let focusFrame;
 const facetTitle = (facet) => t(`facets.${facet.key}`, facet.label);
+// The server decides which sections there are and where each stands: the leading column filters
+// (brand, availability) above the characteristics, the others (colour, type, country) below them.
+const leadingColumns = computed(() => props.facets.columns.filter((facet) => facet.leading));
+const trailingColumns = computed(() => props.facets.columns.filter((facet) => !facet.leading));
 const attributeBlocks = computed(() => groupAttributeBlocks(props.facets.attributes.filter((facet) => facet.options?.length)));
 const groupSelectedCount = (block) => block.attributes.reduce((total, facet) => total + (model.value.attributes[facet.key]?.length || 0), 0);
 const groupSelectionKey = (block) => JSON.stringify(block.attributes.map((facet) => [facet.key, model.value.attributes[facet.key] || []]));
 const optionLabel = (key, option) => ['types', 'stock'].includes(key) ? t(`${key}.${option.value}`, option.label) : option.label;
-const selected = (values, value) => values?.includes(value) || false;
 const unavailable = (count, isSelected = false) => !isSelected && Number(count) === 0;
 const optionDisabled = (count, isSelected = false) => props.busy || unavailable(count, isSelected);
 const countText = (count) => props.busy ? '…' : (count ?? 0);
@@ -113,13 +116,14 @@ onBeforeUnmount(() => { viewport?.removeEventListener('change', resize); documen
                     <div class="price-actions"><button type="submit" class="filter-apply" :disabled="busy || !priceDirty">{{ t('apply') }}</button><button v-if="priceActive || priceDirty" type="button" class="filter-price-clear" :disabled="busy" @click="clearPrice">{{ t('clearPrice') }}</button></div>
                 </form>
             </FilterSection>
-            <FilterSection v-for="facet in facets.columns" :key="facet.key" :title="facetTitle(facet)" :open-by-default="facet.key === 'brands' || facet.key === 'stock'" :selected-count="model[facet.key]?.length || 0"><label v-for="option in facet.options" :key="option.value" class="check-row" :class="{ 'filter-option--unavailable': unavailable(option.count, selected(model[facet.key], option.value)) }"><input v-model="model[facet.key]" type="checkbox" :value="option.value" :disabled="optionDisabled(option.count, selected(model[facet.key], option.value))" @change="$emit('apply')" /><span>{{ optionLabel(facet.key, option) }}</span><small v-if="!selected(model[facet.key], option.value)" :aria-label="countHint(option.count)" :title="countHint(option.count)">({{ countText(option.count) }})</small></label></FilterSection>
+            <AttributeFilterSection v-for="facet in leadingColumns" :key="facet.key" v-model="model[facet.key]" :facet="facet" :title="facetTitle(facet)" :option-label="(option) => optionLabel(facet.key, option)" :open-by-default="true" :busy="busy" @apply="$emit('apply')" />
             <template v-for="block in attributeBlocks" :key="block.key">
                 <FilterSection v-if="block.group?.highlight_in_filters" class="filter-section--attribute-group" :title="attributeGroupName(block.group)" :selected-count="groupSelectedCount(block)" :selected-label="t('selectedOptions')" :selection-key="groupSelectionKey(block)">
                     <AttributeFilterSection v-for="facet in block.attributes" :key="facet.key" v-model="model.attributes[facet.key]" :facet="facet" :busy="busy" :heading-level="4" @apply="$emit('apply')" />
                 </FilterSection>
                 <template v-else><AttributeFilterSection v-for="facet in block.attributes" :key="facet.key" v-model="model.attributes[facet.key]" :facet="facet" :busy="busy" @apply="$emit('apply')" /></template>
             </template>
+            <AttributeFilterSection v-for="facet in trailingColumns" :key="facet.key" v-model="model[facet.key]" :facet="facet" :title="facetTitle(facet)" :option-label="(option) => optionLabel(facet.key, option)" :busy="busy" @apply="$emit('apply')" />
             <p class="filters-count-hint" role="status">{{ busy ? t('updatingFilters') : t('filterCountsHint') }}</p>
             <footer class="filters-mobile-footer"><button type="button" @click="$emit('close')">{{ busy ? t('updating') : `${t('showResults')} · ${productCount(total)}` }}</button></footer>
         </aside>

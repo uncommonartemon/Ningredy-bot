@@ -25,6 +25,7 @@ class CatalogDynamicFacetsTest extends TestCase
         $component = $this->product('components');
         $this->attribute($component, 'socket', 'AM5');
         $this->attribute($component->defaultVariant, 'private_note', 'Warehouse note', false);
+        $this->product('components');
 
         $hidden = $this->product('components', ['is_active' => false]);
         $this->attribute($hidden->defaultVariant, 'hidden_attribute', 'Hidden');
@@ -35,11 +36,11 @@ class CatalogDynamicFacetsTest extends TestCase
 
         $page = $this->catalog(['category' => 'components']);
 
-        $this->assertSame(1, $page['products']['total']);
+        $this->assertSame(2, $page['products']['total']);
         $this->assertSame(['socket'], array_column($page['facets']['attributes'], 'key'));
-        $types = collect($page['facets']['columns'])->firstWhere('key', 'types');
-        $this->assertSame(['component'], array_column($types['options'], 'value'));
         $this->assertSame(1, $this->option($page, 'attributes', 'socket', 'am5')['count']);
+        $types = collect($this->catalog()['facets']['columns'])->firstWhere('key', 'types');
+        $this->assertSame(['component', 'laptop'], array_column($types['options'], 'value'));
     }
 
     public function test_category_switch_drops_irrelevant_attribute_keys_and_preserves_shared_ones(): void
@@ -268,9 +269,10 @@ class CatalogDynamicFacetsTest extends TestCase
     {
         $this->product('laptops');
         $noOffer = $this->product('laptops', variant: ['is_active' => false, 'price' => 999999]);
+        $this->product('laptops', ['brand' => 'Other brand'], ['color' => 'Silver']);
 
         $page = $this->catalog(['category' => 'laptops']);
-        $this->assertSame(2, $page['products']['total']);
+        $this->assertSame(3, $page['products']['total']);
         $this->assertSame(2, $this->option($page, 'columns', 'brands', 'Test brand')['count']);
         $this->assertSame(1, $this->option($page, 'columns', 'colors', 'Black')['count']);
         $this->assertEquals(100, $page['facets']['price']['max']);
@@ -300,6 +302,7 @@ class CatalogDynamicFacetsTest extends TestCase
             'translations' => ['en' => 'Wi-Fi standard', 'cs' => 'Standard Wi-Fi']]);
         $product->defaultVariant->attributes()->create(['attribute_definition_id' => $definition->id, 'value' => 'Yes',
             'translations' => ['cs' => 'Ano']]);
+        $this->product('laptops');
 
         $facet = collect($this->catalog()['facets']['attributes'])->firstWhere('key', 'wireless_lan_standard');
 
@@ -336,10 +339,84 @@ class CatalogDynamicFacetsTest extends TestCase
         $this->assertSame(['ram'], $keys);
     }
 
+    public function test_a_filter_whose_only_value_every_product_of_the_category_shares_is_left_out(): void
+    {
+        // Three memory modules: all of one type and in stock, all SO-DIMM. Ticking any of that
+        // leaves the list as it was, so only what tells them apart is offered.
+        foreach ([['Alpha', '8 GB'], ['Beta', '16 GB'], ['Gamma', '16 GB']] as [$brand, $capacity]) {
+            $module = $this->product('components', ['brand' => $brand], ['color' => null]);
+            $this->attribute($module->defaultVariant, 'capacity', $capacity);
+            $this->attribute($module, 'module_type', 'SO-DIMM');
+        }
+        $this->product('laptops');
+
+        $page = $this->catalog(['category' => 'components']);
+
+        $this->assertSame(['brands'], array_column($page['facets']['columns'], 'key'));
+        $this->assertSame(['capacity'], array_column($page['facets']['attributes'], 'key'));
+
+        // The same filters tell products apart once the whole catalog is shown.
+        $all = $this->catalog();
+        $this->assertSame(['brands', 'colors', 'types'], array_column($all['facets']['columns'], 'key'));
+        $this->assertContains('module_type', array_column($all['facets']['attributes'], 'key'));
+
+        // A module that is sold out: availability now narrows the category.
+        $this->product('components', ['brand' => 'Alpha'], ['color' => null, 'stock_status' => 'out_of_stock']);
+        $this->assertSame(['brands', 'stock'], array_column($this->catalog(['category' => 'components'])['facets']['columns'], 'key'));
+    }
+
+    public function test_a_colour_too_few_products_of_the_category_carry_is_left_out_like_a_characteristic(): void
+    {
+        // The board colour written for one memory module in twenty is no filter of memory.
+        for ($i = 1; $i <= 20; $i++) {
+            $this->product('components', ['brand' => $i % 2 === 0 ? 'Alpha' : 'Beta'], ['color' => $i === 1 ? 'Green' : null]);
+        }
+
+        $this->assertSame(['brands'], array_column($this->catalog(['category' => 'components'])['facets']['columns'], 'key'));
+
+        $this->product('components', ['brand' => 'Alpha'], ['color' => 'Green']);
+        $this->product('components', ['brand' => 'Beta'], ['color' => 'Black']);
+        $this->assertSame(['brands', 'colors'], array_column($this->catalog(['category' => 'components'])['facets']['columns'], 'key'));
+    }
+
+    public function test_a_ticked_filter_stays_to_be_unticked_in_a_category_where_it_narrows_nothing(): void
+    {
+        foreach (['Alpha', 'Beta'] as $brand) {
+            $module = $this->product('components', ['brand' => $brand]);
+            $this->attribute($module, 'module_type', 'SO-DIMM');
+        }
+        $this->product('laptops');
+
+        // Ticked while the whole catalog was shown, then the category was chosen.
+        $page = $this->catalog(['category' => 'components', 'types' => ['component'], 'attributes' => ['module_type' => ['so-dimm']]]);
+
+        $this->assertSame(2, $page['products']['total']);
+        $this->assertSame(['brands', 'types'], array_column($page['facets']['columns'], 'key'));
+        $this->assertSame(2, $this->option($page, 'columns', 'types', 'component')['count']);
+        $this->assertSame(2, $this->option($page, 'attributes', 'module_type', 'so-dimm')['count']);
+    }
+
+    public function test_the_brand_and_availability_lead_and_the_colour_type_and_country_follow_the_characteristics(): void
+    {
+        // What a category's products differ in is chosen before their colour: the page puts the
+        // leading sections above the characteristics and the others below them.
+        $this->matrix();
+        $component = $this->product('components', ['brand' => 'Alpha'], ['stock_status' => 'out_of_stock']);
+        $this->attribute($component->defaultVariant, 'ram', '16 GB');
+
+        $columns = $this->catalog()['facets']['columns'];
+
+        $this->assertSame(['brands', 'stock', 'colors', 'types', 'countries'], array_column($columns, 'key'));
+        $this->assertSame([true, true, false, false, false], array_column($columns, 'leading'));
+    }
+
     public function test_many_distinct_filter_values_do_not_add_one_database_query_per_option(): void
     {
-        $product = $this->product('laptops', variant: ['color' => 'Color 0']);
-        $this->attribute($product->defaultVariant, 'ram', 'Value 0');
+        // Two products with different values: the sections are offered before the options multiply.
+        foreach (['0', 'zero'] as $name) {
+            $product = $this->product('laptops', variant: ['color' => 'Color '.$name]);
+            $this->attribute($product->defaultVariant, 'ram', 'Value '.$name);
+        }
         $this->catalog();
         $before = $this->catalogQueryCount();
 
@@ -365,6 +442,16 @@ class CatalogDynamicFacetsTest extends TestCase
             $product = $this->product('laptops', ['brand' => $brand, 'country' => $country], compact('color', 'price'));
             $this->attribute($product->defaultVariant, 'ram', $ram);
         }
+    }
+
+    public function test_a_shop_with_a_brand_per_product_still_offers_the_brand_but_not_a_colour_per_product(): void
+    {
+        // The brands are a list the shop keeps; a colour is written by hand and may name single products.
+        for ($i = 1; $i <= 13; $i++) {
+            $this->product('components', ['brand' => 'Maker '.$i], ['color' => 'Shade '.$i]);
+        }
+
+        $this->assertSame(['brands'], array_column($this->catalog(['category' => 'components'])['facets']['columns'], 'key'));
     }
 
     private function product(string $category, array $attributes = [], array $variant = []): Product

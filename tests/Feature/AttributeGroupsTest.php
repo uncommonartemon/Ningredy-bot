@@ -153,6 +153,8 @@ class AttributeGroupsTest extends TestCase
         $ssd = $this->definition('group-ssd', $storage, 0);
         $cpuEarly = $this->definition('group-cpu-early', $processor, 10);
         $variantSsd = $this->definition('group-variant-ssd', $storage, 5);
+        // A second laptop without these values: a value every product shares would be no filter.
+        $this->product();
         $product = $this->product();
         foreach ([$ssd, $plain, $cpuLate, $cpuEarly] as $definition) {
             $this->value($product, $definition, 'Inherited '.$definition->key);
@@ -186,6 +188,7 @@ class AttributeGroupsTest extends TestCase
     {
         $second = AttributeGroup::create(['name' => 'Group 2', 'sort_order' => 0]);
         $first = AttributeGroup::create(['name' => 'Group 10', 'sort_order' => 0]);
+        $this->product();
         $product = $this->product();
         foreach ([
             $this->definition('port-2', $first),
@@ -246,6 +249,7 @@ class AttributeGroupsTest extends TestCase
         $note = $this->definition('group-notes', $notesGroup, filterable: false);
         $laptop = $this->product();
         $this->value($laptop->defaultVariant, $screen, '15.6');
+        $this->product('components');
         $component = $this->product('components');
         $this->value($component->defaultVariant, $socket, 'AM5');
         $this->value($component->defaultVariant, $note, 'Informational only');

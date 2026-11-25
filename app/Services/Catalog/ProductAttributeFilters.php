@@ -54,11 +54,11 @@ final class ProductAttributeFilters
         $productsWith = $this->values($categories)->groupBy('attribute_definitions.key')
             ->selectRaw('attribute_definitions.key as attribute_key, COUNT(DISTINCT products.id) as products')
             ->pluck('products', 'attribute_key')->map(fn ($count): int => (int) $count)->all();
-        $minimumCoverage = FilterableAttributes::minimumCoverage(Product::query()->whereIn('category_id', $categories)->count());
+        $products = Product::query()->whereIn('category_id', $categories)->count();
         $groups = AttributeGroup::query()->whereIn('id', $rows->pluck('attribute_group_id')->filter()->unique())->get()->keyBy('id');
 
         $attributes = $rows->groupBy('key')
-            ->filter(fn (Collection $values, string $key): bool => FilterableAttributes::useful($values, $productsWith[$key] ?? 0, $minimumCoverage))
+            ->filter(fn (Collection $values, string $key): bool => FilterableAttributes::useful($values, $productsWith[$key] ?? 0, $products))
             ->map(fn (Collection $values, string $key): array => [
                 'key' => $key,
                 'label' => $this->label($values->first()),

@@ -55,6 +55,9 @@ class AiAttributeGroupsTest extends TestCase
         $this->assertSame(0, $group->sort_order);
         $this->assertSame($group->id, $definition->attribute_group_id);
         $this->assertFalse($definition->is_variant);
+        // A second product without the characteristic: a value every product shares would be no filter.
+        Product::query()->create(['title' => 'Another product', 'category_id' => $product->category_id,
+            'product_type' => $product->product_type, 'status' => 'published', 'is_active' => true]);
         $catalog = $this->get('/catalog')->assertOk()->viewData('page')['props'];
         $this->assertContains('gpu_bus_width', array_column($catalog['facets']['attributes'], 'key'));
         $this->assertDatabaseHas('attribute_values', ['product_id' => $product->id,
