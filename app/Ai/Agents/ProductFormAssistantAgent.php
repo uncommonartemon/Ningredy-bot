@@ -75,6 +75,7 @@ class ProductFormAssistantAgent implements Agent, HasProviderOptions, HasStructu
             attributes contains additions or value updates for the selected variant (variant_key from request); do not edit sibling variants
             unless explicitly requested by the operator. New groups/definitions remain proposals until Save.
             catalog may propose missing brand/category names only when no existing entry matches. Existing IDs go in changes.
+            category_id is the id of a node of catalog_map, chosen by the map's own rule: the deepest node that fits.
             Categories use product_type laptop/desktop/component/phone/tablet/accessory/other only when applicable; do not create
             narrow model-specific categories. Do not modify existing shared dictionaries.
             Sources must be exact real public http(s) product page URLs you used, never guessed, local, private, credential-bearing,

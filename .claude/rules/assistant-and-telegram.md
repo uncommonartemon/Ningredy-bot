@@ -15,6 +15,11 @@ The operator runs the shop from the chat. The bot must be able to do anything wi
 2. The words: a short paragraph in `ServerAssistantAgent::instructions()` saying what the table means and which phrases map to which tool.
 3. The guard: anything that must hold whoever writes (a form, a button, the chat) lives in the model or its service, not in the instructions. The model forgets; a `saving` hook does not. Example: a unit marked sold without a date is sold today (`StockUnit::saving`).
 
+## Categories
+
+- Every agent or chat path that chooses or changes a product's category reads `CatalogMap` (`forAgents()`, with ids where it writes `category_id`) and takes its enum from `CatalogMap::slugs()`. A private list of categories drifts from the others, and the same product lands in two places.
+- Where a product goes is settled by `CatalogPlacement` alone, for the search and the approval; what it settled instead of the agent is shown on the card, never applied silently.
+
 ## Tools
 
 - A dedicated tool beats the generic database tool when the action has a meaning of its own (take off sale, prepare deletion): it records an operation for the audit and returns what the bot should say.

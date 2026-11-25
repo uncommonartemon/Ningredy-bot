@@ -71,6 +71,12 @@ class Product extends Model
         return $this->belongsTo(Category::class);
     }
 
+    /** Into another node of the catalog map; the product type follows a category that names one (2026-11-25). */
+    public function moveToCategory(Category $category): void
+    {
+        $this->update(['category_id' => $category->id, 'product_type' => $category->product_type_affinity ?: $this->product_type]);
+    }
+
     public function brand(): BelongsTo
     {
         return $this->belongsTo(Brand::class);

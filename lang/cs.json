@@ -887,5 +887,9 @@
     "В категории нет товаров.": "Kategorie nemá produkty.",
     "Приведётся значений: :count": "Hodnot k sjednocení: :count",
     "Привести значения к форме": "Sjednotit hodnoty podle formuláře",
-    "Приведено значений: :count.": "Sjednoceno hodnot: :count."
+    "Приведено значений: :count.": "Sjednoceno hodnot: :count.",
+    "Вид не выбран": "Druh nevybrán",
+    "Перенести в категорию": "Přesunout do kategorie",
+    "Товары встанут в выбранную категорию; тип товара станет её типом. Характеристики и фото не меняются.": "Produkty se přesunou do vybrané kategorie a převezmou její typ. Parametry a fotky se nemění.",
+    "Товары перенесены": "Produkty přesunuty"
 }

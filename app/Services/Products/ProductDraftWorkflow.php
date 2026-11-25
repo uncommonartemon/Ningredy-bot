@@ -20,6 +20,7 @@ use App\Models\User;
 use App\Services\Ai\AiSettings;
 use App\Services\Catalog\AttributeDictionary;
 use App\Services\Catalog\AttributeKeeper;
+use App\Services\Catalog\CatalogPlacement;
 use App\Services\Catalog\CategoryStandard;
 use App\Services\Telegram\TelegramCatalogDraftMedia;
 use App\Services\Telegram\TelegramCatalogEditor;
@@ -41,7 +42,6 @@ class ProductDraftWorkflow
     public function __construct(
         private readonly ProductPublicDescription $publicDescription,
         private readonly AiSettings $settings,
-        private readonly ProductCategoryResolver $categoryResolver,
     ) {}
 
     public function approve(
@@ -268,11 +268,15 @@ class ProductDraftWorkflow
             $productType = in_array($draft->product_type, ['laptop', 'desktop', 'component', 'other'], true)
                 ? $draft->product_type
                 : $this->guessProductType($draft);
-            $category = $this->categoryResolver->resolve($productType, $draft->category);
+            // The same placement the card showed before «Добавить» (decision of 2026-11-25).
+            $placement = app(CatalogPlacement::class)->place($productType, $draft->category);
+            $category = $placement->category;
             throw_unless(
                 $category,
                 \RuntimeException::class,
-                'No single active category is configured for product type '.$productType.'.',
+                'Категория не определена: '.($placement->candidates === []
+                    ? 'в каталоге нет активной категории для типа товара «'.$productType.'».'
+                    : 'для типа товара «'.$productType.'» подходят несколько разделов ('.implode(', ', $placement->candidates).'). Выберите категорию в черновике.'),
             );
 
             $brand = $this->resolveBrand($draft->brand);

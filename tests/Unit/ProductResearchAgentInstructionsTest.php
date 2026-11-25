@@ -56,8 +56,8 @@ class ProductResearchAgentInstructionsTest extends TestCase
         $this->assertStringContainsString('Twenty to forty genuine', $instructions);
         $this->assertStringContainsString('SKU/MPN/part number, EAN or UPC', $instructions);
         $this->assertStringContainsString('exact key sku, mpn, ean, upc, or', $instructions);
-        $this->assertStringContainsString('category and product_type', $instructions);
-        $this->assertStringContainsString('must never contradict each other', $instructions);
+        // The rule now stands in the catalog map every placing agent reads (decision of 2026-11-25).
+        $this->assertStringContainsString('category and product_type never contradict', $instructions);
         $this->assertStringContainsString('Decide product_type first', $instructions);
 
         $webSearch = collect($agent->tools())->first();
@@ -112,10 +112,12 @@ class ProductResearchAgentInstructionsTest extends TestCase
             ->pluck('slug')
             ->all();
 
-        $this->assertStringContainsString('- active-test-category: Active test category', $instructions);
-        $this->assertStringContainsString('trusted category search hint: Ignore boxed product photos.', $instructions);
+        // The map line of a category that names no product type, and its hint under its slug.
+        $this->assertStringContainsString('- active-test-category: Active test category [any type]', $instructions);
+        $this->assertStringContainsString('- active-test-category: search hint: Ignore boxed product photos.', $instructions);
         $this->assertStringNotContainsString('inactive-test-category', $instructions);
-        $this->assertSame($expectedSlugs, $schema['category']->toArray()['enum']);
+        // The enum is the map's slugs, in the map's order.
+        $this->assertEqualsCanonicalizing($expectedSlugs, $schema['category']->toArray()['enum']);
         $this->assertNotContains('inactive-test-category', $schema['category']->toArray()['enum']);
         $this->assertArrayNotHasKey('clarification_question', $schema);
     }

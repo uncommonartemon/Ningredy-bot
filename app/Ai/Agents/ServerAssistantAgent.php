@@ -31,6 +31,7 @@ use App\Ai\Tools\UpdateVariant;
 use App\Ai\Tools\UpscaleProductPhoto;
 use App\Models\TelegramUpdate;
 use App\Services\Ai\DatabaseOperatorIntentDetector;
+use App\Services\Catalog\CatalogMap;
 use App\Services\Products\ProductDraftWorkflow;
 use App\Services\Products\ProductImageResolver;
 use App\Services\Products\ProductSearchIntentDetector;
@@ -140,6 +141,10 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
               visible in the admin under «Справочники».
             - Ban or unban a site, show or change the search budget, time limit, search country: ManageSearchSettings.
               Never answer that you cannot ban a site or set a budget.
+            - Where products go is the catalog map at the end of these instructions; a product's category_id comes from it.
+              A product sitting directly in a node with kinds waits for its kind («товары без вида», «наведи порядок в
+              категориях»): list them with QueryDatabase products, filter category_id in the ids the map names, and move each
+              to the kind that fits with ManageDatabase update products category_id (its product_type follows the category).
 
             Adding specifications to a product already in the catalog:
             - "Добавь скорость / допиши характеристики в товар #N" → AddProductSpecifications with that product_id
@@ -350,7 +355,7 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
             - draft_id — ID созданного интернет-исследованием черновика, иначе null;
             - product_ids — ID товаров из локального ответа;
             - operation_ids — ID выполненных или ожидающих подтверждения операций.
-            PROMPT;
+            PROMPT."\n\n".app(CatalogMap::class)->forAgents(withIds: true);
     }
 
     public function tools(): iterable

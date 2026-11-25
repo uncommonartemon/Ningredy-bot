@@ -13,6 +13,7 @@ use App\Models\Product;
 use App\Models\User;
 use App\Services\Ai\AiSettings;
 use App\Services\Catalog\AttributeDictionary;
+use App\Services\Catalog\CatalogMap;
 use Filament\Facades\Filament;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Cache;
@@ -117,7 +118,8 @@ class ProductFormAssistant
             'pending_catalog' => $run->activity['pending_catalog'] ?? [],
             'commercial_options' => ['conditions' => array_keys(ProductCondition::options()), 'stock_statuses' => array_keys(ProductOptions::stockStatuses())],
             'brands' => Brand::query()->get(['id', 'name'])->toArray(),
-            'categories' => Category::query()->get(['id', 'name', 'product_type_affinity'])->toArray(),
+            // The same map every agent places products by (decision of 2026-11-25), with the ids category_id takes.
+            'catalog_map' => app(CatalogMap::class)->forAgents(withIds: true),
             'attributes' => AttributeDefinition::query()->get(['id', 'key', 'label', 'default_unit', 'data_type', 'attribute_group_id'])->toArray(),
             'groups' => AttributeGroup::query()->get(['id', 'name', 'translations'])->toArray(),
         ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);

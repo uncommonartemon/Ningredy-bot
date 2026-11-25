@@ -141,7 +141,6 @@ class TelegramProductUploadIntake
         $context = $existingContext->concat($valid)->values();
         $attachments = $context->map(fn (array $file, int $index) => $this->images->fromBytes(
             Storage::disk($file['disk'])->get($file['path']), 'upload-'.($index + 1).'.'.$file['extension']))->all();
-        $categories = Category::query()->where('is_active', true)->get(['slug', 'name', 'product_type_affinity'])->toArray();
         $currentCard = $target?->only(['title', 'brand', 'model', 'product_type', 'category', 'color', 'condition',
             'description', 'specifications']);
         $observedDescription = $description.($target ? "\nCurrent operator-confirmed draft:\n"
@@ -150,7 +149,7 @@ class TelegramProductUploadIntake
             'operation' => $target ? 'append_photos_only_preserve_current_card' : 'create_manual_draft',
             'current_draft' => $currentCard,
             'existing_gallery_context_count' => $existingContext->count(),
-            'active_categories' => $categories, 'attached_photo_count' => count($attachments)],
+            'attached_photo_count' => count($attachments)],
             JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
         $data = $this->vision->run('product_upload', TelegramProductUploadAgent::make(), $prompt, $attachments,
             new VisionCallContext($owner->id, timeoutSeconds: 120, useSearchBudget: false),
