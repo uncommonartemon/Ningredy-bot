@@ -2,7 +2,7 @@
 import { Head, Link, router } from '@inertiajs/vue3';
 import { computed, ref, watch } from 'vue';
 import AccountLink from '../../Components/AccountLink.vue';
-import LocaleSwitcher from '../../Components/LocaleSwitcher.vue';
+import StoreMasthead from '../../Components/StoreMasthead.vue';
 import ProductGallery from '../../Components/ProductGallery.vue';
 import { useI18n } from '../../i18n';
 import { groupAttributeBlocks, orderedAttributes } from '../../attributeGroups';
@@ -108,10 +108,7 @@ const jumpTo = (id) => {
     <Head :title="title" />
     <main class="catalog-page product-show">
         <a class="skip-link" href="#product-information">{{ copy.skip }}</a>
-        <header class="catalog-masthead">
-            <nav :aria-label="t('navigation')"><Link href="/catalog">{{ t('catalog') }}</Link></nav>
-            <LocaleSwitcher />
-        </header>
+        <StoreMasthead />
         <nav class="product-show__breadcrumb" :aria-label="t('navigation')">
             <button type="button" @click="goBack"><span aria-hidden="true">←</span> {{ copy.back }}</button>
             <template v-if="product.category"><span aria-hidden="true">/</span><Link :href="`/catalog?category=${encodeURIComponent(product.category.slug)}`">{{ categoryName(product.category) }}</Link></template>

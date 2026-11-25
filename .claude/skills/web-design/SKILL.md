@@ -35,7 +35,11 @@ duplicates one of these; add a token instead.
 | `--violet` `#9277ff` / `--blue` `#50a8ff` | ambient gradients and data accents only, never CTAs |
 
 Type: **Space Grotesk** (`--display`) for headings, numbers and anything that
-should read as machined; **Manrope** for body. Never a third family.
+should read as machined; **Manrope** for body. Space Grotesk has no Cyrillic, so it
+must not carry text that is translated into Ukrainian. The start page sets its poster
+type in **Sofia Sans Extra Condensed** (Latin, Czech and Cyrillic; files in
+`resources/fonts`); its lowercase Cyrillic uses Bulgarian letterforms, so use it in
+capitals only.
 
 ## Rules that are not negotiable
 
@@ -48,9 +52,10 @@ should read as machined; **Manrope** for body. Never a third family.
    of elevation, not from heavy borders or drop shadows.
 4. **Numbers are typeset.** Prices, specs and counts use `--display` with
    tabular figures so columns line up while filtering.
-5. **Nothing moves without a reason.** Motion explains a change of state — a
-   filter applied, a page swapped, a card opened. Decorative loops are limited
-   to the ambient background glows that already exist.
+5. **Nothing moves without a reason.** In the catalog and on product pages motion
+   explains a change of state — a filter applied, a page swapped, a card opened.
+   The start page is the exception by decision of 2026-11-25: it is a scene the
+   visitor's scroll drives (see "The start page" below).
 6. **Empty states carry the same weight as full ones.** A catalog with no
    matches still shows structure, not a bare sentence.
 
@@ -95,3 +100,27 @@ ends or the next navigation will find two elements claiming one name.
 - [ ] `prefers-reduced-motion` produces a still, usable page.
 - [ ] No text below 13px, no contrast below WCAG AA on `--bg`.
 - [ ] A screen with one product and a screen with fifty both look deliberate.
+
+## The start page
+
+Decision of 2026-11-25: the start page is expressive where the catalog is restrained.
+
+- The scroll is the clock. Scenes are GSAP ScrollTrigger timelines with `scrub`; the only
+  thing that plays by itself is the entrance and the row of brands (which takes its speed
+  and direction from the scroll).
+- One drawing runs behind everything: the line laptop (`resources/js/laptopWire.js`,
+  `Components/Home/LaptopWire.vue`). The page owns its pose and ties it to the scroll.
+  It is plain canvas; do not add a 3D library for it.
+- A pinned scene is created before the scenes below it, or they are measured without the
+  held distance and fire early.
+- Poster type is huge (10-25vw), capitals, one family. Outline text filling with colour as
+  it crosses the screen is the page's one repeated device; do not add a second.
+- Photos still sit on light plates and nothing is laid over them.
+- `prefers-reduced-motion` gets a still page: no pin, no scrub, no running row. Below
+  900px nothing is pinned and the product row is swiped.
+- All motion is set up inside `gsap.matchMedia` and reverted when the page is left.
+
+## References
+
+Ideas borrowed from other sites, with their sources, are in [references.md](references.md).
+To collect new ones, screenshot the sites with `scripts/shoot-refs.mjs` and look before borrowing.

@@ -55,8 +55,10 @@ button, input, select, label { -webkit-tap-highlight-color: transparent; }
 .skip-link { position: absolute; z-index: 90; top: 12px; left: 24px; padding: 12px 18px; border-radius: 8px; background: var(--accent); color: #16161b !important; transform: translateY(-160%); }
 .skip-link:focus { transform: none; }
 .catalog-masthead { min-height: 78px; display: flex; align-items: center; gap: 48px; border-bottom: 1px solid var(--line); }
-.catalog-masthead nav { flex: 1; font-size: 13px; }
-.catalog-masthead nav a { padding: 12px 0; border-bottom: 2px solid var(--accent); }
+.catalog-masthead nav { display: flex; gap: 26px; flex: 1; font-size: 13px; }
+.catalog-masthead nav a { padding: 12px 0; border-bottom: 2px solid transparent; color: var(--muted); transition: color .18s; }
+.catalog-masthead nav a:hover { color: var(--text); }
+.catalog-masthead nav a[aria-current='page'] { border-bottom-color: var(--accent); color: var(--text); }
 .locale-switcher { display: flex; gap: 3px; padding: 3px; border: 1px solid var(--line); border-radius: 10px; }
 .locale-switcher button { min-width: 36px; min-height: 34px; padding: 4px 6px; border: 0; border-radius: 7px; color: var(--muted); background: transparent; font-size: 12px; font-weight: 700; cursor: pointer; }
 .locale-switcher button:hover { color: var(--text); }
@@ -178,6 +180,8 @@ button, input, select, label { -webkit-tap-highlight-color: transparent; }
 .product-card__media { position: relative; aspect-ratio: 1.6; max-height: 220px; min-width: 0; margin: 9px 9px 0; overflow: hidden; border-radius: 9px; background: #f0f0f2; }
 .product-visual { position: absolute; inset: 0; display: grid; place-items: center; }
 .product-visual img { position: absolute; inset: 0; display: block; width: 100%; height: 100%; max-height: 100%; min-height: 0; object-fit: contain; padding: 12px; }
+/* Shot on white: multiplied onto the light plate, the white becomes the plate and no box shows. */
+.product-visual img { mix-blend-mode: multiply; }
 .product-visual--missing { background: #24242e; }
 .product-visual__placeholder { display: grid; justify-items: center; gap: 10px; color: #a3a3b4; font-size: 12px; }
 .product-visual__placeholder svg { width: 50px; fill: none; stroke: currentColor; stroke-width: 1.5; opacity: .65; }
