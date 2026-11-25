@@ -6,9 +6,11 @@ use App\Models\Product;
 use App\Services\Catalog\CatalogFacetBuilder;
 use App\Services\Catalog\CatalogFilterQuery;
 use App\Services\Catalog\ProductCardPayload;
+use App\Services\Products\ProductCondition;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
 use Illuminate\Support\Arr;
+use Illuminate\Validation\Rule;
 use Inertia\Response;
 use Inertia\ResponseFactory;
 
@@ -36,6 +38,8 @@ class CatalogController extends Controller
             'colors.*' => ['string', 'max:80'],
             'stock' => ['nullable', 'array', 'max:20'],
             'stock.*' => ['string', 'max:80'],
+            'condition' => ['nullable', 'array', 'max:10'],
+            'condition.*' => ['string', Rule::in(ProductCondition::VALUES)],
             'attributes' => ['nullable', 'array', 'max:30'],
             'attributes.*' => ['array', 'max:50'],
             'attributes.*.*' => ['string', 'max:160'],
@@ -110,6 +114,7 @@ class CatalogController extends Controller
             'countries' => Arr::wrap($filters['countries'] ?? []),
             'colors' => Arr::wrap($filters['colors'] ?? []),
             'stock' => Arr::wrap($filters['stock'] ?? []),
+            'condition' => Arr::wrap($filters['condition'] ?? []),
             'attributes' => $filters['attributes'] ?? [],
             'min_price' => $filters['min_price'] ?? null,
             'max_price' => $filters['max_price'] ?? null,

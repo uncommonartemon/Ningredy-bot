@@ -116,6 +116,9 @@ Decision of 2026-11-25: the start page is expressive where the catalog is restra
 - Poster type is huge (10-25vw), capitals, one family. Outline text filling with colour as
   it crosses the screen is the page's one repeated device; do not add a second.
 - Photos still sit on light plates and nothing is laid over them.
+- Categories are shown by icons, not photos: one set of line icons on a 24-unit grid
+  (`resources/js/categoryIcons.js`, `Components/CategoryIcon.vue`). A new icon joins that
+  set in the same hand: one stroke, round joins, no fill. Do not mix in another icon style.
 - `prefers-reduced-motion` gets a still page: no pin, no scrub, no running row. Below
   900px nothing is pinned and the product row is swiped.
 - All motion is set up inside `gsap.matchMedia` and reverted when the page is left.

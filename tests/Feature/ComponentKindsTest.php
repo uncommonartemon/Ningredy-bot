@@ -159,9 +159,10 @@ class ComponentKindsTest extends TestCase
         $page = $this->get('/catalog?category=components')->assertOk()->viewData('page')['props'];
 
         $this->assertSame(['SK hynix BC501 512GB'], array_column($page['products']['data'], 'title'));
-        $categories = collect($page['facets']['categories'])->keyBy('value');
-        $this->assertSame([1, 1, 'components', null],
-            [$categories['components']['count'], $categories['ssd']['count'], $categories['ssd']['parent'], $categories['components']['parent']]);
+        // The kind's own page shows the way to it from its parent.
+        $kind = $this->get('/catalog?category=ssd')->assertOk()->viewData('page')['props'];
+        $this->assertSame(['SK hynix BC501 512GB'], array_column($kind['products']['data'], 'title'));
+        $this->assertSame(['components', 'ssd'], array_column($kind['facets']['trail'], 'slug'));
         $this->assertSame([], $this->get('/catalog?category=laptops')->assertOk()->viewData('page')['props']['products']['data']);
     }
 

@@ -29,10 +29,13 @@ class CatalogTest extends TestCase
             ->where('products.data.0.category.translations.cs', 'Notebooky')
             ->where('products.data.0.category.translations.uk', 'Ноутбуки')
             ->where('products.data.0.category.translations.en', 'Laptops')
-            ->where('facets.categories.0.label', 'Laptops')
-            ->where('facets.categories.0.translations.cs', 'Notebooky')
-            ->has('facets.categories')
+            ->has('facets.tiles')
             ->has('facets.columns'));
+        // The category's page names it in every shop language, from its path.
+        $this->get('/catalog?category=laptops')->assertOk()->assertInertia(fn (Assert $page) => $page
+            ->where('products.total', 1)
+            ->where('facets.trail.0.name', 'Laptops')
+            ->where('facets.trail.0.translations.cs', 'Notebooky'));
     }
 
     public function test_catalog_filters_by_category_brand_and_cpu(): void

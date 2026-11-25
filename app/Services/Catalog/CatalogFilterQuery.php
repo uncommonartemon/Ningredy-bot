@@ -21,7 +21,7 @@ class CatalogFilterQuery
                 ->whereHas('brand', fn (Builder $query) => $query->whereIn('country', $values)));
 
         $hasVariantFilters = filled($filters['search'] ?? null) || ! empty($filters['colors']) || ! empty($filters['stock'])
-            || isset($filters['min_price']) || isset($filters['max_price']) || ! empty($filters['attributes']);
+            || ! empty($filters['condition']) || isset($filters['min_price']) || isset($filters['max_price']) || ! empty($filters['attributes']);
         if ($hasVariantFilters) {
             $query->whereHas('variants', fn (Builder $query) => $this->variants($query, $filters));
         }
@@ -32,6 +32,7 @@ class CatalogFilterQuery
         $query->available()
             ->when($filters['colors'] ?? null, fn (Builder $query, array $values) => $query->whereIn('color', $values))
             ->when($filters['stock'] ?? null, fn (Builder $query, array $values) => $query->whereIn('stock_status', $values))
+            ->when($filters['condition'] ?? null, fn (Builder $query, array $values) => $query->whereIn('condition', $values))
             ->when(isset($filters['min_price']), fn (Builder $query) => $query->where('price', '>=', $filters['min_price']))
             ->when(isset($filters['max_price']), fn (Builder $query) => $query->where('price', '<=', $filters['max_price']));
 

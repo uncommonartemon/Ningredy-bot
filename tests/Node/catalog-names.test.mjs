@@ -39,3 +39,16 @@ test('a starter characteristic without a stored name takes the interface\'s own 
     assert.equal(facetLabel({ key: 'cpu', label: 'Процессор', label_translations: { uk: 'Чип' } }), 'Чип');
     assert.equal(attributeLabel({ key: 'unknown_key', label: '', label_translations: {} }), 'unknown_key');
 });
+
+test('a folded list and the catalog\'s new words are there in every shop language', () => {
+    configureCatalogLocales({ storefront: ['cs', 'uk'], content: ['cs', 'uk'] });
+    const { locale, moreCount, t } = useI18n();
+    const expected = { cs: ['Dalších 7', 'Stav', 'Nejlevnější'], uk: ['Ще 7', 'Стан', 'Найдешевші'] };
+    for (const [code, [more, condition, cheapest]] of Object.entries(expected)) {
+        locale.value = code;
+        assert.equal(moreCount(7), more);
+        assert.equal(t('facets.condition'), condition);
+        assert.equal(t('sortPriceAsc'), cheapest);
+        for (const key of ['breadcrumbs', 'subcategories', 'showLess', 'condition.open_box']) assert.notEqual(t(key), key, `${code}: ${key}`);
+    }
+});

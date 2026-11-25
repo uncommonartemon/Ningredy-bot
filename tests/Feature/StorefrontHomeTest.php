@@ -34,8 +34,8 @@ class StorefrontHomeTest extends TestCase
             ->where('stats.brands', 2)
             ->where('categories.0.slug', 'laptops')
             ->where('categories.0.count', 2)
-            // A category is shown by the newest photos of its own products.
-            ->where('categories.0.images', fn ($images) => count($images) === 1 && str_contains((string) $images[0], 'thinkpad-e14'))
+            // A category names its icon: its own, then its address.
+            ->where('categories.0.icons', ['laptop', 'laptops'])
             ->where('categories.1.slug', 'components')
             ->where('brands', [['name' => 'ASUS', 'count' => 1], ['name' => 'Lenovo', 'count' => 1]])
             // Fewer than six priced products give no price ranges rather than thin ones.
@@ -72,14 +72,18 @@ class StorefrontHomeTest extends TestCase
         $this->get('/')->assertOk()->assertInertia(fn (Assert $page) => $page
             ->has('categories', 2)
             ->where('categories.0.slug', 'ssd')->where('categories.0.count', 1)
-            ->where('categories.1.slug', 'ram')->where('categories.1.images', [])
+            ->where('categories.1.slug', 'ram')
+            // A kind without an icon of its own is found by its address, then by its parent.
+            ->where('categories.1.icons', fn ($icons) => array_slice(collect($icons)->all(), -3) === ['ram', 'component', 'components'])
             ->etc());
 
-        // A product filed straight under the top category would be lost from such a list.
+        // A product filed straight under the top category would be lost from such a list:
+        // the category stays and its kinds follow it.
         $this->product('Odd part', 'components', null, 500, 'component');
 
         $this->get('/')->assertOk()->assertInertia(fn (Assert $page) => $page
-            ->has('categories', 1)->where('categories.0.slug', 'components')->where('categories.0.count', 3)->etc());
+            ->has('categories', 3)->where('categories.0.slug', 'components')->where('categories.0.count', 3)
+            ->where('categories.1.slug', 'ssd')->where('categories.2.slug', 'ram')->etc());
     }
 
     public function test_an_empty_catalog_gives_an_empty_start_page_not_an_error(): void
