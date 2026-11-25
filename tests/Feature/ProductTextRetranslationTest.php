@@ -117,6 +117,32 @@ class ProductTextRetranslationTest extends TestCase
         Queue::assertPushed(TranslateProductText::class, fn (TranslateProductText $job): bool => $job->productId === $product->id);
     }
 
+    /**
+     * A searched card whose check of facts never ran carries no translation at all. It was
+     * published English on the Czech and Ukrainian pages: approval asked for translations
+     * only when the draft had some.
+     */
+    public function test_a_card_published_without_any_translation_is_queued_for_one(): void
+    {
+        Storage::fake('public');
+        $category = Category::query()->firstOrCreate(['slug' => 'laptops'], ['name' => 'Laptops', 'is_active' => true, 'product_type_affinity' => 'laptop']);
+        $update = $this->ask('Find fixture laptop');
+        $run = $update->aiRuns()->create(['provider' => 'local', 'model' => 'fixture', 'status' => 'completed', 'prompt' => 'Fixture', 'started_at' => now(), 'completed_at' => now()]);
+        $draft = ProductDraft::create(['telegram_update_id' => $update->id, 'ai_run_id' => $run->id, 'requested_by_telegram_user_id' => '12345',
+            'title' => 'Lenovo IdeaPad Slim 5', 'brand' => 'Lenovo', 'model' => 'IdeaPad Slim 5', 'description' => 'A thin everyday laptop.', 'status' => 'pending_review',
+            'category' => $category->slug, 'product_type' => 'laptop', 'condition' => 'new', 'specifications' => [], 'translations' => null,
+            'sources' => [], 'image_urls' => [], 'primary_source_url' => 'https://shop.example/exact', 'gallery_status' => 'complete', 'images_staged_at' => now(),
+            'specifications_reconciled_source_url' => 'https://shop.example/exact']);
+        Storage::disk('public')->put("drafts/{$draft->id}/1.jpg", 'fake');
+        $draft->media()->create(['disk' => 'public', 'path' => "drafts/{$draft->id}/1.jpg", 'checksum' => hash('sha256', 'fake'),
+            'width' => 1000, 'height' => 800, 'verification_status' => 'verified', 'is_primary' => true, 'sort_order' => 1]);
+
+        $product = app(ProductDraftWorkflow::class)->approve($draft, telegramReviewerId: '12345');
+
+        $this->assertNull($product->fresh()->translations);
+        Queue::assertPushed(TranslateProductText::class, fn (TranslateProductText $job): bool => $job->productId === $product->id);
+    }
+
     /** @return array{Product, ProductVariant} */
     private function product(): array
     {

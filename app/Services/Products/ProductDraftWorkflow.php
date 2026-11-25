@@ -354,9 +354,11 @@ class ProductDraftWorkflow
             ChooseCardHighlights::dispatch($product->id)->afterCommit();
             // What the product has beyond its category's form is put to the operator (decision of 2026-11-13).
             ProposeFormAdditions::dispatch($product->id, (string) ($draft->telegramUpdate?->chat_id ?: $draft->telegram_review_chat_id) ?: null, $this->heldBack)->afterCommit();
-            // A correction in the operator's words dropped the translations of what it
-            // changed: the published card gets them back from its English text.
-            if (filled($draft->translations) && app(CatalogTextTranslator::class)->lacksTranslations($product->fresh())) {
+            // What the card lacks in a shop language is translated from its English text. A
+            // correction in the operator's words drops what it changed; a card whose check of
+            // facts never ran comes with no translation at all, and such cards used to be
+            // published untranslated with nothing asking for them again.
+            if (app(CatalogTextTranslator::class)->lacksTranslations($product->fresh())) {
                 TranslateProductText::dispatch($product->id)->afterCommit();
             }
 

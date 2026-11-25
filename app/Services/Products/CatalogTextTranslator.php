@@ -8,6 +8,7 @@ use App\Models\AttributeValue;
 use App\Models\Product;
 use App\Services\Ai\AiSettings;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Cache;
 use Throwable;
 
 /**
@@ -18,6 +19,9 @@ use Throwable;
  */
 final class CatalogTextTranslator
 {
+    /** The same missing texts of a product are not asked again for this long. */
+    private const int RETRY_AFTER_HOURS = 6;
+
     public function __construct(private readonly AiSettings $settings) {}
 
     /**
@@ -27,16 +31,46 @@ final class CatalogTextTranslator
      */
     public function pendingProductIds(): array
     {
+        return $this->pendingProducts()->pluck('id')->values()->all();
+    }
+
+    /**
+     * The pending products the scheduler may ask about now. Translations were made only when
+     * something asked for them, so one failed or interrupted request (a worker stopped at the
+     * end of an evening) left a card untranslated for good. The scheduler asks again; what it
+     * asked about and the model left unfilled, or a call that failed, waits some hours, so a
+     * text that will not translate does not cost a request every few minutes. A product whose
+     * missing texts changed since is asked at once.
+     *
+     * @return array<int, int>
+     */
+    public function dueProductIds(): array
+    {
+        return $this->pendingProducts()->filter(fn (Product $product): bool => $this->isDue($product))->pluck('id')->values()->all();
+    }
+
+    /** Whether the product's missing texts were not asked about within the last hours. */
+    public function isDue(Product $product): bool
+    {
+        $items = $this->items($product->loadMissing(['variants.attributes.definition', 'attributes.definition']),
+            array_keys(CatalogLocales::contentTranslations()));
+
+        return $items === [] || Cache::get(self::askedKey($product->id)) !== self::signature($items);
+    }
+
+    /** @return Collection<int, Product> */
+    private function pendingProducts(): Collection
+    {
         $locales = array_keys(CatalogLocales::contentTranslations());
         if ($locales === []) {
-            return [];
+            return collect();
         }
 
         return Product::query()->with(['variants.attributes.definition', 'attributes.definition'])->orderBy('id')->get()
             ->filter(fn (Product $product): bool => $this->items($product, $locales) !== []
                 || $product->variants->contains(fn ($variant): bool => collect($locales)->contains(fn (string $locale): bool => collect(['title', 'description'])
                     ->contains(fn (string $field): bool => filled($product->translations[$locale][$field] ?? null) && ! filled($variant->translations[$locale][$field] ?? null)))))
-            ->pluck('id')->values()->all();
+            ->values();
     }
 
     /** Whether any text of this product lacks a translation in an enabled language. */
@@ -54,8 +88,14 @@ final class CatalogTextTranslator
         $product->loadMissing(['variants.attributes.definition', 'attributes.definition']);
         $items = $this->items($product, array_keys($languages));
         if ($items === []) {
+            Cache::forget(self::askedKey($product->id));
+
             return $this->mirrorIntoVariants($product, array_keys($languages));
         }
+        // Asked now: until this request ends with everything filled, the scheduler does not ask
+        // the same again for some hours. A failed call keeps the mark; a worker stopped
+        // mid-call leaves it too, and the next catch-up after the wait asks again.
+        Cache::put(self::askedKey($product->id), self::signature($items), now()->addHours(self::RETRY_AFTER_HOURS));
         $run = AiRun::query()->create([
             'provider' => $this->settings->providerFor('server_assistant'), 'model' => $this->settings->modelFor('server_assistant'),
             'status' => 'running', 'prompt' => mb_substr(json_encode($items, JSON_UNESCAPED_UNICODE), 0, 60000), 'started_at' => now(),
@@ -84,7 +124,23 @@ final class CatalogTextTranslator
             }
         }
 
-        return $this->write($product, $items, $translated) + $this->mirrorIntoVariants($product->fresh(['variants']), array_keys($languages));
+        $filled = $this->write($product, $items, $translated) + $this->mirrorIntoVariants($product->fresh(['variants']), array_keys($languages));
+        $left = $this->items($product->fresh(['variants.attributes.definition', 'attributes.definition']), array_keys($languages));
+        $left === [] ? Cache::forget(self::askedKey($product->id))
+            : Cache::put(self::askedKey($product->id), self::signature($left), now()->addHours(self::RETRY_AFTER_HOURS));
+
+        return $filled;
+    }
+
+    private static function askedKey(int $productId): string
+    {
+        return 'catalog-text:asked:'.$productId;
+    }
+
+    /** @param array<string, array{id: string, kind: string, text: string, locales: array<int, string>, target: mixed}> $items */
+    private static function signature(array $items): string
+    {
+        return sha1(json_encode(array_map(fn (array $item): array => [$item['id'], $item['text'], $item['locales']], $items), JSON_UNESCAPED_UNICODE) ?: '');
     }
 
     /**

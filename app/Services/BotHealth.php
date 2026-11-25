@@ -6,6 +6,8 @@ use App\Models\AiRun;
 use App\Models\Category;
 use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
+use App\Services\Products\CatalogLocales;
+use App\Services\Products\CatalogTextTranslator;
 use App\Services\ProductSearch\Codes\CodeDatabases;
 use App\Services\Telegram\TelegramClient;
 use Illuminate\Support\Facades\DB;
@@ -37,7 +39,30 @@ class BotHealth
             $this->lastSearch(),
             $this->dictionaries(),
             $this->codeDatabases(),
+            $this->translations(),
         ];
+    }
+
+    /**
+     * Cards still lacking a shop language. A translation that failed or never ran left the
+     * card English on the Czech and Ukrainian pages, and nothing anywhere said so.
+     *
+     * @return array{key: string, label: string, state: string, detail: string, hint: string}
+     */
+    private function translations(): array
+    {
+        if (CatalogLocales::contentTranslations() === []) {
+            return $this->result('translations', 'Переводы', 'off', 'Карточки не переводятся: в «Языках каталога» не отмечен ни один язык.', '');
+        }
+        $pending = app(CatalogTextTranslator::class)->pendingProductIds();
+        if ($pending === []) {
+            return $this->result('translations', 'Переводы', 'up', 'Все товары переведены на языки магазина.', '');
+        }
+
+        return $this->result('translations', 'Переводы', 'down',
+            'Товаров без перевода на языки магазина: '.count($pending).' ('.implode(', ', array_map(fn (int $id): string => '#'.$id, array_slice($pending, 0, 10)))
+            .(count($pending) > 10 ? ', …' : '').').',
+            'Бот сам переводит их каждые 10 минут, а что не перевелось — снова через 6 часов. Сразу: «Перевести недостающее» в «Настройки → Языки каталога».');
     }
 
     /**

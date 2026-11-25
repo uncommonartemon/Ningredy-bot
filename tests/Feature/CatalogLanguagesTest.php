@@ -14,11 +14,13 @@ use App\Models\ProductDraft;
 use App\Models\ProductVariant;
 use App\Models\TelegramUpdate;
 use App\Models\User;
+use App\Services\BotHealth;
 use App\Services\Products\CatalogLocales;
 use App\Services\Products\CatalogTextTranslator;
 use App\Services\Telegram\DraftTelegramPresenter;
 use App\Services\Telegram\TelegramClient;
 use Database\Seeders\StarterCatalogSeeder;
+use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
 use Illuminate\JsonSchema\JsonSchemaTypeFactory;
@@ -163,6 +165,62 @@ class CatalogLanguagesTest extends TestCase
         $this->assertSame([], app(CatalogTextTranslator::class)->pendingProductIds());
         $this->assertSame(0, app(CatalogTextTranslator::class)->translate($product->fresh()));
         $this->assertCount(1, $requests);
+    }
+
+    /**
+     * Fourteen searched cards stood untranslated, most at the ends of evening sessions: a
+     * translation was made only when something asked for it, one failed or interrupted
+     * request was the only one, and nothing said so. The scheduler asks again, the same
+     * texts not more than once in six hours, and the status page names the cards.
+     */
+    public function test_a_translation_that_failed_is_asked_again_by_the_scheduler_after_a_wait(): void
+    {
+        $product = $this->product();
+        CatalogTranslationAgent::fake(fn () => throw new \RuntimeException('provider timeout'))->preventStrayPrompts();
+        (new TranslateProductText($product->id))->handle(app(CatalogTextTranslator::class));
+        $this->assertDatabaseHas('ai_runs', ['status' => 'failed']);
+        $health = collect(app(BotHealth::class)->checks())->firstWhere('key', 'translations');
+        $this->assertSame('down', $health['state']);
+        $this->assertStringContainsString('#'.$product->id, $health['detail']);
+
+        Queue::fake();
+        // The same texts are not asked again every ten minutes ...
+        $this->artisan('catalog:translate-missing --due')->assertSuccessful();
+        Queue::assertNotPushed(TranslateProductText::class);
+        // ... but after the wait they are, by the catch-up the scheduler runs.
+        $this->travel(6)->hours();
+        $this->travel(1)->minutes();
+        $this->artisan('catalog:translate-missing --due')->assertSuccessful();
+        Queue::assertPushed(TranslateProductText::class, fn (TranslateProductText $job): bool => $job->productId === $product->id && $job->onlyIfDue);
+        $this->assertTrue(collect(app(Schedule::class)->events())->contains(fn ($event): bool => str_contains((string) $event->command, 'catalog:translate-missing --due')));
+    }
+
+    public function test_a_queued_catch_up_is_skipped_when_the_same_texts_were_asked_meanwhile_and_new_texts_are_asked_at_once(): void
+    {
+        $product = $this->product();
+        $asked = 0;
+        CatalogTranslationAgent::fake(function () use (&$asked): array {
+            $asked++;
+
+            // The model leaves everything unfilled.
+            return ['translations' => []];
+        })->preventStrayPrompts();
+        $translator = app(CatalogTextTranslator::class);
+
+        (new TranslateProductText($product->id, onlyIfDue: true))->handle($translator);
+        // A second copy queued behind a long search: nothing new to ask.
+        (new TranslateProductText($product->id, onlyIfDue: true))->handle($translator);
+        $this->assertSame(1, $asked);
+        $this->assertSame([], $translator->dueProductIds());
+        $this->assertSame([$product->id], $translator->pendingProductIds());
+
+        // A new title is new text: asked at once.
+        $product->update(['title' => 'Lenovo ThinkPad E14 Gen 6 laptop']);
+        $this->assertSame([$product->id], $translator->dueProductIds());
+        // The admin's button and a request from the chat always ask.
+        (new TranslateProductText($product->id))->handle($translator);
+        (new TranslateProductText($product->id))->handle($translator);
+        $this->assertSame(3, $asked);
     }
 
     public function test_the_admin_page_saves_the_languages_and_queues_the_missing_translations(): void
