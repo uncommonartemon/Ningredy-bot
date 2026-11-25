@@ -250,7 +250,9 @@ class ProductPhotoSearchIntegrationTest extends TestCase
             app(ProductImageStorage::class), $frames, $draft, $draft->telegram_update_id, 1, 10, $source, 'playwright', 'Checked', null,
         );
         $this->assertTrue($result->isComplete());
-        $this->assertSame([$note], PhotoSourceNotice::fromContext($result->source)['differences']);
+        // The shop words the fact itself; the reviewer's Russian note is the operator's.
+        $this->assertSame('differs', PhotoSourceNotice::fromContext($result->source)['keyboard']);
+        $this->assertArrayNotHasKey('differences', PhotoSourceNotice::fromContext($result->source));
         $this->assertStringContainsString($note, PhotoSourceNotice::russian($result->source));
     }
 
@@ -455,7 +457,8 @@ class ProductPhotoSearchIntegrationTest extends TestCase
         if ($accepted) {
             $this->assertSame('unknown', $result->candidates[0]['photo_visual_review']['keyboard_layout_match']);
             $this->assertSame('', $result->candidates[0]['photo_visual_review']['keyboard_layout']);
-            $this->assertSame([$note], PhotoSourceNotice::fromContext($result->source)['differences']);
+            $this->assertSame('unverified', PhotoSourceNotice::fromContext($result->source)['keyboard']);
+            $this->assertStringContainsString($note, PhotoSourceNotice::russian($result->source));
         }
     }
 
