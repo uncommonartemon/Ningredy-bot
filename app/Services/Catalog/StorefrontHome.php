@@ -81,8 +81,9 @@ class StorefrontHome
 
     /**
      * The ways into the catalog by category: the first level that offers a choice. A shop
-     * whose every product sits under one top category is shown by the kinds under it, so the
-     * page never lists a single row. Each entry carries the names its icon may be found by:
+     * whose every product sits under one top category is shown by the kinds under it (after the
+     * category itself when some products are filed straight under it), so the page never lists
+     * a single row while there is a choice. Each entry carries the names its icon may be found by:
      * its own icon and address, then its parents'.
      *
      * @return list<array<string, mixed>>
@@ -92,8 +93,13 @@ class StorefrontHome
         $level = $this->withProducts($categories->whereNull('parent_id'), $categories, $visible);
         while ($level->count() === 1) {
             $below = $this->withProducts($categories->where('parent_id', $level->first()['category']->id), $categories, $visible);
-            // Products filed straight under the top category would be lost from the list.
-            if ($below->isEmpty() || $below->sum('count') < $level->first()['count']) {
+            if ($below->isEmpty()) {
+                break;
+            }
+            // Products filed straight under the category would be lost from a list of its kinds
+            // alone: then the category stays and its kinds follow it.
+            if ($below->sum('count') < $level->first()['count']) {
+                $level = $level->concat($below)->values();
                 break;
             }
             $level = $below;

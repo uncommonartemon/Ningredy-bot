@@ -77,11 +77,13 @@ class StorefrontHomeTest extends TestCase
             ->where('categories.1.icons', fn ($icons) => array_slice(collect($icons)->all(), -3) === ['ram', 'component', 'components'])
             ->etc());
 
-        // A product filed straight under the top category would be lost from such a list.
+        // A product filed straight under the top category would be lost from such a list:
+        // the category stays and its kinds follow it.
         $this->product('Odd part', 'components', null, 500, 'component');
 
         $this->get('/')->assertOk()->assertInertia(fn (Assert $page) => $page
-            ->has('categories', 1)->where('categories.0.slug', 'components')->where('categories.0.count', 3)->etc());
+            ->has('categories', 3)->where('categories.0.slug', 'components')->where('categories.0.count', 3)
+            ->where('categories.1.slug', 'ssd')->where('categories.2.slug', 'ram')->etc());
     }
 
     public function test_an_empty_catalog_gives_an_empty_start_page_not_an_error(): void
