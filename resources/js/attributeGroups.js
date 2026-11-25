@@ -37,6 +37,30 @@ export const groupAttributeBlocks = (attributes = []) => {
 
 export const orderedAttributes = (attributes = []) => groupAttributeBlocks(attributes).flatMap((block) => block.attributes);
 
+// The catalog's filter sections in the order the server gave them (a category's form first).
+// A group highlighted in the filters gathers its characteristics into one block, standing where
+// the first of them stands; every other characteristic is a block of its own.
+export const filterBlocks = (attributes = []) => {
+    const blocks = [];
+    const byGroup = new Map();
+    for (const attribute of attributes) {
+        const group = attribute.group;
+        const highlighted = group?.highlight_in_filters && group.id !== null && group.id !== undefined && String(group.name ?? '').trim();
+        if (!highlighted) {
+            blocks.push({ key: `attribute-${attribute.key}`, group: null, attributes: [attribute] });
+            continue;
+        }
+        const key = String(group.id);
+        if (!byGroup.has(key)) {
+            const block = { key: `group-${key}`, group, attributes: [] };
+            byGroup.set(key, block);
+            blocks.push(block);
+        }
+        byGroup.get(key).attributes.push(attribute);
+    }
+    return blocks;
+};
+
 // A catalog card shows the characteristics chosen for it first, in their order; the
 // rest follow in the usual order, so a card is never left short by a missing key.
 export const cardAttributes = (attributes = [], keys = []) => {
