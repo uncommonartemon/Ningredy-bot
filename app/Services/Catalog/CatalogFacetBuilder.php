@@ -23,11 +23,11 @@ class CatalogFacetBuilder
      * the category has already told, and the country of the brand.
      */
     private const array COLUMNS = [
-        'brands' => ['label' => 'Бренд', 'leading' => true],
-        'stock' => ['label' => 'Наличие', 'leading' => true],
-        'colors' => ['label' => 'Цвет', 'leading' => false],
-        'types' => ['label' => 'Тип', 'leading' => false],
-        'countries' => ['label' => 'Страна бренда', 'leading' => false],
+        'brands' => ['label' => 'Бренд', 'leading' => true, 'kept_list' => true],
+        'stock' => ['label' => 'Наличие', 'leading' => true, 'kept_list' => true],
+        'colors' => ['label' => 'Цвет', 'leading' => false, 'kept_list' => false],
+        'types' => ['label' => 'Тип', 'leading' => false, 'kept_list' => true],
+        'countries' => ['label' => 'Страна бренда', 'leading' => false, 'kept_list' => true],
     ];
 
     private ?Collection $categoryRows = null;
@@ -75,13 +75,18 @@ class CatalogFacetBuilder
         $offered = fn (array $ticked, Collection $rows, int $carriers): bool => $ticked !== []
             || FilterableAttributes::useful($rows, $carriers, $categoryProducts);
 
-        $columns = collect(self::COLUMNS)->map(function (array $column, string $key) use ($filters, $total, $category, $offered): ?array {
+        $columns = collect(self::COLUMNS)->map(function (array $column, string $key) use ($filters, $total, $category, $offered, $categoryProducts): ?array {
             // What the category holds, whatever else is ticked: a section does not come and go with the other filters.
             $choices = DB::query()->fromSub($this->optionRows($key, ['category' => $category]), 'choices');
             $values = (clone $choices)->select('value')->distinct()->orderBy('value')->pluck('value')
                 ->map(fn ($value): string => (string) $value);
             $rows = $values->map(fn (string $value): object => (object) ['normalized_value' => $value, 'option_label' => $value]);
-            if (! $offered($filters[$key] ?? [], $rows, (clone $choices)->distinct()->count('product_id'))) {
+            $carriers = (clone $choices)->distinct()->count('product_id');
+            // A list the shop keeps (brands, states) is never free text; the colour is written by hand.
+            $shown = $column['kept_list']
+                ? ($filters[$key] ?? []) !== [] || FilterableAttributes::narrows($rows, $carriers, $categoryProducts)
+                : $offered($filters[$key] ?? [], $rows, $carriers);
+            if (! $shown) {
                 return null;
             }
             $options = $values->map(fn (string $value): array => ['label' => $value, 'value' => $value]);

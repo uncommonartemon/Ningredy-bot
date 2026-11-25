@@ -21,10 +21,23 @@ final class FilterableAttributes
      */
     public static function useful(Collection $rows, int $carriers, int $products): bool
     {
-        return $carriers >= (int) ceil(self::MINIMUM_SHARE * $products)
-            && ! self::sameForEveryProduct($rows, $carriers, $products)
+        return self::narrows($rows, $carriers, $products)
             && ! self::namesSingleProducts($rows, $carriers)
             && ! self::readsLikeProse($rows);
+    }
+
+    /**
+     * The part of the rule that holds for a list the shop keeps itself (its brands, the states
+     * of availability): enough products carry a value and ticking one changes the list. Such a
+     * list is short by its nature, so a shop with a dozen brands of one product each still
+     * offers the brand; free text (a characteristic, a colour) answers to the whole rule.
+     *
+     * @param  Collection<int, object>  $rows
+     */
+    public static function narrows(Collection $rows, int $carriers, int $products): bool
+    {
+        return $carriers >= (int) ceil(self::MINIMUM_SHARE * $products)
+            && ! self::sameForEveryProduct($rows, $carriers, $products);
     }
 
     /**

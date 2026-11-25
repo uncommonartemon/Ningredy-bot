@@ -444,6 +444,16 @@ class CatalogDynamicFacetsTest extends TestCase
         }
     }
 
+    public function test_a_shop_with_a_brand_per_product_still_offers_the_brand_but_not_a_colour_per_product(): void
+    {
+        // The brands are a list the shop keeps; a colour is written by hand and may name single products.
+        for ($i = 1; $i <= 13; $i++) {
+            $this->product('components', ['brand' => 'Maker '.$i], ['color' => 'Shade '.$i]);
+        }
+
+        $this->assertSame(['brands'], array_column($this->catalog(['category' => 'components'])['facets']['columns'], 'key'));
+    }
+
     private function product(string $category, array $attributes = [], array $variant = []): Product
     {
         $number = ++$this->sequence;
