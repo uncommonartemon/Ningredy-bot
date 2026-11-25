@@ -4,6 +4,7 @@ import { gsap } from 'gsap';
 import { ScrollTrigger } from 'gsap/ScrollTrigger';
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
 import AccountLink from '../Components/AccountLink.vue';
+import CategoryIcon from '../Components/CategoryIcon.vue';
 import DecodeText from '../Components/DecodeText.vue';
 import HomeSearch from '../Components/Home/HomeSearch.vue';
 import LaptopWire from '../Components/Home/LaptopWire.vue';
@@ -30,8 +31,6 @@ const { t, localeTag, categoryName, productCount, translatedText } = useI18n();
 const { formatPrice } = usePrice();
 const root = ref(null);
 const wire = ref(null);
-const fan = ref(null);
-const fanActive = ref(-1);
 const number = (value) => new Intl.NumberFormat(localeTag.value).format(value);
 const padded = (value) => String(value).padStart(2, '0');
 const updated = computed(() => (props.stats.updated_at
@@ -57,22 +56,6 @@ const budgetLabel = (range) => {
 };
 const budgetQuery = (range) => Object.fromEntries([['min_price', range.min], ['max_price', range.max]].filter(([, value]) => value !== null));
 
-// Photos of a category fan out beside the pointer while it is over that category's row.
-let fanX;
-let fanY;
-const canHover = () => window.matchMedia('(hover: hover) and (pointer: fine)').matches;
-const showFan = (index, event) => {
-    if (!canHover() || !fan.value) return;
-    if (fanActive.value === -1) gsap.set(fan.value, { x: event.clientX, y: event.clientY });
-    fanActive.value = index;
-};
-const moveFan = (event) => {
-    if (fanActive.value === -1) return;
-    fanX?.(event.clientX);
-    fanY?.(event.clientY);
-};
-const hideFan = () => { fanActive.value = -1; };
-
 let media;
 onMounted(async () => {
     await nextTick();
@@ -80,10 +63,6 @@ onMounted(async () => {
     const pose = wire.value.pose;
     const render = wire.value.render;
     const find = (selector) => scope.querySelector(selector);
-    if (fan.value) {
-        fanX = gsap.quickTo(fan.value, 'x', { duration: 0.45, ease: 'power3' });
-        fanY = gsap.quickTo(fan.value, 'y', { duration: 0.45, ease: 'power3' });
-    }
 
     media = gsap.matchMedia(scope);
     media.add({ motion: '(prefers-reduced-motion: no-preference)', wide: '(min-width: 900px)' }, (context) => {
@@ -253,19 +232,13 @@ onBeforeUnmount(() => {
         </section>
         <section v-else class="gallery gallery--empty"><p>{{ t('home.emptyBench') }}</p></section>
 
-        <section v-if="categories.length" class="index" @pointermove="moveFan" @pointerleave="hideFan">
+        <section v-if="categories.length" class="index">
             <h2 class="home-label">{{ t('home.categories') }}</h2>
-            <Link v-for="(category, index) in categories" :key="category.slug" :href="catalogUrl({ category: category.slug })" class="index__row"
-                @pointerenter="showFan(index, $event)" @focus="hideFan">
+            <Link v-for="category in categories" :key="category.slug" :href="catalogUrl({ category: category.slug })" class="index__row">
+                <CategoryIcon :names="category.icons" />
                 <span class="index__name">{{ categoryName(category) }}<sup>{{ number(category.count) }}</sup></span>
-                <span class="index__thumbs" aria-hidden="true"><img v-for="image in category.images.slice(0, 3)" :key="image" :src="image" alt="" loading="lazy" decoding="async" /></span>
                 <svg class="index__arrow" viewBox="0 0 20 20" aria-hidden="true"><path d="M3 10h13m-5-5 5 5-5 5" /></svg>
             </Link>
-            <div ref="fan" class="index__fan" aria-hidden="true">
-                <div v-for="(category, index) in categories" :key="category.slug" class="index__fan-group" :class="{ active: index === fanActive }">
-                    <span v-for="(image, position) in category.images" :key="image" :style="{ '--i': position, '--n': category.images.length }"><img :src="image" alt="" loading="lazy" decoding="async" /></span>
-                </div>
-            </div>
         </section>
 
         <section v-if="brands.length" class="brands" :aria-label="t('home.brands')">

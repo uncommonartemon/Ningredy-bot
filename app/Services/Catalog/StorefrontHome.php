@@ -22,8 +22,6 @@ class StorefrontHome
 
     private const BRANDS = 16;
 
-    private const CATEGORY_PHOTOS = 4;
-
     public function __construct(private readonly ProductCardPayload $cards) {}
 
     /** @return array<string, mixed> */
@@ -34,7 +32,7 @@ class StorefrontHome
         $prices = $this->pricesByProduct($visible->pluck('id'));
         $categories = Category::query()->where('is_active', true)
             ->with('translations:id,category_id,locale,name')
-            ->orderBy('sort_order')->orderBy('id')->get(['id', 'name', 'slug', 'parent_id']);
+            ->orderBy('sort_order')->orderBy('id')->get(['id', 'name', 'slug', 'parent_id', 'icon']);
 
         return [
             // Laptops first: the shop is mostly laptops and the bench is its face.
@@ -84,7 +82,8 @@ class StorefrontHome
     /**
      * The ways into the catalog by category: the first level that offers a choice. A shop
      * whose every product sits under one top category is shown by the kinds under it, so the
-     * page never lists a single row. Each entry carries its newest photos.
+     * page never lists a single row. Each entry carries the names its icon may be found by:
+     * its own icon and address, then its parents'.
      *
      * @return list<array<string, mixed>>
      */
@@ -100,20 +99,25 @@ class StorefrontHome
             $level = $below;
         }
 
-        return $level->map(function (array $entry): array {
-            $photos = $this->cardQuery()->whereIn('category_id', $entry['ids'])
-                ->whereHas('media', fn (Builder $query) => $this->catalogImages($query))
-                ->orderByDesc('published_at')->orderByDesc('id')->limit(self::CATEGORY_PHOTOS)->get();
+        return $level->map(fn (array $entry): array => [
+            'name' => $entry['category']->name,
+            'slug' => $entry['category']->slug,
+            'translations' => $entry['category']->translations->pluck('name', 'locale')->all(),
+            'count' => $entry['count'],
+            'icons' => $this->iconNames($entry['category'], $categories),
+        ])->values()->all();
+    }
 
-            return [
-                'name' => $entry['category']->name,
-                'slug' => $entry['category']->slug,
-                'translations' => $entry['category']->translations->pluck('name', 'locale')->all(),
-                'count' => $entry['count'],
-                'images' => $photos->map(fn (Product $product): ?string => $this->cards->for($product, $product->variants->first())['image'])
-                    ->filter()->values()->all(),
-            ];
-        })->values()->all();
+    /** @return list<string> the category's icon and address, then each parent's, nearest first */
+    private function iconNames(Category $category, Collection $categories): array
+    {
+        $names = [];
+        for ($current = $category, $depth = 0; $current !== null && $depth < 8; $depth++) {
+            array_push($names, (string) $current->icon, (string) $current->slug);
+            $current = $current->parent_id === null ? null : $categories->firstWhere('id', $current->parent_id);
+        }
+
+        return array_values(array_filter($names, fn (string $name): bool => $name !== ''));
     }
 
     /** @return Collection<int, array{category: Category, ids: list<int>, count: int}> the given categories that hold products */

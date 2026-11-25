@@ -139,28 +139,22 @@
 
 /* Categories as an index set in poster type. */
 .index { padding: 14vh 0 10vh; }
-.index__row { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 24px; padding: clamp(10px, 1.6vh, 20px) 0; border-top: 1px solid var(--line); }
+.index__row { position: relative; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 24px; padding: clamp(10px, 1.6vh, 20px) 0; border-top: 1px solid var(--line); }
 .index__row:last-of-type { border-bottom: 1px solid var(--line); }
 .index__name { font-size: clamp(54px, 10.5vw, 190px); line-height: .9; transition: color .25s, transform .45s cubic-bezier(.2, .7, .2, 1); overflow-wrap: anywhere; }
 .index__name sup { margin-left: .22em; color: var(--muted); font: 600 clamp(13px, 1.1vw, 18px)/1 'Manrope Variable', sans-serif; letter-spacing: 0; vertical-align: top; position: relative; top: .5em; font-variant-numeric: tabular-nums; }
 .index__arrow { width: clamp(30px, 3.4vw, 60px); color: var(--muted); transition: transform .35s cubic-bezier(.2, .7, .2, 1), color .25s; }
 .index__row:is(:hover, :focus-visible) .index__name { color: var(--accent); transform: translateX(1.4vw); }
 .index__row:is(:hover, :focus-visible) .index__arrow { color: var(--accent); transform: translateX(10px); }
-.index__thumbs { display: flex; gap: 8px; }
-.index__thumbs img { width: clamp(52px, 5vw, 84px); aspect-ratio: 4 / 3; padding: 5px; border-radius: 10px; background: var(--plate); object-fit: contain; mix-blend-mode: normal; }
-/* With a pointer the photos leave the row and fan out beside it instead. */
-@media (hover: hover) and (pointer: fine) { .index__thumbs { display: none; } }
-.index__fan { position: fixed; z-index: 40; top: 0; left: 0; width: 0; height: 0; pointer-events: none; }
-.index__fan-group span {
-    position: absolute; top: -110px; left: 40px; width: clamp(180px, 17vw, 280px); aspect-ratio: 4 / 3; overflow: hidden; border-radius: 16px;
-    background: var(--plate); box-shadow: 0 26px 70px #00000080; opacity: 0; transform: scale(.55) rotate(0deg);
-    transition: opacity .25s ease, transform .5s cubic-bezier(.2, .8, .2, 1);
-}
-.index__fan-group span img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; padding: 7%; }
-.index__fan-group.active span {
-    opacity: 1; transition-delay: calc(var(--i) * 45ms);
-    transform: translate(calc((var(--i) - (var(--n) - 1) / 2) * 54px), calc((var(--i) - (var(--n) - 1) / 2) * -14px)) rotate(calc((var(--i) - (var(--n) - 1) / 2) * 7deg)) scale(1);
-}
+/* The category's icon is drawn in the same line as the laptop behind the page; pointing at
+   the row draws it again. */
+/* The stroke is set in the icon's own units (the page scales the icon about four times), not
+   with a non-scaling stroke: that would measure the dashes of the drawing-in on the screen. */
+.home-page .category-icon { width: clamp(44px, 6.4vw, 116px); height: auto; aspect-ratio: 1; color: var(--muted); stroke-width: .42; stroke-linecap: round; stroke-linejoin: round; transition: color .25s; }
+.category-icon path { stroke-dasharray: 1; stroke-dashoffset: 0; }
+.index__row:is(:hover, :focus-visible) .category-icon { color: var(--accent); }
+.index__row:is(:hover, :focus-visible) .category-icon path { animation: icon-draw .7s cubic-bezier(.3, .6, .2, 1) both; }
+@keyframes icon-draw { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } }
 
 /* Brands: two lines running against each other, pushed by the scroll. */
 .brands { margin: 0 calc(-1 * var(--gutter)); padding: 4vh 0 12vh; overflow: hidden; }
@@ -201,7 +195,8 @@
     .service__word { font-size: 23vw; }
     .gallery__head { width: 74vw; }
     .gallery__item { width: 74vw; max-width: 340px; }
-    .index__row { grid-template-columns: minmax(0, 1fr) auto; }
+    .index__row { grid-template-columns: auto minmax(0, 1fr); gap: 16px; }
+    .home-page .category-icon { stroke-width: .75; }
     .index__arrow { display: none; }
 }
 @media (max-width: 600px) {
@@ -211,11 +206,11 @@
     .home-search__field kbd { display: none; }
     .home-search__item { grid-template-columns: 52px minmax(0, 1fr); }
     .home-search__item strong { grid-column: 2; }
-    .index__thumbs img:nth-child(n + 3) { display: none; }
 }
 /* A still page for visitors who asked for less motion: nothing is held, filled or run. */
 @media (prefers-reduced-motion: reduce) {
     .brands__row { flex-wrap: wrap; width: auto; padding: 0 var(--gutter); gap: 8px 32px; }
     .brands__line[aria-hidden='true'], .brands__row a[aria-hidden='true'] { display: none; }
-    .hero__plate, .gallery__photo img, .index__name, .index__arrow, .index__fan-group span { transition: none; }
+    .hero__plate, .gallery__photo img, .index__name, .index__arrow { transition: none; }
+    .index__row:is(:hover, :focus-visible) .category-icon path { animation: none; }
 }
