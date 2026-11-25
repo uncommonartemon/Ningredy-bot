@@ -3,7 +3,6 @@
 namespace App\Models;
 
 use App\Models\Concerns\GeneratesCatalogCode;
-use App\Services\Catalog\CategoryStandard;
 use App\Services\Products\ProductPhotoIdentity;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -141,31 +140,6 @@ class Category extends Model
         return $this->minimum_image_height !== null
             ? max(0, min(4000, (int) $this->minimum_image_height))
             : null;
-    }
-
-    /**
-     * The category as research reads it: a kind under its parent, the product
-     * type it accepts, the operator's search hint and the keys a card of this
-     * category must carry (what research cannot find, the card names as missing).
-     * Load `parent` and `requiredAttributeDefinitions` before calling for many rows.
-     */
-    public function productSearchPromptLine(): string
-    {
-        $hint = trim((string) $this->product_search_hint);
-        $parent = $this->parent_id === null ? null : $this->parent;
-        // The operator's form for the category (decision of 2026-11-13): every field with how it is
-        // written and whether it is required, and the operator's note.
-        $standard = app(CategoryStandard::class)->forAgents($this);
-        $form = collect($standard['form'] ?? [])->map(fn (array $field): string => $field['key'].' ('.$field['name']
-            .(isset($field['example']) ? '; write like: '.$field['example'] : '').(($field['importance'] ?? '') === 'required' ? '; required' : '').')')
-            ->implode(', ');
-
-        return '- '.$this->slug.': '.$this->name
-            .($parent ? ' (a kind of '.$parent->slug.': prefer it over the parent when it fits)' : '')
-            .($this->product_type_affinity ? ' | product_type='.$this->product_type_affinity : '')
-            .($hint !== '' ? ' | trusted category search hint: '.$hint : '')
-            .($form !== '' ? ' | the form of this category, fill these with these exact keys: '.$form : '')
-            .(isset($standard['operator_note']) ? ' | the operator\'s note for this category: '.$standard['operator_note'] : '');
     }
 
     /**

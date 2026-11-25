@@ -4,11 +4,11 @@ import FilterSection from './FilterSection.vue';
 import AttributeFilterSection from './AttributeFilterSection.vue';
 import PriceRange from './PriceRange.vue';
 import { useI18n } from '../i18n';
-import { groupAttributeBlocks } from '../attributeGroups';
+import { filterBlocks } from '../attributeGroups';
 const props = defineProps({ facets: { type: Object, required: true }, mobileOpen: { type: Boolean, default: false }, hasActive: { type: Boolean, default: false }, total: { type: Number, default: 0 }, busy: { type: Boolean, default: false } });
 const model = defineModel({ type: Object, required: true });
-const emit = defineEmits(['apply', 'reset', 'close', 'category']);
-const { t, categoryName, productCount, attributeGroupName } = useI18n();
+const emit = defineEmits(['apply', 'reset', 'close']);
+const { t, productCount, attributeGroupName } = useI18n();
 const panel = ref(null);
 const isMobile = ref(false);
 let viewport;
@@ -20,14 +20,12 @@ const facetTitle = (facet) => t(`facets.${facet.key}`, facet.label);
 // (brand, availability) above the characteristics, the others (colour, type, country) below them.
 const leadingColumns = computed(() => props.facets.columns.filter((facet) => facet.leading));
 const trailingColumns = computed(() => props.facets.columns.filter((facet) => !facet.leading));
-const attributeBlocks = computed(() => groupAttributeBlocks(props.facets.attributes.filter((facet) => facet.options?.length)));
+// The server orders the characteristics (the category's form first) and says which its form
+// names: those stand open, the rest closed until asked for.
+const attributeBlocks = computed(() => filterBlocks(props.facets.attributes.filter((facet) => facet.options?.length)));
 const groupSelectedCount = (block) => block.attributes.reduce((total, facet) => total + (model.value.attributes[facet.key]?.length || 0), 0);
 const groupSelectionKey = (block) => JSON.stringify(block.attributes.map((facet) => [facet.key, model.value.attributes[facet.key] || []]));
-const optionLabel = (key, option) => ['types', 'stock'].includes(key) ? t(`${key}.${option.value}`, option.label) : option.label;
-const unavailable = (count, isSelected = false) => !isSelected && Number(count) === 0;
-const optionDisabled = (count, isSelected = false) => props.busy || unavailable(count, isSelected);
-const countText = (count) => props.busy ? '…' : (count ?? 0);
-const countHint = (count) => props.busy ? t('updatingFilters') : `${t('afterFilterChange')}: ${productCount(count ?? 0)}`;
+const optionLabel = (key, option) => ['types', 'stock', 'condition'].includes(key) ? t(`${key}.${option.value}`, option.label) : option.label;
 const hasPrice = (value) => value !== '' && value !== null && value !== undefined;
 const priceDraft = reactive({ min: model.value.min_price ?? '', max: model.value.max_price ?? '' });
 const priceActive = computed(() => hasPrice(model.value.min_price) || hasPrice(model.value.max_price));
@@ -101,10 +99,6 @@ onBeforeUnmount(() => { viewport?.removeEventListener('change', resize); documen
         <div v-if="mobileOpen && isMobile" class="filter-backdrop" aria-hidden="true" @click="$emit('close')" />
         <aside id="catalog-filters" ref="panel" class="filters-panel" :class="{ 'filters-panel--open': mobileOpen }" :role="mobileOpen && isMobile ? 'dialog' : undefined" :aria-modal="mobileOpen && isMobile ? true : undefined" :aria-busy="busy" aria-labelledby="filters-title" :inert="isMobile && !mobileOpen" tabindex="-1">
             <header><strong id="filters-title">{{ t('filters') }}</strong><button v-if="hasActive" type="button" class="filters-reset" @click="$emit('reset')">{{ t('reset') }}</button><button type="button" class="filters-close" :aria-label="t('closeFilters')" @click="$emit('close')">×</button></header>
-            <FilterSection v-if="facets.categories.length" :title="t('category')" :open-by-default="true" :selected-count="model.category ? 1 : 0">
-                <label class="radio-row"><input :checked="!model.category" type="radio" name="catalog-category" value="" :disabled="busy" @change="$emit('category', '')" /><span>{{ t('allCategories') }}</span><small v-if="model.category" :aria-label="countHint(facets.allCategoriesCount)" :title="countHint(facets.allCategoriesCount)">({{ countText(facets.allCategoriesCount) }})</small></label>
-                <label v-for="option in facets.categories" :key="option.value" class="radio-row" :class="{ 'filter-option--unavailable': unavailable(option.count, model.category === option.value) }"><input :checked="model.category === option.value" type="radio" name="catalog-category" :value="option.value" :disabled="optionDisabled(option.count, model.category === option.value)" @change="$emit('category', option.value)" /><span>{{ categoryName(option) }}</span><small v-if="model.category !== option.value" :aria-label="countHint(option.count)" :title="countHint(option.count)">({{ countText(option.count) }})</small></label>
-            </FilterSection>
             <FilterSection :title="priceTitle" :open-by-default="true" :selected-count="priceActive ? 1 : 0">
                 <form @submit.prevent="applyPrice">
                     <PriceRange v-model:min="priceDraft.min" v-model:max="priceDraft.max" :min-bound="facets.price.min" :max-bound="facets.price.max" :disabled="busy" @apply="applyPrice" />
@@ -118,10 +112,10 @@ onBeforeUnmount(() => { viewport?.removeEventListener('change', resize); documen
             </FilterSection>
             <AttributeFilterSection v-for="facet in leadingColumns" :key="facet.key" v-model="model[facet.key]" :facet="facet" :title="facetTitle(facet)" :option-label="(option) => optionLabel(facet.key, option)" :open-by-default="true" :busy="busy" @apply="$emit('apply')" />
             <template v-for="block in attributeBlocks" :key="block.key">
-                <FilterSection v-if="block.group?.highlight_in_filters" class="filter-section--attribute-group" :title="attributeGroupName(block.group)" :selected-count="groupSelectedCount(block)" :selected-label="t('selectedOptions')" :selection-key="groupSelectionKey(block)">
-                    <AttributeFilterSection v-for="facet in block.attributes" :key="facet.key" v-model="model.attributes[facet.key]" :facet="facet" :busy="busy" :heading-level="4" @apply="$emit('apply')" />
+                <FilterSection v-if="block.group" class="filter-section--attribute-group" :title="attributeGroupName(block.group)" :open-by-default="block.attributes.some((facet) => facet.in_form)" :selected-count="groupSelectedCount(block)" :selected-label="t('selectedOptions')" :selection-key="groupSelectionKey(block)">
+                    <AttributeFilterSection v-for="facet in block.attributes" :key="facet.key" v-model="model.attributes[facet.key]" :facet="facet" :open-by-default="facet.in_form" :busy="busy" :heading-level="4" @apply="$emit('apply')" />
                 </FilterSection>
-                <template v-else><AttributeFilterSection v-for="facet in block.attributes" :key="facet.key" v-model="model.attributes[facet.key]" :facet="facet" :busy="busy" @apply="$emit('apply')" /></template>
+                <template v-else><AttributeFilterSection v-for="facet in block.attributes" :key="facet.key" v-model="model.attributes[facet.key]" :facet="facet" :open-by-default="facet.in_form" :busy="busy" @apply="$emit('apply')" /></template>
             </template>
             <AttributeFilterSection v-for="facet in trailingColumns" :key="facet.key" v-model="model[facet.key]" :facet="facet" :title="facetTitle(facet)" :option-label="(option) => optionLabel(facet.key, option)" :busy="busy" @apply="$emit('apply')" />
             <p class="filters-count-hint" role="status">{{ busy ? t('updatingFilters') : t('filterCountsHint') }}</p>

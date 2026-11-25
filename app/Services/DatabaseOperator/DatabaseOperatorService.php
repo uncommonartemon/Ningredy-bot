@@ -133,7 +133,9 @@ class DatabaseOperatorService
             'product_drafts' => ['model' => ProductDraft::class, 'writable' => [
                 'title' => 'required|string|max:500', 'brand' => $text, 'model' => $text, 'color' => $text,
                 'condition' => 'in:new,used,refurbished,open_box', 'description' => 'nullable|string|max:200000',
-                'category' => 'nullable|string|max:255', 'product_type' => 'in:laptop,desktop,component,other',
+                // A draft's category is a node of the catalog map, as on every other path (2026-11-25).
+                'category' => ['nullable', 'string', 'max:255', Rule::exists('categories', 'slug')->where('is_active', true)],
+                'product_type' => 'in:laptop,desktop,component,other',
                 'specifications' => 'array', 'translations' => $translations, 'research_notes' => 'nullable|string|max:200000',
             ]],
             'product_draft_media' => ['model' => ProductDraftMedia::class, 'create' => false, 'writable' => [

@@ -7,7 +7,6 @@ use App\Ai\Tools\Concerns\RecordsOperations;
 use App\Jobs\ContinueDraftGallerySearch;
 use App\Models\AiRun;
 use App\Models\AttributeValue;
-use App\Models\Category;
 use App\Models\Product;
 use App\Models\ProductDraft;
 use App\Models\ProductSourceAttempt;
@@ -20,8 +19,9 @@ use App\Services\Ai\ProductSearchCostBudget;
 use App\Services\Ai\ProductSearchTimeBudget;
 use App\Services\Ai\StreamingProductResearch;
 use App\Services\Catalog\AttributeDictionary;
+use App\Services\Catalog\CatalogMap;
+use App\Services\Catalog\CatalogPlacement;
 use App\Services\Products\ProductCatalogIdentity;
-use App\Services\Products\ProductCategoryResolver;
 use App\Services\Products\ProductCondition;
 use App\Services\Products\ProductImageCandidateDiscovery;
 use App\Services\Products\ProductImageResolver;
@@ -577,6 +577,7 @@ class ResearchProduct implements Tool
                         'model' => $data['model'],
                         'product_type' => $data['product_type'] ?? null,
                         'category' => $data['category'] ?? null,
+                        'category_placement' => $data['category_placement'] ?? null,
                         'color' => $data['color'],
                         'condition' => $data['condition'] ?? 'new',
                         'description' => $data['description'],
@@ -860,9 +861,7 @@ class ResearchProduct implements Tool
             'brand' => ['nullable', 'string', 'max:255'],
             'model' => ['nullable', 'string', 'max:255'],
             'product_type' => ['nullable', 'in:laptop,desktop,component,other'],
-            'category' => ['nullable', 'string', Rule::in(
-                Category::query()->where('is_active', true)->pluck('slug'),
-            )],
+            'category' => ['nullable', 'string', Rule::in(app(CatalogMap::class)->slugs())],
             'color' => ['nullable', 'string', 'max:255'],
             'condition' => ['sometimes', 'required', Rule::in(ProductCondition::VALUES)],
             'description' => ['nullable', 'string', 'max:5000'],
@@ -984,17 +983,20 @@ class ResearchProduct implements Tool
                 'primary_source' => ['required', 'array'],
             ], ['primary_source.required' => 'The found result has no unblocked source that identifies the exact product. Keep observed URLs and facts and add the page or record that shows this exact product; do not invent or relabel its source type.'])->validate();
 
-            $category = app(ProductCategoryResolver::class)->resolve($data['product_type'] ?? null, $data['category'] ?? null);
+            // One placement rule for the search and the approval (decision of 2026-11-25): what the
+            // server settled instead of the agent is kept with the draft and shown on its card.
+            $placement = app(CatalogPlacement::class)->place($data['product_type'] ?? null, $data['category'] ?? null);
             $issues = app(ProductResearchConfigurationGuard::class)->issues($data, trim($this->query.' '.(string) $this->update->text), $this->typedByOperator());
-            if (! $category) {
-                $issues[] = 'Category and product_type are incompatible or ambiguous in the live category configuration.';
+            if ($placement->problem() !== null) {
+                $issues[] = $placement->problem();
             }
             if ($issues !== []) {
                 // These failures share the same retained response, budget and
                 // cancellation-aware recovery as transport/schema failures.
                 throw ValidationException::withMessages(['configuration' => $issues]);
             }
-            $data['category'] = $category->slug;
+            $data['category'] = $placement->slug();
+            $data['category_placement'] = $placement->record();
         }
 
         return $data;

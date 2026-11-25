@@ -17,12 +17,12 @@ const messages = {
         pageTitle: 'Electronics catalog', catalog: 'Electronics catalog', search: 'Search products…',
         filters: 'Filters', filtersActive: 'active', selectedOptions: 'selected', reset: 'Reset', resetFilters: 'Reset filters',
         category: 'Category', price: 'Price', from: 'from', to: 'to', apply: 'Apply', sorting: 'Sorting',
-        sortNewest: 'Newest first', sortPriceAsc: 'Price: low to high', sortPriceDesc: 'Price: high to low', sortTitle: 'By title',
+        sortNewest: 'Newest', sortPriceAsc: 'Cheapest', sortPriceDesc: 'Most expensive', sortTitle: 'By title',
         grid: 'Grid', list: 'List', emptyTitle: 'No products found', emptyText: 'Change or reset the filters.',
-        perPage: 'per page',
+        perPage: 'per page', breadcrumbs: 'You are here', subcategories: 'Subcategories', moreCount: '{n} more', showLess: 'Show less',
         priceUnavailable: 'Price not available', tech: 'Electronics', pagination: 'Catalog pagination', language: 'Interface language',
         stock: { in_stock: 'In stock', out_of_stock: 'Out of stock', preorder: 'Pre-order', unknown: 'Check availability' },
-        facets: { brands: 'Brand', types: 'Type', countries: 'Brand country', colors: 'Color', stock: 'Availability' },
+        facets: { brands: 'Brand', types: 'Type', countries: 'Brand country', colors: 'Color', stock: 'Availability', condition: 'Condition' },
         types: { laptop: 'Laptop', desktop: 'Desktop PC', component: 'Component', other: 'Other electronics' },
         photoNotice: {
             otherConfiguration: 'The photos show another configuration in the same body; this product’s configuration is in its specifications.',
@@ -93,12 +93,16 @@ const messages = {
         apply: 'Použít',
         sorting: 'Řazení',
         sortNewest: 'Nejnovější',
-        sortPriceAsc: 'Cena: nejnižší',
-        sortPriceDesc: 'Cena: nejvyšší',
+        sortPriceAsc: 'Nejlevnější',
+        sortPriceDesc: 'Nejdražší',
         sortTitle: 'Podle názvu',
         grid: 'Mřížka',
         list: 'Seznam',
         perPage: 'na stránku',
+        breadcrumbs: 'Jste zde',
+        subcategories: 'Podkategorie',
+        moreCount: 'Dalších {n}',
+        showLess: 'Zobrazit méně',
         emptyTitle: 'Nebyly nalezeny žádné produkty',
         emptyText: 'Upravte nebo vymažte filtry.',
         priceUnavailable: 'Cena není uvedena',
@@ -112,7 +116,7 @@ const messages = {
             unknown: 'Ověřit dostupnost',
         },
         facets: {
-            brands: 'Značka', types: 'Typ', countries: 'Země značky', colors: 'Barva', stock: 'Dostupnost',
+            brands: 'Značka', types: 'Typ', countries: 'Země značky', colors: 'Barva', stock: 'Dostupnost', condition: 'Stav',
         },
         types: {
             laptop: 'Notebook', desktop: 'Stolní počítač', component: 'Komponenta', other: 'Ostatní technika',
@@ -185,13 +189,17 @@ const messages = {
         to: 'до',
         apply: 'Застосувати',
         sorting: 'Сортування',
-        sortNewest: 'Спочатку нові',
-        sortPriceAsc: 'Ціна: дешевші',
-        sortPriceDesc: 'Ціна: дорожчі',
+        sortNewest: 'Найновіші',
+        sortPriceAsc: 'Найдешевші',
+        sortPriceDesc: 'Найдорожчі',
         sortTitle: 'За назвою',
         grid: 'Сітка',
         list: 'Список',
         perPage: 'на сторінці',
+        breadcrumbs: 'Ви тут',
+        subcategories: 'Підкатегорії',
+        moreCount: 'Ще {n}',
+        showLess: 'Згорнути',
         emptyTitle: 'Товарів не знайдено',
         emptyText: 'Змініть або скиньте фільтри.',
         priceUnavailable: 'Ціну не вказано',
@@ -205,7 +213,7 @@ const messages = {
             unknown: 'Уточнити наявність',
         },
         facets: {
-            brands: 'Бренд', types: 'Тип', countries: 'Країна бренду', colors: 'Колір', stock: 'Наявність',
+            brands: 'Бренд', types: 'Тип', countries: 'Країна бренду', colors: 'Колір', stock: 'Наявність', condition: 'Стан',
         },
         types: {
             laptop: 'Ноутбук', desktop: 'Готовий ПК', component: 'Комплектуюча', other: 'Інша техніка',
@@ -325,6 +333,9 @@ const productCount = (count) => {
 
 const localeTag = computed(() => ({ cs: 'cs-CZ', uk: 'uk-UA', en: 'en-US' })[locale.value] || 'en-US');
 
+// "5 more" under a folded list: the number set in the visitor's language.
+const moreCount = (count) => t('moreCount').replace('{n}', new Intl.NumberFormat(localeTag.value).format(count));
+
 // A product's own text is written in English and translated into the languages the
 // admin chose (operator, 2026-11-01: Czech and Ukrainian). The shown language is the
 // interface's own when the bot translates into it; a field without that translation
@@ -387,7 +398,7 @@ if (typeof document !== 'undefined') document.documentElement.lang = locale.valu
 export { configureCatalogLocales };
 
 export const useI18n = () => ({
-    locale, localeTag, setLocale, t, productCount, categoryName, storefrontLocales,
+    locale, localeTag, setLocale, t, productCount, moreCount, categoryName, storefrontLocales,
     contentLocale, translatedText, attributeLabel, attributeValue, attributeUnit, attributeGroupName, facetLabel, facetOptionLabel,
     photoNoticeLines,
 });

@@ -3,6 +3,7 @@
 namespace App\Filament\Resources\Products\Tables;
 
 use App\Filament\Resources\Products\ProductResource;
+use App\Filament\Schemas\ProductCategoryActions;
 use App\Filament\Schemas\ProductCommercialAction;
 use App\Filament\Schemas\ProductSaleActions;
 use App\Filament\Support\CharacteristicsFilter;
@@ -108,7 +109,7 @@ class ProductsTable
                 ProductSaleActions::takeOff(), ProductCommercialAction::putBackOnSale(),
                 ProductSaleActions::delete(DeleteAction::make()),
             ])])
-            ->toolbarActions([ProductSaleActions::bulk()])
+            ->toolbarActions([ProductSaleActions::bulk(), ProductCategoryActions::bulkMove()])
             ->recordUrl(fn ($record): string => ProductResource::getUrl('edit', ['record' => $record]));
     }
 }

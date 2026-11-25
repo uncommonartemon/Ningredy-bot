@@ -15,7 +15,7 @@ class ProductDraft extends Model
         'telegram_update_id', 'ai_run_id', 'status', 'reviewed_at', 'reviewed_by_user_id',
         'reviewed_by_telegram_user_id', 'rejection_reason', 'requested_by_telegram_user_id',
         'approved_product_id', 'approved_variant_id',
-        'title', 'brand', 'model', 'product_type', 'category', 'color', 'description', 'research_notes', 'specifications',
+        'title', 'brand', 'model', 'product_type', 'category', 'category_placement', 'color', 'description', 'research_notes', 'specifications',
         'sources', 'primary_source_url', 'specifications_reconciled_source_url',
         'specifications_reconciliation_attempts', 'gallery_confirmed_sufficient', 'official_source_url', 'image_urls',
         'excluded_gallery_source_urls', 'excluded_gallery_image_urls', 'excluded_gallery_hashes',
@@ -28,7 +28,7 @@ class ProductDraft extends Model
     {
         return [
             'translations' => 'array', 'specification_evidence' => 'array', 'photo_source_context' => 'array', 'card_repair_state' => 'array',
-            'form_review' => 'array',
+            'form_review' => 'array', 'category_placement' => 'array',
             'specifications' => 'array', 'sources' => 'array', 'image_urls' => 'array',
             'excluded_gallery_source_urls' => 'array',
             'excluded_gallery_image_urls' => 'array',

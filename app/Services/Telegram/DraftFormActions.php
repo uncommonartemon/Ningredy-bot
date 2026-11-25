@@ -6,6 +6,9 @@ use App\Models\AttributeDefinition;
 use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
 use App\Services\Catalog\AttributeDictionary;
+use App\Services\Catalog\CatalogMap;
+use App\Services\Catalog\CatalogPlacement;
+use App\Services\Catalog\CategoryPlacement;
 use App\Services\Catalog\CategoryStandard;
 use Illuminate\Support\Facades\Cache;
 
@@ -13,11 +16,17 @@ use Illuminate\Support\Facades\Cache;
  * What the operator does with the form report of a draft in Telegram (decision of 2026-11-13):
  * look for a field not found, write its value, pick one of the example's variants, or keep an
  * inexact value as it is. The card comes back after each, with the report updated.
+ *
+ * The card also says where the product goes in the catalog map, and when it sits in a node that
+ * has kinds, that its kind is not chosen and why; the operator picks the kind here (2026-11-25).
  */
 class DraftFormActions
 {
     /** Fields shown at once; the rest after these are settled. */
     public const int PER_MESSAGE = 6;
+
+    /** The product types as the operator reads them in the chat, whatever the interface language. */
+    public const array TYPE_NAMES = ['laptop' => 'ноутбук', 'desktop' => 'готовый ПК', 'component' => 'комплектующая', 'other' => 'другая техника'];
 
     public function __construct(private readonly CategoryStandard $standard) {}
 
@@ -98,6 +107,85 @@ class DraftFormActions
             ['fields' => ['specifications' => array_values($specifications)], 'commercial' => []],
             'Значение поля формы от оператора: '.($definition->translations['en'] ?? $definition->label).' — '.$value));
         $this->accept($draft->fresh(), $definition->key);
+    }
+
+    /**
+     * The card's line about the product's place: the catalog path it goes to on «Добавить», and the
+     * real cause when the server settled it or its kind is still open. Null for a manual card that
+     * names no category yet: its own line asks for one.
+     */
+    public function categoryLine(ProductDraft $draft): ?string
+    {
+        if (blank($draft->category) && $draft->isManualUpload()) {
+            return null;
+        }
+        $map = app(CatalogMap::class);
+        $placement = app(CatalogPlacement::class)->place($draft->product_type, $draft->category);
+        if ($placement->category === null) {
+            return '📂 Категория не определена: '.($placement->candidates === []
+                ? 'в каталоге нет категории для этого типа товара.'
+                : 'этому типу товара подходят несколько разделов. Напишите, в какой поставить.');
+        }
+        $named = fn (?string $slug): string => '«'.($slug !== null && $map->node($slug) !== null ? $map->path($slug) : (string) $slug).'»';
+        $type = fn (?string $value): string => self::TYPE_NAMES[$value] ?? (string) $value;
+        $record = (array) ($draft->category_placement ?? []);
+        $cause = match (true) {
+            // The draft's own category is not where «Добавить» puts it: that is the cause to name.
+            $placement->reason === CategoryPlacement::TYPE_CONFLICT => 'категория черновика '.$named($draft->category).' — для другого типа товара, а этот — '.$type($draft->product_type),
+            $placement->reason === CategoryPlacement::UNKNOWN => 'категории «'.$draft->category.'» нет в каталоге',
+            $placement->reason === CategoryPlacement::NONE_CHOSEN => 'категория не указана',
+            // What the search asked for, while the draft still sits where the server put it.
+            ($record['placed'] ?? null) !== $draft->category => null,
+            ($record['reason'] ?? null) === CategoryPlacement::TYPE_CONFLICT => 'поиск назвал '.$named($record['requested'] ?? null).', а тип товара — '.$type($record['product_type'] ?? null),
+            ($record['reason'] ?? null) === CategoryPlacement::UNKNOWN => 'поиск назвал «'.($record['requested'] ?? '').'», такой категории нет',
+            ($record['reason'] ?? null) === CategoryPlacement::NONE_CHOSEN => 'поиск не выбрал категорию',
+            $placement->awaitsKind() && ($record['reason'] ?? null) === CategoryPlacement::CHOSEN => 'поиск выбрал общую категорию',
+            default => null,
+        };
+        $line = '📂 '.$map->path((string) $placement->slug());
+
+        return $line.($placement->awaitsKind() ? ' — вид не выбран' : '').($cause !== null ? ' ('.$cause.')' : '');
+    }
+
+    /** @return list<array{text: string, callback_data: string}>|null the card's button when the product's kind is open */
+    public function kindButton(ProductDraft $draft): ?array
+    {
+        return app(CatalogPlacement::class)->place($draft->product_type, $draft->category)->awaitsKind()
+            ? [['text' => '📂 Выбрать вид', 'callback_data' => "draft:kind:{$draft->id}"]] : null;
+    }
+
+    /** @return array{text: string, keyboard: array<string, mixed>} one button per kind of the node the product sits in */
+    public function kindMenu(ProductDraft $draft): array
+    {
+        $map = app(CatalogMap::class);
+        $placement = app(CatalogPlacement::class)->place($draft->product_type, $draft->category);
+        $back = [['text' => '← К карточке', 'callback_data' => "draft:review:{$draft->id}"]];
+        if (! $placement->awaitsKind()) {
+            return ['text' => '📂 Вид уже выбран: '.$map->path((string) $placement->slug()).'.', 'keyboard' => ['inline_keyboard' => [$back]]];
+        }
+        $buttons = array_map(fn (array $kind): array => ['text' => mb_substr($kind['name'], 0, 30), 'callback_data' => "dk:{$draft->id}:{$kind['id']}"],
+            $map->kinds((string) $placement->slug()));
+
+        return ['text' => '📂 Черновик #'.$draft->id.': '.$map->path((string) $placement->slug()).' — какой вид?',
+            'keyboard' => ['inline_keyboard' => [...array_chunk($buttons, 2), $back]]];
+    }
+
+    /**
+     * The kind the operator picked, written through the draft editor like any correction of theirs:
+     * the type follows the category, and a kind of the card's own category keeps the card's check.
+     */
+    public function chooseKind(ProductDraft $draft, TelegramUpdate $update, int $categoryId): string
+    {
+        $placement = app(CatalogPlacement::class)->place($draft->product_type, $draft->category);
+        $kind = collect(app(CatalogMap::class)->kinds((string) $placement->slug()))->firstWhere('id', $categoryId);
+        if (! $placement->awaitsKind() || $kind === null) {
+            return 'Этот вид уже не подходит: откройте карточку заново.';
+        }
+        $editor = app(TelegramDraftEditor::class);
+        $editor->apply($draft, $update, $editor->proposalFor($draft, $update,
+            ['fields' => ['category' => $kind['slug']], 'commercial' => []], 'Вид выбран оператором: '.$kind['name']));
+
+        return 'Вид: '.$kind['name'];
     }
 
     /** An inexact value the operator keeps: it is not marked again on this draft. */

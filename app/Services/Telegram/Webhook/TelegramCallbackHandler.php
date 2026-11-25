@@ -319,6 +319,34 @@ class TelegramCallbackHandler
 
             return;
         }
+        // The kind of a product placed in a node that has kinds (decision of 2026-11-25).
+        if (preg_match('/^draft:kind:(\d+)$/', $data, $kindMenu) === 1) {
+            $draft = ProductDraft::query()->find((int) $kindMenu[1]);
+            if ($draft?->status === 'pending_review') {
+                $menu = app(DraftFormActions::class)->kindMenu($draft);
+                $this->telegram->sendMessage($chatId, $menu['text'], $menu['keyboard']);
+            }
+            $this->answerAndClose($callbackId, $update, $draft?->status === 'pending_review' ? 'Выберите вид.' : 'Черновик уже обработан.');
+
+            return;
+        }
+        if (preg_match('/^dk:(\d+):(\d+)$/', $data, $kind) === 1) {
+            $draft = ProductDraft::query()->find((int) $kind[1]);
+            if ($draft?->status !== 'pending_review' || ! app(DraftAccess::class)->belongsToContext($draft, $update)) {
+                $this->answerAndClose($callbackId, $update, 'Черновик уже обработан.');
+
+                return;
+            }
+            try {
+                $answer = app(DraftFormActions::class)->chooseKind($draft, $update, (int) $kind[2]);
+                $this->draftPresenter->sendReview($this->telegram, $chatId, $draft->fresh());
+            } catch (\RuntimeException $exception) {
+                $answer = $exception->getMessage();
+            }
+            $this->answerAndClose($callbackId, $update, mb_substr($answer, 0, 190));
+
+            return;
+        }
         if (preg_match('/^draft:details:(\d+)$/', $data, $details) === 1) {
             $draft = ProductDraft::find((int) $details[1]);
             if ($draft?->status === 'pending_review') {

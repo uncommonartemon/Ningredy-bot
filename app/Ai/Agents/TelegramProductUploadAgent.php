@@ -2,7 +2,7 @@
 
 namespace App\Ai\Agents;
 
-use App\Models\Category;
+use App\Services\Catalog\CatalogMap;
 use App\Services\Products\AiAttributeGroups;
 use App\Services\Products\ProductCondition;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
@@ -38,7 +38,7 @@ class TelegramProductUploadAgent implements Agent, HasStructuredOutput
             state as specifications with the keys health_percent, power_on_hours and data_written_tb, in the units shown.
             If photos show different products or contradict the description, record the conflict and
             do not approve those photos as matching. Readable foreign labels are allowed in this manual
-            workflow. Only select an active category supplied in the prompt. Commercial data must come
+            workflow. Select the category from the catalog map below. Commercial data must come
             explicitly from the description: price is a nonnegative decimal string, currency is an
             explicitly given ISO code, price_amount is the decimal amount, quantity and warranty_months
             are nonnegative integers or null.
@@ -46,19 +46,17 @@ class TelegramProductUploadAgent implements Agent, HasStructuredOutput
             supplied description text which states that field; do not cite photos for commercial data.
             Do not assume a currency or new condition. Missing information and conflicts are shown to
             the operator before approval; you cannot publish, modify another item, or initiate a search.
-            PROMPT."\n\n".AiAttributeGroups::instructions();
+            PROMPT."\n\n".app(CatalogMap::class)->forAgents()."\n\n".AiAttributeGroups::instructions();
     }
 
     public function schema(JsonSchema $schema): array
     {
-        $categories = Category::query()->where('is_active', true)->pluck('slug')->all();
-
         return [
             'title' => $schema->string()->max(255)->nullable()->required(),
             'brand' => $schema->string()->max(255)->nullable()->required(),
             'model' => $schema->string()->max(255)->nullable()->required(),
             'product_type' => $schema->string()->enum(['laptop', 'desktop', 'component', 'other'])->required(),
-            'category' => $schema->string()->enum($categories ?: ['unconfigured'])->nullable()->required(),
+            'category' => $schema->string()->enum(app(CatalogMap::class)->slugs())->nullable()->required(),
             'color' => $schema->string()->max(255)->nullable()->required(),
             'condition' => $schema->string()->enum(ProductCondition::VALUES)->nullable()->required(),
             'description' => $schema->string()->max(5000)->nullable()->required(),

@@ -2,6 +2,7 @@
 
 namespace App\Ai\Agents;
 
+use App\Services\Catalog\CatalogMap;
 use App\Services\Products\AiAttributeGroups;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
 use Laravel\Ai\Attributes\MaxTokens;
@@ -47,13 +48,14 @@ class TelegramDraftEditAgent implements Agent, HasStructuredOutput
             Normalize prices to decimal strings without thousands separators, currency to three-letter
             ISO code, quantity and warranty_months to nonnegative integer strings. Do not assume a
             currency when absent. condition: new, open_box, used or refurbished. product_type: laptop,
-            desktop, component or other. category must be an active category slug provided in context.
+            desktop, component or other. category is a slug of the catalog map below; the operator may name
+            it in their own words ("это оперативная память" is the node for memory modules).
             If the request is ambiguous or asks to research missing facts, return no changes and explain
             the clarification needed. Never claim an operator-stated fact is verified on the internet.
             For a specification change, group may propose its catalog attribute group. All other changes
             must set group=null. Grouping is presentation metadata, not another product fact. Do not
             add changes solely to regroup existing characteristics or alter their established groups.
-            PROMPT."\n\n".AiAttributeGroups::instructions();
+            PROMPT."\n\n".app(CatalogMap::class)->forAgents()."\n\n".AiAttributeGroups::instructions();
     }
 
     public function schema(JsonSchema $schema): array

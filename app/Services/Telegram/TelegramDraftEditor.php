@@ -13,6 +13,8 @@ use App\Services\Ai\AiSettings;
 use App\Services\Ai\OpenAiHeavyOperationGate;
 use App\Services\Ai\ProductSearchCancellation;
 use App\Services\Catalog\AttributeDictionary;
+use App\Services\Catalog\CatalogMap;
+use App\Services\Catalog\CatalogPlacement;
 use App\Services\Products\AiAttributeGroups;
 use App\Services\Products\ProductCondition;
 use App\Services\Products\RequiredSpecifications;
@@ -68,7 +70,6 @@ class TelegramDraftEditor
                     'operator_message' => $text,
                     'current_draft' => $draft->only(self::FIELDS),
                     'commercial' => $draft->manualIntake()['commercial'] ?? [],
-                    'active_categories' => Category::query()->where('is_active', true)->pluck('name', 'slug')->all(),
                     'missing_required_specifications' => RequiredSpecifications::forDraft($draft),
                     'catalog_keys' => app(AttributeDictionary::class)->vocabulary(),
                 ], JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
@@ -110,6 +111,7 @@ class TelegramDraftEditor
         $draft->refresh();
         $this->assertContext($draft, $update);
         $patch = $this->validatePatch($patch);
+        $patch['fields'] = $this->placed($draft, $patch['fields']);
         if (isset($patch['fields']['specifications'])) {
             $current = collect($draft->specifications ?? [])->keyBy('key');
             foreach ($patch['fields']['specifications'] as &$specification) {
@@ -162,8 +164,14 @@ class TelegramDraftEditor
                 $fields['translations'] = $translations;
             }
             // The operator's own word about a fact does not undo the check of the rest of
-            // the card; only a correction of what the card is about does (2026-11-06).
-            $identityChanged = collect(self::IDENTITY_FIELDS)->contains(fn (string $field): bool => array_key_exists($field, $fields) && $fields[$field] !== $draft->{$field});
+            // the card; only a correction of what the card is about does (2026-11-06). The kind
+            // chosen under the card's own category is the same product, placed deeper (2026-11-25).
+            $identityChanged = collect(self::IDENTITY_FIELDS)->contains(fn (string $field): bool => array_key_exists($field, $fields) && $fields[$field] !== $draft->{$field}
+                && ! ($field === 'category' && $this->isKindOf((string) $fields['category'], (string) $draft->category)));
+            if (array_key_exists('category', $fields) && $fields['category'] !== $draft->category) {
+                // The operator placed it: what the search asked for no longer explains the category.
+                $fields['category_placement'] = null;
+            }
             if (! $draft->isManualUpload() && $fields !== [] && ! $identityChanged) {
                 ProductDraft::withReconciliationWrite(fn () => $draft->fill($fields)->save());
             } else {
@@ -314,7 +322,7 @@ class TelegramDraftEditor
             unset($specification);
         }
         if (isset($fields['category'])) {
-            throw_unless(Category::query()->where('slug', $fields['category'])->where('is_active', true)->exists(), RuntimeException::class, 'Выберите существующую активную категорию.');
+            throw_unless(app(CatalogMap::class)->node($fields['category']) !== null, RuntimeException::class, 'Выберите существующую активную категорию.');
         }
         foreach ($commercial as $field => $value) {
             if ($value === null) {
@@ -340,6 +348,50 @@ class TelegramDraftEditor
         }
 
         return ['fields' => $fields, 'commercial' => $commercial];
+    }
+
+    /**
+     * Category and product type never contradict (decision of 2026-11-25): a category the operator
+     * chose brings its product type, a product type brings the category the server would place it in.
+     * The preview shows both, so nothing moves unseen.
+     */
+    private function placed(ProductDraft $draft, array $fields): array
+    {
+        $map = app(CatalogMap::class);
+        if (isset($fields['category'])) {
+            $type = $map->node($fields['category'])['type'] ?? null;
+            if ($type !== null && isset($fields['product_type']) && $fields['product_type'] !== $type) {
+                $types = DraftFormActions::TYPE_NAMES;
+                throw new RuntimeException('Категория «'.$map->path($fields['category']).'» — для типа «'.($types[$type] ?? $type)
+                    .'», а в правке указан тип «'.($types[$fields['product_type']] ?? $fields['product_type']).'».');
+            }
+            if ($type !== null && $type !== $draft->product_type) {
+                $fields['product_type'] = $type;
+            }
+        } elseif (isset($fields['product_type']) && $fields['product_type'] !== $draft->product_type) {
+            $placement = app(CatalogPlacement::class)->place($fields['product_type'], $draft->category);
+            if ($placement->category !== null && $placement->slug() !== $draft->category) {
+                $fields['category'] = $placement->slug();
+            }
+        }
+
+        return $fields;
+    }
+
+    /** The node is a kind under the other one, at any depth. */
+    private function isKindOf(string $slug, string $parentSlug): bool
+    {
+        $map = app(CatalogMap::class);
+        $node = $map->node($slug);
+        $parent = $map->node($parentSlug);
+        while ($node !== null && $parent !== null && $node['parent'] !== null) {
+            if ($node['parent'] === $parent['id']) {
+                return true;
+            }
+            $node = $map->nodes()[$node['parent']];
+        }
+
+        return false;
     }
 
     private function simpleChange(string $text): ?array
@@ -376,6 +428,11 @@ class TelegramDraftEditor
                         $lines[] = ($new['name'] ?? $old['name']).":\n".$this->display($old['value'] ?? null).' → '.$this->display($new['value'] ?? null);
                     }
                 }
+            } elseif ($field === 'category' && $draft->category !== $value) {
+                // The operator reads the category by its place in the catalog, not by its slug.
+                $map = app(CatalogMap::class);
+                $name = fn (?string $slug): ?string => $slug !== null && $map->node($slug) !== null ? $map->path($slug) : $slug;
+                $lines[] = self::LABELS[$field].":\n".$this->display($name($draft->category)).' → '.$this->display($name($value));
             } elseif ($draft->{$field} !== $value) {
                 $lines[] = self::LABELS[$field].":\n".$this->display($draft->{$field}).' → '.$this->display($value);
             }

@@ -11,8 +11,8 @@ use App\Models\Category;
 use App\Models\Product;
 use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
+use App\Services\Catalog\CatalogPlacement;
 use App\Services\Catalog\CategoryStandard;
-use App\Services\Products\ProductCategoryResolver;
 use App\Services\Products\ProductDraftWorkflow;
 use App\Services\Products\RequiredSpecifications;
 use App\Services\Telegram\DraftTelegramPresenter;
@@ -66,26 +66,29 @@ class ComponentKindsTest extends TestCase
         $this->assertSame(['mpn', 'storage', 'interface'], $ssd->requiredAttributeDefinitions()->pluck('key')->all());
     }
 
-    public function test_the_resolver_keeps_the_kind_research_chose_and_falls_back_to_the_parent(): void
+    public function test_the_placement_keeps_the_kind_research_chose_and_puts_the_rest_in_the_parent_saying_the_kind_is_open(): void
     {
-        $resolver = app(ProductCategoryResolver::class);
+        $placement = app(CatalogPlacement::class);
 
-        $this->assertSame('ssd', $resolver->resolve('component', 'ssd')?->slug);
+        $this->assertSame(['ssd', false], [$placement->place('component', 'ssd')->slug(), $placement->place('component', 'ssd')->awaitsKind()]);
         // Before: several categories accepted «component», so a draft without a kind had no category at all.
-        $this->assertSame('components', $resolver->resolve('component', null)?->slug);
-        $this->assertSame('components', $resolver->resolve('component', 'laptops')?->slug);
-        $this->assertSame('laptops', $resolver->resolve('laptop', 'ssd')?->slug);
+        // Then a resolver put it in the parent silently; now the placement says the kind is still open.
+        $this->assertSame(['components', true], [$placement->place('component', null)->slug(), $placement->place('component', null)->awaitsKind()]);
+        $this->assertSame('components', $placement->place('component', 'laptops')->slug());
+        $this->assertSame('laptops', $placement->place('laptop', 'ssd')->slug());
     }
 
-    public function test_research_reads_each_kind_with_its_parent_and_required_keys(): void
+    public function test_research_reads_each_kind_under_its_parent_and_the_form_keys_by_slug(): void
     {
         $instructions = (string) (new ProductResearchAgent)->instructions();
 
-        $this->assertStringContainsString('- ram: Оперативная память (a kind of components: prefer it over the parent when it fits) | product_type=component', $instructions);
-        $this->assertStringContainsString('the form of this category, fill these with these exact keys: mpn (Manufacturer part number; required), ram (Memory; required), memory_type (Memory type; required), data_rate (Data rate; required), module_type (Module type; required)', $instructions);
-        preg_match('/^[ \t]*- laptops: Ноутбуки[^\n]*/mu', $instructions, $laptops);
-        $this->assertStringNotContainsString('required specifications', $laptops[0] ?? 'no laptops line');
-        $this->assertStringContainsString('one you cannot find on any page', $instructions);
+        // The map shows a kind indented under its parent; the type is written once, on the parent.
+        $this->assertStringContainsString("- components: Components [component]\n  - ssd: SSD-накопители / SSD drives\n", $instructions);
+        $this->assertStringContainsString("\n  - ram: Оперативная память / Memory modules\n", $instructions);
+        $this->assertStringContainsString('form: mpn (Manufacturer part number; required), ram (Memory; required), memory_type (Memory type; required), data_rate (Data rate; required), module_type (Module type; required)', $instructions);
+        preg_match('/^- laptops: (?:search hint|form)[^\n]*/mu', $instructions, $laptops);
+        $this->assertStringNotContainsString('required', $laptops[0] ?? '');
+        $this->assertStringContainsString('a field no page shows is left out, never guessed', $instructions);
     }
 
     public function test_the_card_names_the_required_characteristics_research_did_not_find(): void
@@ -156,9 +159,10 @@ class ComponentKindsTest extends TestCase
         $page = $this->get('/catalog?category=components')->assertOk()->viewData('page')['props'];
 
         $this->assertSame(['SK hynix BC501 512GB'], array_column($page['products']['data'], 'title'));
-        $categories = collect($page['facets']['categories'])->keyBy('value');
-        $this->assertSame([1, 1, 'components', null],
-            [$categories['components']['count'], $categories['ssd']['count'], $categories['ssd']['parent'], $categories['components']['parent']]);
+        // The kind's own page shows the way to it from its parent.
+        $kind = $this->get('/catalog?category=ssd')->assertOk()->viewData('page')['props'];
+        $this->assertSame(['SK hynix BC501 512GB'], array_column($kind['products']['data'], 'title'));
+        $this->assertSame(['components', 'ssd'], array_column($kind['facets']['trail'], 'slug'));
         $this->assertSame([], $this->get('/catalog?category=laptops')->assertOk()->viewData('page')['props']['products']['data']);
     }
 
