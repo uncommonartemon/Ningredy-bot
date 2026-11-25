@@ -22,6 +22,8 @@ class StorefrontHome
 
     private const BRANDS = 16;
 
+    private const CATEGORY_PHOTOS = 4;
+
     public function __construct(private readonly ProductCardPayload $cards) {}
 
     /** @return array<string, mixed> */
@@ -80,30 +82,48 @@ class StorefrontHome
     }
 
     /**
-     * Top-level categories with the products of the kinds under them, each shown by its newest photo.
+     * The ways into the catalog by category: the first level that offers a choice. A shop
+     * whose every product sits under one top category is shown by the kinds under it, so the
+     * page never lists a single row. Each entry carries its newest photos.
      *
      * @return list<array<string, mixed>>
      */
     private function categories(Collection $categories, Collection $visible): array
     {
-        return $categories->whereNull('parent_id')->map(function (Category $category) use ($categories, $visible): ?array {
-            $ids = $this->treeIds($category, $categories);
-            $count = $visible->whereIn('category_id', $ids)->count();
-            if ($count === 0) {
-                return null;
+        $level = $this->withProducts($categories->whereNull('parent_id'), $categories, $visible);
+        while ($level->count() === 1) {
+            $below = $this->withProducts($categories->where('parent_id', $level->first()['category']->id), $categories, $visible);
+            // Products filed straight under the top category would be lost from the list.
+            if ($below->isEmpty() || $below->sum('count') < $level->first()['count']) {
+                break;
             }
-            $cover = $this->cardQuery()->whereIn('category_id', $ids)
+            $level = $below;
+        }
+
+        return $level->map(function (array $entry): array {
+            $photos = $this->cardQuery()->whereIn('category_id', $entry['ids'])
                 ->whereHas('media', fn (Builder $query) => $this->catalogImages($query))
-                ->orderByDesc('published_at')->orderByDesc('id')->first();
+                ->orderByDesc('published_at')->orderByDesc('id')->limit(self::CATEGORY_PHOTOS)->get();
 
             return [
-                'name' => $category->name,
-                'slug' => $category->slug,
-                'translations' => $category->translations->pluck('name', 'locale')->all(),
-                'count' => $count,
-                'image' => $cover ? $this->cards->for($cover, $cover->variants->first())['image'] : null,
+                'name' => $entry['category']->name,
+                'slug' => $entry['category']->slug,
+                'translations' => $entry['category']->translations->pluck('name', 'locale')->all(),
+                'count' => $entry['count'],
+                'images' => $photos->map(fn (Product $product): ?string => $this->cards->for($product, $product->variants->first())['image'])
+                    ->filter()->values()->all(),
             ];
-        })->filter()->values()->all();
+        })->values()->all();
+    }
+
+    /** @return Collection<int, array{category: Category, ids: list<int>, count: int}> the given categories that hold products */
+    private function withProducts(Collection $level, Collection $categories, Collection $visible): Collection
+    {
+        return $level->map(function (Category $category) use ($categories, $visible): array {
+            $ids = $this->treeIds($category, $categories);
+
+            return ['category' => $category, 'ids' => $ids, 'count' => $visible->whereIn('category_id', $ids)->count()];
+        })->filter(fn (array $entry): bool => $entry['count'] > 0)->values();
     }
 
     /** @return list<int> */

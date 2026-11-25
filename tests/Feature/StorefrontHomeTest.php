@@ -34,7 +34,8 @@ class StorefrontHomeTest extends TestCase
             ->where('stats.brands', 2)
             ->where('categories.0.slug', 'laptops')
             ->where('categories.0.count', 2)
-            ->where('categories.0.image', fn (?string $image) => str_contains((string) $image, 'thinkpad-e14'))
+            // A category is shown by the newest photos of its own products.
+            ->where('categories.0.images', fn ($images) => count($images) === 1 && str_contains((string) $images[0], 'thinkpad-e14'))
             ->where('categories.1.slug', 'components')
             ->where('brands', [['name' => 'ASUS', 'count' => 1], ['name' => 'Lenovo', 'count' => 1]])
             // Fewer than six priced products give no price ranges rather than thin ones.
@@ -56,6 +57,29 @@ class StorefrontHomeTest extends TestCase
                 ['min' => 32000, 'max' => null, 'count' => 1],
             ])
             ->etc());
+    }
+
+    public function test_a_shop_with_one_top_category_is_shown_by_the_kinds_under_it(): void
+    {
+        // One row of categories is no choice: the page lists the level that offers one.
+        $components = Category::query()->where('slug', 'components')->value('id');
+        foreach (['ssd' => 31, 'ram' => 32] as $slug => $order) {
+            Category::query()->updateOrCreate(['slug' => $slug], ['name' => strtoupper($slug), 'parent_id' => $components, 'sort_order' => $order, 'is_active' => true]);
+        }
+        $this->product('Samsung 990 Pro', 'ssd', null, 3490, 'component', photo: true);
+        $this->product('Kingston Fury 16GB', 'ram', null, 1290, 'component');
+
+        $this->get('/')->assertOk()->assertInertia(fn (Assert $page) => $page
+            ->has('categories', 2)
+            ->where('categories.0.slug', 'ssd')->where('categories.0.count', 1)
+            ->where('categories.1.slug', 'ram')->where('categories.1.images', [])
+            ->etc());
+
+        // A product filed straight under the top category would be lost from such a list.
+        $this->product('Odd part', 'components', null, 500, 'component');
+
+        $this->get('/')->assertOk()->assertInertia(fn (Assert $page) => $page
+            ->has('categories', 1)->where('categories.0.slug', 'components')->where('categories.0.count', 3)->etc());
     }
 
     public function test_an_empty_catalog_gives_an_empty_start_page_not_an_error(): void
