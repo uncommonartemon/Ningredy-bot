@@ -119,8 +119,13 @@ class StorefrontHome
     {
         $names = [];
         for ($current = $category, $depth = 0; $current !== null && $depth < 8; $depth++) {
-            array_push($names, (string) $current->icon, (string) $current->slug);
-            $current = $current->parent_id === null ? null : $categories->firstWhere('id', $current->parent_id);
+            $parent = $current->parent_id === null ? null : $categories->firstWhere('id', $current->parent_id);
+            // An icon the same as the parent's says nothing of the category itself: its address is asked first.
+            if ((string) $current->icon !== (string) $parent?->icon) {
+                $names[] = (string) $current->icon;
+            }
+            $names[] = (string) $current->slug;
+            $current = $parent;
         }
 
         return array_values(array_filter($names, fn (string $name): bool => $name !== ''));
