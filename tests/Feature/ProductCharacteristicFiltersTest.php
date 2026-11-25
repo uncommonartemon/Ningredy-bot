@@ -39,6 +39,18 @@ class ProductCharacteristicFiltersTest extends TestCase
         $this->assertSame('16 GB', $filters->optionName('ram', '16 gb'));
     }
 
+    public function test_a_value_every_product_of_the_category_shares_is_not_offered_as_a_filter(): void
+    {
+        $products = $this->catalog();
+        $this->assertArrayHasKey('interface', (new ProductAttributeFilters)->forCategory($this->category('ssd')));
+
+        // Both drives are NVMe now: choosing it would leave the list as it was. One rule with the storefront.
+        AttributeValue::query()->create(['product_id' => $products['bareSsd']->id, 'value' => 'NVMe',
+            'attribute_definition_id' => AttributeDefinition::query()->where('key', 'interface')->value('id')]);
+
+        $this->assertArrayNotHasKey('interface', (new ProductAttributeFilters)->forCategory($this->category('ssd')));
+    }
+
     public function test_the_list_is_filtered_by_a_characteristic_hidden_products_included_and_the_choice_is_remembered(): void
     {
         $user = $this->admin();
@@ -93,6 +105,8 @@ class ProductCharacteristicFiltersTest extends TestCase
             'other' => $product('Laptop 16 again', 'laptops', $ram, '16 GB'),
             'hiddenBig' => $product('Laptop 32 asleep', 'laptops', $ram, '32 GB', onSale: false),
             'ssd' => $product('Drive', 'ssd', $interface, 'NVMe'),
+            // Without it every component would be NVMe, and a value all products share is no filter.
+            'bareSsd' => $product('Drive of unknown interface', 'ssd', null, null),
         ];
     }
 

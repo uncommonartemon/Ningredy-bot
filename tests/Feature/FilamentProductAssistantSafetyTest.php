@@ -436,6 +436,9 @@ class FilamentProductAssistantSafetyTest extends TestCase
         $this->assertSame('Assistant Storage', $attribute->definition->group->name);
         $this->assertSame('Assistant proposed brand', $product->brand->name);
         $this->assertFalse($attribute->definition->is_variant);
+        // A second product without the characteristic: a value every product shares would be no filter.
+        Product::query()->create(['title' => 'Another laptop', 'category_id' => $product->category_id,
+            'product_type' => 'laptop', 'status' => 'published', 'is_active' => true]);
         $catalog = $this->get('/catalog')->assertOk()->viewData('page')['props'];
         $this->assertContains('assistant_storage_interface', array_column($catalog['facets']['attributes'], 'key'));
 

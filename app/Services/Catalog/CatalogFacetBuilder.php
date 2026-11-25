@@ -15,6 +15,21 @@ use Illuminate\Support\Facades\DB;
 
 class CatalogFacetBuilder
 {
+    /**
+     * The filters kept in columns of a product or a configuration, in the order of the panel.
+     * The leading ones stand above the characteristics: who made it and whether it can be had
+     * is asked of any product. The others stand below them: what the products of a category
+     * differ in (capacity, memory type, screen) is chosen before the colour, the coarse type
+     * the category has already told, and the country of the brand.
+     */
+    private const array COLUMNS = [
+        'brands' => ['label' => 'Бренд', 'leading' => true],
+        'stock' => ['label' => 'Наличие', 'leading' => true],
+        'colors' => ['label' => 'Цвет', 'leading' => false],
+        'types' => ['label' => 'Тип', 'leading' => false],
+        'countries' => ['label' => 'Страна бренда', 'leading' => false],
+    ];
+
     private ?Collection $categoryRows = null;
 
     private ?Collection $attributeRows = null;
@@ -54,30 +69,39 @@ class CatalogFacetBuilder
             ];
         })->values();
 
-        $columns = collect([
-            'brands' => 'Бренд', 'types' => 'Тип', 'countries' => 'Страна бренда',
-            'colors' => 'Цвет', 'stock' => 'Наличие',
-        ])->map(function (string $label, string $key) use ($filters, $total): array {
-            $universe = DB::query()->fromSub($this->optionRows($key, ['category' => $filters['category'] ?? '']), 'choices')
-                ->select('value')->distinct()->orderBy('value')->get()
-                ->map(fn ($row) => ['label' => (string) $row->value, 'value' => (string) $row->value]);
+        $category = $filters['category'] ?? '';
+        $categoryProducts = $this->products($this->normalize(['category' => $category]))->count();
+        // A ticked filter stays where it can be unticked, whatever the rule says of it.
+        $offered = fn (array $ticked, Collection $rows, int $carriers): bool => $ticked !== []
+            || FilterableAttributes::useful($rows, $carriers, $categoryProducts);
 
-            return ['key' => $key, 'label' => $label, 'options' => $this->counts($key, $universe, $filters, $total)];
-        })->filter(fn (array $facet) => $facet['options']->isNotEmpty())->values();
+        $columns = collect(self::COLUMNS)->map(function (array $column, string $key) use ($filters, $total, $category, $offered): ?array {
+            // What the category holds, whatever else is ticked: a section does not come and go with the other filters.
+            $choices = DB::query()->fromSub($this->optionRows($key, ['category' => $category]), 'choices');
+            $values = (clone $choices)->select('value')->distinct()->orderBy('value')->pluck('value')
+                ->map(fn ($value): string => (string) $value);
+            $rows = $values->map(fn (string $value): object => (object) ['normalized_value' => $value, 'option_label' => $value]);
+            if (! $offered($filters[$key] ?? [], $rows, (clone $choices)->distinct()->count('product_id'))) {
+                return null;
+            }
+            $options = $values->map(fn (string $value): array => ['label' => $value, 'value' => $value]);
 
-        $attributeRows = $this->scopedAttributes($filters['category'] ?? '');
+            return ['key' => $key, 'label' => $column['label'], 'leading' => $column['leading'],
+                'options' => $this->counts($key, $options, $filters, $total)];
+        })->filter(fn (?array $facet): bool => $facet !== null && $facet['options']->isNotEmpty())->values();
+
+        $attributeRows = $this->scopedAttributes($category);
         $groups = AttributeGroup::query()->whereIn('id', $attributeRows->pluck('attribute_group_id')->filter()->unique())->get()->keyBy('id');
         $keys = $attributeRows->pluck('key')->unique()->values();
         // The storefront names a filter and its options in the visitor's language,
         // as the product page does; only the definition's own label was sent before.
         $labelTranslations = AttributeDefinition::query()->whereIn('key', $keys)->pluck('translations', 'key');
         $valueTranslations = $this->valueTranslations($keys);
-        $productsWith = $this->productsPerAttribute($filters['category'] ?? '');
+        $productsWith = $this->productsPerAttribute($category);
         // A filter carried by one laptop in forty narrows almost nothing; the
         // catalog page then lists dozens of such sections.
-        $minimumCoverage = FilterableAttributes::minimumCoverage($this->products($this->normalize(['category' => $filters['category'] ?? '']))->count());
         $attributes = AttributePresentation::sort($attributeRows->groupBy('key')
-            ->filter(fn (Collection $rows, string $key): bool => FilterableAttributes::useful($rows, $productsWith[$key] ?? 0, $minimumCoverage))
+            ->filter(fn (Collection $rows, string $key): bool => $offered($filters['attributes'][$key] ?? [], $rows, $productsWith[$key] ?? 0))
             ->map(function (Collection $rows, string $key) use ($filters, $total, $groups, $labelTranslations, $valueTranslations): array {
                 $options = $rows->unique('normalized_value')->sortBy('option_label')
                     ->map(fn ($row) => ['label' => $row->option_label, 'value' => (string) $row->normalized_value,
