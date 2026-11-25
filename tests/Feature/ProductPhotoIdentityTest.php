@@ -373,6 +373,33 @@ class ProductPhotoIdentityTest extends TestCase
         $this->assertSame('conflict', ProductPhotoIdentity::blindVerdict($msi, 'RTX 4070 VENTUS 2X BLACK 8G OC', 'MSI'));
     }
 
+    /**
+     * The card of a Core i7-4770S (BX80646I74770S) carried a photo whose lid reads «i7-4770 SR149».
+     * Run together, the model and the S-spec after it hold I74770S; an S-spec always starts with S.
+     */
+    public function test_a_processor_lid_with_its_s_spec_is_not_the_model_with_an_s(): void
+    {
+        $sku = ['key' => 'sku', 'name' => 'SKU', 'value' => 'BX80646I74770S'];
+        foreach (['Core i7-4770S', 'i7-4770S'] as $model) {
+            $cpu = new ProductDraft(['brand' => 'Intel', 'title' => 'Intel Core i7-4770S', 'model' => $model, 'specifications' => [$sku]]);
+            $this->assertSame('conflict', ProductPhotoIdentity::markingVerdict($cpu, 'i7-4770 SR149'), $model);
+            $this->assertSame('conflict', ProductPhotoIdentity::markingVerdict($cpu, 'INTEL CORE i7-4770 SR149 3.40GHZ'), $model);
+            $this->assertSame('conflict', ProductPhotoIdentity::blindVerdict($cpu, 'CORE i7-4770 SR149', 'Intel'), $model);
+            // The model name without its letter, alone or inside the box code.
+            $this->assertSame('conflict', ProductPhotoIdentity::markingVerdict($cpu, 'Core i7-4770'), $model);
+            $this->assertSame('conflict', ProductPhotoIdentity::markingVerdict($cpu, 'i7-4770'), $model);
+            // Its own lid and box.
+            $this->assertSame('match', ProductPhotoIdentity::markingVerdict($cpu, 'INTEL CORE i7-4770S SR14H 3.10GHZ'), $model);
+            $this->assertSame('match', ProductPhotoIdentity::blindVerdict($cpu, 'BX80646I74770S', 'Intel'), $model);
+        }
+        // A batch tail on a long part number is still that part, also split off by a space.
+        $micron = new ProductDraft(['brand' => 'Micron', 'model' => 'MTA9ASF1G72PZ-2G6J1', 'specifications' => [['key' => 'mpn', 'value' => 'MTA9ASF1G72PZ-2G6J1']]]);
+        $this->assertSame('match', ProductPhotoIdentity::markingVerdict($micron, 'MTA9ASF1G72PZ-2G6J1QI'));
+        $this->assertSame('match', ProductPhotoIdentity::markingVerdict($micron, 'MTA9ASF1G72PZ 2G6J1QI'));
+        $hynix = new ProductDraft(['brand' => 'SK hynix', 'model' => 'HMCG78AGBSA095N', 'specifications' => [['key' => 'mpn', 'value' => 'HMCG78AGBSA095N']]]);
+        $this->assertSame('match', ProductPhotoIdentity::markingVerdict($hynix, 'HMCG78AGBSA095N BA'));
+    }
+
     public function test_what_a_reader_not_told_the_product_found_is_compared_with_room_for_a_slip(): void
     {
         // Real readings of real frames, 2026-11-07.

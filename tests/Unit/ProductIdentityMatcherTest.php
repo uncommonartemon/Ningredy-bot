@@ -65,6 +65,27 @@ class ProductIdentityMatcherTest extends TestCase
         $this->assertFalse(PartNumberSuffix::sameBase('mzvlq512hblu00b00', 'mzvlq512hblu'));
     }
 
+    /**
+     * A card with the SKU BX80646I74770S (Core i7-4770S) got the photo of a Core i7-4770: the
+     * page selling BX80646I74770 was let in, its single trailing letter taken for a batch tail.
+     */
+    public function test_a_processors_model_letter_is_not_a_batch_tail(): void
+    {
+        $matcher = new ProductIdentityMatcher;
+        $cpu = $this->part('Intel', 'BX80646I74770S');
+        $neighbour = 'Intel Core i7-4770 3.4GHz LGA1150 Box BX80646I74770';
+
+        $this->assertTrue($matcher->conflictsSource($cpu, ['url' => 'https://shop.example/1', 'title' => $neighbour]));
+        $this->assertSame(['requested' => 'bx80646i74770s', 'found' => 'bx80646i74770'], $matcher->conflictingIdentifier($cpu, $neighbour));
+        $this->assertFalse(PartNumberSuffix::sameBase('bx80646i74770', 'bx80646i74770s'));
+        // Its own page stays its own.
+        $this->assertFalse($matcher->conflictsSource($cpu, ['url' => 'https://shop.example/2',
+            'title' => 'Intel Core i7-4770S 3.1GHz LGA1150 Box BX80646I74770S']));
+        // The batch tails the rule was made for are still one part.
+        $this->assertTrue(PartNumberSuffix::sameBase('mta9asf1g72pz2g6j1qi', 'mta9asf1g72pz2g6j1'));
+        $this->assertTrue(PartNumberSuffix::sameBase('hmcg78agbsa095nba', 'hmcg78agbsa095n'));
+    }
+
     private function part(string $brand, string $code): ProductDraft
     {
         $draft = new ProductDraft(['brand' => $brand, 'model' => $code, 'product_type' => 'component',
