@@ -2,10 +2,12 @@
 
 namespace Tests\Feature;
 
+use App\Jobs\ProcessTelegramMessage;
 use App\Services\BotHealth;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Queue;
 use Tests\TestCase;
 
 class BotHealthTest extends TestCase
@@ -97,6 +99,40 @@ class BotHealthTest extends TestCase
         $this->assertSame('down', $check['state']);
         $this->assertStringContainsString('поиск товара не сможет', $check['detail']);
         $this->assertStringContainsString('update-and-start.bat', $check['hint']);
+    }
+
+    public function test_a_search_a_worker_holds_for_twenty_minutes_reads_as_a_busy_worker_with_its_request(): void
+    {
+        // Live report 2026-11-27: request 706 had run for 21 minutes and the status page
+        // said the task waited and the worker was not started - the oldest job counted
+        // was the one being processed. Jobs queued behind it wait for that search.
+        Http::fake(['*' => Http::response('', 403)]);
+        Queue::connection('database')->push(new ProcessTelegramMessage(706), '', 'assistant');
+        DB::table('jobs')->update(['reserved_at' => time() - 21 * 60, 'attempts' => 1, 'created_at' => time() - 21 * 60, 'available_at' => time() - 21 * 60]);
+        Queue::connection('database')->push(new ProcessTelegramMessage(707), '', 'assistant');
+        DB::table('jobs')->whereNull('reserved_at')->update(['created_at' => time() - 15 * 60, 'available_at' => time() - 15 * 60]);
+
+        $worker = $this->checkNamed('worker');
+
+        $this->assertSame('up', $worker['state']);
+        $this->assertStringContainsString('Обработчик занят запросом #706 уже 21 мин', $worker['detail']);
+        $this->assertStringContainsString('В очереди задач: 1 (assistant: 1)', $worker['detail']);
+        $this->assertStringNotContainsString('никто не забирает', $worker['detail']);
+    }
+
+    public function test_a_job_held_past_the_queue_retry_time_reads_as_a_stopped_worker(): void
+    {
+        // A live worker gives a job back after retry_after; a job held longer was taken by
+        // a worker that stopped since, and nobody else is there to take it again.
+        Http::fake(['*' => Http::response('', 403)]);
+        Queue::connection('database')->push(new ProcessTelegramMessage(706), '', 'assistant');
+        DB::table('jobs')->update(['reserved_at' => time() - 3 * 3600, 'attempts' => 1]);
+
+        $worker = $this->checkNamed('worker');
+
+        $this->assertSame('down', $worker['state']);
+        $this->assertStringContainsString('запроса #706', $worker['detail']);
+        $this->assertStringContainsString('queue:work', $worker['hint']);
     }
 
     public function test_a_quiet_queue_is_not_a_dead_worker(): void
