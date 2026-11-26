@@ -26,6 +26,9 @@ class SearchStats extends Command
 
     private const GALLERY_PHASES = ['gallery_preflight', 'gallery_training', 'source_resolution', 'image_download', 'image_verification'];
 
+    /** The assistant's stage, named for what its minutes measure. */
+    public const ASSISTANT_STAGE = 'assistant: whole run with its tools, not model time';
+
     public function handle(ProductSearchCostBudget $costBudget): int
     {
         $query = TelegramUpdate::query()->orderBy('id');
@@ -136,7 +139,13 @@ class SearchStats extends Command
 
         return AiRun::query()->whereIn('telegram_update_id', $updateIds)
             ->get(['provider', 'model', 'usage', 'status', 'activity', 'started_at', 'completed_at'])
-            ->groupBy(fn (AiRun $run): string => (string) (data_get($run->activity, 'stage') ?: 'unlabelled'))
+            // The assistant's run stays open while its tools work, and the whole search is one
+            // of its tools: its minutes are the request's wall time, not model time (live
+            // report 2026-11-27 read "assistant 390.9 min" as the slowest model).
+            ->groupBy(fn (AiRun $run): string => match ($stage = (string) (data_get($run->activity, 'stage') ?: 'unlabelled')) {
+                'assistant' => self::ASSISTANT_STAGE,
+                default => $stage,
+            })
             ->map(fn (Collection $runs, string $stage): array => [$stage, $runs->count(), $runs->where('status', 'failed')->count(),
                 round($runs->sum(fn (AiRun $run): int => $run->started_at && $run->completed_at ? (int) $run->started_at->diffInSeconds($run->completed_at) : 0) / 60, 1),
                 ($cost = $reporter->forRuns($runs)['estimated_cost_usd']) !== null ? round($cost, 3) : null])

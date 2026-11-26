@@ -50,16 +50,29 @@ final class DiagnosticReport
     private const PRIVATE_SETTING = '/key|token|secret|password|username|login|proxy|allowed_user/i';
 
     /**
+     * How many searches one report carries. A search is an update with journal steps or a
+     * card; a button press, a command or a chat message is not one and does not count.
+     */
+    public const SEARCHES_IN_REPORT = 80;
+
+    /**
+     * The journal steps and model answers the searches may carry, in characters before
+     * compression. JSON packs about ten to one, so this stays well inside the 47 MB a
+     * Telegram document allows next to the photos.
+     */
+    private const SEARCH_TEXT_BUDGET = 150_000_000;
+
+    /**
+     * @param  int  $maxSearches  the most searches the report carries, newest first
      * @param  bool  $withDatabase  also a consistent copy of the database with its secrets blanked
      * @param  string|null  $connection  the connection to copy; the application's by default
      * @return string the absolute path of the zip that was written
      */
-    public function build(int $days = 7, int $maxRequests = 80, bool $withDatabase = false, ?string $connection = null): string
+    public function build(int $days = 7, int $maxSearches = self::SEARCHES_IN_REPORT, bool $withDatabase = false, ?string $connection = null): string
     {
         $days = max(1, $days);
         $snapshot = null;
-        $updates = TelegramUpdate::query()->where('created_at', '>=', now()->subDays($days))
-            ->orderByDesc('id')->limit(max(1, $maxRequests))->get()->sortBy('id')->values();
+        [$updates, $coverage] = $this->updatesInReport($days, max(1, $maxSearches));
         $ids = $updates->pluck('id')->all();
 
         $directory = storage_path('app/reports');
@@ -70,7 +83,7 @@ final class DiagnosticReport
             throw new RuntimeException("Could not create the report archive at {$path}.");
         }
         try {
-            $zip->addFromString('summary.txt', $this->summary($days, $updates));
+            $zip->addFromString('summary.txt', $this->summary($days, $updates, $coverage));
             foreach ($updates as $update) {
                 $zip->addFromString("requests/{$update->id}.txt", $this->request($update));
             }
@@ -167,15 +180,70 @@ final class DiagnosticReport
         $copy = null;
     }
 
-    /** @param  Collection<int, TelegramUpdate>  $updates */
-    private function summary(int $days, Collection $updates): string
+    /**
+     * The updates the report carries: the newest searches of the window up to the limit
+     * and the text budget, and every update (presses, commands, chat) from the oldest of
+     * them on, so a card's buttons stay next to its search. A limit on updates was spent
+     * by presses: 80 updates, 52 of them presses, turned seven days into one (live report
+     * 2026-11-27: 24 searches of 60).
+     *
+     * @return array{0: Collection<int, TelegramUpdate>, 1: array{searches: int, in_window: int, cut_by: ?string}}
+     */
+    private function updatesInReport(int $days, int $maxSearches): array
     {
+        $since = now()->subDays($days);
+        $searchIds = TelegramUpdate::query()->where('created_at', '>=', $since)
+            ->where(fn (Builder $query) => $query
+                ->whereExists(fn ($steps) => $steps->selectRaw('1')->from('product_source_attempts')->whereColumn('product_source_attempts.telegram_update_id', 'telegram_updates.id'))
+                ->orWhereExists(fn ($drafts) => $drafts->selectRaw('1')->from('product_drafts')->whereColumn('product_drafts.telegram_update_id', 'telegram_updates.id')))
+            ->orderByDesc('id')->pluck('id')->all();
+        $taken = [];
+        $cutBy = null;
+        $text = 0;
+        foreach ($searchIds as $id) {
+            if (count($taken) >= $maxSearches) {
+                $cutBy = 'searches';
+                break;
+            }
+            $size = (int) ProductSourceAttempt::query()->where('telegram_update_id', $id)
+                ->sum(DB::raw("length(coalesce(message, '')) + length(coalesce(input, '')) + length(coalesce(output, ''))"))
+                + (int) AiRun::query()->where('telegram_update_id', $id)
+                    ->sum(DB::raw("length(coalesce(response, '')) + length(coalesce(activity, '')) + length(coalesce(error, ''))"));
+            if ($taken !== [] && $text + $size > self::SEARCH_TEXT_BUDGET) {
+                $cutBy = 'size';
+                break;
+            }
+            $taken[] = $id;
+            $text += $size;
+        }
+        $query = TelegramUpdate::query()->where('created_at', '>=', $since);
+        $updates = $taken === []
+            // No search in the window: what the chat did is all there is to see.
+            ? $query->orderByDesc('id')->limit(self::SEARCHES_IN_REPORT)->get()
+            : $query->where('id', '>=', min($taken))->orderByDesc('id')->get();
+
+        return [$updates->sortBy('id')->values(), ['searches' => count($taken), 'in_window' => count($searchIds), 'cut_by' => $cutBy]];
+    }
+
+    /**
+     * @param  Collection<int, TelegramUpdate>  $updates
+     * @param  array{searches: int, in_window: int, cut_by: ?string}  $coverage
+     */
+    private function summary(int $days, Collection $updates, array $coverage): string
+    {
+        $from = $updates->first()?->created_at?->toDateTimeString() ?? '-';
         $lines = [
             'Ningredy diagnostic report',
             'generated: '.now()->toDateTimeString().' ('.config('app.timezone').')',
             'version: '.$this->version(),
             'php: '.PHP_VERSION.' · os: '.PHP_OS_FAMILY.' · laravel: '.app()->version(),
-            "window: last {$days} days · requests: ".$updates->count(),
+            "window: last {$days} days · searches: {$coverage['searches']} of {$coverage['in_window']}"
+                .' · updates: '.$updates->count().' (presses, commands and chat included) · from '.$from
+                .match ($coverage['cut_by']) {
+                    'searches' => ' · older searches left out: the report carries the newest '.$coverage['searches'],
+                    'size' => ' · older searches left out: their journal would not fit the file',
+                    default => '',
+                },
             'services: icecat '.(CodeDatabases::enabled('icecat') ? 'on' : 'off').' (login '.(CodeDatabases::icecatUsernameSource() ?? 'none')
                 .', last answer '.(CodeDatabases::lastIcecatAnswer() ?? '-').') · upcitemdb '.(CodeDatabases::enabled('upcitemdb') ? 'on' : 'off'),
             'active categories: '.Category::query()->where('is_active', true)->count(),
