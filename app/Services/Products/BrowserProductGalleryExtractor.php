@@ -437,10 +437,9 @@ class BrowserProductGalleryExtractor
     private function rememberAccessChallenge(string $url, array $scout): void
     {
         if (($scout['access_gate'] ?? false) === true) {
-            $this->reputation->noteRefusal(
-                $url,
-                (string) ($scout['access_gate_reason'] ?? HostReputation::REFUSAL_ACCESS_GATE),
-            );
+            $reason = (string) ($scout['access_gate_reason'] ?? HostReputation::REFUSAL_ACCESS_GATE);
+            $this->reputation->noteRefusal($url, $reason);
+            $this->reputation->noteBrowserBlock($url, $reason);
 
             return;
         }

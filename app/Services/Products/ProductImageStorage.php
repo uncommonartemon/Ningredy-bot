@@ -679,6 +679,13 @@ class ProductImageStorage
                     report($exception);
                     $preflight = [];
                 }
+                // A host that refused the browser before and the quick check now is
+                // not opened: the journal row of the check says so.
+                if (($preflight['reason'] ?? null) === 'remembered_browser_block') {
+                    $progress?->__invoke('Пропускаю '.$source['url'].': сайт уже закрывал страницу от браузера и снова отказал быстрой проверке.');
+
+                    continue;
+                }
                 $source = [...$source, 'title' => SourceIdentityProvenance::confirmedByCode($source) ? ($source['title'] ?? null) : null,
                     '_preflight_final_url' => SourceIdentityProvenance::pageUrl($source, (string) ($preflight['final_url'] ?? $source['url'])),
                     '_preflight_identity_evidence' => SourceIdentityProvenance::mergeEvidence($source, $preflight['identity_evidence'] ?? null),

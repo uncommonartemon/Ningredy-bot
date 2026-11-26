@@ -165,6 +165,20 @@ class ProductImageResolver
             $result['reason'] = $status ? 'http_'.$status : 'http_error';
         }
 
+        // The quick check is the cheap look; a refusal there sends the page to the
+        // real browser. A host whose browser was refused on an earlier visit and that
+        // refuses the quick check again is not sent there: the photo check and the
+        // browser run would only meet the same gate (live report 2026-11-27). A page
+        // the host serves is the first success, and the memory goes.
+        $browserBlock = null;
+        $quickCheckRefused = '';
+        if ($result['browser_probe_required'] && ($browserBlock = $this->reputation->browserBlock($url)) !== null) {
+            $quickCheckRefused = (string) $result['reason'];
+            $result = [...$result, 'blocked' => true, 'browser_probe_required' => false, 'reason' => 'remembered_browser_block'];
+        } elseif (! $result['blocked'] && ! $result['unavailable'] && ! $result['browser_probe_required'] && $result['reason'] === null) {
+            $this->reputation->noteAcceptance($url);
+        }
+
         $this->attempts->record([
             'telegram_update_id' => $telegramUpdateId,
             'product_url' => $url,
@@ -173,12 +187,17 @@ class ProductImageResolver
             'action' => 'check_source_access',
             'status' => ($result['blocked'] || $result['unavailable']) ? 'failed' : 'completed',
             'decision' => $result['reason'] ?: 'candidate_ranked',
+            'message' => $browserBlock === null ? null : sprintf(
+                '%s закрыл страницу от браузера (%s, раз: %d, последний %s); быстрая проверка снова получила %s. Источник пропущен до %s или до первой страницы, которую сайт отдаст.',
+                $host, $browserBlock['reason'], $browserBlock['count'], $browserBlock['at'], $quickCheckRefused, $browserBlock['until'],
+            ),
             'output' => [
                 'active_recipe' => $result['active_recipe'],
                 'known_recipe_domain' => $result['known_recipe_domain'],
                 'static_count' => count($result['static_image_urls']),
                 'identity_evidence_present' => $result['identity_evidence'] !== '',
                 'page_rule' => $result['reason'] === 'known_unsuitable_page',
+                ...($browserBlock === null ? [] : ['quick_check' => $quickCheckRefused, 'browser_block' => $browserBlock]),
             ],
         ]);
 

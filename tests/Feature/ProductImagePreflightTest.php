@@ -3,9 +3,16 @@
 namespace Tests\Feature;
 
 use App\Models\ProductGalleryRecipe;
+use App\Models\ProductSourceAttempt;
+use App\Models\TelegramUpdate;
+use App\Services\Playwright\BrowserRunner;
+use App\Services\Playwright\BrowserRunResult;
+use App\Services\Products\BrowserProductGalleryExtractor;
+use App\Services\Products\HostReputation;
 use App\Services\Products\ProductImageResolver;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
+use Mockery;
 use Tests\TestCase;
 
 class ProductImagePreflightTest extends TestCase
@@ -51,6 +58,56 @@ class ProductImagePreflightTest extends TestCase
         $this->assertFalse($result['unavailable']);
         $this->assertTrue($result['browser_probe_required']);
         $this->assertSame('http_error', $result['reason']);
+    }
+
+    public function test_a_host_that_gated_the_browser_is_skipped_by_the_next_search_until_it_serves_a_page(): void
+    {
+        // Live report 2026-11-27 (#705): a server-memory reseller refused the quick check with
+        // 403, the photo check ran twice on its page and the browser was served a gate
+        // ("Playwright обнаружил защитную страницу: http_403"). A refusal was remembered for
+        // twenty minutes, so every later request paid all of it again. The address keeps the
+        // reseller's path on a literal address: the test resolves no name.
+        config(['product-images.browser_fallback.enabled' => true, 'product-images.browser_fallback.host_visit_spacing_seconds' => 0,
+            'product-images.browser_fallback.challenged_host_spacing_seconds' => 0]);
+        $url = 'https://93.184.216.34/item/1.1v-16gb-1rx8-5600-cwm-ddr5-m321r2ga3eb0/samdrv_m321r2ga3eb0cwm.html';
+        $runner = Mockery::mock(BrowserRunner::class);
+        $runner->shouldReceive('run')->once()->andReturn(new BrowserRunResult([
+            'images' => [], 'scout' => ['access_gate' => true, 'access_gate_reason' => 'http_403', 'title' => 'Just a moment...'],
+        ], hasObservation: true));
+        $this->app->instance(BrowserRunner::class, $runner);
+        app(BrowserProductGalleryExtractor::class)->scout($url);
+        $reputation = app(HostReputation::class);
+        $this->assertSame(['count' => 1, 'reason' => 'http_403'], array_intersect_key($reputation->browserBlock($url), ['count' => 0, 'reason' => '']));
+
+        // The next request, a day later: the short refusal is gone, the browser block is not.
+        $this->travel(26)->hours();
+        $this->assertNull($reputation->refusal($url));
+        $update = TelegramUpdate::query()->create(['update_id' => 970706, 'telegram_user_id' => '1', 'chat_id' => '1', 'payload' => [],
+            'status' => 'processing', 'text' => 'M321R2GA3EBO-CWMXJ']);
+        $serves = false;
+        Http::fake([$url => function () use (&$serves) {
+            return $serves
+                ? Http::response('<html><head><title>Samsung M321R2GA3EB0-CWM 16GB DDR5-5600 RDIMM</title></head><body><h1>Samsung M321R2GA3EB0-CWM</h1></body></html>', 200, ['Content-Type' => 'text/html'])
+                : Http::response('Forbidden', 403);
+        }]);
+
+        $refused = app(ProductImageResolver::class)->preflightSource(['url' => $url], $update->id);
+
+        $this->assertTrue($refused['blocked']);
+        $this->assertFalse($refused['browser_probe_required']);
+        $this->assertSame('remembered_browser_block', $refused['reason']);
+        $row = ProductSourceAttempt::query()->where('telegram_update_id', $update->id)->where('action', 'check_source_access')->sole();
+        $this->assertSame('remembered_browser_block', $row->decision);
+        $this->assertStringContainsString('закрыл страницу от браузера (http_403, раз: 1', (string) $row->message);
+        $this->assertSame('http_403', $row->output['quick_check']);
+
+        // The first page the host serves is the first success: the memory goes.
+        $serves = true;
+        $served = app(ProductImageResolver::class)->preflightSource(['url' => $url], $update->id);
+
+        $this->assertFalse($served['blocked']);
+        $this->assertStringContainsString('M321R2GA3EB0-CWM', $served['identity_evidence']);
+        $this->assertNull($reputation->browserBlock($url));
     }
 
     public function test_preflight_reports_static_images_and_an_active_domain_recipe(): void
