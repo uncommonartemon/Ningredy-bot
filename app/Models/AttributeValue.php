@@ -20,7 +20,10 @@ class AttributeValue extends Model
             // A translation belongs to the English value it was made from. A
             // value edited by hand without a new translation shows in English
             // rather than next to a translation of what it used to say.
-            if ($value->exists && $value->isDirty('value') && ! $value->isDirty('translations')) {
+            // A bare number is read with its unit, and a unit in Cyrillic is translated with it
+            // (CardTranslationState::valueText()): a new unit is a new text too.
+            $newUnit = $value->isDirty('unit') && preg_match('/^[\d\s.,]+$/', trim((string) $value->value)) === 1;
+            if ($value->exists && ($value->isDirty('value') || $newUnit) && ! $value->isDirty('translations')) {
                 $value->translations = null;
             }
         });

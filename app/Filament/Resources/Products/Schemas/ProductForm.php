@@ -168,7 +168,7 @@ class ProductForm
 
                     Toggle::make('is_active')->label(__('Активен'))->default(true),
                 ])->compact()->columns(['default' => 1, 'md' => 3])->collapsed()->columnSpanFull(),
-                Section::make(__('Переводы конфигурации'))->compact()->schema([ProductTranslations::make()])->collapsed(),
+                Section::make(__('Переводы конфигурации'))->compact()->schema([ProductTranslations::make(configuration: true)])->collapsed(),
             ])->defaultItems(1)->columns(1)
             // The prices for groups are rows of their own; the form shows them as fields of the configuration.
             ->mutateRelationshipDataBeforeFillUsing(fn (array $data): array => [...$data, 'group_prices' => isset($data['id'])

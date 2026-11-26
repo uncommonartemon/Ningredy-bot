@@ -2,6 +2,7 @@
 
 namespace App\Services\DatabaseOperator;
 
+use App\Jobs\TranslateCatalogNames;
 use App\Jobs\TranslateProductText;
 use App\Models\AiOperation;
 use App\Models\AiRun;
@@ -61,6 +62,9 @@ class DatabaseOperatorService
     /** Products whose shown text a batch changed: made again in the catalog's languages after it commits. @var array<int, true> */
     private array $retranslate = [];
 
+    /** Whether a batch named a characteristic, a group, a category or a brand's country anew. */
+    private bool $renamed = false;
+
     /** @return array<string, array{model: class-string<Model>, writable: array, create?: bool, delete?: bool, read?: array, reason?: string}> */
     private function registry(): array
     {
@@ -119,6 +123,7 @@ class DatabaseOperatorService
             ]],
             'brands' => ['model' => Brand::class, 'writable' => [
                 'name' => 'required|string|max:255', 'slug' => 'string|max:255', 'country' => $text,
+                'country_translations' => $translations,
                 'website_url' => 'nullable|url:http,https|max:2048', 'is_active' => $bool,
             ]],
             'product_sources' => ['model' => ProductSource::class, 'writable' => [
@@ -341,6 +346,9 @@ class DatabaseOperatorService
         $this->assert(($plan['version'] ?? null) === 1 && ($plan['scope'] ?? null) === $this->scope($context), 'plan', 'План принадлежит другому оператору/чату или имеет неподдерживаемую версию.');
         $this->assert(is_array($plan['commands'] ?? null) && $plan['commands'] !== [], 'plan', 'Пустой план.');
 
+        // A batch that failed before leaves nothing to translate for this one.
+        [$this->retranslate, $this->renamed] = [[], false];
+
         return DB::transaction(function () use ($plan, $context): array {
             // Check every original snapshot before changing any row (commands may overlap).
             foreach ($plan['commands'] as $command) {
@@ -387,7 +395,11 @@ class DatabaseOperatorService
             foreach (array_keys($this->retranslate) as $productId) {
                 TranslateProductText::dispatch($productId)->afterCommit();
             }
+            if ($this->renamed) {
+                TranslateCatalogNames::dispatch()->afterCommit();
+            }
             $this->retranslate = [];
+            $this->renamed = false;
 
             return ['status' => 'completed', 'affected_count' => array_sum(array_column($results, 'count')), 'commands' => $results,
                 'references' => $references, 'scope' => $this->scope($context)];
@@ -708,15 +720,21 @@ class DatabaseOperatorService
         $previousProductId = null;
         // category_id is intentionally set server-side on this existing relation model.
         $row->forceFill($values);
-        if ($row instanceof Product && $row->exists && $row->isDirty(['title', 'description'])) {
-            $this->retranslate[(int) $row->getKey()] = true;
-        }
-        if ($row instanceof AttributeValue && $row->isDirty('value')) {
-            $productId = $row->product_id ?: ProductVariant::query()->whereKey($row->product_variant_id)->value('product_id');
-            if ($productId) {
-                $this->retranslate[(int) $productId] = true;
-            }
-        }
+        // A text a buyer reads, new or changed, is made in the shop's languages after the batch
+        // commits; a shared name by the names' job. A configuration's name and colour, a unit and
+        // a new row used to wait for the scheduler, or for nothing at all.
+        $shownText = match (true) {
+            $row instanceof Product => ! $row->exists || $row->isDirty(['title', 'description']),
+            $row instanceof ProductVariant => ! $row->exists || $row->isDirty(['name', 'color']),
+            $row instanceof AttributeValue => ! $row->exists || $row->isDirty(['value', 'unit']),
+            default => false,
+        };
+        $this->renamed = $this->renamed || match (true) {
+            $row instanceof AttributeDefinition => ! $row->exists || $row->isDirty('label'),
+            $row instanceof AttributeGroup, $row instanceof Category => ! $row->exists || $row->isDirty('name'),
+            $row instanceof Brand => $row->isDirty('country'),
+            default => false,
+        };
         if ($row instanceof AttributeDefinition && $row->exists && $row->isDirty('label') && ! array_key_exists('translations', $values)) {
             $row->translations = null;
         }
@@ -804,6 +822,16 @@ class DatabaseOperatorService
             ProductDraft::query()->whereKey($row->product_draft_id)->lockForUpdate()->first();
         }
         $row->save();
+        if ($shownText) {
+            $productId = match (true) {
+                $row instanceof Product => $row->getKey(),
+                $row instanceof ProductVariant => $row->product_id,
+                default => $row->product_id ?: ProductVariant::query()->whereKey($row->product_variant_id)->value('product_id'),
+            };
+            if ($productId) {
+                $this->retranslate[(int) $productId] = true;
+            }
+        }
         if ($row instanceof ProductVariant && $row->is_default) {
             ProductVariant::query()->where('product_id', $row->product_id)->whereKeyNot($row->id)->update(['is_default' => false]);
         } elseif ($row instanceof ProductVariant && ! ProductVariant::query()->where('product_id', $row->product_id)->where('is_default', true)->exists()) {

@@ -7,6 +7,7 @@ use App\Models\Product;
 use App\Models\ProductDraft;
 use App\Models\ProductVariant;
 use App\Services\Ai\AiUsageReporter;
+use App\Services\Products\CardTranslationState;
 use App\Services\Products\ProductImageStorage;
 use App\Services\Products\ProductPhotoManager;
 use App\Services\Support\WorkerMemory;
@@ -308,6 +309,9 @@ class StoreProductImages implements ShouldQueue
             (string) config('services.telegram.proxy_url'),
         ), '/');
         $footer = $publicUrl !== '' ? "\n\n{$publicUrl}/products/{$product->slug}" : '';
+        // Still waiting for its translation when the photos are in: said once, in the card that stays.
+        $translation = app(CardTranslationState::class)->pendingNote($product);
+        $footer .= $translation !== null ? "\n{$translation}" : '';
         $sourcesLine = $this->photoSourcesLine($photoSourceUrls);
         $footer .= $sourcesLine !== '' ? "\n\n{$sourcesLine}" : '';
         $description = trim((string) $product->description);

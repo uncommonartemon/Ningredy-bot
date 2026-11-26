@@ -48,14 +48,18 @@ final class CatalogLocales
     }
 
     /**
-     * The languages the bot translates a card into, as locale => label.
+     * The languages the bot translates a card into, as locale => label: the ones the admin
+     * ticked and always every storefront language but the English source (decision of
+     * 2026-11-27: a buyer reads a card in the shop's languages). A storefront language left
+     * unticked was never translated into, and its pages showed every card in English.
      *
      * @return array<string, string>
      */
     public static function contentTranslations(): array
     {
-        return array_intersect_key(self::TRANSLATION_OPTIONS,
-            array_flip(self::stored(self::SETTING_TRANSLATIONS, self::DEFAULT_TRANSLATIONS, self::TRANSLATION_OPTIONS)));
+        $chosen = self::stored(self::SETTING_TRANSLATIONS, self::DEFAULT_TRANSLATIONS, self::TRANSLATION_OPTIONS);
+
+        return array_intersect_key(self::TRANSLATION_OPTIONS, array_flip([...$chosen, ...self::storefrontLocales()]));
     }
 
     /**
@@ -88,8 +92,9 @@ final class CatalogLocales
      */
     public static function save(array $translations, array $storefront, string $telegramCard): void
     {
-        $translations = array_values(array_intersect(array_keys(self::TRANSLATION_OPTIONS), $translations));
         $storefront = array_values(array_intersect(array_keys(self::STOREFRONT_OPTIONS), $storefront)) ?: self::DEFAULT_STOREFRONT;
+        // A storefront language is always translated into: it is stored so, not only read so.
+        $translations = array_values(array_intersect(array_keys(self::TRANSLATION_OPTIONS), [...$translations, ...$storefront]));
         AppSetting::put(self::SETTING_TRANSLATIONS, json_encode($translations));
         AppSetting::put(self::SETTING_STOREFRONT, json_encode($storefront));
         AppSetting::put(self::SETTING_TELEGRAM_CARD,

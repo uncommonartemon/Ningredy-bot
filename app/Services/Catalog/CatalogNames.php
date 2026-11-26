@@ -6,8 +6,10 @@ use App\Ai\Agents\CatalogTranslationAgent;
 use App\Models\AiRun;
 use App\Models\AttributeDefinition;
 use App\Models\AttributeGroup;
+use App\Models\Brand;
 use App\Models\Category;
 use App\Services\Ai\AiSettings;
+use App\Services\Products\CardTranslationState;
 use App\Services\Products\CatalogLocales;
 use Illuminate\Support\Facades\Cache;
 use Throwable;
@@ -19,7 +21,8 @@ use Throwable;
  *
  * Before, each kind was translated its own way, and groups were never translated at all: the
  * model that proposed a group gave an English and a Czech name, so a Ukrainian page showed
- * Czech group names between Ukrainian filters.
+ * Czech group names between Ukrainian filters. A brand's country is such a name too: it
+ * stood on product pages and in the filters as typed in the admin.
  */
 class CatalogNames
 {
@@ -53,10 +56,11 @@ class CatalogNames
     {
         $locales = self::locales();
         $items = [];
+        // A stored name that could not stand as one (Cyrillic for Czech, Russian for Ukrainian) counts as none.
         $add = function (string $id, string $kind, ?string $source, array $have) use (&$items, $locales): void {
             $source = trim((string) $source);
-            $lacking = array_values(array_filter($locales,
-                fn (string $locale): bool => ! (is_string($have[$locale] ?? null) && trim($have[$locale]) !== '')));
+            $lacking = array_values(array_filter($locales, fn (string $locale): bool => ! (is_string($have[$locale] ?? null)
+                && CardTranslationState::acceptable($kind, $source, $have[$locale], $locale))));
             if ($source !== '' && $lacking !== []) {
                 $items[$id] = ['id' => $id, 'kind' => $kind, 'text' => $source, 'locales' => $lacking];
             }
@@ -71,6 +75,10 @@ class CatalogNames
         }
         foreach (Category::query()->with('translations')->orderBy('id')->get() as $category) {
             $add("category.{$category->id}", 'category_name', $category->name, $category->translations->pluck('name', 'locale')->all());
+        }
+        // A brand's country is typed by hand in the admin and stood on every product page as written.
+        foreach (Brand::query()->whereNotNull('country')->where('country', '!=', '')->orderBy('id')->get() as $brand) {
+            $add("country.{$brand->id}", 'country_name', $brand->country, $brand->country_translations ?? []);
         }
 
         return $items;
@@ -91,15 +99,21 @@ class CatalogNames
         if ($items === [] || Cache::get(self::UNFILLED_KEY) === $this->signature($items)) {
             return $filled;
         }
-        try {
-            foreach (array_chunk($items, self::NAMES_PER_CALL, true) as $chunk) {
+        $failure = null;
+        foreach (array_chunk($items, self::NAMES_PER_CALL, true) as $chunk) {
+            try {
                 $filled += $this->translate($chunk);
+            } catch (Throwable $exception) {
+                // The next requests are still made: one failed answer used to leave every other name for hours.
+                $failure ??= $exception;
             }
-        } finally {
-            // What the model left unfilled, or a failed call, is not asked again every few minutes.
-            $left = $this->missing();
-            $left === [] ? Cache::forget(self::UNFILLED_KEY)
-                : Cache::put(self::UNFILLED_KEY, $this->signature($left), now()->addHours(self::RETRY_AFTER_HOURS));
+        }
+        // What the model left unfilled, or a failed call, is not asked again every few minutes.
+        $left = $this->missing();
+        $left === [] ? Cache::forget(self::UNFILLED_KEY)
+            : Cache::put(self::UNFILLED_KEY, $this->signature($left), now()->addHours(self::RETRY_AFTER_HOURS));
+        if ($failure !== null) {
+            throw $failure;
         }
 
         return $filled;
@@ -137,7 +151,8 @@ class CatalogNames
             $id = (string) ($entry['id'] ?? '');
             $locale = (string) ($entry['locale'] ?? '');
             $text = trim((string) ($entry['text'] ?? ''));
-            if (isset($items[$id]) && in_array($locale, $items[$id]['locales'], true) && $text !== '' && mb_strlen($text) <= 255) {
+            if (isset($items[$id]) && in_array($locale, $items[$id]['locales'], true) && mb_strlen($text) <= 255
+                && CardTranslationState::acceptable($items[$id]['kind'], $items[$id]['text'], $text, $locale)) {
                 $translated[$id][$locale] = $text;
             }
         }
@@ -150,30 +165,41 @@ class CatalogNames
     }
 
     /**
-     * Adds names in languages that have none; a name someone already gave is never replaced.
+     * Adds names in languages that have none; a name someone already gave is never replaced,
+     * unless it could not stand as one (CardTranslationState::acceptable()).
      *
      * @param  array<string, string>  $names
      */
     private function write(string $id, array $names): int
     {
         [$kind, $key] = explode('.', $id, 2);
+        $stands = fn (mixed $text, string $locale): bool => is_string($text) && CardTranslationState::acceptable($kind.'_name', '', $text, $locale);
         if ($kind === 'category') {
             $category = Category::query()->find((int) $key);
             $written = 0;
             foreach ($category === null ? [] : $names as $locale => $name) {
-                $written += (int) $category->translations()->firstOrCreate(['locale' => $locale], ['name' => $name])->wasRecentlyCreated;
+                $row = $category->translations()->firstOrNew(['locale' => $locale]);
+                if (! $row->exists || ! $stands($row->name, $locale)) {
+                    $row->fill(['name' => $name])->save();
+                    $written++;
+                }
             }
 
             return $written;
         }
-        $model = ($kind === 'group' ? AttributeGroup::query() : AttributeDefinition::query())->find((int) $key);
+        $model = (match ($kind) {
+            'group' => AttributeGroup::query(),
+            'country' => Brand::query(),
+            default => AttributeDefinition::query(),
+        })->find((int) $key);
         if ($model === null) {
             return 0;
         }
-        $current = array_filter($model->translations ?? [], fn (mixed $text): bool => is_string($text) && trim($text) !== '');
+        $column = $kind === 'country' ? 'country_translations' : 'translations';
+        $current = array_filter($model->{$column} ?? [], fn (mixed $text, string $locale): bool => $stands($text, $locale), ARRAY_FILTER_USE_BOTH);
         $added = array_diff_key($names, $current);
         if ($added !== []) {
-            $model->forceFill(['translations' => [...$current, ...$added]])->saveQuietly();
+            $model->forceFill([$column => [...($model->{$column} ?? []), ...$added]])->saveQuietly();
         }
 
         return count($added);
