@@ -2,6 +2,7 @@
 
 namespace App\Services\Support;
 
+use App\Filament\Support\DraftSearchResult;
 use App\Models\AiRun;
 use App\Models\Category;
 use App\Models\ImageRenditionRule;
@@ -323,6 +324,10 @@ final class DiagnosticReport
     private function cardPhotos(ProductDraft $draft): array
     {
         $media = $draft->media()->orderByDesc('is_primary')->orderBy('sort_order')->get(['disk', 'path']);
+        if ($media->isEmpty() && DraftSearchResult::photosInProduct($draft)) {
+            $media = ProductMedia::query()->where('product_id', $draft->approved_product_id)->where('type', 'image')
+                ->orderByDesc('is_primary')->orderBy('sort_order')->get(['disk', 'path']);
+        }
         if ($media->isEmpty() && is_array($draft->image_urls) && $draft->image_urls !== []) {
             $media = ProductMedia::query()->whereIn('source_url', $draft->image_urls)->orderBy('sort_order')->get(['disk', 'path']);
         }
@@ -361,7 +366,8 @@ final class DiagnosticReport
         if ($draft !== null) {
             $lines[] = "draft #{$draft->id}: ".trim((string) $draft->title).' · status '.$draft->status
                 .' · gallery '.($draft->gallery_status ?? '-').' · stop '.($draft->gallery_search_stop_reason ?? '-')
-                .' · photos '.$draft->media()->count();
+                .' · photos '.DraftSearchResult::photos($draft)
+                .(DraftSearchResult::photosInProduct($draft) ? ' (moved to product #'.$draft->approved_product_id.' on approval)' : '');
         }
         $lines[] = '';
 
@@ -388,12 +394,17 @@ final class DiagnosticReport
     {
         $out = '';
         foreach (ProductDraft::query()->whereIn('telegram_update_id', $ids)->orderBy('id')->cursor() as $draft) {
+            // Approval moves the draft's photos to the product; the draft then holds none.
+            $inProduct = DraftSearchResult::photosInProduct($draft);
             $out .= $this->json([
                 'id' => $draft->id, 'telegram_update_id' => $draft->telegram_update_id, 'title' => $draft->title,
                 'brand' => $draft->brand, 'model' => $draft->model, 'color' => $draft->color, 'status' => $draft->status,
                 'gallery_status' => $draft->gallery_status, 'gallery_search_stop_reason' => $draft->gallery_search_stop_reason,
                 'primary_source_url' => $draft->primary_source_url,
-                'photos' => $draft->media()->get(['source_url', 'width', 'height', 'verification_status'])->toArray(),
+                'photos_in' => $inProduct ? 'product #'.$draft->approved_product_id : 'draft',
+                'photos' => ($inProduct
+                    ? ProductMedia::query()->where('product_id', $draft->approved_product_id)->where('type', 'image')->orderBy('sort_order')
+                    : $draft->media())->get(['source_url', 'width', 'height', 'verification_status'])->toArray(),
                 'created_at' => $draft->created_at, 'updated_at' => $draft->updated_at,
             ], pretty: false)."\n";
         }

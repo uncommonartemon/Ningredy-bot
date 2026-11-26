@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Filament\Support\DraftSearchResult;
 use App\Models\AiRun;
 use App\Models\ProductDraft;
 use App\Models\ProductSourceAttempt;
@@ -122,9 +123,7 @@ class SearchStats extends Command
     private function photoCount(ProductDraft $draft): int
     {
         // An approved draft hands its files to the product.
-        return $draft->status === 'approved' && $draft->approved_product_id
-            ? (int) $draft->product?->media()->count()
-            : $draft->media()->count();
+        return DraftSearchResult::photos($draft);
     }
 
     /**

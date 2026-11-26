@@ -891,5 +891,8 @@
     "Вид не выбран": "Kind not chosen",
     "Перенести в категорию": "Move to category",
     "Товары встанут в выбранную категорию; тип товара станет её типом. Характеристики и фото не меняются.": "The products move to the chosen category and take its product type. Characteristics and photos stay as they are.",
-    "Товары перенесены": "Products moved"
+    "Товары перенесены": "Products moved",
+    "в товаре #:id: :count": "in product #:id: :count",
+    "Черновик подтверждён: его фото перенесены в товар.": "The draft was approved: its photos moved to the product.",
+    "Все найденные источники просмотрены": "All sources found were looked at"
 }
