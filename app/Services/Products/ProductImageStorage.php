@@ -616,6 +616,22 @@ class ProductImageStorage
             }
 
             $reuseOnly = (bool) ($source['_reuse_only'] ?? $activeRecipeOnly);
+            // The same page again, now in the pass that may train: its frames from a confirmed
+            // run of the domain's recipe already wait for the check, and that recipe runs again
+            // before any training could (live report 2026-11-27, #661: two shops opened twice,
+            // each paying two photo checks and a browser run for the frames already held).
+            if (! $reuseOnly && collect($deferredVisionSets)->contains(fn (array $set): bool => ($set['source']['url'] ?? null) === ($source['url'] ?? null))
+                && ProductSourceAttempt::query()->where('telegram_update_id', $telegramUpdateId)->where('product_url', (string) $source['url'])
+                    ->where('action', 'confirmed_recipe_execution')->where('decision', 'traversal_confirmed')->exists()) {
+                $this->attempts->record([
+                    'telegram_update_id' => $telegramUpdateId, 'product_draft_id' => $draft->id, 'product_url' => (string) $source['url'],
+                    'actor' => 'server', 'phase' => 'source_queue', 'action' => 'skip_repeat_visit', 'status' => 'skipped',
+                    'decision' => 'frames_already_held',
+                    'message' => 'Кадры этой страницы уже собраны подтверждённым рецептом и ждут проверки; второй проход открыл бы её тем же рецептом.',
+                ]);
+
+                continue;
+            }
 
             // This reservation exists to stop training new domains once most of
             // the money is spent, and a source that may only reuse an existing
@@ -763,6 +779,14 @@ class ProductImageStorage
             }
 
             app(ProductSearchCancellation::class)->throwIfCancelled($telegramUpdateId);
+            // The watcher dropped the site while its page was in work: what the page gave is
+            // not checked or downloaded (live report 2026-11-27, #661: after "skip site" the
+            // page's frames still went to the photo check, the download and Vision).
+            if (($dropped = app(SearchProgressSupervisor::class)->siteDropReason($telegramUpdateId, $originalSourceUrl)) !== null) {
+                $this->skipDroppedSite($draft, $telegramUpdateId, $originalSourceUrl, $dropped, $progress);
+
+                continue;
+            }
 
             $resolvedPageContext = $this->resolver->sourceContextForPage($originalSourceUrl) ?? collect($resolvedUrls)
                 ->map(fn (string $imageUrl): ?array => $this->resolver->sourceContextForImage($imageUrl))
@@ -2542,6 +2566,27 @@ class ProductImageStorage
             || ! collect($result->candidates)->every(fn (array $frame): bool => (bool) data_get($frame, 'photo_visual_review.identity_unproven', false))) {
             return false;
         }
+        // Two pages confirmed as the exact product that show no readable label say the shops
+        // do not photograph it: the wait ends and the card goes out with what there is (live
+        // report 2026-11-27, #690: six exact pages in a row were held, and a card with one
+        // photo came after twenty minutes). Which frames count as proven is not changed here.
+        $page = rtrim((string) ($result->source['url'] ?? ''), '/');
+        if ($telegramUpdateId && $this->pageConfirmedExact($telegramUpdateId, $page, $result->source)) {
+            $earlier = ProductSourceAttempt::query()->where('telegram_update_id', $telegramUpdateId)->where('action', 'hold_photo_without_code')
+                ->pluck('product_url')->map(fn (string $url): string => rtrim($url, '/'))->unique()
+                ->reject(fn (string $url): bool => $url === $page)
+                ->filter(fn (string $url): bool => $this->pageConfirmedExact($telegramUpdateId, $url))->values();
+            if ($earlier->isNotEmpty()) {
+                $this->attempts->record([
+                    'telegram_update_id' => $telegramUpdateId, 'product_draft_id' => $draft->id, 'product_url' => $page,
+                    'actor' => 'server', 'phase' => 'source_selection', 'action' => 'stop_holding_for_label', 'status' => 'info',
+                    'decision' => 'deliver_without_label', 'input' => ['exact_pages_without_label' => [...$earlier->all(), $page]],
+                    'message' => 'Вторая страница точного товара без читаемой наклейки: дальше наклейку не жду, карточка идёт с найденными фото.',
+                ]);
+
+                return false;
+            }
+        }
         foreach ($queue as $index => $candidate) {
             if ($index > $afterIndex && is_array($candidate) && ! isset($reviewed[rtrim((string) ($candidate['url'] ?? ''), '/')])
                 && rtrim((string) ($candidate['url'] ?? ''), '/') !== rtrim((string) ($result->source['url'] ?? ''), '/')
@@ -2557,6 +2602,25 @@ class ProductImageStorage
         }
 
         return false;
+    }
+
+    /**
+     * The photo check of this request confirmed the page as the exact product.
+     *
+     * @param  array<string, mixed>  $source
+     */
+    private function pageConfirmedExact(int $telegramUpdateId, string $page, array $source = []): bool
+    {
+        if ($page === '') {
+            return false;
+        }
+        if (($source['_photo_applicability']['verdict'] ?? null) === 'exact') {
+            return true;
+        }
+
+        return ProductSourceAttempt::query()->where('telegram_update_id', $telegramUpdateId)
+            ->where('action', 'assess_photo_applicability')->where('decision', 'exact')
+            ->whereIn('product_url', [$page, $page.'/'])->exists();
     }
 
     /**

@@ -8,6 +8,7 @@ use App\Services\Ai\ProductSearchCancellation;
 use App\Services\Ai\ProductSearchTimeBudget;
 use App\Services\ProductSearch\Recovery\FailureDiagnosis;
 use App\Services\ProductSearch\Recovery\RecoveryContext;
+use App\Services\ProductSearch\Supervision\SearchProgressSupervisor;
 
 /**
  * Finish the chosen-source card before it reaches review. Recovery reuses
@@ -178,6 +179,10 @@ class ProductCardAssembly
                         retained: ['source_url' => $source['url'] ?? null, 'photos_preserved' => true],
                     )])],
             ]);
+            // The same refusal on a second site ends the photo search (see the supervisor).
+            if ($updateId && $outcome->status === SpecificationReconciliationStatus::NotReady) {
+                app(SearchProgressSupervisor::class)->stopOnRepeatedBlocker($updateId, $draft);
+            }
 
             if ($outcome->isReconciled() || $outcome->isBudgetExhausted()
                 || $outcome->status === SpecificationReconciliationStatus::Disabled

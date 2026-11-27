@@ -1109,6 +1109,21 @@ class ProductGalleryRecipeTrainer
                 }
 
                 app(ProductSearchCancellation::class)->throwIfCancelled($telegramUpdateId);
+                // A watcher's verdict that arrived while the trainer was thinking ends the
+                // page before its plan runs (live report 2026-11-27, #661: the site was dropped
+                // during round four's call, and that round was still executed and its frames
+                // downloaded and checked). What was found stays. Like the checks at the top of
+                // a round, from the second round on.
+                if ($attempt > 1 && $telegramUpdateId && (($stop = app(SearchProgressSupervisor::class)->deliverNowReason($telegramUpdateId)) !== null
+                    || ($stop = app(SearchProgressSupervisor::class)->siteDropReason($telegramUpdateId, $host)) !== null)) {
+                    $agentAbandoned = true;
+                    $agentAbandonReason = 'Наблюдатель поиска: '.$stop;
+                    $failureKind = 'agent_abandoned';
+                    $attempts[] = ['attempt' => $attempt, 'error' => 'agent_abandoned: '.$agentAbandonReason];
+                    $debug?->__invoke('warning', $agentAbandonReason.' Новый план раунда не выполняю; найденное сохраняю, рецепт домена не отключаю.');
+
+                    break;
+                }
                 if ($abandonSignal->abandoned) {
                     $agentAbandonReason = $abandonSignal->reason;
                     $failureKind = $abandonSignal->failureKind ?? 'agent_abandoned';
