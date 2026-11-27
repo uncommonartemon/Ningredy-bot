@@ -61,6 +61,8 @@ class ProductSourceIdentityAgent implements Agent, HasStructuredOutput
             verification_stage distinguishes source eligibility from final offer acceptance.
             For source_eligibility, decide whether the observed product identity and configuration
             satisfy the operator's model, codes, colour, RAM/storage and other product requirements.
+            operator_follow_up, when present, is what the operator wrote after the request: an
+            instruction about the search, not a description of the product.
             Missing commercial condition evidence (new/used/refurbished) alone must not turn an
             otherwise confirmed product configuration into uncertain: preserve that source for
             collection and the mandatory card assembly, which must establish the requested condition.

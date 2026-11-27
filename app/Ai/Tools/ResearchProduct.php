@@ -83,6 +83,9 @@ class ResearchProduct implements Tool
     /** The query of the current call, so validation can tell the operator's codes from a page's. */
     private string $query = '';
 
+    /** @var array{text: string, message_ids: list<int>, follow_up: ?string, unmatched: list<string>}|null */
+    private ?array $searchRequest = null;
+
     public function description(): Stringable|string
     {
         return 'Search the internet for a real product, verify its data and create a pending catalog draft. Use for explicit web searches or after local catalog search returns no suitable match.';
@@ -95,6 +98,10 @@ class ResearchProduct implements Tool
         }
         $query = trim((string) $request->string('query'));
         $this->query = $query;
+        // The product request may be in earlier messages, the current one only an instruction
+        // about the search (live #635, #706); the assistant names them, the server finds them.
+        $this->searchRequest = ProductInputContext::rememberSearchRequest($this->update, array_values(array_filter(
+            (array) ($request['request_messages'] ?? []), 'is_string')));
         // Live #247: the assistant called this tool twice with the same query in
         // one turn; the second call bought the research again and only then met
         // the draft the first one had made. The same request asking the same
@@ -986,7 +993,8 @@ class ResearchProduct implements Tool
             // One placement rule for the search and the approval (decision of 2026-11-25): what the
             // server settled instead of the agent is kept with the draft and shown on its card.
             $placement = app(CatalogPlacement::class)->place($data['product_type'] ?? null, $data['category'] ?? null);
-            $issues = app(ProductResearchConfigurationGuard::class)->issues($data, trim($this->query.' '.(string) $this->update->text), $this->typedByOperator());
+            $issues = app(ProductResearchConfigurationGuard::class)->issues($data,
+                trim($this->query.' '.(string) ($this->searchRequest['text'] ?? '').' '.(string) $this->update->text), $this->typedByOperator());
             if ($placement->problem() !== null) {
                 $issues[] = $placement->problem();
             }
@@ -1186,11 +1194,13 @@ class ResearchProduct implements Tool
     private function typedByOperator(): string
     {
         $payload = (array) ($this->update->payload ?? []);
+        // The request the search was started for, when it came from earlier messages.
+        $request = (string) ($this->searchRequest['text'] ?? '');
         if (data_get($payload, 'message.photo') === null) {
-            return trim($this->query.' '.(string) $this->update->text);
+            return trim($this->query.' '.$request.' '.(string) $this->update->text);
         }
 
-        return trim((string) data_get($payload, 'message.caption', '').' '.(string) data_get($payload, PhotoReadingCheck::PAYLOAD_KEY.'.correction', ''));
+        return trim($request.' '.(string) data_get($payload, 'message.caption', '').' '.(string) data_get($payload, PhotoReadingCheck::PAYLOAD_KEY.'.correction', ''));
     }
 
     private function primarySource(array $sources): ?array
@@ -1221,6 +1231,12 @@ class ResearchProduct implements Tool
                 .'actually stated. Do not add a model year, generation, suffix, or any other identifying detail '
                 .'the user did not mention - an invented detail can steer the downstream search toward the wrong '
                 .'product. Do not repeat the same term multiple times or wrap it in quotes.'
+            ),
+            'request_messages' => $schema->array()->items($schema->string())->description(
+                'When the product was named in earlier messages of this chat and the current message only adds an instruction '
+                .'(search again, where to look, how to treat the condition), copy those earlier messages here exactly as the '
+                .'operator wrote them, and the current message too if it also names the product. Omit when the current message '
+                .'alone is the request.'
             ),
         ];
     }

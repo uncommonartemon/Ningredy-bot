@@ -106,6 +106,9 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
             matching the hard specifications can be verified, distinguish unresolved identity/evidence
             from a search that actually found no suitable product.
 
+            operator_follow_up, when the input carries it, is what the operator wrote after the request
+            (search again, where to look, how to treat the condition): follow it as an instruction about this
+            search; the product is the one original_operator_request names.
             Before opening galleries, use Web Search as broad source discovery across every domain that
             may provide facts or photographs for the selected product. Input provenance separates human requirements from
             label observations and handwritten notes: do not turn every observed label value into

@@ -58,7 +58,9 @@ class ProductSpecificationReconciliationAgent implements Agent, HasStructuredOut
             Finish the selected product card before operator approval. Photos belong to ONE selected gallery,
             but text facts may come from several verified sources about this same exact configuration.
             original_operator_request contains the user's binding requirements; current_* is the researcher's
-            provisional offer, not additional user requirements. Choose one exact offer for the WHOLE card.
+            provisional offer, not additional user requirements. operator_follow_up, when present, is what the
+            operator wrote after the request (search again, how to treat the condition): an instruction about this
+            search and card to follow, never a description of the product. Choose one exact offer for the WHOLE card.
             request_differences, when present, lists requirements research found on no page of the requested
             model (most often a colour name) with the value the pages show instead. Each is already shown to the
             operator beside the add button, who decides. Keep the observed value, do not mark that field

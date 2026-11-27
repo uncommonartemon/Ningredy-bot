@@ -160,6 +160,7 @@ class ProductSpecificationReconciler
             'offer_context' => app(CardOfferSelection::class)->context($draft, $source),
             'original_operator_request' => is_string($originalOperatorRequest) ? $originalOperatorRequest : null,
             'original_operator_request_status' => $requestContext['original_operator_request_status'],
+            ...(isset($requestContext['operator_follow_up']) ? ['operator_follow_up' => $requestContext['operator_follow_up']] : []),
             'input_evidence' => $inputEvidence,
             ...(isset($requestContext['request_differences']) ? ['request_differences' => $requestContext['request_differences']] : []),
             'photo_applicability' => $photoApplicability,
