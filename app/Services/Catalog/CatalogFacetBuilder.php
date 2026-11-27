@@ -7,6 +7,7 @@ use App\Models\AttributeGroup;
 use App\Models\Category;
 use App\Models\Product;
 use App\Models\ProductVariant;
+use App\Services\Products\ProductCondition;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Query\Builder as QueryBuilder;
 use Illuminate\Database\Query\JoinClause;
@@ -17,28 +18,33 @@ class CatalogFacetBuilder
 {
     /**
      * The filters kept in columns of a product or a configuration, in the order of the panel.
-     * The leading ones stand above the characteristics: who made it and whether it can be had
-     * is asked of any product. The others stand below them: what the products of a category
-     * differ in (capacity, memory type, screen) is chosen before the colour, the coarse type
-     * the category has already told, and the country of the brand.
+     * The leading ones stand above the characteristics: who made it, whether it can be had and
+     * in what state is asked of any product. The others stand below them: what the products of
+     * a category differ in (capacity, memory type, screen) is chosen before the colour, the
+     * coarse type the category has already told, and the country of the brand. A list of states
+     * is offered in the order of their meaning, not of the alphabet.
      */
     private const array COLUMNS = [
         'brands' => ['label' => 'Бренд', 'leading' => true, 'kept_list' => true],
-        'stock' => ['label' => 'Наличие', 'leading' => true, 'kept_list' => true],
+        'stock' => ['label' => 'Наличие', 'leading' => true, 'kept_list' => true, 'order' => ['in_stock', 'preorder', 'out_of_stock', 'unknown']],
+        'condition' => ['label' => 'Состояние', 'leading' => true, 'kept_list' => true, 'order' => ProductCondition::VALUES],
         'colors' => ['label' => 'Цвет', 'leading' => false, 'kept_list' => false],
         'types' => ['label' => 'Тип', 'leading' => false, 'kept_list' => true],
         'countries' => ['label' => 'Страна бренда', 'leading' => false, 'kept_list' => true],
     ];
 
-    private ?Collection $categoryRows = null;
+    /** Column filters a configuration carries itself, by the column that holds them. */
+    private const array VARIANT_COLUMNS = ['colors' => 'color', 'stock' => 'stock_status', 'condition' => 'condition'];
+
+    private ?CategoryWays $ways = null;
 
     private ?Collection $attributeRows = null;
 
-    public function __construct(private readonly CatalogFilterQuery $query) {}
+    public function __construct(private readonly CatalogFilterQuery $query, private readonly CategoryStandard $standard) {}
 
     public function reset(): void
     {
-        $this->categoryRows = null;
+        $this->ways = null;
         $this->attributeRows = null;
     }
 
@@ -58,18 +64,10 @@ class CatalogFacetBuilder
 
     public function build(array $filters, int $total): array
     {
-        $categories = $this->categories()->map(function (Category $category) use ($filters): array {
-            $candidate = $this->normalize(array_replace($filters, ['category' => $category->slug]));
-
-            return [
-                'label' => $category->name, 'value' => $category->slug,
-                'parent' => $category->parent_id === null ? null : $this->categories()->firstWhere('id', (int) $category->parent_id)?->slug,
-                'count' => $this->products($candidate)->count(),
-                'translations' => $category->translations->pluck('name', 'locale')->all(),
-            ];
-        })->values();
-
         $category = $filters['category'] ?? '';
+        $chosen = $this->ways()->find($category);
+        // The category is the page, not a filter: the path to it and the kinds under it are links.
+        $tiles = $this->ways()->choice($chosen);
         $categoryProducts = $this->products($this->normalize(['category' => $category]))->count();
         // A ticked filter stays where it can be unticked, whatever the rule says of it.
         $offered = fn (array $ticked, Collection $rows, int $carriers): bool => $ticked !== []
@@ -89,7 +87,8 @@ class CatalogFacetBuilder
             if (! $shown) {
                 return null;
             }
-            $options = $values->map(fn (string $value): array => ['label' => $value, 'value' => $value]);
+            $options = $this->columnOrder($values, $column['order'] ?? [])
+                ->map(fn (string $value): array => ['label' => $value, 'value' => $value]);
 
             return ['key' => $key, 'label' => $column['label'], 'leading' => $column['leading'],
                 'options' => $this->counts($key, $options, $filters, $total)];
@@ -103,13 +102,14 @@ class CatalogFacetBuilder
         $labelTranslations = AttributeDefinition::query()->whereIn('key', $keys)->pluck('translations', 'key');
         $valueTranslations = $this->valueTranslations($keys);
         $productsWith = $this->productsPerAttribute($category);
+        $form = $this->formOrder($chosen);
         // A filter carried by one laptop in forty narrows almost nothing; the
         // catalog page then lists dozens of such sections.
-        $attributes = AttributePresentation::sort($attributeRows->groupBy('key')
+        $attributes = $this->inFormOrder(AttributePresentation::sort($attributeRows->groupBy('key')
             ->filter(fn (Collection $rows, string $key): bool => $offered($filters['attributes'][$key] ?? [], $rows, $productsWith[$key] ?? 0))
-            ->map(function (Collection $rows, string $key) use ($filters, $total, $groups, $labelTranslations, $valueTranslations): array {
-                $options = $rows->unique('normalized_value')->sortBy('option_label')
-                    ->map(fn ($row) => ['label' => $row->option_label, 'value' => (string) $row->normalized_value,
+            ->map(function (Collection $rows, string $key) use ($filters, $total, $groups, $labelTranslations, $valueTranslations, $form): array {
+                $options = $this->optionOrder($rows)
+                    ->map(fn (object $row): array => ['label' => $row->option_label, 'value' => (string) $row->normalized_value,
                         'translations' => $valueTranslations[$key][(string) $row->normalized_value] ?? []])->values();
 
                 return [
@@ -117,9 +117,10 @@ class CatalogFacetBuilder
                     'label_translations' => $labelTranslations[$key] ?? [],
                     'sort_order' => (int) $rows->first()->sort_order,
                     'group' => AttributePresentation::group($groups->get($rows->first()->attribute_group_id)),
+                    'in_form' => $form->has($key),
                     'options' => $this->counts($key, $options, $filters, $total, true),
                 ];
-            }));
+            })), $form);
 
         $priceFilters = $filters;
         unset($priceFilters['min_price'], $priceFilters['max_price']);
@@ -127,8 +128,13 @@ class CatalogFacetBuilder
             ->selectRaw('MIN(price) as min_price, MAX(price) as max_price, MIN(currency) as min_currency, MAX(currency) as max_currency')->first();
 
         return [
-            'categories' => $categories,
-            'allCategoriesCount' => $this->products($this->normalize(array_replace($filters, ['category' => ''])))->count(),
+            'trail' => $chosen === null ? [] : $this->ways()->trail($chosen)->map(fn (Category $step): array => CategoryWays::name($step))->values()->all(),
+            // One tile is no choice: the strip is left out rather than offering the only way on.
+            'tiles' => $tiles->count() < 2 ? [] : $tiles->map(fn (array $entry): array => [
+                ...CategoryWays::name($entry['category']),
+                'count' => $entry['count'],
+                'icons' => $this->ways()->icons($entry['category']),
+            ])->values()->all(),
             'columns' => $columns, 'attributes' => $attributes,
             'price' => [
                 'min' => $price?->min_price !== null ? (float) $price->min_price : null,
@@ -170,20 +176,96 @@ class CatalogFacetBuilder
         return $translations;
     }
 
-    private function categories(): Collection
+    private function ways(): CategoryWays
     {
-        return $this->categoryRows ??= Category::query()->where('is_active', true)
-            ->with('translations:id,category_id,locale,name')->orderBy('sort_order')->orderBy('id')->get(['id', 'name', 'slug', 'parent_id']);
+        return $this->ways ??= CategoryWays::read();
+    }
+
+    /**
+     * The characteristics the category's form names (its own form or the nearest parent's),
+     * the required ones first, each in the form's order. Empty when no category is chosen.
+     *
+     * @return Collection<string, int> key => place
+     */
+    private function formOrder(?Category $category): Collection
+    {
+        if ($category === null) {
+            return collect();
+        }
+
+        return $this->standard->form($category)
+            ->sortBy(fn (AttributeDefinition $definition): int => $definition->pivot->is_required ? 0 : 1)
+            ->pluck('key')->values()->flip();
+    }
+
+    /**
+     * The category's own parameters lead in the order its form gives them; whatever else is
+     * worth filtering by follows in the shop's usual order.
+     *
+     * @param  Collection<int, array<string, mixed>>  $attributes  in the usual order
+     * @param  Collection<string, int>  $form
+     */
+    private function inFormOrder(Collection $attributes, Collection $form): Collection
+    {
+        [$named, $others] = $attributes->partition(fn (array $attribute): bool => $form->has($attribute['key']));
+
+        return $named->sortBy(fn (array $attribute): int => $form[$attribute['key']])->concat($others)->values();
+    }
+
+    /**
+     * Options in the order a person reads them: by size when the characteristic is a number
+     * (8 GB before 16 GB), otherwise by name with its numbers read as numbers (Gen 9 before Gen 10).
+     *
+     * @param  Collection<int, object>  $rows  rows of one characteristic
+     * @return Collection<int, object> one row per value
+     */
+    private function optionOrder(Collection $rows): Collection
+    {
+        $numeric = $rows->first()->data_type === 'number';
+
+        return $rows->groupBy(fn (object $row): string => (string) $row->normalized_value)
+            ->map(function (Collection $same) use ($numeric): object {
+                $numbers = $numeric ? $same->pluck('numeric_value')->filter(fn ($number): bool => $number !== null) : collect();
+
+                return (object) ['normalized_value' => $same->first()->normalized_value, 'option_label' => (string) $same->first()->option_label,
+                    'number' => $numbers->isEmpty() ? null : (float) $numbers->min()];
+            })
+            ->sort(fn (object $left, object $right): int => match (true) {
+                $left->number !== null && $right->number !== null && $left->number !== $right->number => $left->number <=> $right->number,
+                ($left->number === null) !== ($right->number === null) => $left->number === null ? 1 : -1,
+                default => self::natural($left->option_label, $right->option_label)
+                    ?: strcmp((string) $left->normalized_value, (string) $right->normalized_value),
+            })->values();
+    }
+
+    /**
+     * A column's values: a list of states in the order of their meaning, anything else by name.
+     *
+     * @param  Collection<int, string>  $values
+     * @param  list<string>  $order
+     * @return Collection<int, string>
+     */
+    private function columnOrder(Collection $values, array $order): Collection
+    {
+        $place = array_flip($order);
+
+        return $values->sort(fn (string $left, string $right): int => ($place[$left] ?? PHP_INT_MAX) <=> ($place[$right] ?? PHP_INT_MAX)
+            ?: self::natural($left, $right))->values();
+    }
+
+    private static function natural(string $left, string $right): int
+    {
+        return strnatcmp(mb_strtolower($left), mb_strtolower($right));
     }
 
     private function scopedAttributes(string $category): Collection
     {
         $rows = $this->attributeRows ??= $this->effectiveAttributes()
             ->join('products', 'products.id', '=', 'product_variants.product_id')
-            ->select(['products.category_id', 'attribute_definitions.key', 'attribute_definitions.label',
+            ->select(['products.category_id', 'attribute_definitions.key', 'attribute_definitions.label', 'attribute_definitions.data_type',
                 'attribute_definitions.sort_order', 'attribute_definitions.attribute_group_id', 'attribute_values.normalized_value'])
-            ->selectRaw('MIN(attribute_values.value) as option_label')
-            ->groupBy('products.category_id', 'attribute_definitions.key', 'attribute_definitions.label',
+            ->selectRaw('MIN(attribute_values.value) as option_label, MIN(attribute_values.numeric_value) as numeric_value')
+            ->groupBy('products.category_id', 'attribute_definitions.key', 'attribute_definitions.label', 'attribute_definitions.data_type',
                 'attribute_definitions.sort_order', 'attribute_definitions.attribute_group_id', 'attribute_values.normalized_value')
             ->orderBy('attribute_definitions.sort_order')->orderBy('attribute_definitions.key')->get();
         if ($category === '') {
@@ -200,19 +282,9 @@ class CatalogFacetBuilder
      */
     private function treeIds(string $slug): array
     {
-        $root = $this->categories()->firstWhere('slug', $slug);
-        if ($root === null) {
-            return [];
-        }
-        $ids = [(int) $root->id];
-        $frontier = $ids;
-        while ($frontier !== []) {
-            $frontier = $this->categories()->whereIn('parent_id', $frontier)->pluck('id')
-                ->map(fn ($id): int => (int) $id)->reject(fn (int $id): bool => in_array($id, $ids, true))->values()->all();
-            $ids = [...$ids, ...$frontier];
-        }
+        $root = $this->ways()->find($slug);
 
-        return $ids;
+        return $root === null ? [] : $this->ways()->treeIds($root);
     }
 
     private function effectiveAttributes(): QueryBuilder
@@ -257,8 +329,8 @@ class CatalogFacetBuilder
                 ->whereIn('product_variants.id', $this->variants($filters)->select('product_variants.id'))
                 ->select(['product_variants.product_id', 'attribute_values.normalized_value as value'])->distinct();
         }
-        if (in_array($key, ['colors', 'stock'], true)) {
-            $column = $key === 'colors' ? 'color' : 'stock_status';
+        if (isset(self::VARIANT_COLUMNS[$key])) {
+            $column = self::VARIANT_COLUMNS[$key];
 
             return $this->variants($filters)->whereNotNull($column)->where($column, '!=', '')
                 ->select(['product_id', $column.' as value'])->toBase();

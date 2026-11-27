@@ -3,7 +3,6 @@
 namespace App\Services\Catalog;
 
 use App\Models\Brand;
-use App\Models\Category;
 use App\Models\Product;
 use App\Models\ProductVariant;
 use Illuminate\Database\Eloquent\Builder;
@@ -30,9 +29,7 @@ class StorefrontHome
         $visible = Product::query()->visibleInCatalog()
             ->get(['id', 'category_id', 'brand_id', 'published_at']);
         $prices = $this->pricesByProduct($visible->pluck('id'));
-        $categories = Category::query()->where('is_active', true)
-            ->with('translations:id,category_id,locale,name')
-            ->orderBy('sort_order')->orderBy('id')->get(['id', 'name', 'slug', 'parent_id', 'icon']);
+        $ways = new CategoryWays(CategoryWays::activeCategories(), $visible->countBy('category_id'));
 
         return [
             // Laptops first: the shop is mostly laptops and the bench is its face.
@@ -41,7 +38,7 @@ class StorefrontHome
                 ->orderByDesc('published_at')->orderByDesc('id')->limit(self::BENCH)->get()),
             'arrivals' => $this->cardsOf($this->cardQuery()
                 ->orderByDesc('published_at')->orderByDesc('id')->limit(self::ARRIVALS)->get()),
-            'categories' => $this->categories($categories, $visible),
+            'categories' => $this->categories($ways),
             'brands' => $this->brands($visible),
             'budgets' => $this->budgets($prices),
             'stats' => [
@@ -80,79 +77,19 @@ class StorefrontHome
     }
 
     /**
-     * The ways into the catalog by category: the first level that offers a choice. A shop
-     * whose every product sits under one top category is shown by the kinds under it (after the
-     * category itself when some products are filed straight under it), so the page never lists
-     * a single row while there is a choice. Each entry carries the names its icon may be found by:
-     * its own icon and address, then its parents'.
+     * The ways into the catalog by category: the first level that offers a choice (see
+     * CategoryWays::choice), so the page never lists a single row while there is a choice. Each
+     * entry carries the names its icon may be found by: its own icon and address, then its parents'.
      *
      * @return list<array<string, mixed>>
      */
-    private function categories(Collection $categories, Collection $visible): array
+    private function categories(CategoryWays $ways): array
     {
-        $level = $this->withProducts($categories->whereNull('parent_id'), $categories, $visible);
-        while ($level->count() === 1) {
-            $below = $this->withProducts($categories->where('parent_id', $level->first()['category']->id), $categories, $visible);
-            if ($below->isEmpty()) {
-                break;
-            }
-            // Products filed straight under the category would be lost from a list of its kinds
-            // alone: then the category stays and its kinds follow it.
-            if ($below->sum('count') < $level->first()['count']) {
-                $level = $level->concat($below)->values();
-                break;
-            }
-            $level = $below;
-        }
-
-        return $level->map(fn (array $entry): array => [
-            'name' => $entry['category']->name,
-            'slug' => $entry['category']->slug,
-            'translations' => $entry['category']->translations->pluck('name', 'locale')->all(),
+        return $ways->choice(null)->map(fn (array $entry): array => [
+            ...CategoryWays::name($entry['category']),
             'count' => $entry['count'],
-            'icons' => $this->iconNames($entry['category'], $categories),
+            'icons' => $ways->icons($entry['category']),
         ])->values()->all();
-    }
-
-    /** @return list<string> the category's icon and address, then each parent's, nearest first */
-    private function iconNames(Category $category, Collection $categories): array
-    {
-        $names = [];
-        for ($current = $category, $depth = 0; $current !== null && $depth < 8; $depth++) {
-            $parent = $current->parent_id === null ? null : $categories->firstWhere('id', $current->parent_id);
-            // An icon the same as the parent's says nothing of the category itself: its address is asked first.
-            if ((string) $current->icon !== (string) $parent?->icon) {
-                $names[] = (string) $current->icon;
-            }
-            $names[] = (string) $current->slug;
-            $current = $parent;
-        }
-
-        return array_values(array_filter($names, fn (string $name): bool => $name !== ''));
-    }
-
-    /** @return Collection<int, array{category: Category, ids: list<int>, count: int}> the given categories that hold products */
-    private function withProducts(Collection $level, Collection $categories, Collection $visible): Collection
-    {
-        return $level->map(function (Category $category) use ($categories, $visible): array {
-            $ids = $this->treeIds($category, $categories);
-
-            return ['category' => $category, 'ids' => $ids, 'count' => $visible->whereIn('category_id', $ids)->count()];
-        })->filter(fn (array $entry): bool => $entry['count'] > 0)->values();
-    }
-
-    /** @return list<int> */
-    private function treeIds(Category $root, Collection $categories): array
-    {
-        $ids = [(int) $root->id];
-        $frontier = $ids;
-        while ($frontier !== []) {
-            $frontier = $categories->whereIn('parent_id', $frontier)->pluck('id')
-                ->map(fn ($id): int => (int) $id)->reject(fn (int $id): bool => in_array($id, $ids, true))->values()->all();
-            $ids = [...$ids, ...$frontier];
-        }
-
-        return $ids;
     }
 
     /** @return list<array{name: string, count: int}> */

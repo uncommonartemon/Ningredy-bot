@@ -7,6 +7,7 @@ use App\Models\Brand;
 use App\Models\Category;
 use App\Models\Product;
 use App\Models\ProductVariant;
+use App\Services\Catalog\CategoryStandard;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Inertia\Testing\AssertableInertia as Assert;
@@ -187,22 +188,6 @@ class CatalogDynamicFacetsTest extends TestCase
         $this->assertSame(2, $this->option($page, 'attributes', 'ram', '16 gb')['count']);
     }
 
-    public function test_category_counts_predict_switch_and_clear_only_irrelevant_attributes(): void
-    {
-        $laptop = $this->product('laptops', variant: ['price' => 100]);
-        $this->attribute($laptop->defaultVariant, 'screen_size', '15.6');
-        $this->product('components', variant: ['price' => 50]);
-        $this->product('components', variant: ['price' => 500]);
-
-        $page = $this->catalog(['category' => 'laptops', 'attributes' => ['screen_size' => ['15.6']], 'max_price' => 150]);
-        $component = collect($page['facets']['categories'])->firstWhere('value', 'components');
-
-        $this->assertSame(1, $component['count']);
-        $this->assertSame(1, $page['facets']['allCategoriesCount']);
-        $switched = $this->catalog(['category' => 'components', 'attributes' => ['screen_size' => ['15.6']], 'max_price' => 150]);
-        $this->assertSame($component['count'], $switched['products']['total']);
-    }
-
     public function test_price_bounds_follow_other_filters_but_do_not_shrink_to_the_selected_range(): void
     {
         $free = $this->product('laptops', ['brand' => 'Alpha'], ['price' => 0]);
@@ -257,7 +242,9 @@ class CatalogDynamicFacetsTest extends TestCase
         $this->assertEmpty($page['filters']['attributes']);
         $this->assertNull($page['facets']['price']['min']);
         $this->assertNull($page['facets']['price']['max']);
-        $this->assertSame(0, collect($page['facets']['categories'])->firstWhere('value', $category->slug)['count']);
+        // The empty category is still the page: its path is shown, and it has no kinds to offer.
+        $this->assertSame([$category->slug], array_column($page['facets']['trail'], 'slug'));
+        $this->assertSame([], $page['facets']['tiles']);
 
         $page = $this->catalog(['category' => 'components']);
         $this->assertSame(1, $page['products']['total']);
@@ -428,6 +415,86 @@ class CatalogDynamicFacetsTest extends TestCase
         $after = $this->catalogQueryCount();
         $this->assertLessThanOrEqual($before + 12, $after,
             'Adding 80 filter choices must not create one count query per choice.');
+    }
+
+    public function test_the_condition_is_offered_after_availability_once_it_tells_the_products_apart(): void
+    {
+        // Every laptop new: ticking «new» would leave the list as it was, so there is nothing to offer.
+        $this->product('laptops', ['brand' => 'Alpha']);
+        $this->product('laptops', ['brand' => 'Beta']);
+        $this->assertNotContains('condition', array_column($this->catalog(['category' => 'laptops'])['facets']['columns'], 'key'));
+
+        $used = $this->product('laptops', ['brand' => 'Alpha'], ['condition' => 'used', 'stock_status' => 'out_of_stock']);
+        $this->product('laptops', ['brand' => 'Beta'], ['condition' => 'refurbished']);
+        $page = $this->catalog(['category' => 'laptops']);
+
+        $this->assertSame(['brands', 'stock', 'condition'], array_column($page['facets']['columns'], 'key'));
+        $condition = collect($page['facets']['columns'])->firstWhere('key', 'condition');
+        $this->assertTrue($condition['leading']);
+        // The states in the order of their meaning, not of the alphabet.
+        $this->assertSame(['new', 'used', 'refurbished'], array_column($condition['options'], 'value'));
+        $this->assertSame([2, 1, 1], array_column($condition['options'], 'count'));
+
+        $page = $this->catalog(['category' => 'laptops', 'condition' => ['used']]);
+        $this->assertSame([$used->id], array_column($page['products']['data'], 'id'));
+        $this->assertSame(['used'], $page['filters']['condition']);
+        $this->assertSame(3, $this->option($page, 'columns', 'condition', 'new')['count']);
+        $this->assertSame(0, $this->option($page, 'columns', 'stock', 'in_stock')['count']);
+        $this->assertSame(2, $this->catalog(['category' => 'laptops', 'condition' => ['used', 'refurbished']])['products']['total']);
+
+        // Only the shop's own states are a condition.
+        $this->get('/catalog?condition[]=broken')->assertSessionHasErrors('condition.0');
+    }
+
+    public function test_a_category_lists_the_characteristics_of_its_form_first_with_the_required_ones_leading(): void
+    {
+        // The drives sit in a kind without a form of its own: the parent's form applies to it.
+        $kind = Category::create(['slug' => 'drives-kind', 'name' => 'Drives', 'is_active' => true,
+            'parent_id' => Category::where('slug', 'components')->value('id')]);
+        foreach ([['512 GB', 'NVMe', 'M.2 2280', 'Green'], ['1 TB', 'SATA', '2.5"', 'Blue'], ['256 GB', 'NVMe', 'M.2 2242', 'Green']] as [$capacity, $interface, $form, $board]) {
+            $drive = $this->product('drives-kind');
+            $this->attribute($drive->defaultVariant, 'capacity', $capacity);
+            $this->attribute($drive->defaultVariant, 'interface', $interface);
+            $this->attribute($drive->defaultVariant, 'form_factor', $form);
+            $this->attribute($drive->defaultVariant, 'board_colour', $board);
+        }
+        $id = fn (string $key): int => AttributeDefinition::where('key', $key)->value('id');
+        app(CategoryStandard::class)->syncForm(Category::where('slug', 'components')->firstOrFail(), [
+            ['attribute_definition_id' => $id('capacity'), 'is_required' => false],
+            ['attribute_definition_id' => $id('form_factor'), 'is_required' => true],
+            ['attribute_definition_id' => $id('interface'), 'is_required' => false],
+        ]);
+
+        foreach (['components', $kind->slug] as $slug) {
+            $attributes = $this->catalog(['category' => $slug])['facets']['attributes'];
+            $this->assertSame(['form_factor', 'capacity', 'interface', 'board_colour'], array_column($attributes, 'key'), $slug);
+            // What the form names stands open on the page; the rest waits closed.
+            $this->assertSame([true, true, true, false], array_column($attributes, 'in_form'), $slug);
+        }
+
+        // The whole catalog has no form: the usual order, nothing marked.
+        $attributes = $this->catalog()['facets']['attributes'];
+        $this->assertSame(['board_colour', 'capacity', 'form_factor', 'interface'], array_column($attributes, 'key'));
+        $this->assertSame([false, false, false, false], array_column($attributes, 'in_form'));
+    }
+
+    public function test_options_come_in_natural_order_by_size_when_the_characteristic_is_a_number(): void
+    {
+        $capacity = AttributeDefinition::create(['key' => 'module_capacity', 'label' => 'Capacity', 'is_filterable' => true,
+            'data_type' => 'number', 'default_unit' => 'GB']);
+        foreach ([['16 GB', 16, 'Gen 10'], ['4 GB', 4, 'Gen 9'], ['1 TB', 1024, 'Gen 11'], ['8 GB', 8, 'Gen 9'], ['32 GB', 32, 'Gen 10']] as [$value, $number, $generation]) {
+            $module = $this->product('components');
+            $module->defaultVariant->attributes()->create(['attribute_definition_id' => $capacity->id, 'value' => $value,
+                'numeric_value' => $number, 'unit' => 'GB']);
+            $this->attribute($module->defaultVariant, 'generation', $generation);
+        }
+
+        $page = $this->catalog(['category' => 'components']);
+
+        // 8 GB before 16 GB, and a terabyte (written in gigabytes as a number) after them all.
+        $this->assertSame(['4 gb', '8 gb', '16 gb', '32 gb', '1 tb'], array_column(collect($page['facets']['attributes'])->firstWhere('key', 'module_capacity')['options'], 'value'));
+        // Text reads its numbers as numbers: Gen 9 before Gen 10.
+        $this->assertSame(['gen 9', 'gen 10', 'gen 11'], array_column(collect($page['facets']['attributes'])->firstWhere('key', 'generation')['options'], 'value'));
     }
 
     private function matrix(): void

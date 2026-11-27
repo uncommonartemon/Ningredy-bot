@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { cardAttributes, groupAttributeBlocks, orderedAttributes } from '../../resources/js/attributeGroups.js';
+import { cardAttributes, filterBlocks, groupAttributeBlocks, orderedAttributes } from '../../resources/js/attributeGroups.js';
 
 test('a catalog card shows its chosen characteristics first and fills up from the rest', () => {
     const ports = { id: 1, name: 'Connectivity', sort_order: 1 };
@@ -104,4 +104,23 @@ test('grouping preserves attribute values and never mutates caller arrays or met
     assert.deepEqual(result, [second, first]);
     assert.equal(result[0], second);
     assert.deepEqual(attrs, [first, second]);
+});
+
+test('the catalog filters keep the server order and gather a highlighted group where it first stands', () => {
+    const memory = { id: 4, name: 'Memory', sort_order: 0, highlight_in_filters: true };
+    const plain = { id: 5, name: 'Physical', sort_order: 0, highlight_in_filters: false };
+    // The order a category's form gives: capacity, form factor, then the memory type.
+    const attrs = [
+        { key: 'capacity', group: memory },
+        { key: 'form_factor', group: plain },
+        { key: 'memory_type', group: memory },
+        { key: 'colour_of_board', group: null },
+    ];
+
+    const blocks = filterBlocks(attrs);
+
+    assert.deepEqual(blocks.map((block) => block.key), ['group-4', 'attribute-form_factor', 'attribute-colour_of_board']);
+    assert.deepEqual(blocks[0].attributes.map((attr) => attr.key), ['capacity', 'memory_type']);
+    assert.equal(blocks[1].group, null);
+    assert.deepEqual(filterBlocks(), []);
 });
