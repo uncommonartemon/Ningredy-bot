@@ -303,6 +303,83 @@ final class SearchProgressSupervisor
         return $refused && ! $opened;
     }
 
+    /**
+     * The search holds a part's photo without a readable code and goes on only for a page that
+     * shows the label: the pages held so far and since when, or null when it holds none.
+     *
+     * @return array{pages_held: int, sites: list<string>, minutes_since_first_hold: float}|null
+     */
+    public static function labelHold(int $updateId): ?array
+    {
+        $holds = ProductSourceAttempt::query()->where('telegram_update_id', $updateId)->where('action', 'hold_photo_without_code')
+            ->orderBy('id')->get(['product_url', 'created_at']);
+        if ($holds->isEmpty()) {
+            return null;
+        }
+
+        return [
+            'pages_held' => $holds->pluck('product_url')->unique()->count(),
+            'sites' => $holds->map(fn (ProductSourceAttempt $row): string => self::site((string) $row->product_url))->filter()->unique()->values()->all(),
+            'minutes_since_first_hold' => round((now()->getTimestamp() - $holds->first()->created_at->getTimestamp()) / 60, 1),
+        ];
+    }
+
+    /**
+     * What the card assembly refused on, field by field, with the sites it refused on.
+     *
+     * @return list<array{field: string, status: string, sites: list<string>, reason: string}>
+     */
+    public static function assemblyBlockers(int $updateId): array
+    {
+        $blockers = [];
+        $rows = ProductSourceAttempt::query()->where('telegram_update_id', $updateId)->where('phase', 'card_assembly')
+            ->where('action', 'reconcile_card')->where('decision', 'not_ready')->orderBy('id')->get(['product_url', 'output']);
+        foreach ($rows as $row) {
+            $site = self::site((string) $row->product_url);
+            foreach ((array) data_get($row->output, 'repair_context.unresolved_fields', []) as $field) {
+                if (! is_array($field) || ! is_string($field['key'] ?? null) || ! is_string($field['status'] ?? null) || $site === '') {
+                    continue;
+                }
+                $id = $field['key'].':'.$field['status'];
+                $blockers[$id] ??= ['field' => $field['key'], 'status' => $field['status'], 'sites' => [], 'reason' => mb_substr((string) ($field['reason'] ?? ''), 0, 300)];
+                $blockers[$id]['sites'] = array_values(array_unique([...$blockers[$id]['sites'], $site]));
+            }
+        }
+
+        return array_values($blockers);
+    }
+
+    /**
+     * The card assembly refused the card for the same field on two sites: a third site does
+     * not change what the card lacks, so the photo search ends and the card goes out with
+     * what there is (the owner's rule: no questions during a search, doubt means wrap up and
+     * deliver). Live report 2026-11-27, #706: the model field was refused on ireptech.com,
+     * rezo.fr and distrinode.es, and the search went on to sixteen sites.
+     *
+     * @return array{field: string, status: string, sites: list<string>, reason: string}|null the blocker it stopped on
+     */
+    public function stopOnRepeatedBlocker(int $updateId, ProductDraft $draft): ?array
+    {
+        if ($this->deliverNowReason($updateId) !== null) {
+            return null;
+        }
+        $repeated = collect(self::assemblyBlockers($updateId))->first(fn (array $blocker): bool => count($blocker['sites']) >= 2);
+        if ($repeated === null) {
+            return null;
+        }
+        $reason = 'Сборка карточки остановилась на одном и том же поле «'.$repeated['field'].'» ('.$repeated['status'].') на сайтах '
+            .implode(', ', $repeated['sites']).': следующий источник этого не исправит. Заканчиваю поиск фото и собираю карточку из найденного.';
+        $this->requestWrapUp($updateId, $reason);
+        $this->attempts->record([
+            'telegram_update_id' => $updateId, 'product_draft_id' => $draft->id, 'product_url' => (string) ($draft->primary_source_url ?? ''),
+            'actor' => 'server', 'phase' => 'search_supervision', 'action' => 'repeated_assembly_blocker',
+            'status' => 'completed', 'decision' => 'deliver_now', 'message' => mb_substr($reason, 0, 1000),
+            'output' => ['blocker' => $repeated],
+        ]);
+
+        return $repeated;
+    }
+
     /** @return array{decision: string, reason: string, operator_note: ?string, site: ?string} */
     public function validate(array $response): array
     {
@@ -418,6 +495,11 @@ final class SearchProgressSupervisor
             'current_activity' => $current,
             'open_calls' => SearchJournal::openCalls($updateId),
             'sites_dropped' => $this->droppedSites($updateId),
+            // Why the card assembly refused the card so far, by field and site.
+            'assembly_blockers' => self::assemblyBlockers($updateId),
+            // On every look, the outside ones too: only 2 of 11 looks in #690 knew the search
+            // was holding a part's photo and going on only for one that shows its label.
+            'holding_a_part_photo_without_a_readable_code' => self::labelHold($updateId),
             'earlier_supervisor_decisions' => ProductSourceAttempt::query()->where('telegram_update_id', $updateId)
                 ->where('phase', 'search_supervision')->orderBy('id')->get(['decision', 'message'])
                 ->map(fn (ProductSourceAttempt $row): array => ['decision' => $row->decision, 'reason' => $row->message])

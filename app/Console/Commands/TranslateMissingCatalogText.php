@@ -4,6 +4,7 @@ namespace App\Console\Commands;
 
 use App\Jobs\TranslateProductText;
 use App\Models\Product;
+use App\Services\Catalog\CatalogNames;
 use App\Services\Products\CatalogLocales;
 use App\Services\Products\CatalogTextTranslator;
 use Illuminate\Console\Command;
@@ -22,7 +23,7 @@ class TranslateMissingCatalogText extends Command
 
     protected $description = 'Translate catalog products into the enabled languages where a translation is missing';
 
-    public function handle(CatalogTextTranslator $translator): int
+    public function handle(CatalogTextTranslator $translator, CatalogNames $names): int
     {
         $languages = CatalogLocales::contentTranslations();
         $due = (bool) $this->option('due');
@@ -48,6 +49,15 @@ class TranslateMissingCatalogText extends Command
                 $failed++;
                 $this->error("#{$id}: ".mb_substr($exception->getMessage(), 0, 200));
             }
+        }
+        // Names of characteristics, groups, categories and brand countries the cards show: asked
+        // again even when an earlier request left some unfilled, as the admin's button does.
+        $names->forgetUnfilled();
+        try {
+            $this->line('Названия: заполнено '.$names->fill());
+        } catch (Throwable $exception) {
+            $failed++;
+            $this->error('Названия: '.mb_substr($exception->getMessage(), 0, 200));
         }
 
         return $failed === 0 ? self::SUCCESS : self::FAILURE;

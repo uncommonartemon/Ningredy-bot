@@ -376,6 +376,71 @@ class SearchProgressSupervisorTest extends TestCase
             'phase' => 'search_supervision', 'decision' => 'continue']);
     }
 
+    public function test_the_same_assembly_blocker_on_a_second_site_ends_the_photo_search(): void
+    {
+        // Live report 2026-11-27, #706: the card assembly refused the card for the model field
+        // on ireptech.com, then on rezo.fr and distrinode.es, and the search went on to sixteen
+        // sites. The journal rows below carry the assembly's real unresolved fields.
+        $draft = $this->draft(minutesAgo: 9);
+        SearchProgressAgent::fake()->preventStrayPrompts();
+        $supervisor = app(SearchProgressSupervisor::class);
+        $refused = function (string $url, array $fields) use ($draft): void {
+            app(ProductSourceAttemptRecorder::class)->record(['telegram_update_id' => $draft->telegram_update_id, 'product_draft_id' => $draft->id,
+                'product_url' => $url, 'actor' => 'server', 'phase' => 'card_assembly', 'action' => 'reconcile_card',
+                'status' => 'interrupted', 'decision' => 'not_ready', 'output' => ['repair_context' => ['unresolved_fields' => $fields,
+                    'recovery_action' => 'try_other_source']]]);
+        };
+        $refused('https://ireptech.com/product-detail/M321R2GA3EB0-CWMXJ', [
+            ['key' => 'model', 'status' => 'conflicting', 'reason' => 'The requested model is M321R2GA3EBO-CWMXJ, but the selected gallery source and other observed product pages identify M321R2GA3EB0-CWMXJ.'],
+            ['key' => 'gallery_applicability', 'status' => 'unknown', 'reason' => 'The selected gallery source describes the EB0 model, not the explicitly requested EBO model.'],
+        ]);
+        $refused('https://icecat.biz/p/samsung/m321r2ga3eb0-cwm/m321r2ga3eb0-cwm-130448782.html', [
+            ['key' => 'photo_applicability', 'status' => 'unknown', 'reason' => 'Галерея Icecat описана для M321R2GA3EB0-CWM, а не для полного артикула M321R2GA3EB0-CWMXJ.'],
+        ]);
+
+        $this->assertNull($supervisor->stopOnRepeatedBlocker($draft->telegram_update_id, $draft));
+        $this->assertNull($supervisor->deliverNowReason($draft->telegram_update_id));
+
+        $refused('https://rezo.fr/en/samsung-m321r2ga3eb0-cwm', [
+            ['key' => 'model', 'status' => 'conflicting', 'reason' => 'The requested model is M321R2GA3EBO-CWMXJ, while the observed product evidence identifies M321R2GA3EB0-CWMXJ.'],
+        ]);
+        $blocker = $supervisor->stopOnRepeatedBlocker($draft->telegram_update_id, $draft);
+
+        $this->assertSame(['model', 'conflicting', ['ireptech.com', 'rezo.fr']], [$blocker['field'], $blocker['status'], $blocker['sites']]);
+        $this->assertStringContainsString('«model»', (string) $supervisor->deliverNowReason($draft->telegram_update_id));
+        $this->assertDatabaseHas('product_source_attempts', ['telegram_update_id' => $draft->telegram_update_id,
+            'phase' => 'search_supervision', 'action' => 'repeated_assembly_blocker', 'decision' => 'deliver_now']);
+        // The search's next look obeys it without asking the agent.
+        $this->assertSame('deliver_now', $this->review($draft)['decision']);
+    }
+
+    public function test_every_look_knows_the_held_label_photo_and_the_assembly_blockers(): void
+    {
+        // Live report 2026-11-27, #690: the watcher said continue eleven times while the search
+        // held a part's photo for a readable label; only two of its inputs said so - the looks
+        // from outside carried only the url and the host.
+        $draft = $this->draft(minutesAgo: 12);
+        app(ProductSourceAttemptRecorder::class)->record(['telegram_update_id' => $draft->telegram_update_id, 'product_draft_id' => $draft->id,
+            'product_url' => 'https://istyle.cz/products/magic-keyboard-folio-for-ipad-10-9-inch-mqdp3cz-a', 'actor' => 'server',
+            'phase' => 'source_selection', 'action' => 'hold_photo_without_code', 'status' => 'info', 'decision' => 'look_for_a_readable_label',
+            'input' => ['next_source' => 'https://eshop.axes.cz/apple-magic-keyboard-folio-for-ipad-10gen-czech-mqdp3cz-a/']]);
+        $prompts = [];
+        SearchProgressAgent::fake(function (string $prompt) use (&$prompts): array {
+            $prompts[] = json_decode($prompt, true);
+
+            return ['decision' => 'continue', 'reason' => 'Проверка.', 'operator_note' => null, 'site' => null];
+        })->preventStrayPrompts();
+
+        app(SearchProgressSupervisor::class)->review($draft->telegram_update_id, $draft,
+            ['kind' => 'outside_check', 'minutes_since_last_step' => 0, 'operator_already_told' => false,
+                'url' => 'https://www.planeo.cz/apple-magic-keyboard-folio-ipad-cz-10-gen-a16', 'host' => 'www.planeo.cz'], null, fromOutside: true);
+
+        $hold = $prompts[0]['holding_a_part_photo_without_a_readable_code'];
+        $this->assertSame(1, $hold['pages_held']);
+        $this->assertSame(['istyle.cz'], $hold['sites']);
+        $this->assertSame([], $prompts[0]['assembly_blockers']);
+    }
+
     private function round(ProductDraft $draft, string $page, array $images): void
     {
         app(ProductSourceAttemptRecorder::class)->record(['telegram_update_id' => $draft->telegram_update_id,

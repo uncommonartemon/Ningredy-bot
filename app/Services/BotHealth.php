@@ -118,17 +118,38 @@ class BotHealth
     {
         try {
             $connection = (string) config('queue.default');
+            $database = $connection === 'database';
+            // The database queue's size() counts the job a worker holds as well;
+            // only jobs nobody has taken are waiting.
             $waiting = collect(['assistant', 'default', 'voice', 'media'])
-                ->mapWithKeys(fn (string $queue): array => [$queue => Queue::connection($connection)->size($queue)]);
+                ->mapWithKeys(fn (string $queue): array => [$queue => $database
+                    ? DB::table('jobs')->where('queue', $queue)->whereNull('reserved_at')->count()
+                    : Queue::connection($connection)->size($queue)]);
             $total = $waiting->sum();
-            $oldestSeconds = $connection === 'database'
-                ? $this->oldestQueuedJobAgeInSeconds()
-                : null;
+            $oldestSeconds = $database ? $this->oldestWaitingJobAgeInSeconds() : null;
+            $busy = $database ? $this->jobInHand() : null;
+            // A live worker gives a job back after retry_after; one held longer
+            // was taken by a worker that has stopped since.
+            if ($busy !== null && $busy['seconds'] > (int) config('queue.connections.database.retry_after', 2220)) {
+                return $this->result(
+                    'worker',
+                    'Обработчик задач',
+                    'down',
+                    'Задачу '.($busy['request'] !== null ? 'запроса #'.$busy['request'] : $busy['job']).' взяли '.$this->humanSeconds($busy['seconds'])
+                        .' назад и не закончили: обработчик, который её взял, остановился.',
+                    'Похоже, воркер не запущен. Запустите start-ningredy.bat или команду: php artisan queue:work --queue=assistant,default',
+                );
+            }
+            $busyText = $busy === null ? '' : 'Обработчик занят '.($busy['request'] !== null ? 'запросом #'.$busy['request'] : 'задачей '.$busy['job'])
+                .' уже '.$this->humanSeconds($busy['seconds']).'.';
 
-            // A backlog on its own is just work in progress. A backlog whose
-            // head has been sitting there for ten minutes is a worker nobody
-            // started - the single most common way a handover looks broken.
-            if ($oldestSeconds !== null && $oldestSeconds > self::STALLED_QUEUE_MINUTES * 60) {
+            // A backlog on its own is just work in progress. A job nobody has
+            // picked up for ten minutes while no job is in hand is a worker
+            // nobody started - the single most common way a handover looks broken.
+            // A job in hand is a running worker: a long search holds the one
+            // worker for twenty minutes, and the job queued behind it waits for
+            // that, not for somebody to start anything (live report 2026-11-27).
+            if ($oldestSeconds !== null && $oldestSeconds > self::STALLED_QUEUE_MINUTES * 60 && $busy === null) {
                 return $this->result(
                     'worker',
                     'Обработчик задач',
@@ -144,9 +165,10 @@ class BotHealth
                 'worker',
                 'Обработчик задач',
                 'up',
-                $total === 0
+                trim($busyText.' '.($total === 0
                     ? 'Очередь пуста, за сутки обработано запросов: '.$recent.'.'
-                    : 'В очереди задач: '.$total.' ('.$waiting->filter()->map(fn (int $size, string $queue): string => $queue.': '.$size)->implode(', ').').',
+                    : 'В очереди задач: '.$total.' ('.$waiting->filter()->map(fn (int $size, string $queue): string => $queue.': '.$size)->implode(', ').')'
+                        .($oldestSeconds !== null && $oldestSeconds >= 60 ? ', самая старая ждёт '.$this->humanSeconds($oldestSeconds) : '').'.')),
                 '',
             );
         } catch (Throwable $exception) {
@@ -286,20 +308,48 @@ class BotHealth
         }
     }
 
-    private function oldestQueuedJobAgeInSeconds(): ?int
+    /**
+     * How long the oldest job that a worker could take has been waiting. A job a
+     * worker holds has `reserved_at` set and is not waiting; a delayed job waits
+     * only from the moment it became available.
+     */
+    private function oldestWaitingJobAgeInSeconds(): ?int
     {
-        $oldest = DB::table('jobs')->min('created_at');
+        $now = time();
+        $oldest = DB::table('jobs')->whereNull('reserved_at')->where('available_at', '<=', $now)->min('available_at');
 
         // Laravel stores this as a unix timestamp, and diffInMinutes is signed
         // in Carbon 3 - subtracting the two integers cannot be read backwards.
-        return $oldest === null ? null : max(0, time() - (int) $oldest);
+        return $oldest === null ? null : max(0, $now - (int) $oldest);
+    }
+
+    /**
+     * The job a worker took longest ago and still holds: the request it serves
+     * (read from the job's own properties) and how long it has been at it.
+     *
+     * @return array{request: ?int, job: string, seconds: int}|null
+     */
+    private function jobInHand(): ?array
+    {
+        $job = DB::table('jobs')->whereNotNull('reserved_at')->orderBy('reserved_at')->first(['payload', 'reserved_at']);
+        if ($job === null) {
+            return null;
+        }
+        $payload = json_decode((string) $job->payload, true);
+        $command = is_array($payload) ? (string) ($payload['data']['command'] ?? '') : '';
+        $request = preg_match('/s:\d+:"(?:telegramUpdateId|updateId)";i:(\d+);/', $command, $match) === 1 ? (int) $match[1] : null;
+        $name = is_array($payload) ? class_basename((string) ($payload['displayName'] ?? '')) : '';
+
+        return ['request' => $request, 'job' => $name !== '' ? $name : '—', 'seconds' => max(0, time() - (int) $job->reserved_at)];
     }
 
     private function humanSeconds(int $seconds): string
     {
-        return $seconds >= 3600
-            ? intdiv($seconds, 3600).' ч '.intdiv($seconds % 3600, 60).' мин'
-            : intdiv($seconds, 60).' мин';
+        return match (true) {
+            $seconds >= 3600 => intdiv($seconds, 3600).' ч '.intdiv($seconds % 3600, 60).' мин',
+            $seconds >= 60 => intdiv($seconds, 60).' мин',
+            default => $seconds.' с',
+        };
     }
 
     /** @return array{key: string, label: string, state: string, detail: string, hint: string} */

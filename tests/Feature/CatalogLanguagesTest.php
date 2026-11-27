@@ -47,15 +47,16 @@ class CatalogLanguagesTest extends TestCase
 
         CatalogLocales::save(['cs', 'ru'], ['uk', 'en'], 'ru');
 
-        $this->assertSame(['cs' => 'Čeština', 'ru' => 'Русский'], CatalogLocales::contentTranslations());
+        // A storefront language is always translated into (decision of 2026-11-27), ticked or not.
+        $this->assertSame(['cs' => 'Čeština', 'uk' => 'Українська', 'ru' => 'Русский'], CatalogLocales::contentTranslations());
         $this->assertSame(['uk', 'en'], CatalogLocales::storefrontLocales());
         $this->assertSame('ru', CatalogLocales::telegramCardLocale());
 
         // A Telegram language the bot no longer makes falls back to one it does.
         CatalogLocales::save(['cs'], ['cs'], 'ru');
         $this->assertSame('cs', CatalogLocales::telegramCardLocale());
-        // No translation at all: the card stays in its English source.
-        CatalogLocales::save([], ['cs'], 'cs');
+        // No translation at all, with only the English storefront: the card stays in its English source.
+        CatalogLocales::save([], ['en'], 'cs');
         $this->assertSame([], CatalogLocales::contentTranslations());
         $this->assertSame('en', CatalogLocales::telegramCardLocale());
     }
@@ -128,9 +129,11 @@ class CatalogLanguagesTest extends TestCase
         CatalogTranslationAgent::fake(function (string $prompt) use (&$requests): array {
             $requests[] = json_decode($prompt, true);
             $translations = [];
-            foreach ($requests[0]['items'] as $item) {
+            foreach (end($requests)['items'] as $item) {
                 foreach ($item['locales'] as $locale) {
-                    $translations[] = ['locale' => $locale, 'id' => $item['id'], 'text' => strtoupper($locale).': '.$item['text']];
+                    // A name typed in Russian is answered in the language's own script.
+                    $text = $locale !== 'uk' && preg_match('/\p{Cyrillic}/u', $item['text']) === 1 ? $item['id'] : $item['text'];
+                    $translations[] = ['locale' => $locale, 'id' => $item['id'], 'text' => strtoupper($locale).': '.$text];
                 }
             }
 
@@ -146,12 +149,17 @@ class CatalogLanguagesTest extends TestCase
         $this->assertSame('UK: Lenovo ThinkPad E14 laptop', $product->translations['uk']['title']);
         $value = $product->attributes()->with('definition')->where('value', 'Intel Core i5')->sole();
         $this->assertSame('UK: Intel Core i5', $value->translations['uk']);
-        $this->assertSame('UK: Processor', $value->definition->translations['uk']);
         // Codes and numbers are not sent: "16 GB" reads the same everywhere.
         $ids = array_column($requests[0]['items'], 'id');
         $this->assertNotContains('value.'.$product->attributes()->where('value', '16 GB')->value('id'), $ids);
         $this->assertGreaterThan(0, $filled);
         $this->assertDatabaseHas('ai_runs', ['status' => 'completed']);
+        // A characteristic's name is shared by every product: it is not asked once per card but by
+        // the names' request for the whole catalog, which the card's job makes at once.
+        $this->assertNotContains('label.'.$value->attribute_definition_id, $ids);
+        (new TranslateProductText($product->id))->handle(app(CatalogTextTranslator::class));
+        $this->assertSame('UK: Processor', $value->definition->fresh()->translations['uk']);
+        $this->assertCount(2, $requests);
 
         // Live 2026-11-01: a variant's translations are the product's text for that variant, never a
         // translation of its configuration name (every Ukrainian card read «Базова конфігурація»).
@@ -161,10 +169,10 @@ class CatalogLanguagesTest extends TestCase
         $this->assertSame('CS: Fast laptop for work.', $variant->translations['cs']['description']);
         $this->assertNotContains('variant.'.$variant->id.'.title', $ids);
 
-        // Nothing is missing any more: no second paid call.
+        // Nothing is missing any more: no further paid call.
         $this->assertSame([], app(CatalogTextTranslator::class)->pendingProductIds());
         $this->assertSame(0, app(CatalogTextTranslator::class)->translate($product->fresh()));
-        $this->assertCount(1, $requests);
+        $this->assertCount(2, $requests);
     }
 
     /**
@@ -199,8 +207,9 @@ class CatalogLanguagesTest extends TestCase
     {
         $product = $this->product();
         $asked = 0;
-        CatalogTranslationAgent::fake(function () use (&$asked): array {
-            $asked++;
+        CatalogTranslationAgent::fake(function (string $prompt) use (&$asked): array {
+            // The card's own texts; the names beside them are the names' request, with its own wait.
+            $asked += (int) str_contains($prompt, '"product.title"');
 
             // The model leaves everything unfilled.
             return ['translations' => []];

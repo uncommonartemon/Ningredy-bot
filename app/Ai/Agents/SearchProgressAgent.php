@@ -27,7 +27,11 @@ class SearchProgressAgent implements Agent, HasStructuredOutput
             whole story, not the current page alone: a new page of the same site collecting the same tag is the
             same dead end. pages_opened sums up each site. earlier_supervisor_decisions are your own earlier
             answers; the timeline shows whether they were carried out. open_calls are steps still running and for
-            how long. sites_dropped are sites you already ended for this search.
+            how long. sites_dropped are sites you already ended for this search. assembly_blockers are the fields
+            the card assembly refused the card on, with the sites it refused on: a blocker that is not about the
+            page (the requested code, a fact no page states) comes back on every site, and the same blocker on two
+            sites is answered with deliver_now - the card goes out with what there is; the server ends the photo
+            search itself at the second site.
             Decisions:
             continue: the next step is worth the operator's wait, and you can name which step and why it is
               likely to add accepted photos of the exact product - a page with photo_match exact whose gallery
@@ -35,7 +39,9 @@ class SearchProgressAgent implements Agent, HasStructuredOutput
               check of held frames. "Time and money remain" is never by itself a reason to continue.
               holding_a_part_photo_without_a_readable_code means the card already has a real photo of the part and the
               search goes on only for one that shows its code: one or two more pages are worth it, a long tail of shops
-              is not, and pages of a kind that rarely shows a label (a processor, a boxed graphics card) less so.
+              is not, and pages of a kind that rarely shows a label (a processor, a boxed graphics card) less so. It
+              comes on every look with pages_held and minutes_since_first_hold; with two pages held, deliver_now
+              (the server itself stops waiting for a label after the second exact page without one).
             leave_current_page: the page keeps producing the same frames, or its second round in a row collected
               nothing new, or it has accepted no photo after two rounds; the search moves on to its next source.
               Photos already found stay. A page selling another configuration of the same model is not by

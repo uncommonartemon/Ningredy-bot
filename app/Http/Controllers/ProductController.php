@@ -20,7 +20,7 @@ class ProductController extends Controller
         abort_unless($product->isOnSale(), 404);
 
         $product->load([
-            'brand:id,name,country,website_url',
+            'brand:id,name,country,country_translations,website_url',
             'category:id,name,slug',
             'category.translations:id,category_id,locale,name',
             'attributes' => fn ($query) => $query->whereNull('product_variant_id'),
@@ -46,7 +46,8 @@ class ProductController extends Controller
                 'description' => $product->description,
                 'translations' => $product->translations ?? [],
                 'type' => $product->product_type,
-                'brand' => $product->brand?->only(['name', 'country', 'website_url']),
+                'brand' => $product->brand ? [...$product->brand->only(['name', 'country', 'website_url']),
+                    'country_translations' => $product->brand->country_translations ?? []] : null,
                 'category' => $product->category ? [
                     'name' => $product->category->name,
                     'slug' => $product->category->slug,
@@ -59,7 +60,10 @@ class ProductController extends Controller
                         'id' => $media->id,
                         'variant_id' => $media->product_variant_id,
                         'url' => $this->mediaUrl($media),
-                        'alt' => $media->alt ?: $product->title,
+                        // A photo is described by the product's title in the visitor's language. The
+                        // stored description is the English title the bot wrote, read aloud and shown
+                        // in its place to a buyer whose photo does not load.
+                        'alt' => null,
                         'role' => $media->role,
                         'primary' => $media->is_primary,
                         'photo_notice' => PhotoSourceNotice::fromContext($media->photo_source_context),

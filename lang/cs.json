@@ -904,5 +904,9 @@
     "в продаже": "v prodeji",
     "снят с продажи": "stažen z prodeje",
     "с фото": "s fotografií",
-    "без фото": "bez fotografie"
+    "без фото": "bez fotografie",
+    "в товаре #:id: :count": "v produktu #:id: :count",
+    "Черновик подтверждён: его фото перенесены в товар.": "Koncept byl schválen: jeho fotografie byly přesunuty k produktu.",
+    "Все найденные источники просмотрены": "Všechny nalezené zdroje byly prohlédnuty",
+    "Без перевода": "Bez překladu"
 }

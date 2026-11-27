@@ -57,7 +57,8 @@ const chipGroups = computed(() => {
         if (!form[key]?.length) return;
         const facet = props.facets.columns.find((item) => item.key === key);
         groups.push({ key, label: t(`facets.${key}`, facet?.label || key), chips: form[key].map((value) => {
-            const label = facet?.options.find((option) => option.value === value)?.label || value;
+            const option = facet?.options.find((item) => item.value === value);
+            const label = option ? facetOptionLabel(option) : value;
             return { key, value, label: NAMED_VALUES.includes(key) ? t(`${key}.${value}`, label) : label };
         }) });
     };

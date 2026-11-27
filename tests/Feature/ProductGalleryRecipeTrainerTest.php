@@ -623,6 +623,37 @@ class ProductGalleryRecipeTrainerTest extends TestCase
         $this->assertSame('agent_abandoned', ProductGalleryRecipeVersion::latest('id')->firstOrFail()->result['failure_kind'] ?? null);
     }
 
+    public function test_a_site_dropped_while_the_trainer_thinks_does_not_get_that_rounds_plan_executed(): void
+    {
+        // Live report 2026-11-27, #661: the watcher dropped ecom-trading.de during round four's
+        // call to the trainer; the round's plan still ran in the browser, and its frames went
+        // on to the photo check, the download and Vision.
+        $update = TelegramUpdate::create(['update_id' => 883932, 'chat_id' => '1', 'telegram_user_id' => '1',
+            'payload' => [], 'status' => 'processing', 'text' => 'Patriot Viper Venom RGB VVR532G60C28AK']);
+        $calls = 0;
+        ProductGalleryRecipeTrainerAgent::fake(function () use (&$calls, $update): array {
+            $calls++;
+            if ($calls === 2) {
+                app(SearchProgressSupervisor::class)->dropSite($update->id, 'ecom-trading.de',
+                    'На ecom-trading.de скачанные изображения оказались только миниатюрами, принятых фото нет.');
+            }
+
+            return $this->validRecipeResponse(['collect_selectors' => ['.image-slider--item-'.$calls.' img'], 'expected_image_count' => 5]);
+        })->preventStrayPrompts();
+        $this->mock(BrowserProductGalleryExtractor::class, function (MockInterface $mock): void {
+            $mock->shouldReceive('scout')->once()->andReturn(['scout' => ['title' => 'Product', 'fragments' => ['<div>Gallery</div>']]]);
+            // Only round one's plan reaches the browser.
+            $mock->shouldReceive('executeRecipe')->once()->andReturn(['images' => ['https://www.ecom-trading.de/media/image/94496_1.jpg'],
+                'diagnostics' => ['observed_gallery_count' => 5]]);
+        });
+
+        app(ProductGalleryRecipeTrainer::class)->train('https://www.ecom-trading.de/shop/en/hardware/components/ram/ddr-4/ddr5-32gb-kit-2x16gb-pc-6000-patriot-viper-venom-rgb-vvr532g60c28ak-cl28',
+            force: true, telegramUpdateId: $update->id);
+
+        $this->assertSame(2, $calls);
+        $this->assertSame('agent_abandoned', ProductGalleryRecipeVersion::latest('id')->firstOrFail()->result['failure_kind'] ?? null);
+    }
+
     public function test_a_refusing_host_ends_page_training_without_another_paid_round(): void
     {
         $calls = 0;

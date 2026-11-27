@@ -42,7 +42,7 @@ class RecentSearchesWidget extends TableWidget
                         'missing' => 'danger',
                         default => 'gray',
                     }),
-                TextColumn::make('media_count')->label(__('Фото'))->badge(),
+                DraftSearchResult::photosColumn(),
                 TextColumn::make('primary_source_url')
                     ->label(__('Источник'))
                     ->formatStateUsing(fn (?string $state): string => $state ? (parse_url($state, PHP_URL_HOST) ?: $state) : '—'),

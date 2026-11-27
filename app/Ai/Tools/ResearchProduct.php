@@ -83,6 +83,12 @@ class ResearchProduct implements Tool
     /** The query of the current call, so validation can tell the operator's codes from a page's. */
     private string $query = '';
 
+    /** The condition the operator named for the item (used, refurbished, open box), if any. */
+    private ?string $statedCondition = null;
+
+    /** @var array{text: string, message_ids: list<int>, follow_up: ?string, unmatched: list<string>}|null */
+    private ?array $searchRequest = null;
+
     public function description(): Stringable|string
     {
         return 'Search the internet for a real product, verify its data and create a pending catalog draft. Use for explicit web searches or after local catalog search returns no suitable match.';
@@ -93,8 +99,18 @@ class ResearchProduct implements Tool
         if ($this->isCancelled()) {
             return $this->cancelledResult();
         }
-        $query = trim((string) $request->string('query'));
+        // The condition of the operator's item is written on the card when it is saved; the
+        // search looks for the model as for a new one (decision of 2026-11-27, live #705: the
+        // query ended in "used", the pages sold the module new, and the card was refused).
+        [$query, $this->statedCondition] = ProductCondition::fromSearchQuery(
+            trim((string) $request->string('query')),
+            in_array($request['condition'] ?? null, ProductCondition::VALUES, true) ? (string) $request['condition'] : null,
+        );
         $this->query = $query;
+        // The product request may be in earlier messages, the current one only an instruction
+        // about the search (live #635, #706); the assistant names them, the server finds them.
+        $this->searchRequest = ProductInputContext::rememberSearchRequest($this->update, array_values(array_filter(
+            (array) ($request['request_messages'] ?? []), 'is_string')));
         // Live #247: the assistant called this tool twice with the same query in
         // one turn; the second call bought the research again and only then met
         // the draft the first one had made. The same request asking the same
@@ -511,6 +527,11 @@ class ResearchProduct implements Tool
                 return $this->json($notFound);
             }
 
+            // The card carries the condition the operator named; an observed offer's other
+            // condition stays a request difference. A condition row among the facts is the
+            // offer's, not the product's: the card's condition is its own field.
+            $data['condition'] = $this->statedCondition ?? $data['condition'] ?? 'new';
+            $data['specifications'] = ProductCondition::withoutConditionRows($data['specifications'] ?? []);
             $catalogIdentity = app(ProductCatalogIdentity::class);
             $existingProduct = $catalogIdentity->find($data, $data['condition'] ?? 'new', activeOnly: true);
 
@@ -986,7 +1007,8 @@ class ResearchProduct implements Tool
             // One placement rule for the search and the approval (decision of 2026-11-25): what the
             // server settled instead of the agent is kept with the draft and shown on its card.
             $placement = app(CatalogPlacement::class)->place($data['product_type'] ?? null, $data['category'] ?? null);
-            $issues = app(ProductResearchConfigurationGuard::class)->issues($data, trim($this->query.' '.(string) $this->update->text), $this->typedByOperator());
+            $issues = app(ProductResearchConfigurationGuard::class)->issues($data,
+                trim($this->query.' '.(string) ($this->searchRequest['text'] ?? '').' '.(string) $this->update->text), $this->typedByOperator());
             if ($placement->problem() !== null) {
                 $issues[] = $placement->problem();
             }
@@ -1186,11 +1208,13 @@ class ResearchProduct implements Tool
     private function typedByOperator(): string
     {
         $payload = (array) ($this->update->payload ?? []);
+        // The request the search was started for, when it came from earlier messages.
+        $request = (string) ($this->searchRequest['text'] ?? '');
         if (data_get($payload, 'message.photo') === null) {
-            return trim($this->query.' '.(string) $this->update->text);
+            return trim($this->query.' '.$request.' '.(string) $this->update->text);
         }
 
-        return trim((string) data_get($payload, 'message.caption', '').' '.(string) data_get($payload, PhotoReadingCheck::PAYLOAD_KEY.'.correction', ''));
+        return trim($request.' '.(string) data_get($payload, 'message.caption', '').' '.(string) data_get($payload, PhotoReadingCheck::PAYLOAD_KEY.'.correction', ''));
     }
 
     private function primarySource(array $sources): ?array
@@ -1220,7 +1244,18 @@ class ResearchProduct implements Tool
                 'The product exactly as the user described it: brand, model, and the specs/identifiers they '
                 .'actually stated. Do not add a model year, generation, suffix, or any other identifying detail '
                 .'the user did not mention - an invented detail can steer the downstream search toward the wrong '
-                .'product. Do not repeat the same term multiple times or wrap it in quotes.'
+                .'product. Do not repeat the same term multiple times or wrap it in quotes. Never add the item\'s '
+                .'condition (used, refurbished, open box): the model is searched as for a new item; pass the condition in condition.'
+            ),
+            'condition' => $schema->string()->enum(ProductCondition::VALUES)->description(
+                'The condition the operator named for their item (used, refurbished, open_box), written on the card when it is '
+                .'saved. Omit it when they named none: the card is new.'
+            ),
+            'request_messages' => $schema->array()->items($schema->string())->description(
+                'When the product was named in earlier messages of this chat and the current message only adds an instruction '
+                .'(search again, where to look, how to treat the condition), copy those earlier messages here exactly as the '
+                .'operator wrote them, and the current message too if it also names the product. Omit when the current message '
+                .'alone is the request.'
             ),
         ];
     }

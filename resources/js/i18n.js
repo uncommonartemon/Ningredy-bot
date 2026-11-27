@@ -382,10 +382,19 @@ const facetOptionLabel = (option) => translatedValue(option?.translations) || op
 const attributeGroupName = (group) => pickName(group?.translations, group?.name);
 
 // "15,6 inch" is spelled out in the value already; a unit is added only to a
-// bare number, so a value is never followed by its own unit twice.
+// bare number, so a value is never followed by its own unit twice. A bare number
+// with a translation was translated with its unit (a unit typed in Cyrillic, «16 ГБ»):
+// the translation carries the unit in the visitor's language.
 const attributeUnit = (attribute) => (attribute?.unit && /^[\d\s.,]+$/.test(String(attribute?.value ?? ''))
+    && ! translatedValue(attribute?.translations)
     ? attribute.unit
     : null);
+
+// A configuration's own words, its name and its colour, in the visitor's language.
+const variantText = (variant, field) => translatedText(variant?.translations, field) || variant?.[field] || null;
+
+// A brand's country is a name typed in the admin; it is named like a category.
+const countryName = (brand) => pickName(brand?.country_translations, brand?.country);
 
 // What the shop says under a photo. The server sends facts, not sentences: the reviewers'
 // notes are written for the operator in Russian and once stood under the gallery as they were.
@@ -406,5 +415,5 @@ export { configureCatalogLocales };
 export const useI18n = () => ({
     locale, localeTag, setLocale, t, productCount, moreCount, categoryName, storefrontLocales,
     contentLocale, translatedText, attributeLabel, attributeValue, attributeUnit, attributeGroupName, facetLabel, facetOptionLabel,
-    photoNoticeLines,
+    photoNoticeLines, variantText, countryName,
 });

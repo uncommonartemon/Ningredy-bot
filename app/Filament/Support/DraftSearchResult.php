@@ -3,6 +3,7 @@
 namespace App\Filament\Support;
 
 use App\Models\ProductDraft;
+use App\Models\ProductMedia;
 use Filament\Tables\Columns\TextColumn;
 use Illuminate\Database\Eloquent\Builder;
 
@@ -14,7 +15,71 @@ final class DraftSearchResult
         return $query->with('telegramUpdate')->withCount([
             'media',
             'media as pending_media_count' => fn (Builder $media) => $media->where('verification_status', 'pending'),
-        ]);
+        ])->addSelect(['product_media_count' => ProductMedia::query()->selectRaw('count(*)')
+            ->whereColumn('product_media.product_id', 'product_drafts.approved_product_id')->where('type', 'image')]);
+    }
+
+    /**
+     * Whether the card's photos now live in its product. Approval moves the draft's files to
+     * the product (`ProductImageStorage::adoptStaged`), so the draft itself keeps none (live
+     * report 2026-11-27: every approved draft read "0 photos", one of them with nine).
+     */
+    public static function photosInProduct(ProductDraft $draft): bool
+    {
+        return $draft->status === 'approved' && $draft->approved_product_id !== null;
+    }
+
+    /** The card's photos: the product's for an approved draft, the draft's own otherwise. */
+    public static function photos(ProductDraft $draft): int
+    {
+        if (! self::photosInProduct($draft)) {
+            return (int) ($draft->media_count ?? $draft->media()->count());
+        }
+
+        return (int) ($draft->product_media_count
+            ?? ProductMedia::query()->where('product_id', $draft->approved_product_id)->where('type', 'image')->count());
+    }
+
+    /** The count, with where the photos are when they moved to the product. */
+    public static function photosText(ProductDraft $draft): string
+    {
+        return self::photosInProduct($draft)
+            ? __('в товаре #:id: :count', ['id' => $draft->approved_product_id, 'count' => self::photos($draft)])
+            : (string) self::photos($draft);
+    }
+
+    public static function photosColumn(): TextColumn
+    {
+        return TextColumn::make('photos')->label(__('Фото'))->badge()
+            ->state(fn (ProductDraft $record): string => self::photosText($record))
+            ->color(fn (ProductDraft $record): string => self::photos($record) > 0 ? 'gray' : 'warning')
+            ->tooltip(fn (ProductDraft $record): ?string => self::photosInProduct($record)
+                ? __('Черновик подтверждён: его фото перенесены в товар.')
+                : null)
+            ->sortable(query: fn (Builder $query, string $direction): Builder => $query->orderByRaw(
+                '(case when product_drafts.status = \'approved\' and product_drafts.approved_product_id is not null'
+                .' then (select count(*) from product_media where product_media.product_id = product_drafts.approved_product_id and product_media.type = \'image\')'
+                .' else (select count(*) from product_draft_media where product_draft_media.product_draft_id = product_drafts.id) end) '
+                .($direction === 'asc' ? 'asc' : 'desc')));
+    }
+
+    /**
+     * Why the photo search stopped, in words that fit the outcome. Every source looked at
+     * is the end of a search that found nine photos as much as of one that found none;
+     * beside a gallery it is said neutrally, not as a failure.
+     */
+    public static function stopReason(ProductDraft $draft): string
+    {
+        $photos = self::photos($draft) > 0;
+
+        return match ($draft->gallery_search_stop_reason) {
+            'cost_budget' => __('Денежный лимит'),
+            'stalled' => __('Остановлен досрочно'),
+            'time_budget' => __('Временной лимит'),
+            'exhausted' => $photos ? __('Все найденные источники просмотрены') : __('Источники исчерпаны'),
+            'specifications_unreconciled' => __('Характеристики не сверены'),
+            default => '—',
+        };
     }
 
     public static function column(): TextColumn

@@ -8,6 +8,7 @@ use App\Filament\Schemas\ProductCategoryActions;
 use App\Filament\Support\ProductTablePreferences;
 use App\Models\Product;
 use App\Models\User;
+use App\Services\Products\CardTranslationState;
 use Filament\Actions\CreateAction;
 use Filament\Facades\Filament;
 use Filament\Resources\Pages\ListRecords;
@@ -20,6 +21,9 @@ class ListProducts extends ListRecords
     use InteractsWithCatalogCleanup;
 
     protected static string $resource = ProductResource::class;
+
+    /** @var list<int>|null products with a text lacking a shop language */
+    private ?array $untranslated = null;
 
     public function getTabs(): array
     {
@@ -40,6 +44,12 @@ class ListProducts extends ListRecords
                 ->badge(fn (): int => $this->awaitingKindCount())->badgeColor('warning')
                 ->visible(fn (): bool => $this->activeTab === 'awaiting_kind' || $this->awaitingKindCount() > 0)
                 ->modifyQueryUsing(fn (Builder $query) => ProductCategoryActions::awaitingKind($query)),
+            // A text a buyer reads still lacks a shop language (decision of 2026-11-27); the bot asks for it
+            // by itself, and the tab shows while any wait, as the status page's «Переводы» does.
+            'untranslated' => Tab::make(__('Без перевода'))
+                ->badge(fn (): int => count($this->untranslatedIds()))->badgeColor('warning')
+                ->visible(fn (): bool => $this->activeTab === 'untranslated' || $this->untranslatedIds() !== [])
+                ->modifyQueryUsing(fn (Builder $query) => $query->whereKey($this->untranslatedIds())),
         ];
     }
 
@@ -47,6 +57,12 @@ class ListProducts extends ListRecords
     {
         // Counted at each drawing: a move in this same request changes it.
         return ProductCategoryActions::awaitingKind(Product::query())->count();
+    }
+
+    /** @return list<int> read once per request: the whole catalog's texts are looked at */
+    private function untranslatedIds(): array
+    {
+        return $this->untranslated ??= app(CardTranslationState::class)->pendingProductIds();
     }
 
     public function table(Table $table): Table

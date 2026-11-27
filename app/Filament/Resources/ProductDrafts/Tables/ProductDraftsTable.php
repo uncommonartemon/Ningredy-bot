@@ -24,12 +24,13 @@ class ProductDraftsTable
     public static function configure(Table $table): Table
     {
         return $table
-            ->modifyQueryUsing(fn (Builder $query) => DraftSearchResult::withSummary($query)->with('media'))
+            ->modifyQueryUsing(fn (Builder $query) => DraftSearchResult::withSummary($query)->with(['media', 'product.primaryMedia']))
             ->defaultSort('id', 'desc')
             ->columns([
                 ImageColumn::make('preview')
                     ->label(__('Фото'))
-                    ->state(fn (ProductDraft $record): ?string => $record->media->first()?->path)
+                    // An approved draft's photos moved to its product.
+                    ->state(fn (ProductDraft $record): ?string => $record->media->first()?->path ?? $record->product?->primaryMedia?->path)
                     ->disk('public')
                     ->square(),
                 TextColumn::make('id')->label('#')->sortable(),
@@ -48,7 +49,7 @@ class ProductDraftsTable
                     'rejected' => 'danger',
                     default => 'warning',
                 }),
-                TextColumn::make('media_count')->label(__('Фото'))->badge()->sortable(),
+                DraftSearchResult::photosColumn(),
                 DraftSearchResult::column(),
                 TextColumn::make('gallery_status')
                     ->label(__('Галерея'))
@@ -67,14 +68,7 @@ class ProductDraftsTable
                     }),
                 TextColumn::make('gallery_search_stop_reason')
                     ->label(__('Причина остановки'))
-                    ->formatStateUsing(fn (?string $state): string => match ($state) {
-                        'cost_budget' => __('Денежный лимит'),
-                        'stalled' => __('Остановлен досрочно'),
-                        'time_budget' => __('Временной лимит'),
-                        'exhausted' => __('Источники исчерпаны'),
-                        'specifications_unreconciled' => __('Характеристики не сверены'),
-                        default => '—',
-                    })
+                    ->formatStateUsing(fn (ProductDraft $record): string => DraftSearchResult::stopReason($record))
                     ->toggleable(),
                 TextColumn::make('primary_source_url')
                     ->label(__('Источник'))

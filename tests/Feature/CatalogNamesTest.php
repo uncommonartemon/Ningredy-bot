@@ -37,11 +37,13 @@ class CatalogNamesTest extends TestCase
         $this->assertSame(['en', 'uk'], $missing["category.{$category->id}"]['locales']);
 
         $requests = [];
+        // Answers in the target language's own script: a Cyrillic answer for Czech or English, or
+        // one with Russian letters for Ukrainian, is no translation and is not stored.
         CatalogTranslationAgent::fake(function (string $prompt) use (&$requests): array {
             $requests[] = json_decode($prompt, true)['items'];
 
             return ['translations' => collect(end($requests))->flatMap(fn (array $item): array => array_map(
-                fn (string $locale): array => ['locale' => $locale, 'id' => $item['id'], 'text' => "{$item['text']} [{$locale}]"], $item['locales']))->all()];
+                fn (string $locale): array => ['locale' => $locale, 'id' => $item['id'], 'text' => "[{$locale}] {$item['id']}"], $item['locales']))->all()];
         })->preventStrayPrompts();
 
         $filled = app(CatalogNames::class)->fill();
@@ -54,9 +56,9 @@ class CatalogNamesTest extends TestCase
         $this->assertSame(['en', 'cs', 'uk'], $asked["definition.{$typed->id}"]['locales']);
         $this->assertSame('category_name', $asked["category.{$category->id}"]['kind']);
         $this->assertSame(7, $filled);
-        $this->assertSame(['cs' => 'Konektivita', 'en' => 'Connectivity', 'uk' => 'Connectivity [uk]'], $group->fresh()->translations);
-        $this->assertSame('Язык клавиатуры [uk]', $typed->fresh()->translations['uk']);
-        $this->assertSame(['cs' => 'Monitory', 'en' => 'Мониторы [en]', 'uk' => 'Мониторы [uk]'],
+        $this->assertSame(['cs' => 'Konektivita', 'en' => 'Connectivity', 'uk' => "[uk] group.{$group->id}"], $group->fresh()->translations);
+        $this->assertSame("[uk] definition.{$typed->id}", $typed->fresh()->translations['uk']);
+        $this->assertSame(['cs' => 'Monitory', 'en' => "[en] category.{$category->id}", 'uk' => "[uk] category.{$category->id}"],
             $category->fresh()->translations->pluck('name', 'locale')->all());
         $this->assertSame([], app(CatalogNames::class)->missing());
         $this->assertSame('catalog_names', AiRun::query()->latest('id')->first()->activity['stage']);

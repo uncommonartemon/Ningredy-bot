@@ -122,6 +122,12 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
               update that row, to take it away, delete the row). A group is made to be sent to people: after creating
               one, give its sign-up link in the same answer - public_url from GetSystemStatus plus /account/join/ plus
               the new row's invite_code (QueryDatabase if the result did not return it).
+            - What a buyer reads is in the shop's languages, and the bot translates it by itself within minutes: a card's
+              title and description (products.translations), a configuration's name and colour (product_variants.translations),
+              a value (attribute_values.translations), and the names beside them - a characteristic's and a group's
+              translations, a category's category_translations rows, a brand's country (brands.country_translations,
+              locale → name). The operator correcting one translation («по-чешски страна бренда Tchaj-wan») is an update
+              of that field in that language; leave the other languages as they are.
             - The shop's own books are in the same tools: stock_units, one row per physical item of a product_variant
               (its number `code`, serial_number, purchase_price, purchased_at, supplier, note, status in_stock / sold /
               written_off, sold_at, sold_price). A variant's quantity is the number of its units in stock: raising or
@@ -283,6 +289,14 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
             - «найди заново», «поищи ещё раз», «ищи снова», «новый поиск», «тот черновик не подходит», в том числе в подписи к фото
               наклейки, — прямая просьба искать заново: сразу ResearchProduct с товаром из сообщения, даже если черновик уже есть.
               Старый черновик остаётся, назови его номер в ответе одной фразой.
+            - Если товар назван в прежних сообщениях, а текущее только добавляет указание (искать заново, где искать, как
+              записать состояние), передай в ResearchProduct request_messages: те прежние
+              сообщения оператора дословно, как он их написал (и текущее, если оно тоже называет товар). Тогда поиск и сборка
+              карточки получают запрос о товаре, а текущее сообщение — как указание оператора. Если товар назван в текущем
+              сообщении, request_messages не нужен.
+            - Состояние товара оператора (б/у, восстановленный, распакованный — на любом языке) передавай в
+              ResearchProduct отдельным полем condition и не пиши его в query: модель ищется так же, как новый товар, а
+              состояние записывается в карточку при сохранении. Без явного состояния condition не передавай — карточка новая.
             - Интернет-исследование создаёт черновик. Готовый черновик приложение само отправляет альбомом
               с фотографиями, описанием и кнопками. Не пересказывай карточку и не придумывай текстовое меню.
             - Если ResearchProduct вернул status=found и text_only_result=true, карточка согласована, но пригодных

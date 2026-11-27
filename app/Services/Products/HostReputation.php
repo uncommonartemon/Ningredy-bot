@@ -66,7 +66,56 @@ class HostReputation
 
         if ($host !== '') {
             Cache::forget($this->refusalKey($host));
+            Cache::forget($this->browserBlockKey($host));
         }
+    }
+
+    /**
+     * The real browser was served a robot check, a security wall or a 403 by
+     * this host. Unlike a refusal of the quick check, this is the authoritative
+     * answer, and shops that give it tend to give it to every visit: it is kept
+     * for days, not minutes, and goes with the first page the host serves.
+     *
+     * Live report 2026-11-27: server-memory resellers gated the browser about
+     * eleven times in three requests, and every new request paid the photo
+     * check and the browser run again, because a refusal was remembered for
+     * twenty minutes.
+     *
+     * @return array{count: int, reason: string, first_at: string, at: string, until: string}
+     */
+    public function noteBrowserBlock(string $url, string $reason): array
+    {
+        $host = $this->host($url);
+        $current = $this->browserBlock($url);
+        $until = now()->addDays($this->browserBlockMemoryDays());
+        $record = [
+            'count' => (int) ($current['count'] ?? 0) + 1,
+            'reason' => $reason,
+            'first_at' => (string) ($current['first_at'] ?? now()->toIso8601String()),
+            'at' => now()->toIso8601String(),
+            'until' => $until->toIso8601String(),
+        ];
+        if ($host !== '') {
+            Cache::put($this->browserBlockKey($host), $record, $until);
+        }
+
+        return $record;
+    }
+
+    /**
+     * The browser block this host gave last, while it is remembered.
+     *
+     * @return array{count: int, reason: string, first_at: string, at: string, until: string}|null
+     */
+    public function browserBlock(string $url): ?array
+    {
+        $host = $this->host($url);
+        if ($host === '') {
+            return null;
+        }
+        $stored = Cache::get($this->browserBlockKey($host));
+
+        return is_array($stored) && isset($stored['count']) ? $stored : null;
     }
 
     /**
@@ -140,7 +189,18 @@ class HostReputation
         if ($host !== '') {
             Cache::forget($this->refusalKey($host));
             Cache::forget($this->http11Key($host));
+            Cache::forget($this->browserBlockKey($host));
         }
+    }
+
+    private function browserBlockMemoryDays(): int
+    {
+        return max(1, (int) config('product-images.browser_fallback.browser_block_memory_days', 3));
+    }
+
+    private function browserBlockKey(string $host): string
+    {
+        return 'host-reputation:browser-block:'.$host;
     }
 
     private function threshold(): int

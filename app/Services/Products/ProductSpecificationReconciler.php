@@ -138,7 +138,9 @@ class ProductSpecificationReconciler
         $evidenceStateBefore = $progress->snapshot($draft);
         $madeProgress = fn (): bool => $progress->hasNewObservations($evidenceStateBefore, $progress->snapshot($draft));
 
-        $specifications = collect($draft->specifications ?? [])
+        // The card's condition is its own field, the operator's (current_condition); a
+        // condition row is an offer's and is not assembled (decision of 2026-11-27).
+        $specifications = collect(ProductCondition::withoutConditionRows($draft->specifications ?? []))
             ->filter(fn (mixed $item): bool => is_array($item)
                 && is_string($item['key'] ?? null) && $item['key'] !== ''
                 && is_string($item['name'] ?? null) && $item['name'] !== '')
@@ -160,6 +162,7 @@ class ProductSpecificationReconciler
             'offer_context' => app(CardOfferSelection::class)->context($draft, $source),
             'original_operator_request' => is_string($originalOperatorRequest) ? $originalOperatorRequest : null,
             'original_operator_request_status' => $requestContext['original_operator_request_status'],
+            ...(isset($requestContext['operator_follow_up']) ? ['operator_follow_up' => $requestContext['operator_follow_up']] : []),
             'input_evidence' => $inputEvidence,
             ...(isset($requestContext['request_differences']) ? ['request_differences' => $requestContext['request_differences']] : []),
             'photo_applicability' => $photoApplicability,
@@ -334,6 +337,30 @@ class ProductSpecificationReconciler
                     }
                 }
             }
+            // A form field nobody found comes back as a row without a value. It is not a fact to
+            // validate: it leaves the card, which then lists it as not found (CategoryStandard).
+            // Validated as a row, it failed the whole reconciled card, and the repair returned
+            // it empty again (live report 2026-11-27, #706: run 4128, memory_timings,
+            // rgb_lighting and xmp_support; the card was lost and the search went on).
+            // A value the card already had and the answer emptied is not such a field: that
+            // answer still fails, as an answer that lost a fact.
+            $emptyFields = [];
+            if (is_array($normalized['specifications'] ?? null)) {
+                $normalized['specifications'] = ProductCondition::withoutConditionRows($normalized['specifications']);
+            }
+            foreach ((array) ($normalized['specifications'] ?? []) as $index => $specification) {
+                if (! is_array($specification) || ! is_string($specification['key'] ?? null)
+                    || trim((string) ($specification['value'] ?? '')) !== ''
+                    || trim((string) ($inputByKey->get($specification['key'], [])['value'] ?? '')) !== '') {
+                    continue;
+                }
+                unset($normalized['specifications'][$index]);
+                $emptyFields[] = $specification['key'];
+            }
+            if ($emptyFields !== []) {
+                $normalized['specifications'] = array_values($normalized['specifications']);
+                $run?->update(['activity' => [...($run->activity ?? []), 'fields_without_value' => $emptyFields]]);
+            }
             $data = Validator::make($normalized, [
                 'overall_status' => ['required', 'in:reconciled,not_ready'],
                 'recovery_action' => ['sometimes', 'in:none,retry_current_source,try_other_source'],
@@ -385,7 +412,9 @@ class ProductSpecificationReconciler
             // field is expressed through its own "evidence" value, not by
             // omitting it from the response).
             $returnedKeys = collect($data['specifications'])->pluck('key')->sort()->values()->all();
-            $expectedKeys = collect($inputSpecifications)->pluck('key')->sort()->values()->all();
+            // An input row that had no value has nothing to account for.
+            $expectedKeys = collect($inputSpecifications)->filter(fn (array $item): bool => trim($item['value']) !== '')
+                ->pluck('key')->sort()->values()->all();
 
             if (array_diff($expectedKeys, $returnedKeys) !== []) {
                 throw ValidationException::withMessages(['specifications' => [
