@@ -4,6 +4,7 @@ namespace App\Filament\Resources\ProductDrafts\Schemas;
 
 use App\Filament\Resources\Products\ProductResource;
 use App\Filament\Resources\ProductSourceAttempts\ProductSourceAttemptResource;
+use App\Filament\Support\DraftSearchResult;
 use App\Models\ProductDraft;
 use App\Services\Catalog\AttributePresentation;
 use Filament\Infolists\Components\RepeatableEntry;
@@ -58,15 +59,10 @@ class ProductDraftInfolist
                             }),
                         TextEntry::make('gallery_search_stop_reason')
                             ->label(__('Причина остановки'))
-                            ->formatStateUsing(fn (?string $state): string => match ($state) {
-                                'cost_budget' => __('Денежный лимит'),
-                                'stalled' => __('Остановлен досрочно'),
-                                'time_budget' => __('Временной лимит'),
-                                'exhausted' => __('Источники исчерпаны'),
-                                'specifications_unreconciled' => __('Характеристики не сверены'),
-                                default => '—',
-                            })
+                            ->formatStateUsing(fn (ProductDraft $record): string => DraftSearchResult::stopReason($record))
                             ->placeholder('—'),
+                        TextEntry::make('photos')->label(__('Фото'))
+                            ->state(fn (ProductDraft $record): string => DraftSearchResult::photosText($record)),
                         TextEntry::make('images_staged_at')->label(__('Фото сохранены'))->dateTime('d.m.Y H:i:s')->placeholder('—'),
                         TextEntry::make('gallery_notes')->label(__('Заметка'))->placeholder('—')->columnSpanFull(),
                     ])

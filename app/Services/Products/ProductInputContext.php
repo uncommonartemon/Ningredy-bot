@@ -10,6 +10,9 @@ final class ProductInputContext
 {
     public const string PAYLOAD_KEY = '_product_input';
 
+    /** The product request a search was started for, kept on the update that started it. */
+    public const string REQUEST_KEY = '_search_request';
+
     private const array SEARCH_PRIORITY = ['ean' => 10, 'upc' => 10, 'gtin' => 10, 'mpn' => 20, 'model' => 30, 'sku' => 40, 'family' => 60];
 
     /** Store the observed values, not an invented web citation or binding request. */
@@ -62,9 +65,108 @@ final class ProductInputContext
         return $update ? self::forUpdate($update) : self::empty();
     }
 
+    /**
+     * The product request a search was started for, when the assistant says it came from
+     * earlier messages of this chat. A follow-up that only instructs (search again, how to treat
+     * the condition) names no product; read as the request it made the card assembly say the
+     * request names no product (live report 2026-11-27, #635) and put an instruction about the
+     * condition in the place of the product (#706). The earlier messages
+     * are found by their own text, copied by the assistant; only real messages of this chat
+     * count, and their text is kept as the operator wrote it. The current message that is not
+     * part of the request travels as the operator's follow-up.
+     *
+     * @param  list<string>  $quotes  the operator's messages as the assistant copied them
+     * @return array{text: string, message_ids: list<int>, follow_up: ?string, unmatched: list<string>}|null
+     */
+    public static function rememberSearchRequest(TelegramUpdate $update, array $quotes): ?array
+    {
+        $quotes = array_values(array_filter(array_map(fn (mixed $quote): ?string => self::text($quote), $quotes)));
+        if ($quotes === []) {
+            return null;
+        }
+        $candidates = TelegramUpdate::query()
+            ->where('chat_id', $update->chat_id)->where('telegram_user_id', $update->telegram_user_id)
+            ->where('id', '<=', $update->id)->where('created_at', '>=', now()->subDays(2))
+            ->whereNotNull('text')->orderByDesc('id')->limit(40)->get()
+            ->reject(fn (TelegramUpdate $candidate): bool => isset($candidate->payload['callback_query'])
+                || str_starts_with((string) $candidate->text, 'draft:'));
+        $matched = [];
+        $unmatched = [];
+        foreach ($quotes as $quote) {
+            $hit = $candidates->first(fn (TelegramUpdate $candidate): bool => self::sameMessage((string) $candidate->text, $quote));
+            $hit === null ? $unmatched[] = $quote : $matched[$hit->id] = $hit;
+        }
+        if ($matched === []) {
+            return null;
+        }
+        ksort($matched);
+        // A photo's text is the bot's reading of its label, never the operator's words: only its
+        // caption is; what the label says comes with the photo's own evidence (forUpdate()).
+        $words = array_filter(array_map(fn (TelegramUpdate $message): ?string => self::photoMessage($message)
+            ? self::text(data_get($message->payload, 'message.caption'))
+            : self::text($message->text), $matched));
+        $record = [
+            'text' => implode("\n\n", $words),
+            'message_ids' => array_keys($matched),
+            'follow_up' => isset($matched[$update->id]) ? null
+                : (self::photoMessage($update) ? self::text(data_get($update->payload, 'message.caption')) : self::text($update->text)),
+            'unmatched' => $unmatched,
+        ];
+        $fresh = $update->fresh() ?? $update;
+        $payload = is_array($fresh->payload) ? $fresh->payload : [];
+        $payload[self::REQUEST_KEY] = $record;
+        $fresh->update(['payload' => $payload]);
+        $update->setAttribute('payload', $payload);
+
+        return $record;
+    }
+
+    private static function photoMessage(TelegramUpdate $message): bool
+    {
+        $payload = is_array($message->payload) ? $message->payload : [];
+
+        return ! empty(data_get($payload, 'message.photo')) || is_array($payload[self::PAYLOAD_KEY] ?? null);
+    }
+
+    /** One message, whatever spaces and case the copy has; a copy may also be a part of it. */
+    private static function sameMessage(string $message, string $quote): bool
+    {
+        $normal = fn (string $text): string => mb_strtolower(trim((string) preg_replace('/[\s\p{Z}]+/u', ' ', trim($text, " \t\n\r\0\x0B\"'«»“”„"))));
+        $message = $normal($message);
+        $quote = $normal($quote);
+
+        return $message !== '' && $quote !== ''
+            && ($message === $quote || (mb_strlen($quote) >= 4 && str_contains($message, $quote)));
+    }
+
     public static function forUpdate(TelegramUpdate $update): array
     {
         $payload = is_array($update->payload) ? $update->payload : [];
+        $request = $payload[self::REQUEST_KEY] ?? null;
+        // A bare label photo as the request has no words of the operator: its evidence still counts.
+        if (is_array($request) && ((array) ($request['message_ids'] ?? [])) !== []) {
+            $own = $payload;
+            unset($own[self::REQUEST_KEY]);
+            $alone = clone $update;
+            $alone->setAttribute('payload', $own);
+            $current = self::forUpdate($alone);
+            $result = self::empty();
+            $result['original_operator_request'] = self::text($request['text'] ?? null);
+            if (self::text($request['follow_up'] ?? null) !== null) {
+                $result['operator_follow_up'] = self::text($request['follow_up']);
+            }
+            // What a photo of the request read (its label) belongs to the request, not to the message it came in.
+            $earlier = TelegramUpdate::query()->whereIn('id', array_map('intval', (array) ($request['message_ids'] ?? [])))
+                ->where('id', '!=', $update->id)->orderBy('id')->get()->map(fn (TelegramUpdate $message): array => self::forUpdate($message));
+            foreach ([...$earlier->all(), $current] as $part) {
+                $result['input_evidence'] = [...$result['input_evidence'], ...$part['input_evidence']];
+                $result['search_keys'] = [...$result['search_keys'], ...$part['search_keys']];
+            }
+            $result['search_keys'] = self::rankKeys($result['search_keys']);
+            $result['search_plan'] = self::searchPlan($result['search_keys']);
+
+            return $result;
+        }
         $saved = $payload[self::PAYLOAD_KEY] ?? null;
         if (is_array($saved) && ($saved['version'] ?? null) === 1) {
             $result = self::empty();

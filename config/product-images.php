@@ -198,6 +198,11 @@ return [
         // the retry a person makes straight afterwards, short enough that a
         // shop which blocked us for a minute is not written off for the day.
         'refusal_memory_minutes' => (int) env('PRODUCT_IMAGE_BROWSER_REFUSAL_MEMORY_MINUTES', 20),
+        // A gate the real browser was served is remembered far longer: such a
+        // shop refuses every search, and each one paid the photo check and the
+        // browser run again (live report 2026-11-27). The first page the host
+        // serves, to the quick check or the browser, forgets it.
+        'browser_block_memory_days' => (int) env('PRODUCT_IMAGE_BROWSER_BLOCK_MEMORY_DAYS', 3),
         // A server's broken HTTP/2 stack is a property of the server, so once
         // seen it is worth starting on HTTP/1.1 rather than paying for the
         // broken stream again on every later visit.

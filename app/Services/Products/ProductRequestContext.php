@@ -175,6 +175,11 @@ final class ProductRequestContext
         return $this->originalRequest;
     }
 
+    public function operatorFollowUp(): ?string
+    {
+        return self::text($this->inputContext['operator_follow_up'] ?? null);
+    }
+
     public function operatorHint(): ?string
     {
         return $this->operatorHint;
@@ -201,6 +206,9 @@ final class ProductRequestContext
                 : self::STATUS_PROVIDED,
             'selected_product' => $this->selectedProduct,
             'operator_hint' => $this->operatorHint,
+            // What the operator said after the request (search again, how to treat the
+            // condition): an instruction about this search, never the product itself.
+            ...(filled($this->inputContext['operator_follow_up'] ?? null) ? ['operator_follow_up' => $this->inputContext['operator_follow_up']] : []),
             'input_evidence' => $this->inputContext['input_evidence'] ?? [],
             'search_keys' => $this->inputContext['search_keys'] ?? [],
             'search_plan' => $this->inputContext['search_plan'] ?? [],

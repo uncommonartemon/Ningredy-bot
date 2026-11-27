@@ -38,6 +38,7 @@ use App\Services\Products\ProductImageStorage;
 use App\Services\Products\ProductImageVisionVerifier;
 use App\Services\Products\ProductPhotoApplicability;
 use App\Services\Products\ProductPhotoManager;
+use App\Services\Products\ProductSourceAttemptRecorder;
 use App\Services\Products\ProductSpecificationReconciler;
 use App\Services\Products\SourceIdentityProvenance;
 use App\Services\Products\SpecificationReconciliationOutcome;
@@ -3797,6 +3798,62 @@ class ProductImageStorageTest extends TestCase
                 ['title' => 'CMP-1000', 'url' => 'https://93.184.216.34/cmp-1000-page-two', 'type' => 'retailer', 'image_urls' => []]]]);
 
         return [$draft->fresh(), app(ProductImageStorage::class)->stage($draft->fresh())];
+    }
+
+    public function test_the_second_exact_page_without_a_readable_label_ends_the_wait_for_one(): void
+    {
+        // Live report 2026-11-27, #690: six pages confirmed as the exact product showed no
+        // readable code, each was held while the search moved to the next shop, and the card
+        // came after twenty minutes with one photo. Two such pages say the shops do not
+        // photograph the label; the third page is not opened for it.
+        Storage::fake('public');
+        Category::query()->where('slug', 'components')->update(['gallery_search_strategy' => Category::GALLERY_SEARCH_VISION_FIRST]);
+        AppSetting::put('ai.fallback_sources_enabled', '0');
+        ProductImageVisionAgent::fake(function (string $prompt, $attachments): array {
+            $labelled = str_contains($prompt, 'component-21');
+
+            return ['images' => $attachments->keys()->map(fn (int $index): array => [
+                'index' => $index + 1, 'exact_match' => true, 'color_match' => true, 'publishable' => true, 'kind' => 'product', 'view' => 'front',
+                'gallery_rank' => $index + 1, 'score' => 95, 'observed_marking' => $labelled ? 'CMP-1000' : '', 'reason' => 'A component.',
+            ])->all()];
+        })->preventStrayPrompts();
+        Http::fake(function (Request $request) {
+            if (str_contains($request->url(), 'cmp-1000-')) {
+                return Http::response('<html><body><div class=product-gallery></div></body></html>', 200, ['Content-Type' => 'text/html']);
+            }
+            preg_match('/component-(\d+)/', $request->url(), $matches);
+
+            return Http::response($this->jpeg((int) ($matches[1] ?? 1)), 200, ['Content-Type' => 'image/jpeg']);
+        });
+        $opened = [];
+        $browser = $this->mockBrowser();
+        $browser->shouldReceive('extract')->andReturnUsing(function (...$arguments) use (&$opened): array {
+            $page = str_contains(json_encode($arguments), 'page-three') ? 'three' : (str_contains(json_encode($arguments), 'page-two') ? 'two' : 'one');
+            $opened[] = $page;
+
+            return ['https://93.184.216.34/component-'.['one' => 11, 'two' => 12, 'three' => 21][$page].'.jpg'];
+        });
+        $browser->shouldReceive('isConfirmedGalleryImage')->andReturn(false);
+        $browser->shouldReceive('isPartialGalleryImage')->andReturn(false);
+        [, , $draft] = $this->records();
+        $pages = collect(['one', 'two', 'three'])->map(fn (string $page): string => 'https://93.184.216.34/cmp-1000-page-'.$page);
+        $draft->update(['category' => 'components', 'product_type' => 'component', 'model' => 'CMP-1000',
+            'primary_source_url' => $pages[0], 'image_urls' => [],
+            'sources' => $pages->map(fn (string $url): array => ['title' => 'CMP-1000', 'url' => $url, 'type' => 'retailer', 'image_urls' => []])->all()]);
+        foreach ($pages as $url) {
+            // What the photo check of #690 said of each held page.
+            app(ProductSourceAttemptRecorder::class)->record(['telegram_update_id' => $draft->telegram_update_id, 'product_draft_id' => $draft->id,
+                'product_url' => $url, 'actor' => 'identity_validator', 'phase' => 'source_selection', 'action' => 'assess_photo_applicability',
+                'status' => 'completed', 'decision' => 'exact', 'message' => 'Exact product identifier observed; image content and colour still need Vision.']);
+        }
+
+        $stored = app(ProductImageStorage::class)->stage($draft->fresh());
+
+        $this->assertSame(1, $stored);
+        $this->assertNotContains('three', $opened, 'the page after the second exact page without a label is not opened for it');
+        $this->assertSame(1, ProductSourceAttempt::query()->where('product_draft_id', $draft->id)->where('action', 'hold_photo_without_code')->count());
+        $this->assertDatabaseHas('product_source_attempts', ['product_draft_id' => $draft->id, 'action' => 'stop_holding_for_label',
+            'decision' => 'deliver_without_label']);
     }
 
     public function test_a_parts_photo_without_a_readable_code_waits_while_another_page_may_show_the_label(): void

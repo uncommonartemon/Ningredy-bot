@@ -892,5 +892,8 @@
     "Перенести в категорию": "Přesunout do kategorie",
     "Товары встанут в выбранную категорию; тип товара станет её типом. Характеристики и фото не меняются.": "Produkty se přesunou do vybrané kategorie a převezmou její typ. Parametry a fotky se nemění.",
     "Товары перенесены": "Produkty přesunuty",
+    "в товаре #:id: :count": "v produktu #:id: :count",
+    "Черновик подтверждён: его фото перенесены в товар.": "Koncept byl schválen: jeho fotografie byly přesunuty k produktu.",
+    "Все найденные источники просмотрены": "Všechny nalezené zdroje byly prohlédnuty",
     "Без перевода": "Bez překladu"
 }

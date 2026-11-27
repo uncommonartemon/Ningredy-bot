@@ -106,6 +106,53 @@ class DiagnosticReportTest extends TestCase
         @unlink($path);
     }
 
+    public function test_button_presses_do_not_use_up_the_searches_a_report_carries(): void
+    {
+        // Live report 2026-11-27: the report stopped at 80 Telegram updates and 52 of them were
+        // button presses (draft:add, draft:asis, draft:asisok), so seven days became one and
+        // 24 searches of 60. The searches are counted; the presses come along with them.
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => []])]);
+        $searches = [];
+        foreach (range(1, 30) as $n) {
+            $search = TelegramUpdate::query()->create(['update_id' => 910000 + $n * 10, 'telegram_user_id' => '1', 'chat_id' => '1',
+                'payload' => ['message' => ['text' => 'M321R2GA3EB0-CWMXJ']], 'status' => 'completed', 'text' => 'M321R2GA3EB0-CWMXJ '.$n, 'processed_at' => now()]);
+            ProductSourceAttempt::query()->create(['telegram_update_id' => $search->id, 'domain' => 'shop.example', 'product_url' => 'https://shop.example/'.$n,
+                'actor' => 'server', 'phase' => 'image_download', 'action' => 'download_candidates', 'status' => 'completed', 'decision' => 'ready_for_selection']);
+            $run = AiRun::query()->create(['telegram_update_id' => $search->id, 'provider' => 'openai', 'model' => 'gpt-test', 'status' => 'completed',
+                'prompt' => 'x', 'activity' => ['stage' => 'research'], 'started_at' => now()]);
+            $draft = ProductDraft::query()->create(['telegram_update_id' => $search->id, 'ai_run_id' => $run->id, 'requested_by_telegram_user_id' => '1', 'title' => 'Samsung 16GB DDR5 '.$n,
+                'product_type' => 'component', 'category' => 'components', 'status' => 'approved', 'specifications' => [], 'sources' => [], 'image_urls' => []]);
+            $searches[] = $search->id;
+            foreach (['draft:asis:'.$draft->id, 'draft:asisok:'.$draft->id.':'.$search->id, 'draft:add:'.$draft->id] as $i => $data) {
+                TelegramUpdate::query()->create(['update_id' => 910000 + $n * 10 + $i + 1, 'telegram_user_id' => '1', 'chat_id' => '1',
+                    'payload' => ['callback_query' => ['data' => $data]], 'status' => 'completed', 'text' => $data, 'processed_at' => now()]);
+            }
+        }
+
+        $path = app(DiagnosticReport::class)->build(days: 7);
+
+        $zip = new ZipArchive;
+        $this->assertTrue($zip->open($path) === true);
+        foreach ($searches as $id) {
+            $this->assertNotFalse($zip->getFromName("requests/{$id}.txt"), "search #{$id} is in the report");
+        }
+        $this->assertStringContainsString('searches: 30 of 30', (string) $zip->getFromName('summary.txt'));
+        $this->assertSame(30, substr_count((string) $zip->getFromName('drafts.jsonl'), "\n"));
+        $zip->close();
+        @unlink($path);
+
+        // A smaller limit keeps the newest searches and the presses that followed them.
+        $path = app(DiagnosticReport::class)->build(days: 7, maxSearches: 5);
+        $zip->open($path);
+        $this->assertFalse($zip->getFromName('requests/'.$searches[24].'.txt'));
+        $this->assertNotFalse($zip->getFromName('requests/'.$searches[25].'.txt'));
+        $this->assertNotFalse($zip->getFromName('requests/'.($searches[25] + 3).'.txt'), 'the press after a carried search comes along');
+        $this->assertStringContainsString('searches: 5 of 30', (string) $zip->getFromName('summary.txt'));
+        $this->assertStringContainsString('the report carries the newest 5', (string) $zip->getFromName('summary.txt'));
+        $zip->close();
+        @unlink($path);
+    }
+
     public function test_the_report_job_sends_the_archive_to_the_chat_as_a_document(): void
     {
         config(['services.telegram.bot_token' => '1234567890:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA']);
