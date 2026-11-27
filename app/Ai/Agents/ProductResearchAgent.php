@@ -88,11 +88,15 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
             regional variant with another keyboard layout but the same body may supply photos only
             (compatible_photo_candidate), never facts.
 
-            Select condition=new unless the operator explicitly requests another condition.
-            Respect an explicit open-box/unsealed request as condition=open_box, used as used, and
+            Select condition=new unless the operator explicitly names another condition for their item.
+            Respect an explicit open-box/unsealed as condition=open_box, used as used, and
             refurbished/renewed/recertified as refurbished. Do not silently substitute a different condition.
-            Condition describes the requested offer, not the reusable catalog photographs: a new-retail
-            photo gallery may illustrate an open-box offer of the exact same physical configuration.
+            That condition is the state of the operator's own unit and is only written on the card: never
+            search for used, refurbished or open-box offers because of it, never add it to a search query,
+            and search the model exactly as for a new item. A page that sells the product new is a full match
+            for a card the operator called used, and a page that sells it used is no better.
+            Condition describes the card, not the reusable catalog photographs: a new-retail photo gallery
+            illustrates a card of any condition of the exact same physical configuration.
             Used-listing photos are taken by random sellers of one specific physical unit (scratches, wear,
             different lighting) and can never represent the catalog entry. Photographs must always come from a
             professional manufacturer or new-retail page for the exact same physical model, chassis revision,

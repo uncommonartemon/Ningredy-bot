@@ -17,8 +17,55 @@ class ProductSpecificationEvidenceGuard
     public function differingObservations(array $facts): array
     {
         return collect($facts)->filter(fn ($fact) => $this->isCitedFact($fact))
-            ->groupBy('key')->filter(fn ($group) => $group->map(fn ($fact) => $this->valueText($fact['value']))->unique()->count() > 1)
+            ->groupBy('key')->filter(fn ($group) => $group->map(fn ($fact) => $this->notation($fact['value']))->unique()->count() > 1)
             ->map(fn ($group) => $group->values()->all())->all();
+    }
+
+    /**
+     * One value however it is written: the same numbers and words in any order, spacing and
+     * case aside, with the times sign of a kit read as a separator. "32GB (16GBx2)",
+     * "32 GB (2 x 16 GB)" and "32 GB (2 × 16 GB)" are one value (live report 2026-11-27,
+     * #687: three writings of one kit cost a card assembly and a repair).
+     */
+    private function notation(string $value): string
+    {
+        $tokens = $this->tokens($value);
+        sort($tokens);
+
+        return implode(' ', $tokens);
+    }
+
+    /** @return list<string> the words and numbers of a value, numbers without a trailing decimal zero */
+    private function tokens(string $value): array
+    {
+        $text = mb_strtolower(html_entity_decode($value, ENT_QUOTES | ENT_HTML5, 'UTF-8'));
+        // A letter run touching a number is a unit or a word of its own: "16GBx2" is 16, gb, x, 2.
+        $text = (string) preg_replace(['/(?<=\p{N})(?=\p{L})|(?<=\p{L})(?=\p{N})/u', '/×/u'], [' ', ' x '], $text);
+        preg_match_all('/\p{L}+|\p{N}+(?:[.,]\p{N}+)?/u', $text, $matches);
+
+        return array_values(array_filter(array_map(
+            fn (string $token): string => preg_match('/^\p{N}/u', $token) === 1 ? $this->valueText(str_replace(',', '.', $token)) : $token,
+            $matches[0],
+        ), fn (string $token): bool => $token !== 'x'));
+    }
+
+    /**
+     * The value's main amount: its first number written with a unit ("64 gb" in
+     * "64 GB (1 × 64 GB)" and in "64 GB; 2 ranks; x4 organization"). Two values with the same
+     * main amount state one quantity and differ in detail; "16GB" beside "32 GB (2 x 16 GB)"
+     * and "i5-13400F" beside "i5-12400F" do not. A value without a unit has none.
+     */
+    private function mainAmount(string $value): ?string
+    {
+        $tokens = $this->tokens($value);
+        foreach ($tokens as $index => $token) {
+            $next = $tokens[$index + 1] ?? null;
+            if (preg_match('/^\p{N}/u', $token) === 1 && $next !== null && preg_match('/^\p{L}/u', $next) === 1) {
+                return $token.' '.$next;
+            }
+        }
+
+        return null;
     }
 
     /** Repair only a status label, then run every provenance/conflict check. */
@@ -76,7 +123,42 @@ class ProductSpecificationEvidenceGuard
         }
 
         $result = $this->listSourcesNamedInReason($input, $result, $observedFacts);
+        $result = $this->listSourcesThatAgree($input, $result, $observedFacts);
         $this->validate($input, $result, $observedFacts, $observedPages, $inputEvidence, $operatorRequest);
+
+        return $result;
+    }
+
+    /**
+     * A source that wrote the same quantity, only with more or less detail, needs no account of
+     * its own once the value carries a reason: the server lists it, because it knows it. This was
+     * the most common rejected assembly (docs/failure-modes.md): the reason was written and the
+     * agent left out sources that said "64 GB (1 × 64 GB)" or "64 GB; 2 ranks; x4 organization"
+     * beside its own "64 GB (1 × 64 GB)", and every new attempt, after a repair had listed them,
+     * left them out again (live report 2026-11-27: 6 of 9 failed assembly calls, #687, #693).
+     * A source with another amount still has to be accounted for by the agent.
+     */
+    private function listSourcesThatAgree(array $input, array $result, array $observedFacts): array
+    {
+        $facts = collect([...$input, ...$observedFacts])->filter(fn ($fact) => $this->isCitedFact($fact));
+        foreach ($result as $index => $item) {
+            if (! is_array($item) || ($item['evidence'] ?? null) === 'dropped' || trim((string) ($item['reason'] ?? '')) === ''
+                || ! is_string($item['value'] ?? null)) {
+                continue;
+            }
+            $amount = $this->mainAmount($item['value']);
+            // The value's own source is already counted.
+            $agreeing = $facts->where('key', $item['key'] ?? null)
+                ->filter(fn (array $fact): bool => $fact['source_url'] !== ($item['source_url'] ?? null)
+                    && ($this->notation($fact['value']) === $this->notation($item['value'])
+                        || ($amount !== null && $this->mainAmount($fact['value']) === $amount)))
+                ->pluck('source_url')->unique()->values()->all();
+            if ($agreeing !== []) {
+                $result[$index]['considered_source_urls'] = array_values(array_unique([
+                    ...(array) ($item['considered_source_urls'] ?? []), ...$agreeing,
+                ]));
+            }
+        }
 
         return $result;
     }
@@ -241,8 +323,9 @@ class ProductSpecificationEvidenceGuard
             }
 
             $known = $facts->where('key', $key)->concat($labels->where('key', $key));
+            // Another writing of the same value is not a difference to account for.
             $hasDifference = $dropped ? $known->isNotEmpty()
-                : $known->contains(fn ($fact) => $this->valueText($fact['value']) !== $this->valueText($item['value']));
+                : $known->contains(fn ($fact) => $this->notation($fact['value']) !== $this->notation($item['value']));
             if ($hasDifference) {
                 $needed = $known->pluck('source_url')->filter();
                 $considered = $item['considered_source_urls'] ?? [];

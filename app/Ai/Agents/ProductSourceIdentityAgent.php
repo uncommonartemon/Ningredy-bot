@@ -61,15 +61,15 @@ class ProductSourceIdentityAgent implements Agent, HasStructuredOutput
             verification_stage distinguishes source eligibility from final offer acceptance.
             For source_eligibility, decide whether the observed product identity and configuration
             satisfy the operator's model, codes, colour, RAM/storage and other product requirements.
+            The condition of an offer (new, used, refurbished, open box) is not part of the product's
+            identity, in either direction: a page selling the product new satisfies a request the
+            operator called used, and a page selling it used is no better a match. The card carries the
+            condition the operator named and the difference is recorded elsewhere. Never return
+            conflicting or uncertain over condition, for source_eligibility or assembled_offer; whether
+            a listing's own photos may be published is decided by the photo checks, not here.
             operator_follow_up, when present, is what the operator wrote after the request: an
             instruction about the search, not a description of the product.
-            Missing commercial condition evidence (new/used/refurbished) alone must not turn an
-            otherwise confirmed product configuration into uncertain: preserve that source for
-            collection and the mandatory card assembly, which must establish the requested condition.
-            Do not infer or assert that it is new. Explicit contradictory condition evidence remains
-            conflicting immediately (for example a used listing when the operator requested new).
-            For assembled_offer, check ALL explicit operator requirements including condition;
-            return uncertain if the requested condition cannot be established from the supplied evidence.
+            For assembled_offer, check every other explicit operator requirement.
             Source eligibility is never permission to publish an unverified assembled offer.
 
             When proposed_card is present, this is an explicit offer-adoption check, not just page

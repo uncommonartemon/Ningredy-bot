@@ -83,6 +83,9 @@ class ResearchProduct implements Tool
     /** The query of the current call, so validation can tell the operator's codes from a page's. */
     private string $query = '';
 
+    /** The condition the operator named for the item (used, refurbished, open box), if any. */
+    private ?string $statedCondition = null;
+
     /** @var array{text: string, message_ids: list<int>, follow_up: ?string, unmatched: list<string>}|null */
     private ?array $searchRequest = null;
 
@@ -96,7 +99,13 @@ class ResearchProduct implements Tool
         if ($this->isCancelled()) {
             return $this->cancelledResult();
         }
-        $query = trim((string) $request->string('query'));
+        // The condition of the operator's item is written on the card when it is saved; the
+        // search looks for the model as for a new one (decision of 2026-11-27, live #705: the
+        // query ended in "used", the pages sold the module new, and the card was refused).
+        [$query, $this->statedCondition] = ProductCondition::fromSearchQuery(
+            trim((string) $request->string('query')),
+            in_array($request['condition'] ?? null, ProductCondition::VALUES, true) ? (string) $request['condition'] : null,
+        );
         $this->query = $query;
         // The product request may be in earlier messages, the current one only an instruction
         // about the search (live #635, #706); the assistant names them, the server finds them.
@@ -518,6 +527,11 @@ class ResearchProduct implements Tool
                 return $this->json($notFound);
             }
 
+            // The card carries the condition the operator named; an observed offer's other
+            // condition stays a request difference. A condition row among the facts is the
+            // offer's, not the product's: the card's condition is its own field.
+            $data['condition'] = $this->statedCondition ?? $data['condition'] ?? 'new';
+            $data['specifications'] = ProductCondition::withoutConditionRows($data['specifications'] ?? []);
             $catalogIdentity = app(ProductCatalogIdentity::class);
             $existingProduct = $catalogIdentity->find($data, $data['condition'] ?? 'new', activeOnly: true);
 
@@ -1230,7 +1244,12 @@ class ResearchProduct implements Tool
                 'The product exactly as the user described it: brand, model, and the specs/identifiers they '
                 .'actually stated. Do not add a model year, generation, suffix, or any other identifying detail '
                 .'the user did not mention - an invented detail can steer the downstream search toward the wrong '
-                .'product. Do not repeat the same term multiple times or wrap it in quotes.'
+                .'product. Do not repeat the same term multiple times or wrap it in quotes. Never add the item\'s '
+                .'condition (used, refurbished, open box): the model is searched as for a new item; pass the condition in condition.'
+            ),
+            'condition' => $schema->string()->enum(ProductCondition::VALUES)->description(
+                'The condition the operator named for their item (used, refurbished, open_box), written on the card when it is '
+                .'saved. Omit it when they named none: the card is new.'
             ),
             'request_messages' => $schema->array()->items($schema->string())->description(
                 'When the product was named in earlier messages of this chat and the current message only adds an instruction '
