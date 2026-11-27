@@ -104,23 +104,34 @@ ends or the next navigation will find two elements claiming one name.
 ## The start page
 
 Decision of 2026-11-25: the start page is expressive where the catalog is restrained.
+Decision of 2026-11-27: its one job is to open the catalog, and the hook is the price. Prices
+and counts on it are the catalog's own (`StorefrontHome`), every way in opens the catalog
+already filtered to exactly what it counted, and it promises nothing the shop did not decide.
 
 - The scroll is the clock. Scenes are GSAP ScrollTrigger timelines with `scrub`; the only
-  thing that plays by itself is the entrance and the row of brands (which takes its speed
-  and direction from the scroll).
+  things that move by themselves are the entrance, the row of brands (which takes its speed
+  and direction from the scroll) and the product row while a pointer rests near its edge.
 - One drawing runs behind everything: the line laptop (`resources/js/laptopWire.js`,
   `Components/Home/LaptopWire.vue`). The page owns its pose and ties it to the scroll.
   It is plain canvas; do not add a 3D library for it.
-- A pinned scene is created before the scenes below it, or they are measured without the
-  held distance and fire early.
-- Poster type is huge (10-25vw), capitals, one family. Outline text filling with colour as
-  it crosses the screen is the page's one repeated device; do not add a second.
-- Photos still sit on light plates and nothing is laid over them.
+- No scene holds the page in place (decision of 2026-11-27): every section is scrolled past
+  like any other, so each scene below is measured where it stands. The row of new products is
+  an ordinary slider in the flow (`resources/js/dragRow.js`): swiped, dragged with the mouse
+  (a drag never opens a card, a click does), moved slowly toward a side while the pointer rests
+  in its outer eighth, reached by the keyboard and by previous/next buttons. Should a pinned
+  scene ever come back, create it before the scenes below it, or they fire early.
+- Poster type is huge (10-25vw), capitals, one family. Each line is shrunk until it fits its
+  box (`fitPoster` in `Pages/Home.vue`): Ukrainian and Czech words are longer than English
+  ones. Outline text filling with colour as it crosses the screen is the page's one repeated
+  device; do not add a second.
+- Photos still sit on light plates and nothing is laid over them; a line never runs under a plate.
+- The catalog is one press away: a fixed «Catalog» button appears once the first screen is
+  gone and leaves when the last link is on screen (a bar across the bottom on a phone).
 - Categories are shown by icons, not photos: one set of line icons on a 24-unit grid
   (`resources/js/categoryIcons.js`, `Components/CategoryIcon.vue`). A new icon joins that
   set in the same hand: one stroke, round joins, no fill. Do not mix in another icon style.
-- `prefers-reduced-motion` gets a still page: no pin, no scrub, no running row. Below
-  900px nothing is pinned and the product row is swiped.
+- `prefers-reduced-motion` gets a still page: no scrub, no running row, and the product row
+  moves only when dragged, swiped or reached by the keyboard (no glide, no edge movement).
 - All motion is set up inside `gsap.matchMedia` and reverted when the page is left.
 
 ## References

@@ -25,48 +25,64 @@
 .home-page .catalog-masthead { border-bottom-color: transparent; }
 .home-page svg { fill: none; stroke: currentColor; stroke-width: 1.5; }
 .home-page img { mix-blend-mode: multiply; }
+/* A focused element is scrolled clear of the fixed catalog button. */
+html:has(.home-dock--shown) { scroll-padding-bottom: 104px; }
 
-/* Poster type: the three verbs, the service words, the category index and the last link. */
-.hero__words, .service__word, .index__name, .brands__row a, .outro__link, .gallery__head h2, .gallery__more span {
+/* Poster type: the three lines, the ways, the category index and the last link. */
+.hero__words, .way__word, .index__name, .brands__row a, .outro__link, .gallery__head h2, .gallery__more span, .hero__cta-label, .home-dock span {
     font-family: var(--poster); font-weight: 800; text-transform: uppercase; letter-spacing: -.012em;
 }
 .home-label { margin: 0 0 22px; color: var(--muted); font: 600 14px/1.4 'Manrope Variable', sans-serif; }
 
 /* First screen. */
-.hero { display: flex; flex-direction: column; min-height: calc(100svh - 78px); padding: clamp(8px, 2vh, 28px) 0 clamp(28px, 4vh, 48px); }
-.hero__words { display: grid; margin: 0; font-size: min(15vw, 26svh, 270px); line-height: .84; }
+.hero { display: flex; flex-direction: column; min-height: calc(100svh - 78px); padding: clamp(8px, 2vh, 28px) 0 clamp(24px, 3.4vh, 44px); }
+.hero__words { display: grid; margin: 0; font-size: min(15vw, 23svh, 250px); line-height: .84; }
+/* With plates beside them the lines keep to the left and are fitted to that room. */
+.hero--plates .hero__words { max-width: 66%; }
 .hero__word { display: block; overflow: hidden; padding-top: .1em; margin-top: -.1em; white-space: nowrap; }
 .hero__word-inner { display: inline-block; will-change: transform; }
 .hero__word--1 { color: transparent; -webkit-text-stroke: 1.5px rgba(244, 247, 251, .82); }
 
 .hero__plates { position: absolute; inset: 0; pointer-events: none; }
 .hero__plate {
-    position: absolute; display: grid; width: clamp(170px, 16vw, 270px); padding: 8px 8px 12px; border-radius: 16px;
+    position: absolute; display: grid; width: clamp(170px, 15vw, 260px); padding: 8px 8px 12px; border-radius: 16px;
     color: var(--ink) !important; background: var(--plate); box-shadow: 0 30px 80px #00000073; pointer-events: auto;
     transition: rotate .4s cubic-bezier(.2, .7, .2, 1), box-shadow .3s;
 }
 .hero__plate:hover { rotate: 0deg; box-shadow: 0 34px 90px #000000a6; }
-.hero__plate--0 { top: 6%; right: 3%; rotate: 5deg; }
-.hero__plate--1 { top: 60%; right: 21%; rotate: -6deg; width: clamp(150px, 13vw, 220px); }
-.hero__plate--2 { top: 44%; right: 1%; rotate: -2deg; width: clamp(170px, 15vw, 250px); }
+.hero__plate--0 { top: 4%; right: 2%; rotate: 5deg; }
+.hero__plate--1 { top: 36%; right: 17%; rotate: -6deg; width: clamp(150px, 12.5vw, 220px); }
+.hero__plate--2 { top: 46%; right: 0; rotate: -2deg; width: clamp(160px, 14vw, 240px); }
 .hero__plate-photo { position: relative; display: block; aspect-ratio: 4 / 3; }
 .hero__plate-photo img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; padding: 6%; }
 .hero__plate-caption { display: grid; gap: 1px; padding: 8px 6px 0; border-top: 1px solid #1011161f; font-size: 12px; line-height: 1.35; }
 .hero__plate-caption small { color: #5c5f6e; font-size: 11px; }
 .hero__plate-caption strong { overflow: hidden; font: 700 13px/1.3 'Manrope Variable', sans-serif; text-overflow: ellipsis; white-space: nowrap; }
-.hero__plate-caption em { font: 800 20px/1.1 var(--poster); font-style: normal; font-variant-numeric: tabular-nums; }
+/* The price is what the plate is for: set large in tabular figures. */
+.hero__plate-caption em { margin-top: 4px; font: 800 clamp(24px, 2vw, 32px)/1 var(--poster); font-style: normal; font-variant-numeric: tabular-nums; }
 
-.hero__foot { display: grid; grid-template-columns: minmax(0, 520px) minmax(0, 1fr); gap: 32px; align-items: end; margin-top: auto; padding-top: 28px; }
-.hero__copy p { max-width: 44ch; margin: 0 0 20px; color: #c9cddb; font-size: 17px; line-height: 1.55; }
+.hero__foot { display: grid; grid-template-columns: minmax(0, 720px) minmax(0, 1fr); gap: 32px; align-items: end; margin-top: auto; padding-top: 24px; }
+.hero__copy p { max-width: 52ch; margin: 0 0 18px; color: #c9cddb; font-size: 17px; line-height: 1.5; }
+.hero__actions { display: grid; grid-template-columns: auto minmax(220px, 1fr); gap: 12px; align-items: stretch; }
+/* The loudest thing after the words: the one way in, with the catalog's own numbers on it. */
+.hero__cta {
+    display: grid; align-content: center; gap: 3px; min-height: 60px; padding: 10px 24px 10px 26px; border-radius: 14px;
+    color: var(--ink) !important; background: var(--accent); box-shadow: 0 18px 50px #52f6da2e; transition: box-shadow .25s, transform .25s cubic-bezier(.2, .7, .2, 1);
+}
+.hero__cta:hover { box-shadow: 0 22px 60px #52f6da4d; transform: translateY(-2px); }
+.hero__cta-label { display: inline-flex; align-items: center; gap: 12px; font-size: clamp(24px, 2vw, 30px); line-height: 1; white-space: nowrap; }
+.hero__cta-label svg { width: 22px; flex-shrink: 0; stroke-width: 2.2; transition: transform .25s; }
+.hero__cta:hover .hero__cta-label svg { transform: translateX(4px); }
+.hero__cta small { color: #101116b8; font: 700 13px/1.25 'Manrope Variable', sans-serif; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .hero__stats { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 14px 0; margin: 0; }
 .hero__stats div { padding: 0 22px; border-left: 1px solid var(--line); }
 .hero__stats div:last-child { padding-right: 0; }
 .hero__stats dt { color: var(--muted); font-size: 12px; }
-.hero__stats dd { margin: 2px 0 0; font: 800 30px/1.1 var(--poster); font-variant-numeric: tabular-nums; text-transform: uppercase; }
+.hero__stats dd { margin: 2px 0 0; font: 800 30px/1.1 var(--poster); font-variant-numeric: tabular-nums; text-transform: uppercase; white-space: nowrap; }
 
 .home-search { position: relative; z-index: 20; }
 .home-search__field {
-    display: flex; align-items: center; gap: 14px; min-height: 60px; padding: 0 12px 0 18px;
+    display: flex; align-items: center; gap: 14px; min-height: 60px; height: 100%; padding: 0 12px 0 18px;
     border: 1px solid #3a3d50; border-radius: 14px; background: #13141ad9; backdrop-filter: blur(10px); transition: border-color .18s;
 }
 .home-search__field:focus-within { border-color: var(--accent); }
@@ -92,38 +108,54 @@
 .manifesto__word { display: inline-block; margin-right: .22em; }
 .manifesto p { max-width: 24ch; margin: 0; font: 800 clamp(40px, 6.6vw, 118px)/.98 var(--poster); text-transform: uppercase; letter-spacing: -.008em; text-wrap: balance; }
 
-/* Buy, sell, repair: each word fills as it crosses the screen. */
-.services { display: grid; gap: clamp(36px, 9vh, 110px); padding: 6vh 0 14vh; }
-.service { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
-.service:nth-child(even) { justify-items: end; text-align: right; }
-.service__word { position: relative; display: inline-grid; margin: 0; font-size: min(21vw, 360px); line-height: .82; white-space: nowrap; }
-.service__word > span { grid-area: 1 / 1; padding-top: .08em; }
-.service__outline { color: transparent; -webkit-text-stroke: 1.5px rgba(244, 247, 251, .34); }
-.service__fill { color: var(--text); }
-.service__body { display: grid; gap: 16px; max-width: 46ch; }
-.service:nth-child(even) .service__body { justify-items: end; }
-.service__body p { margin: 0; color: #c9cddb; font-size: clamp(16px, 1.3vw, 20px); line-height: 1.5; }
-.service__link { display: inline-flex; align-items: center; gap: 12px; min-height: 48px; padding: 10px 20px; border: 1px solid var(--text); border-radius: 999px; font-weight: 700; transition: color .2s, background-color .2s; }
-.service__link svg { width: 18px; transition: transform .25s; }
-.service__link:hover { color: var(--bg); background: var(--text); }
-.service__link:hover svg { transform: translateX(4px); }
+/* Three ways into the catalog, each word filling as it crosses the screen, each with its own
+   lowest price and the catalog already filtered behind its link. */
+.ways { display: grid; gap: clamp(48px, 11vh, 130px); padding: 6vh 0 14vh; }
+.way { display: grid; gap: 14px; }
+.way:nth-child(even) { justify-items: end; }
+.way__word { position: relative; display: inline-grid; margin: 0; font-size: min(21vw, 340px); line-height: .82; white-space: nowrap; }
+.way__word > span { grid-area: 1 / 1; padding-top: .08em; }
+.way__outline { color: transparent; -webkit-text-stroke: 1.5px rgba(244, 247, 251, .34); }
+.way__fill { color: var(--text); }
+.way__body {
+    display: grid; grid-template-columns: minmax(0, 44ch) minmax(0, 1fr) auto; gap: 18px clamp(28px, 4vw, 72px); align-items: end;
+    justify-self: stretch; padding-top: 18px; border-top: 1px solid var(--line);
+}
+.way__text { margin: 0; color: #c9cddb; font-size: clamp(16px, 1.25vw, 19px); line-height: 1.5; }
+.way__price { display: grid; margin: 0; justify-self: end; }
+.way__price small { color: var(--muted); font: 600 13px/1.4 'Manrope Variable', sans-serif; }
+.way__price span { font: 800 clamp(48px, 5.4vw, 92px)/.9 var(--poster); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.way__go { display: grid; grid-column: -2 / -1; justify-items: start; gap: 10px; }
+.way__count { color: var(--muted); font-size: 14px; font-variant-numeric: tabular-nums; }
+.way__link { display: inline-flex; align-items: center; gap: 12px; min-height: 48px; padding: 10px 20px; border: 1px solid var(--text); border-radius: 999px; font-weight: 700; white-space: nowrap; transition: color .2s, background-color .2s; }
+.way__link svg { width: 18px; transition: transform .25s; }
+.way__link:hover { color: var(--bg); background: var(--text); }
+.way__link:hover svg { transform: translateX(4px); }
 
-/* The newest products. By default a row the visitor swipes; with room and motion the page
-   holds still and the scroll carries the row sideways. */
-.gallery { margin: 0 calc(-1 * var(--gutter)); }
-.gallery__track { display: flex; align-items: stretch; gap: clamp(18px, 2.4vw, 40px); padding: 6vh var(--gutter); overflow-x: auto; overscroll-behavior-x: contain; scroll-snap-type: x proximity; scrollbar-width: none; }
+/* The newest products: an ordinary row in the page's flow, swiped with a finger, dragged with
+   the mouse and moved a little by a pointer resting near its edge. */
+.gallery { margin: 0 calc(-1 * var(--gutter)); padding: 6vh 0 2vh; }
+.gallery__track {
+    display: flex; align-items: stretch; gap: clamp(18px, 2.4vw, 40px); padding: 2vh var(--gutter) 3vh; overflow-x: auto; overscroll-behavior-x: contain;
+    scroll-snap-type: x proximity; scroll-padding-inline: var(--gutter); scrollbar-width: none;
+}
 .gallery__track::-webkit-scrollbar { display: none; }
 .gallery__track > * { flex: 0 0 auto; scroll-snap-align: start; }
-.gallery--pinned { height: 100svh; overflow: hidden; }
-.gallery--pinned .gallery__track { width: max-content; height: 100%; align-items: center; padding-block: 0; overflow: visible; will-change: transform; }
-.gallery__head { display: grid; align-content: center; gap: 18px; width: min(78vw, 520px); }
-.gallery__head h2 { margin: 0; font-size: clamp(64px, 10vw, 170px); line-height: .86; }
+@media (hover: hover) and (pointer: fine) {
+    /* A mouse drags the row; snapping would pull it back after every drag. */
+    .gallery__track { scroll-snap-type: none; cursor: grab; user-select: none; }
+    .gallery__track a { cursor: inherit; }
+    .gallery__track.is-dragging { cursor: grabbing; }
+    .gallery__track.is-dragging a { pointer-events: none; }
+}
+.gallery__head { display: grid; align-content: center; gap: 18px; width: min(78vw, 460px); }
+.gallery__head h2 { display: grid; margin: 0; font-size: clamp(64px, 9vw, 150px); line-height: .86; }
+.gallery__head-line { display: block; white-space: nowrap; }
 .gallery__head a { justify-self: start; color: var(--muted); text-decoration: underline; text-underline-offset: 5px; }
 .gallery__head a:hover { color: var(--text); }
-.gallery__item { display: grid; align-content: start; gap: 10px; width: clamp(260px, 27vw, 430px); }
-.gallery--pinned .gallery__item:nth-of-type(even) { margin-top: 9vh; }
+.gallery__item { display: grid; align-content: start; gap: 10px; width: clamp(260px, 26vw, 420px); }
 .gallery__photo { position: relative; display: block; aspect-ratio: 4 / 3; overflow: hidden; border-radius: 18px; background: var(--plate); transition: transform .5s cubic-bezier(.2, .7, .2, 1); }
-.gallery__photo img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; padding: 8%; transition: transform .6s cubic-bezier(.2, .7, .2, 1); }
+.gallery__photo img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; padding: 8%; transition: transform .6s cubic-bezier(.2, .7, .2, 1); -webkit-user-drag: none; }
 .gallery__item:hover .gallery__photo img { transform: scale(1.06); }
 .gallery__meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; margin-top: 6px; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .gallery__title { font: 700 clamp(17px, 1.4vw, 21px)/1.3 'Manrope Variable', sans-serif; overflow-wrap: anywhere; }
@@ -131,20 +163,33 @@
 /* A missing price is a fact, not a headline. */
 .gallery__price--none { color: var(--muted); font: 500 13px/1.4 'Manrope Variable', sans-serif; }
 .gallery__more { display: grid; align-content: center; justify-items: start; gap: 6px; padding: 0 6vw 0 2vw; }
-.gallery__more span { font-size: clamp(64px, 10vw, 170px); line-height: .86; }
+.gallery__more span { font-size: clamp(64px, 9vw, 150px); line-height: .86; }
 .gallery__more svg { width: clamp(44px, 5vw, 84px); transition: transform .3s; }
 .gallery__more:hover svg { transform: translateX(14px); }
 .gallery__more small { color: var(--muted); font-size: 14px; }
+/* Where the row stands, and a press to the next screen of cards for those who prefer one. */
+.gallery__bar { display: flex; align-items: center; gap: 10px; padding: 0 var(--gutter); }
+.gallery__progress { position: relative; flex: 1; height: 1px; margin-right: 14px; background: var(--line); }
+.gallery__progress i { position: absolute; inset: 0; background: var(--text); transform-origin: left; transition: transform .2s linear; }
+.gallery__bar button {
+    display: grid; place-items: center; width: 48px; height: 48px; border: 1px solid var(--line); border-radius: 999px;
+    color: var(--text); background: transparent; transition: border-color .2s, color .2s;
+}
+.gallery__bar button:hover:not(:disabled) { border-color: var(--text); }
+.gallery__bar button:disabled { color: #4a4d60; cursor: default; }
+.gallery__bar button svg { width: 18px; }
 .gallery--empty { display: grid; min-height: 40svh; margin: 0; place-items: center; color: var(--muted); text-align: center; }
 
-/* Categories as an index set in poster type. */
+/* Categories as an index set in poster type, each with the lowest price under it. */
 .index { padding: 14vh 0 10vh; }
-.index__row { position: relative; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 24px; padding: clamp(10px, 1.6vh, 20px) 0; border-top: 1px solid var(--line); }
+.index__row { position: relative; display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 24px; padding: clamp(10px, 1.6vh, 20px) 0; border-top: 1px solid var(--line); }
 .index__row:last-of-type { border-bottom: 1px solid var(--line); }
-.index__name { font-size: clamp(54px, 10.5vw, 190px); line-height: .9; transition: color .25s, transform .45s cubic-bezier(.2, .7, .2, 1); overflow-wrap: anywhere; }
+.index__name { font-size: clamp(54px, 10vw, 180px); line-height: .9; white-space: nowrap; transition: color .25s, transform .45s cubic-bezier(.2, .7, .2, 1); }
 .index__name sup { margin-left: .22em; color: var(--muted); font: 600 clamp(13px, 1.1vw, 18px)/1 'Manrope Variable', sans-serif; letter-spacing: 0; vertical-align: top; position: relative; top: .5em; font-variant-numeric: tabular-nums; }
+.index__price { color: var(--muted); font: 800 clamp(22px, 2.4vw, 40px)/1 var(--poster); font-variant-numeric: tabular-nums; text-transform: uppercase; white-space: nowrap; transition: color .25s; }
 .index__arrow { width: clamp(30px, 3.4vw, 60px); color: var(--muted); transition: transform .35s cubic-bezier(.2, .7, .2, 1), color .25s; }
 .index__row:is(:hover, :focus-visible) .index__name { color: var(--accent); transform: translateX(1.4vw); }
+.index__row:is(:hover, :focus-visible) .index__price { color: var(--text); }
 .index__row:is(:hover, :focus-visible) .index__arrow { color: var(--accent); transform: translateX(10px); }
 /* The category's icon is drawn in the same line as the laptop behind the page; pointing at
    the row draws it again. */
@@ -167,35 +212,62 @@
 
 /* The way out is the catalog. */
 .outro { display: grid; justify-items: center; gap: 10px; min-height: 92svh; padding: 10vh 0 6vh; align-content: center; text-align: center; }
-.outro__link { display: inline-flex; align-items: center; gap: 3vw; font-size: min(25vw, 420px); line-height: .82; }
+.outro__lead { margin: 0; color: #c9cddb; font-size: clamp(18px, 1.6vw, 24px); font-weight: 600; }
+.outro__link { display: inline-flex; align-items: center; gap: 3vw; font-size: min(25vw, 420px); line-height: .82; white-space: nowrap; }
 .outro__link span { padding-top: .08em; }
 .outro__link svg { width: .42em; height: .42em; stroke-width: 1.1; transition: transform .4s cubic-bezier(.2, .7, .2, 1); }
 .outro__link:hover { color: var(--accent); }
 .outro__link:hover svg { transform: translateX(.08em); }
-.outro__count { margin: 0; color: var(--muted); font-size: 15px; }
+.outro__count { margin: 0; color: var(--muted); font-size: 15px; font-variant-numeric: tabular-nums; }
 .outro__budgets { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; margin: 0 0 5vh; padding: 0; list-style: none; }
 .outro__budgets a { display: inline-flex; align-items: baseline; gap: 12px; min-height: 48px; padding: 10px 20px; border: 1px solid var(--line); border-radius: 999px; transition: border-color .2s; }
 .outro__budgets a:hover { border-color: var(--text); }
 .outro__budgets strong { font: 700 16px/1.3 'Manrope Variable', sans-serif; font-variant-numeric: tabular-nums; }
 .outro__budgets span { color: var(--muted); font-size: 13px; }
 
+/* The catalog one press away: a button in the corner once the first screen is gone, until the
+   last link is on screen. Hidden, it is out of the way of the pointer, the keyboard and readers. */
+.home-page > .home-dock {
+    position: fixed; z-index: 40; right: max(20px, calc(var(--gutter) - 4px)); bottom: max(20px, env(safe-area-inset-bottom));
+    display: inline-flex; align-items: center; gap: 12px; min-height: 56px; padding: 8px 20px 8px 24px; border-radius: 999px;
+    color: var(--ink) !important; background: var(--accent); box-shadow: 0 16px 44px #00000080;
+    visibility: hidden; opacity: 0; transform: translateY(24px);
+    transition: opacity .22s ease-out, transform .26s cubic-bezier(.2, .7, .2, 1), visibility 0s linear .26s;
+}
+.home-page > .home-dock--shown { visibility: visible; opacity: 1; transform: none; transition-delay: 0s; }
+.home-dock span { font-size: 26px; line-height: 1; padding-top: .06em; }
+.home-dock svg { width: 20px; stroke-width: 2.2; transition: transform .25s; }
+.home-dock:hover svg { transform: translateX(4px); }
+.home-page > .home-dock:focus-visible { outline-color: var(--text); }
+
+@media (max-width: 1099px) {
+    .hero__actions { grid-template-columns: minmax(0, 1fr); }
+    .hero__cta { justify-self: start; }
+}
 @media (max-width: 899px) {
     .hero { min-height: 0; }
-    .hero__words { font-size: min(21vw, 190px); }
+    .hero__words { font-size: min(19vw, 190px); }
+    .hero--plates .hero__words { max-width: none; }
     .hero__plates { position: static; display: flex; gap: 12px; margin: 26px calc(-1 * var(--gutter)) 0; padding: 12px var(--gutter) 30px; overflow-x: auto; scrollbar-width: none; pointer-events: auto; }
     .hero__plate, .hero__plate--1, .hero__plate--2 { position: static; flex: 0 0 62%; width: auto; max-width: 280px; box-shadow: 0 18px 40px #00000073; }
     .hero__plate--0 { rotate: -2deg; }
     .hero__plate--1 { rotate: 2deg; }
     .hero__plate--2 { rotate: -1deg; }
     .hero__foot { grid-template-columns: minmax(0, 1fr); padding-top: 8px; }
+    .hero__cta { justify-self: stretch; min-height: 68px; }
     .hero__stats { justify-content: flex-start; }
     .hero__stats div:first-child { padding-left: 0; border-left: 0; }
     .home-search__results { top: calc(100% + 8px); bottom: auto; }
     .manifesto { min-height: 0; padding: 14vh 0; }
-    .service__word { font-size: 23vw; }
+    .way__word { font-size: 23vw; }
+    .way__body { grid-template-columns: minmax(0, 1fr) auto; }
+    .way__text { grid-column: 1 / -1; }
+    .way__price { justify-self: start; }
+    .way__go { justify-items: end; }
     .gallery__head { width: 74vw; }
     .gallery__item { width: 74vw; max-width: 340px; }
-    .index__row { grid-template-columns: auto minmax(0, 1fr); gap: 16px; }
+    .gallery__bar { display: none; }
+    .index__row { grid-template-columns: auto minmax(0, 1fr) auto; gap: 14px; }
     .home-page .category-icon { stroke-width: .75; }
     .index__arrow { display: none; }
 }
@@ -206,11 +278,15 @@
     .home-search__field kbd { display: none; }
     .home-search__item { grid-template-columns: 52px minmax(0, 1fr); }
     .home-search__item strong { grid-column: 2; }
+    .index__price { font-size: 20px; }
+    /* On a phone the way to the catalog is a bar across the bottom. */
+    .home-page > .home-dock { right: 0; bottom: 0; left: 0; justify-content: center; min-height: 0; padding: 14px 20px max(14px, env(safe-area-inset-bottom)); border-radius: 18px 18px 0 0; box-shadow: 0 -10px 30px #00000066; }
 }
-/* A still page for visitors who asked for less motion: nothing is held, filled or run. */
+/* A still page for visitors who asked for less motion: nothing is filled, run or moved by itself. */
 @media (prefers-reduced-motion: reduce) {
     .brands__row { flex-wrap: wrap; width: auto; padding: 0 var(--gutter); gap: 8px 32px; }
     .brands__line[aria-hidden='true'], .brands__row a[aria-hidden='true'] { display: none; }
-    .hero__plate, .gallery__photo img, .index__name, .index__arrow { transition: none; }
+    .hero__plate, .hero__cta, .gallery__photo img, .gallery__progress i, .index__name, .index__arrow { transition: none; }
     .index__row:is(:hover, :focus-visible) .category-icon path { animation: none; }
+    .home-page > .home-dock, .home-page > .home-dock--shown { transform: none; transition: none; }
 }
