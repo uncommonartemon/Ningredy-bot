@@ -4,7 +4,9 @@ namespace App\Filament\Resources\Products\Pages;
 
 use App\Filament\Concerns\InteractsWithCatalogCleanup;
 use App\Filament\Resources\Products\ProductResource;
+use App\Filament\Schemas\ProductCategoryActions;
 use App\Filament\Support\ProductTablePreferences;
+use App\Models\Product;
 use App\Models\User;
 use Filament\Actions\CreateAction;
 use Filament\Facades\Filament;
@@ -32,7 +34,19 @@ class ListProducts extends ListRecords
             'sold_out' => Tab::make(__('Нет в наличии'))
                 ->modifyQueryUsing(fn (Builder $query) => $query->whereDoesntHave('variants',
                     fn (Builder $variant) => $variant->where('quantity', '>', 0))),
+            // In a category that has kinds, the product's kind is still to be chosen (decision of 2026-11-25);
+            // the tab shows while any wait, and stays for whoever is moving the last of them.
+            'awaiting_kind' => Tab::make(__('Вид не выбран'))
+                ->badge(fn (): int => $this->awaitingKindCount())->badgeColor('warning')
+                ->visible(fn (): bool => $this->activeTab === 'awaiting_kind' || $this->awaitingKindCount() > 0)
+                ->modifyQueryUsing(fn (Builder $query) => ProductCategoryActions::awaitingKind($query)),
         ];
+    }
+
+    private function awaitingKindCount(): int
+    {
+        // Counted at each drawing: a move in this same request changes it.
+        return ProductCategoryActions::awaitingKind(Product::query())->count();
     }
 
     public function table(Table $table): Table

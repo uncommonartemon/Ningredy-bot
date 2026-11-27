@@ -362,6 +362,9 @@ class DraftTelegramPresenter
             }
             $rows[] = [['text' => '✏️ Исправить данные', 'callback_data' => "draft:fields:{$draft->id}"],
                 ['text' => '📎 Добавить фото', 'callback_data' => "draft:upload:{$draft->id}"]];
+            if (($kindRow = app(DraftFormActions::class)->kindButton($draft)) !== null) {
+                $rows[] = $kindRow;
+            }
             $rows[] = [['text' => '🌐 Доп. информация', 'callback_data' => "draft:enrich:{$draft->id}"],
                 ['text' => '🔎 Фото в интернете', 'callback_data' => "draft:webphotos:{$draft->id}"]];
             if ($mediaCount > 0) {
@@ -428,6 +431,9 @@ class DraftTelegramPresenter
             ];
         if (! $draft->isManualUpload() && ($formRow = app(DraftFormActions::class)->cardButton($draft)) !== null) {
             $rows[] = $formRow;
+        }
+        if (($kindRow = app(DraftFormActions::class)->kindButton($draft)) !== null) {
+            $rows[] = $kindRow;
         }
         if ($mediaCount === 0 && $draft->images_staged_at !== null) {
             $rows[] = [['text' => '📋 Все характеристики', 'callback_data' => "draft:details:{$draft->id}"]];
@@ -612,6 +618,8 @@ class DraftTelegramPresenter
         $footer = implode("\n", array_filter([
             "📷 Фото: {$galleryCount}",
             ($photoNotice = $this->photoNotice($draft)) !== '' ? 'ℹ️ '.$photoNotice : null,
+            // Where «Добавить» puts the product, and why when the server chose (decision of 2026-11-25).
+            app(DraftFormActions::class)->categoryLine($draft),
             // What the category requires and research did not find (a part without its
             // form factor or interface): named here, in the fixed part of the card.
             $draft->isManualUpload() ? null : (app(CategoryStandard::class)->reportLine($draft) ?? RequiredSpecifications::cardLine($draft)),

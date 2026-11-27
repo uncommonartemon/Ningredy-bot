@@ -887,5 +887,9 @@
     "В категории нет товаров.": "The category has no products.",
     "Приведётся значений: :count": "Values to bring to the standard: :count",
     "Привести значения к форме": "Bring values to the form",
-    "Приведено значений: :count.": "Values brought to the standard: :count."
+    "Приведено значений: :count.": "Values brought to the standard: :count.",
+    "Вид не выбран": "Kind not chosen",
+    "Перенести в категорию": "Move to category",
+    "Товары встанут в выбранную категорию; тип товара станет её типом. Характеристики и фото не меняются.": "The products move to the chosen category and take its product type. Characteristics and photos stay as they are.",
+    "Товары перенесены": "Products moved"
 }

@@ -2,15 +2,14 @@
 
 namespace App\Ai\Agents;
 
-use App\Models\Category;
 use App\Services\Ai\AiSettings;
+use App\Services\Catalog\CatalogMap;
 use App\Services\Products\AiAttributeGroups;
 use App\Services\Products\ProductCondition;
 use App\Services\Products\ProductSourceTypes;
 use App\Services\Products\ProductTextEvidenceContract;
 use App\Services\ProductSearch\Catalogs\ReferenceSites;
 use App\Services\ProductSearch\Research\ResearchSourceRoles;
-use Database\Seeders\StarterCatalogSeeder;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
 use Laravel\Ai\Attributes\MaxTokens;
 use Laravel\Ai\Attributes\Strict;
@@ -46,28 +45,19 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
      */
     public function instructions(): Stringable|string
     {
-        $categories = $this->categoryList();
-        $attributeGroups = AiAttributeGroups::instructions();
+        $map = app(CatalogMap::class);
 
-        return <<<PROMPT
-            Always classify the product into exactly one category from this exact list (return its
-            slug in the "category" field, never invent a new one - pick the closest match):
-            {$categories}
-
-            category and product_type (defined below) describe the same product from two different angles and
-            must never contradict each other - e.g. a motherboard, GPU, RAM module, cooler, or other separate
-            part is product_type=component, so its category must be whichever entry above is for components or
-            parts, never one meant for complete laptops or complete desktop computers. Decide product_type first
-            using its explicit rule below, then choose the category consistent with that decision - do not pick
-            category independently and risk it disagreeing with product_type. When a category is listed as a
-            kind of another (an SSD under components), choose the kind. A category may list required
-            specifications: write each one you find under exactly that key; one you cannot find on any page
-            is left out, never guessed or filled from a similar product - the card will say it is missing.
-
-            {$this->researchInstructions()}
-
-            {$attributeGroups}
-            PROMPT;
+        // The catalog map is the same text every agent that places a product reads (decision of
+        // 2026-11-25); the forms by slug and the sentence about deciding the type first are research's.
+        return implode("\n\n", array_filter([
+            $map->forAgents(),
+            'Return one slug of the map in "category", never a new one. Decide product_type first by its rule below'
+                .' (a motherboard, GPU, memory module or cooler is a component, never a laptop or a desktop), then take'
+                .' the deepest node of that type that fits.',
+            $map->formsForAgents(),
+            $this->researchInstructions(),
+            AiAttributeGroups::instructions(),
+        ]));
     }
 
     private function researchInstructions(): string
@@ -286,25 +276,6 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
             PROMPT;
     }
 
-    private function categoryList(): string
-    {
-        return Category::query()
-            ->where('is_active', true)
-            ->orderBy('sort_order')
-            ->with(['parent:id,slug', 'requiredAttributeDefinitions'])
-            ->get(['id', 'parent_id', 'slug', 'name', 'product_type_affinity', 'product_search_hint'])
-            ->map->productSearchPromptLine()
-            ->implode("\n            ");
-    }
-
-    /** @return array<int, string> */
-    private function categorySlugs(): array
-    {
-        // An empty list is a schema no answer can satisfy: the provider closes the
-        // request unread (live 2026-11-01, after a cleanup removed every category).
-        return Category::query()->where('is_active', true)->pluck('slug')->all() ?: array_keys(StarterCatalogSeeder::CATEGORIES);
-    }
-
     /**
      * Get the tools available to the agent.
      *
@@ -343,7 +314,7 @@ class ProductResearchAgent implements Agent, HasProviderOptions, HasStructuredOu
                 ->enum(['laptop', 'desktop', 'component', 'other'])
                 ->nullable()->required(),
             'category' => $schema->string()
-                ->enum($this->categorySlugs())
+                ->enum(app(CatalogMap::class)->slugs())
                 ->nullable()->required(),
             'color' => $schema->string()->max(255)->nullable()->required(),
             'condition' => $schema->string()->enum(ProductCondition::VALUES)->required(),

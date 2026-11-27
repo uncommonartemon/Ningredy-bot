@@ -22,6 +22,7 @@ This is the oldest and most tuned part of the code. Read `docs/failure-modes.md`
 - Success: the search ends, and it ends with photos. A hang or zero photos is the only failure.
 - Judge a rule about a model's verdict by the model's raw answers next to the server's verdict, not by the final card. Replay real answers from `ai_runs`; a test that fakes the answer can keep a branch green that the live model never enters.
 - When a call fails on one machine only, compare every database-derived input of the request first (schema enums built from categories, instructions built from tables), then the prompt, key and code.
+- The categories research reads are `CatalogMap` (the tree) and its forms block (hints, forms, notes by slug); the placement of its answer is `CatalogPlacement`. Change those, not a list of its own.
 - After a live run, open every page the search visited and compare with the journal. A mismatch is a fix candidate.
 
 ## Time

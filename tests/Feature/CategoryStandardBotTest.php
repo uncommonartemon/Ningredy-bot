@@ -48,10 +48,12 @@ class CategoryStandardBotTest extends TestCase
     {
         $instructions = (string) (new ProductResearchAgent)->instructions();
 
-        $this->assertStringContainsString('the form of this category, fill these with these exact keys: ram (Memory; write like: 16 GB; required), '
+        // The form and the note stand in the forms block under the category's slug (decision of 2026-11-25).
+        $this->assertStringContainsString('form: ram (Memory; write like: 16 GB; required), '
             .'memory_type (Memory type; write like: DDR4 / DDR5; required)', $instructions);
         $this->assertStringContainsString('cas_latency (Cas latency; write like: CL22)', $instructions);
-        $this->assertStringContainsString("the operator's note for this category: No «Brand new», «Tray» or «Used» in the title.", $instructions);
+        $this->assertStringContainsString('| note: No «Brand new», «Tray» or «Used» in the title.', $instructions);
+        $this->assertMatchesRegularExpression('/^- ram: search hint: [^\n]*\| form: ram \(Memory/mu', $instructions);
         $standard = app(CategoryStandard::class)->forAgents($this->ram);
         $this->assertSame(['ram', 'memory_type', 'module_type', 'voltage', 'cas_latency'], array_column($standard['form'], 'key'));
         $this->assertSame('required', $standard['form'][0]['importance']);
