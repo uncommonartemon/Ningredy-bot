@@ -2882,7 +2882,7 @@ class ProductImageStorage
      *
      * @return array<int, array<string, mixed>>|null|false
      */
-    private function durablyReviewedFrames(array $candidates, ProductDraft $draft, ?int $telegramUpdateId): array|null|false
+    private function durablyReviewedFrames(array $candidates, ProductDraft $draft, ?int $telegramUpdateId, ?array &$rejected = null): array|null|false
     {
         $fresh = $candidates !== [] && collect($candidates)->every(fn (array $candidate): bool => ! isset($candidate['media_id'])
             && ! isset($candidate['photo_frame_id']) && ($candidate['image'] ?? null) instanceof GdImage);
@@ -2908,8 +2908,33 @@ class ProductImageStorage
             return false;
         }
         $review = $batches->review($batch, $draft, $candidates, $this->visionVerifier, $telegramUpdateId);
+        $rejected = $review->rejected;
 
         return $review->isComplete() ? $review->accepted : null;
+    }
+
+    /**
+     * Why the catalog review left a frame out, as a class the journal can count. The label
+     * rule is its own class: a frame the reviewer took for the exact product, refused only
+     * because no code could be read on it (live report 2026-11-27: such frames were journaled
+     * as "non-product or foreign text").
+     *
+     * @param  array<string, mixed>  $review  the frame's review (ProductImageVisionVerifier)
+     */
+    public static function frameRejectionClass(array $review): string
+    {
+        return match (true) {
+            $review === [] => 'not_reviewed',
+            ($review['marking_verdict'] ?? null) === 'conflict' => 'other_code_on_label',
+            ! ($review['publishable'] ?? false) => 'refused_'.((string) ($review['rejection_reason'] ?? '') ?: 'other'),
+            ! ($review['catalog_photo'] ?? true) => 'not_a_catalog_photo',
+            ($review['physical_match'] ?? null) === 'conflicting' => 'other_body',
+            ($review['reviewer_exact_match'] ?? false) && ! ($review['exact_match'] ?? false)
+                && in_array($review['marking_verdict'] ?? 'none', ['none', 'name'], true) => 'no_readable_label',
+            ! in_array($review['kind'] ?? 'product', ['product', 'packaging', 'detail'], true) => 'kind_'.$review['kind'],
+            array_key_exists('color_match', $review) && ! $review['color_match'] => 'colour',
+            default => 'not_selected',
+        };
     }
 
     /**
@@ -2948,8 +2973,10 @@ class ProductImageStorage
         // Exact page identity is provenance, never a waiver for the current
         // pixels: UGC, another colour/body and visible keyboard differences all
         // require the same full review as a compatible source.
-        $kept = $this->durablyReviewedFrames($candidates, $draft, $telegramUpdateId);
+        $rejected = null;
+        $kept = $this->durablyReviewedFrames($candidates, $draft, $telegramUpdateId, $rejected);
         if ($kept === false) {
+            $rejected = null;
             $kept = $this->visionVerifier->reviewCompleteGallery($candidates, $draft, $telegramUpdateId);
         }
         app(ProductSearchCancellation::class)->throwIfCancelled($telegramUpdateId);
@@ -2986,6 +3013,10 @@ class ProductImageStorage
         $removed = count($candidates) - count($kept);
 
         $enough = count($kept) >= $minimumImages;
+        // The reason of each frame left out, where the review gave one per frame.
+        $reasons = $rejected === null ? null : array_map(fn (array $frame): string => self::frameRejectionClass(
+            is_array($frame['frame_review'] ?? null) ? $frame['frame_review'] : []), array_values($rejected));
+        $labelOnly = $reasons !== null && $reasons !== [] && array_unique($reasons) === ['no_readable_label'];
         // Recorded on every outcome, the clean one included: "Vision looked and
         // allowed everything" is what an audit is most often asked for, and it
         // used to leave no trace at all.
@@ -2998,11 +3029,12 @@ class ProductImageStorage
             'status' => $enough ? 'completed' : 'failed',
             'decision' => match (true) {
                 $removed === 0 => 'accept_all_frames',
-                $enough => 'drop_non_product_or_foreign_text_frames',
+                $enough => $labelOnly ? 'drop_frames_without_readable_label' : 'drop_non_product_or_foreign_text_frames',
                 $kept === [] => 'reject_all_frames',
-                default => 'keep_partial_after_frame_review',
+                default => $labelOnly ? 'keep_partial_without_readable_label' : 'keep_partial_after_frame_review',
             },
-            'output' => ['removed' => $removed, 'kept' => count($kept)],
+            'output' => ['removed' => $removed, 'kept' => count($kept),
+                ...($reasons === null ? [] : ['removed_by_reason' => array_count_values($reasons)])],
         ]);
 
         if ($removed > 0) {
