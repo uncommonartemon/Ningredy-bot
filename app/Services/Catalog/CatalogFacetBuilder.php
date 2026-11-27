@@ -87,8 +87,11 @@ class CatalogFacetBuilder
             if (! $shown) {
                 return null;
             }
+            // A colour and a brand's country are words typed for a card or a brand: each option
+            // carries its translations, as a characteristic's options do.
+            $translations = $this->columnTranslations($key);
             $options = $this->columnOrder($values, $column['order'] ?? [])
-                ->map(fn (string $value): array => ['label' => $value, 'value' => $value]);
+                ->map(fn (string $value): array => ['label' => $value, 'value' => $value, 'translations' => $translations[$value] ?? []]);
 
             return ['key' => $key, 'label' => $column['label'], 'leading' => $column['leading'],
                 'options' => $this->counts($key, $options, $filters, $total)];
@@ -157,7 +160,13 @@ class CatalogFacetBuilder
             ->pluck('products', 'attribute_key')->map(fn ($count): int => (int) $count)->all();
     }
 
-    /** @return array<string, array<string, array<string, string>>> key => normalized value => locale => text */
+    /**
+     * Each language from the first value that has it. The first value's whole map was taken
+     * before, and a value translated into one language only (an older card) hid the other
+     * language every later card of that value had.
+     *
+     * @return array<string, array<string, array<string, string>>> key => normalized value => locale => text
+     */
     private function valueTranslations(Collection $keys): array
     {
         $translations = [];
@@ -167,11 +176,38 @@ class CatalogFacetBuilder
             ->orderBy('attribute_values.id')
             ->get(['attribute_definitions.key', 'attribute_values.normalized_value', 'attribute_values.translations'])
             ->each(function (object $row) use (&$translations): void {
-                $decoded = json_decode((string) $row->translations, true);
-                if (is_array($decoded) && $decoded !== []) {
-                    $translations[$row->key][(string) $row->normalized_value] ??= $decoded;
+                foreach ((array) json_decode((string) $row->translations, true) as $locale => $text) {
+                    if (is_string($text) && trim($text) !== '') {
+                        $translations[$row->key][(string) $row->normalized_value][$locale] ??= $text;
+                    }
                 }
             });
+
+        return $translations;
+    }
+
+    /** @return array<string, array<string, string>> value => locale => text, for the colour and the brand's country */
+    private function columnTranslations(string $key): array
+    {
+        $rows = match ($key) {
+            // A configuration keeps its colour's translation among its own texts.
+            'colors' => DB::table('product_variants')->whereNotNull('color')->whereNotNull('translations')->orderBy('id')
+                ->get(['color as value', 'translations'])
+                ->map(fn (object $row): array => [(string) $row->value, collect((array) json_decode((string) $row->translations, true))
+                    ->map(fn (mixed $texts): mixed => is_array($texts) ? ($texts['color'] ?? null) : null)->all()]),
+            'countries' => DB::table('brands')->whereNotNull('country')->whereNotNull('country_translations')->orderBy('id')
+                ->get(['country as value', 'country_translations as translations'])
+                ->map(fn (object $row): array => [(string) $row->value, (array) json_decode((string) $row->translations, true)]),
+            default => collect(),
+        };
+        $translations = [];
+        foreach ($rows as [$value, $byLocale]) {
+            foreach ($byLocale as $locale => $text) {
+                if (is_string($text) && trim($text) !== '') {
+                    $translations[$value][$locale] ??= $text;
+                }
+            }
+        }
 
         return $translations;
     }

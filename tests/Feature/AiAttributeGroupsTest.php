@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Jobs\StoreProductImages;
+use App\Jobs\TranslateProductText;
 use App\Models\AiRun;
 use App\Models\AttributeDefinition;
 use App\Models\AttributeGroup;
@@ -28,7 +29,9 @@ class AiAttributeGroupsTest extends TestCase
     {
         parent::setUp();
         Storage::fake('public');
-        Queue::fake([StoreProductImages::class]);
+        // The card's translation job is queued by the approval, not run here: it names a new group in
+        // the shop's languages (CatalogNames), which these tests of the approval's own writes do not watch.
+        Queue::fake([StoreProductImages::class, TranslateProductText::class]);
     }
 
     public function test_a_new_attribute_receives_its_proposed_group_only_when_the_draft_is_approved(): void

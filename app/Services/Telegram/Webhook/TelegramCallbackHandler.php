@@ -21,6 +21,7 @@ use App\Models\TelegramUpdate;
 use App\Services\Catalog\CategoryStandard;
 use App\Services\Catalog\CharacteristicAudit;
 use App\Services\Catalog\FormProposals;
+use App\Services\Products\CardTranslationState;
 use App\Services\Products\ProductDraftWorkflow;
 use App\Services\Products\ProductGalleryRecipeRouter;
 use App\Services\Products\ProductSourcePriority;
@@ -707,10 +708,13 @@ class TelegramCallbackHandler
         ]);
 
         $update->update(['status' => 'completed', 'processed_at' => now()]);
+        // A card added before its translation is ready says so (decision of 2026-11-27): the
+        // translation is queued with the approval and reaches the site by itself.
+        $translation = $approved ? app(CardTranslationState::class)->pendingNote($product->fresh()) : null;
         $result = $approved
             ? ($draft->isManualUpload() && data_get($draft->manualIntake(), 'target_product_id')
-                ? "✅ Изменения товара #{$product->id} сохранены. Операция #{$operation->id}."
-                : "✅ Товар #{$product->id} добавлен в каталог и активен. Операция #{$operation->id}.")
+                ? "✅ Изменения товара #{$product->id} сохранены."
+                : "✅ Товар #{$product->id} добавлен в каталог и активен.").($translation === null ? '' : ' '.$translation)." Операция #{$operation->id}."
             : "✖ Черновик #{$draft->id} отклонён. Операция #{$operation->id}.";
         $this->telegram->answerCallbackQuery($callbackId, $result);
 

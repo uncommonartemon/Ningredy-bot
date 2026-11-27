@@ -245,9 +245,11 @@ class FilamentActionSafetyTest extends TestCase
         $product->update(['description' => 'New English description']);
         $this->assertNull($product->fresh()->translations['cs']['description'] ?? null);
         $this->assertSame('New Czech', $product->fresh()->translations['cs']['title']);
-        $variant = $product->variants()->create($this->offer(['name' => 'Old variant', 'translations' => ['cs' => ['title' => 'Old variant Czech']]]));
+        // A configuration's name has its own translation (decision of 2026-11-27); its title is the product's copy.
+        $variant = $product->variants()->create($this->offer(['name' => 'Old variant', 'translations' => ['cs' => ['title' => 'New Czech', 'name' => 'Stará varianta']]]));
         $variant->update(['name' => 'New variant']);
-        $this->assertNull($variant->fresh()->translations['cs']['title'] ?? null);
+        $this->assertNull($variant->fresh()->translations['cs']['name'] ?? null);
+        $this->assertSame('New Czech', $variant->fresh()->translations['cs']['title']);
     }
 
     public function test_category_cycle_is_rejected_by_form_and_model_while_reparenting_stays_possible(): void

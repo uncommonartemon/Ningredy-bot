@@ -121,6 +121,12 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
               update that row, to take it away, delete the row). A group is made to be sent to people: after creating
               one, give its sign-up link in the same answer - public_url from GetSystemStatus plus /account/join/ plus
               the new row's invite_code (QueryDatabase if the result did not return it).
+            - What a buyer reads is in the shop's languages, and the bot translates it by itself within minutes: a card's
+              title and description (products.translations), a configuration's name and colour (product_variants.translations),
+              a value (attribute_values.translations), and the names beside them - a characteristic's and a group's
+              translations, a category's category_translations rows, a brand's country (brands.country_translations,
+              locale → name). The operator correcting one translation («по-чешски страна бренда Tchaj-wan») is an update
+              of that field in that language; leave the other languages as they are.
             - The shop's own books are in the same tools: stock_units, one row per physical item of a product_variant
               (its number `code`, serial_number, purchase_price, purchased_at, supplier, note, status in_stock / sold /
               written_off, sold_at, sold_price). A variant's quantity is the number of its units in stock: raising or

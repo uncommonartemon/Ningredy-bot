@@ -317,7 +317,7 @@ class ProductDraftWorkflow
                 'title' => $draft->title,
                 'model' => $draft->model,
                 'description' => $normalizedDescription['description'],
-                'translations' => CatalogLocales::textTranslations($draft->translations),
+                'translations' => self::keptTranslations($product->translations, CatalogLocales::textTranslations($draft->translations)),
                 'confidence' => max((float) $product->confidence, (float) $draft->confidence),
                 'is_active' => $targetId ? $product->is_active : true,
                 'published_at' => $product->published_at ?: now(),
@@ -368,6 +368,27 @@ class ProductDraftWorkflow
 
             return $product;
         });
+    }
+
+    /**
+     * The card's translations over the ones the product or configuration already has. The same
+     * product comes in again, and a card whose check of facts never ran comes with no translation:
+     * replacing wiped the sleeping card's paid translations, and its page stood in English until
+     * they were made again. A kept translation of a text the card changes is dropped on save
+     * (InvalidatesStaleTextTranslations), so only translations of the current text stay.
+     *
+     * @param  array<string, mixed>|null  $current
+     * @param  array<string, array<string, string>>|null  $card
+     * @return array<string, mixed>|null
+     */
+    private static function keptTranslations(?array $current, ?array $card): ?array
+    {
+        $kept = is_array($current) ? $current : [];
+        foreach ($card ?? [] as $locale => $fields) {
+            $kept[$locale] = [...(is_array($kept[$locale] ?? null) ? $kept[$locale] : []), ...$fields];
+        }
+
+        return $kept === [] ? $card : $kept;
     }
 
     public function reject(
@@ -461,7 +482,7 @@ class ProductDraftWorkflow
             'gtin' => ($identifiers->get('gtin') ?: $identifiers->get('ean') ?: $identifiers->get('upc')) ?: ($keepCodes ? $variant->gtin : null),
             'color' => $draft->color,
             'condition' => $draft->condition ?? 'new',
-            'translations' => CatalogLocales::textTranslations($draft->translations),
+            'translations' => self::keptTranslations($variant->translations, CatalogLocales::textTranslations($draft->translations)),
             'currency' => $commercial['currency'] ?? ($variant->currency ?: 'CZK'),
             'stock_status' => match (true) {
                 $firstItem => 'in_stock',
@@ -614,6 +635,14 @@ class ProductDraftWorkflow
             }
             $valueTranslations = array_filter(array_map(fn (array $items): ?string => $items[$attributeKey]['value'] ?? null, $translations));
             $belongsToVariant = $variantScoped || $isVariantAttribute;
+            $current = ($belongsToVariant ? $variant->attributes() : $product->attributes())
+                ->where('attribute_definition_id', $definition->id)->first();
+            if ($current !== null && trim((string) $current->value) === trim((string) $rawValue)) {
+                // The same value again, as when the same product comes in again: its translations
+                // stay where the card brings none, the card's own win.
+                $valueTranslations = [...array_filter((array) ($current->translations ?? []),
+                    fn (mixed $text): bool => is_string($text) && trim($text) !== ''), ...$valueTranslations];
+            }
             $owner = $belongsToVariant ? $variant->attributes() : $product->attributes();
             $typedFields = ['numeric_value' => $numericValue, 'unit' => $unit];
             if ($variantScoped) {
@@ -638,8 +667,8 @@ class ProductDraftWorkflow
                     'value' => trim((string) $rawValue),
                     'normalized_value' => Str::lower(trim((string) $rawValue)),
                     ...$typedFields,
-                    // Replaced, not merged: a translation of an older value
-                    // must not survive next to a new English value.
+                    // Replaced, not merged, when the value is new: a translation of an
+                    // older value must not survive next to a new English value.
                     'translations' => $valueTranslations === [] ? null : $valueTranslations,
                 ],
             );

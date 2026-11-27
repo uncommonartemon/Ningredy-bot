@@ -894,5 +894,6 @@
     "Товары перенесены": "Products moved",
     "в товаре #:id: :count": "in product #:id: :count",
     "Черновик подтверждён: его фото перенесены в товар.": "The draft was approved: its photos moved to the product.",
-    "Все найденные источники просмотрены": "All sources found were looked at"
+    "Все найденные источники просмотрены": "All sources found were looked at",
+    "Без перевода": "Untranslated"
 }

@@ -3,6 +3,8 @@
 namespace App\Jobs;
 
 use App\Models\Product;
+use App\Services\Catalog\CatalogNames;
+use App\Services\Products\CardTranslationState;
 use App\Services\Products\CatalogTextTranslator;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
@@ -38,6 +40,16 @@ class TranslateProductText implements ShouldQueue
         } catch (Throwable $exception) {
             // The product keeps its English text and the translations it had; the
             // scheduler asks again after a wait, «Перевести недостающее» at once.
+            report($exception);
+        }
+        // A new characteristic, group or category of this card is named in the shop's languages
+        // now, not at the next round of the names' schedule. CatalogNames asks for every missing
+        // name at once and keeps its own wait for names no answer filled.
+        try {
+            if (collect(app(CardTranslationState::class)->missing($product->fresh()))->contains('shared', true)) {
+                app(CatalogNames::class)->fill();
+            }
+        } catch (Throwable $exception) {
             report($exception);
         }
     }

@@ -8,7 +8,7 @@ import { filterBlocks } from '../attributeGroups';
 const props = defineProps({ facets: { type: Object, required: true }, mobileOpen: { type: Boolean, default: false }, hasActive: { type: Boolean, default: false }, total: { type: Number, default: 0 }, busy: { type: Boolean, default: false } });
 const model = defineModel({ type: Object, required: true });
 const emit = defineEmits(['apply', 'reset', 'close']);
-const { t, productCount, attributeGroupName } = useI18n();
+const { t, productCount, attributeGroupName, facetOptionLabel } = useI18n();
 const panel = ref(null);
 const isMobile = ref(false);
 let viewport;
@@ -25,7 +25,8 @@ const trailingColumns = computed(() => props.facets.columns.filter((facet) => !f
 const attributeBlocks = computed(() => filterBlocks(props.facets.attributes.filter((facet) => facet.options?.length)));
 const groupSelectedCount = (block) => block.attributes.reduce((total, facet) => total + (model.value.attributes[facet.key]?.length || 0), 0);
 const groupSelectionKey = (block) => JSON.stringify(block.attributes.map((facet) => [facet.key, model.value.attributes[facet.key] || []]));
-const optionLabel = (key, option) => ['types', 'stock', 'condition'].includes(key) ? t(`${key}.${option.value}`, option.label) : option.label;
+// States are the interface's own words; a colour or a brand's country comes with its translations.
+const optionLabel = (key, option) => ['types', 'stock', 'condition'].includes(key) ? t(`${key}.${option.value}`, option.label) : facetOptionLabel(option);
 const hasPrice = (value) => value !== '' && value !== null && value !== undefined;
 const priceDraft = reactive({ min: model.value.min_price ?? '', max: model.value.max_price ?? '' });
 const priceActive = computed(() => hasPrice(model.value.min_price) || hasPrice(model.value.max_price));
