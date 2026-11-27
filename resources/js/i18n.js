@@ -24,6 +24,14 @@ const messages = {
         stock: { in_stock: 'In stock', out_of_stock: 'Out of stock', preorder: 'Pre-order', unknown: 'Check availability' },
         facets: { brands: 'Brand', types: 'Type', countries: 'Brand country', colors: 'Color', stock: 'Availability', condition: 'Condition' },
         types: { laptop: 'Laptop', desktop: 'Desktop PC', component: 'Component', other: 'Other electronics' },
+        photoNotice: {
+            otherConfiguration: 'The photos show another configuration in the same body; this product’s configuration is in its specifications.',
+            keyboard: {
+                differs: 'The keyboard layout in the photos differs from this product’s.',
+                unverified: 'The keyboard layout in the photos could not be checked against this product’s.',
+            },
+            markings: 'Processor or graphics stickers in the photos may differ from the product configuration.',
+        },
         account: {
             partnerLogin: 'Partner sign-in', partners: 'For partners', signInTitle: 'Sign in',
             signInLead: 'Sign in to see the prices of your group.', email: 'Email', password: 'Password', signIn: 'Sign in',
@@ -113,6 +121,14 @@ const messages = {
         types: {
             laptop: 'Notebook', desktop: 'Stolní počítač', component: 'Komponenta', other: 'Ostatní technika',
         },
+        photoNotice: {
+            otherConfiguration: 'Fotografie zachycují jinou konfiguraci ve stejném provedení; konfigurace tohoto produktu je uvedena v parametrech.',
+            keyboard: {
+                differs: 'Rozložení klávesnice na fotografiích se liší od rozložení tohoto produktu.',
+                unverified: 'Rozložení klávesnice na fotografiích nebylo možné porovnat s rozložením tohoto produktu.',
+            },
+            markings: 'Nálepky procesoru nebo grafiky na fotografiích se mohou lišit od konfigurace produktu.',
+        },
         account: {
             partnerLogin: 'Přihlášení pro partnery', partners: 'Pro partnery', signInTitle: 'Přihlášení',
             signInLead: 'Po přihlášení uvidíte ceny své skupiny.', email: 'E-mail', password: 'Heslo', signIn: 'Přihlásit se',
@@ -201,6 +217,14 @@ const messages = {
         },
         types: {
             laptop: 'Ноутбук', desktop: 'Готовий ПК', component: 'Комплектуюча', other: 'Інша техніка',
+        },
+        photoNotice: {
+            otherConfiguration: 'На фото інша комплектація в тому самому корпусі; комплектацію цього товару наведено в характеристиках.',
+            keyboard: {
+                differs: 'Розкладка клавіатури на фото відрізняється від розкладки цього товару.',
+                unverified: 'Розкладку клавіатури на фото не вдалося звірити з розкладкою цього товару.',
+            },
+            markings: 'Наліпки процесора чи відеокарти на фото можуть відрізнятися від комплектації товару.',
         },
         account: {
             partnerLogin: 'Вхід для партнерів', partners: 'Партнерам', signInTitle: 'Вхід',
@@ -357,6 +381,18 @@ const attributeUnit = (attribute) => (attribute?.unit && /^[\d\s.,]+$/.test(Stri
     ? attribute.unit
     : null);
 
+// What the shop says under a photo. The server sends facts, not sentences: the reviewers'
+// notes are written for the operator in Russian and once stood under the gallery as they were.
+const photoNoticeLines = (notice) => {
+    if (! notice) return [];
+
+    return [
+        notice.other_configuration ? t('photoNotice.otherConfiguration') : '',
+        notice.keyboard ? t(`photoNotice.keyboard.${notice.keyboard}`, '') : '',
+        notice.markings_may_differ ? t('photoNotice.markings') : '',
+    ].filter(Boolean);
+};
+
 if (typeof document !== 'undefined') document.documentElement.lang = locale.value;
 
 export { configureCatalogLocales };
@@ -364,4 +400,5 @@ export { configureCatalogLocales };
 export const useI18n = () => ({
     locale, localeTag, setLocale, t, productCount, moreCount, categoryName, storefrontLocales,
     contentLocale, translatedText, attributeLabel, attributeValue, attributeUnit, attributeGroupName, facetLabel, facetOptionLabel,
+    photoNoticeLines,
 });

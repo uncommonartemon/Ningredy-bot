@@ -250,7 +250,9 @@ class ProductPhotoSearchIntegrationTest extends TestCase
             app(ProductImageStorage::class), $frames, $draft, $draft->telegram_update_id, 1, 10, $source, 'playwright', 'Checked', null,
         );
         $this->assertTrue($result->isComplete());
-        $this->assertSame([$note], PhotoSourceNotice::fromContext($result->source)['differences']);
+        // The shop words the fact itself; the reviewer's Russian note is the operator's.
+        $this->assertSame('differs', PhotoSourceNotice::fromContext($result->source)['keyboard']);
+        $this->assertArrayNotHasKey('differences', PhotoSourceNotice::fromContext($result->source));
         $this->assertStringContainsString($note, PhotoSourceNotice::russian($result->source));
     }
 
@@ -346,16 +348,21 @@ class ProductPhotoSearchIntegrationTest extends TestCase
         $this->assertSame([], app(ProductImageVisionVerifier::class)->reviewCompleteGallery($frames, $draft, $draft->telegram_update_id));
     }
 
-    public function test_complete_gallery_keeps_professional_feature_composition_without_an_aesthetic_score_gate(): void
+    /**
+     * A complete gallery has no aesthetic score gate, but a banner is not a catalog photo even
+     * there (operator, 2026-10-20). Real answers of the reviewer on such galleries mark English
+     * promo slides «banner» and publishable, and the server used to take them.
+     */
+    public function test_complete_gallery_has_no_aesthetic_score_gate_and_still_drops_a_banner(): void
     {
         $draft = $this->draft();
         $base = ['exact_match' => false, 'color_match' => true, 'publishable' => true, 'catalog_photo' => true,
             'physical_match' => 'match', 'kind' => 'product', 'view' => 'detail', 'score' => 99];
         $reviews = [
             [...$base, 'exact_match' => true, 'score' => 10,
-                'reason' => 'Professional feature collage showing the actual product, with English graphics; aesthetically busy but clear.'],
+                'reason' => 'A plain side view of the actual product; aesthetically dull but clear.'],
             [...$base, 'exact_match' => true, 'kind' => 'banner', 'score' => 10,
-                'reason' => 'Professional product feature banner with a prominent actual product and English text.'],
+                'reason' => 'Англоязычный промобаннер; серебристый ноутбук заметен и соответствует товару.'],
             [...$base, 'catalog_photo' => false, 'reason' => 'Auction phone photograph, not catalog quality.'],
             [...$base, 'physical_match' => 'conflicting', 'reason' => 'A different shell with incompatible ports.'],
             [...$base, 'color_match' => false, 'reason' => 'Silver product, requested black.'],
@@ -378,9 +385,7 @@ class ProductPhotoSearchIntegrationTest extends TestCase
         $kept = $verifier->reviewCompleteGallery($frames, $draft, $draft->telegram_update_id);
 
         $this->assertSame(1, $calls, 'A low aesthetic score must not cause a second full-gallery Vision call.');
-        $this->assertCount(2, $kept);
-        $this->assertSame($frames[0]['source_url'], $kept[0]['source_url']);
-        $this->assertSame($frames[1]['source_url'], $kept[1]['source_url']);
+        $this->assertSame([$frames[0]['source_url']], array_column($kept, 'source_url'));
         $this->assertSame(10, $kept[0]['vision_score']);
         // Separate, unconfirmed candidate selection keeps its ordinary score threshold.
         ProductImageVisionAgent::fake([['images' => [[
@@ -455,7 +460,8 @@ class ProductPhotoSearchIntegrationTest extends TestCase
         if ($accepted) {
             $this->assertSame('unknown', $result->candidates[0]['photo_visual_review']['keyboard_layout_match']);
             $this->assertSame('', $result->candidates[0]['photo_visual_review']['keyboard_layout']);
-            $this->assertSame([$note], PhotoSourceNotice::fromContext($result->source)['differences']);
+            $this->assertSame('unverified', PhotoSourceNotice::fromContext($result->source)['keyboard']);
+            $this->assertStringContainsString($note, PhotoSourceNotice::russian($result->source));
         }
     }
 

@@ -103,7 +103,7 @@ final class ProductPhotoIdentity
         $verdict = 'conflict';
         foreach ($codes as $written) {
             $code = self::compact($written);
-            if ($observed === $code || str_contains($observed, $code) || str_contains($code, $observed)
+            if ($observed === $code || self::holds($marking, $written) || self::holds($written, $marking)
                 || ReadingSlip::within($observed, $code)) {
                 return 'match';
             }
@@ -147,6 +147,73 @@ final class ProductPhotoIdentity
         }
 
         return 'conflict';
+    }
+
+    /**
+     * Whether $outer holds $inner as written, not only once both are run together. A processor's
+     * lid prints its S-spec after the model, and every S-spec starts with S: «i7-4770 SR149» run
+     * together holds I74770S, the code of another processor, whose card once got this photo. So
+     * the code must stop where a word of $outer stops, or leave in that word a tail of its own:
+     * a long part number may carry a batch tail, a model name only a short one, and a single
+     * character after a code is the letter of another model (i7-4770 and i7-4770S), as in
+     * PartNumberSuffix. A long code split by a space on the label is still that code.
+     */
+    private static function holds(string $outer, string $inner): bool
+    {
+        $long = self::compact($outer);
+        $short = self::compact($inner);
+        $innerWords = self::wordSpans($inner);
+        if ($short === '' || $innerWords === []) {
+            return false;
+        }
+        $lastStart = $innerWords[array_key_last($innerWords)][0];
+        $lastWordIsCode = strlen($short) - $lastStart >= self::LONG_CODE_LENGTH;
+        $outerWords = self::wordSpans($outer);
+        for ($start = strpos($long, $short); $start !== false; $start = strpos($long, $short, $start + 1)) {
+            $end = $start + strlen($short);
+            $word = collect($outerWords)->first(fn (array $span): bool => $span[0] < $end && $end <= $span[1]);
+            $rest = $word[1] - $end;
+            if ($rest === 0) {
+                return true;
+            }
+            if ($rest === 1) {
+                continue;
+            }
+            // The word the code stops in began inside the code's last word: two words of the
+            // label were joined into it.
+            if ($word[0] > $start + $lastStart) {
+                if ($lastWordIsCode) {
+                    return true;
+                }
+
+                continue;
+            }
+            if ($lastWordIsCode || PartNumberSuffix::isTail($rest)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Where each word of $text starts and stops in its compact form.
+     *
+     * @return list<array{0: int, 1: int}>
+     */
+    private static function wordSpans(string $text): array
+    {
+        $spans = [];
+        $offset = 0;
+        foreach (preg_split('/\s+/', $text, -1, PREG_SPLIT_NO_EMPTY) ?: [] as $word) {
+            $length = strlen(self::compact($word));
+            if ($length > 0) {
+                $spans[] = [$offset, $offset + $length];
+                $offset += $length;
+            }
+        }
+
+        return $spans;
     }
 
     /**

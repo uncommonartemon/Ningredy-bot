@@ -298,9 +298,10 @@ class ProductImageVisionVerifier
                     : $review);
         }
 
-        $allowedKinds = $galleryFramePolicy
-            ? ['product', 'packaging', 'detail', 'banner']
-            : ['product', 'packaging', 'detail'];
+        // A banner is not a catalog photo, even inside a complete official gallery (operator,
+        // 2026-10-20). The gallery policy kept admitting the kind after that rule: the reviewer
+        // marked English promo slides and collages "banner", publishable, and they went out.
+        $allowedKinds = ['product', 'packaging', 'detail'];
         if (ProductPhotoPolicy::allowsComponentLogos($draft)) {
             $allowedKinds[] = 'logo';
         }

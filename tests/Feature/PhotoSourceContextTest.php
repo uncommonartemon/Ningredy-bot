@@ -9,6 +9,7 @@ use App\Models\Product;
 use App\Models\ProductDraft;
 use App\Models\TelegramUpdate;
 use App\Services\Products\PhotoSourceNotice;
+use App\Services\Products\ProductPhotoKeyboardContext;
 use App\Services\Telegram\DraftTelegramPresenter;
 use App\Services\Telegram\TelegramClient;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -55,7 +56,9 @@ class PhotoSourceContextTest extends TestCase
         $this->get(route('products.show', $product))->assertOk()->assertInertia(fn (Assert $page) => $page
             ->component('Products/Show')->has('product.media', 3)
             ->where('product.media.0.photo_notice.source_model', 'A8WHG-019US')
-            ->where('product.media.0.photo_notice.differences.0', 'На фото американская клавиатура; товар с немецкой клавиатурой.')
+            ->where('product.media.0.photo_notice.other_configuration', true)
+            // The reviewer's Russian words are the operator's; the page says the fact itself.
+            ->missing('product.media.0.photo_notice.differences')
             ->missing('product.media.0.photo_notice.target_fingerprint')
             ->missing('product.media.0.photo_source_context')
             ->where('product.media.1.photo_notice', null)
@@ -96,8 +99,51 @@ class PhotoSourceContextTest extends TestCase
         $context['_photo_applicability']['differences'] = ['<script>bad()</script>', [], null, '   '];
         $notice = PhotoSourceNotice::fromContext($context);
         $this->assertSame('A8WHG', $notice['source_model']);
-        $this->assertSame(['bad()'], $notice['differences']);
-        $this->assertSame(['source_model', 'differences'], array_keys($notice));
+        $this->assertSame(['source_model', 'other_configuration'], array_keys($notice));
+        $this->assertTrue($notice['other_configuration']);
+        $this->assertStringContainsString('Отличия: bad()', (string) PhotoSourceNotice::russian($context));
+        $this->assertStringNotContainsString('<script>', (string) PhotoSourceNotice::russian($context));
+    }
+
+    /**
+     * Under the gallery of nine of sixteen laptops stood «Rozdíly: Раскладка на фото
+     * неразборчива; …», on five of them twice in two wordings: the reviewer's notes, written in
+     * Russian for the operator, went to the shop as they were. The shop says the fact once in
+     * its own words; the operator still reads the notes. A stored card needs no rewrite: the
+     * frames' verdicts are in every stored review.
+     */
+    public function test_a_keyboard_note_reaches_the_shop_as_a_fact_and_the_operator_as_the_reviewers_words(): void
+    {
+        $notes = ['Раскладка на фото неразборчива; у продаваемого товара заявлена чешская/словацкая раскладка.',
+            'Раскладка на фото неразборчива; у товара заявлена чешская/словацкая раскладка.'];
+        $frame = fn (string $note, string $url): array => ['source_url' => $url, 'keyboard_visibility' => 'visible_unreadable',
+            'keyboard_layout_match' => 'unknown', 'keyboard_requirement_scope' => 'product', 'keyboard_layout' => '', 'keyboard_layout_note' => $note];
+        $context = ['url' => 'https://shop.example/laptop', '_photo_applicability' => ['verdict' => 'exact', 'source_model' => 'A8WHG-018'],
+            '_photo_visual_review' => ['scope' => 'current_downloaded_frames', 'keyboard_target' => ['Czech/Slovak'],
+                'differences' => $notes, 'configuration_markings' => [],
+                'frames' => [$frame($notes[0], 'https://shop.example/1.jpg'), $frame($notes[1], 'https://shop.example/2.jpg')]]];
+
+        $notice = PhotoSourceNotice::fromContext($context);
+
+        $this->assertSame(['source_model' => 'A8WHG-018', 'other_configuration' => false, 'keyboard' => 'unverified'], $notice);
+        $this->assertDoesNotMatchRegularExpression('/\p{Cyrillic}/u', json_encode($notice, JSON_UNESCAPED_UNICODE));
+        $operator = (string) PhotoSourceNotice::russian($context);
+        $this->assertStringContainsString($notes[0], $operator);
+
+        // A layout seen and different is said as such.
+        $context['_photo_visual_review']['frames'][0]['keyboard_layout_match'] = 'different';
+        $this->assertSame('differs', PhotoSourceNotice::fromContext($context)['keyboard']);
+
+        // The card's layout changed after the frames were judged: their verdict is old, and
+        // the later comparison says the photos were not compared with the card.
+        $context = ProductPhotoKeyboardContext::reconcile($context, [['key' => 'keyboard_layout', 'value' => 'German']]);
+        $this->assertSame('unverified', PhotoSourceNotice::fromContext($context)['keyboard']);
+        $this->assertStringContainsString('не сверена с итоговой карточкой', (string) PhotoSourceNotice::russian($context));
+
+        // Frames without a keyboard question say nothing about it.
+        $quiet = ['_photo_visual_review' => ['scope' => 'current_downloaded_frames', 'differences' => [], 'frames' => [
+            ['keyboard_visibility' => 'not_visible', 'keyboard_layout_match' => 'not_applicable', 'keyboard_requirement_scope' => 'none']]]];
+        $this->assertNull(PhotoSourceNotice::fromContext($quiet));
     }
 
     public function test_a_processor_sticker_kept_on_the_photos_is_named_for_the_operator_and_flagged_for_the_buyer(): void
