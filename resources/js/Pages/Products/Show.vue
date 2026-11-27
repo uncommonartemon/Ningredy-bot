@@ -10,7 +10,7 @@ import { backToCatalog } from '../../navigationTransitions';
 import '../../../css/product.css';
 
 const props = defineProps({ product: { type: Object, required: true } });
-const { locale, localeTag, t, categoryName, translatedText, attributeLabel, attributeValue, attributeUnit, attributeGroupName } = useI18n();
+const { locale, localeTag, t, categoryName, translatedText, attributeLabel, attributeValue, attributeUnit, attributeGroupName, variantText, countryName } = useI18n();
 const requestedVariant = props.product.variants.findIndex((item) => item.id === props.product.selected_variant_id);
 const selectedVariant = ref(requestedVariant >= 0 ? requestedVariant : Math.max(0, props.product.variants.findIndex((item) => item.is_default)));
 const productCopy = {
@@ -42,8 +42,10 @@ const variant = computed(() => props.product.variants[selectedVariant.value] || 
 // from either, then the English source.
 const title = computed(() => translatedText([variant.value?.translations, props.product.translations], 'title') || props.product.title);
 const description = computed(() => translatedText([variant.value?.translations, props.product.translations], 'description') || props.product.description);
-// The default configuration has no name of its own: it is named in the visitor's language.
-const variantName = (item) => (item?.is_base_configuration ? copy.value.baseConfiguration : item?.name);
+// The default configuration has no name of its own: it is named in the visitor's language;
+// any other name and the colour are a card's own words, translated like its title.
+const variantName = (item) => (item?.is_base_configuration ? copy.value.baseConfiguration : variantText(item, 'name'));
+const color = computed(() => variantText(variant.value, 'color'));
 const paragraphs = computed(() => (description.value || '').split(/\n\s*\n/).filter((part) => part.trim()));
 const conditionLabel = computed(() => variant.value?.condition ? t(`condition.${variant.value.condition}`, variant.value.condition) : null);
 const gallery = computed(() => {
@@ -64,10 +66,10 @@ const highlights = computed(() => {
 const facts = computed(() => [
     [copy.value.model, props.product.model], ['SKU', variant.value?.sku], ['MPN', variant.value?.mpn], ['GTIN', variant.value?.gtin],
     [copy.value.category, categoryName(props.product.category)], [copy.value.type, t(`types.${props.product.type}`, props.product.type)],
-    [copy.value.color, variant.value?.color], [copy.value.condition, conditionLabel.value],
+    [copy.value.color, color.value], [copy.value.condition, conditionLabel.value],
     [copy.value.quantity, variant.value?.quantity],
     [copy.value.warranty, hasValue(variant.value?.warranty_months) ? `${variant.value.warranty_months} ${copy.value.months}` : null],
-    [copy.value.country, props.product.brand?.country],
+    [copy.value.country, countryName(props.product.brand)],
 ].filter(([, value]) => hasValue(value)));
 const hasDiscount = computed(() => hasValue(variant.value?.price) && Number(variant.value?.compare_at_price) > Number(variant.value.price));
 const formatPrice = (value, currency) => {
@@ -121,7 +123,7 @@ const jumpTo = (id) => {
                 <div class="product-show__badges">
                     <span :class="['stock', `stock--${variant?.stock_status || 'unknown'}`]">{{ t(`stock.${variant?.stock_status || 'unknown'}`) }}</span>
                     <span v-if="conditionLabel" class="product-show__condition">{{ conditionLabel }}</span>
-                    <span v-if="variant?.color" class="product-show__color">{{ variant.color }}</span>
+                    <span v-if="color" class="product-show__color">{{ color }}</span>
                 </div>
             </header>
             <ProductGallery :key="`${product.id}-${variant?.id || 'shared'}`" class="product-show__gallery" :media="gallery" :title="title" />
@@ -132,7 +134,7 @@ const jumpTo = (id) => {
                         <legend>{{ copy.configuration }}</legend>
                         <label v-for="(item, index) in product.variants" :key="item.id" :class="{ active: selectedVariant === index }">
                             <input v-model="selectedVariant" type="radio" name="product-variant" :value="index" @change="selectVariant" />
-                            <span>{{ variantName(item) || item.sku || item.color || `#${item.id}` }}</span><span class="product-show__variant-check" aria-hidden="true">✓</span>
+                            <span>{{ variantName(item) || item.sku || variantText(item, 'color') || `#${item.id}` }}</span><span class="product-show__variant-check" aria-hidden="true">✓</span>
                         </label>
                     </fieldset>
                     <div v-else-if="variantName(variant)" class="product-show__configuration"><span>{{ copy.configuration }}</span><strong>{{ variantName(variant) }}</strong></div>

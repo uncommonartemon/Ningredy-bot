@@ -3,6 +3,7 @@
 namespace App\Ai\Tools;
 
 use App\Ai\Tools\Concerns\RecordsOperations;
+use App\Jobs\TranslateProductText;
 use App\Models\ProductVariant;
 use App\Models\TelegramUpdate;
 use App\Services\Products\ProductCondition;
@@ -52,21 +53,30 @@ class UpdateVariant implements Tool
             return $this->json(['ok' => false, 'error' => 'Invalid stock_status']);
         }
 
-        return $this->json($this->recordOperation(
+        $retranslate = null;
+        $result = $this->recordOperation(
             $this->update,
             class_basename(self::class),
             'update_product_variant',
             ['variant_id' => $variantId, 'changes' => $changes],
-            function () use ($variantId, $changes): array {
+            function () use ($variantId, $changes, &$retranslate): array {
                 $variant = ProductVariant::query()->find($variantId);
                 throw_if(! $variant, ModelNotFoundException::class, 'Product variant not found.');
                 $variant->update($changes);
+                $retranslate = $variant->wasChanged(['name', 'color']) ? (int) $variant->product_id : null;
 
                 return ['variant_id' => $variant->id, 'product_id' => $variant->product_id, 'changed' => array_keys($changes)];
             },
             ProductVariant::class,
             $variantId,
-        ));
+        );
+        // A configuration's name and colour are read by buyers: the old translation went with the
+        // change, and the shop's languages are made again from the new words, off this request.
+        if ($retranslate !== null) {
+            TranslateProductText::dispatch($retranslate);
+        }
+
+        return $this->json($result);
     }
 
     public function schema(JsonSchema $schema): array

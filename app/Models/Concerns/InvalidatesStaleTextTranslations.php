@@ -16,8 +16,10 @@ trait InvalidatesStaleTextTranslations
             }
             $before = $record->getOriginal('translations') ?? [];
             $translations = $record->translations ?? [];
+            // A configuration's own texts are its name and colour; its title and description are
+            // copies of the product's and follow the product (below).
             $fields = $record instanceof ProductVariant
-                ? ['name' => 'title'] : ['title' => 'title', 'description' => 'description'];
+                ? ['name' => 'name', 'color' => 'color'] : ['title' => 'title', 'description' => 'description'];
             if (! $record->isDirty(array_keys($fields))) {
                 return;
             }
