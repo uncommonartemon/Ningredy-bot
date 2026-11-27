@@ -15,6 +15,7 @@ use App\Ai\Tools\ManageCharacteristicDictionary;
 use App\Ai\Tools\ManageDatabase;
 use App\Ai\Tools\ManageDraftPhotos;
 use App\Ai\Tools\ManageSearchSettings;
+use App\Ai\Tools\ManageStorefrontShowcase;
 use App\Ai\Tools\PrepareProductDeletion;
 use App\Ai\Tools\QueryDatabase;
 use App\Ai\Tools\RefindProductPhotos;
@@ -141,6 +142,7 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
               visible in the admin under «Справочники».
             - Ban or unban a site, show or change the search budget, time limit, search country: ManageSearchSettings.
               Never answer that you cannot ban a site or set a budget.
+            - Which products the site's start page shows first («витрина», «товары на главной», «поставь на главную»): ManageStorefrontShowcase.
             - Where products go is the catalog map at the end of these instructions; a product's category_id comes from it.
               A product sitting directly in a node with kinds waits for its kind («товары без вида», «наведи порядок в
               категориях»): list them with QueryDatabase products, filter category_id in the ids the map names, and move each
@@ -378,6 +380,7 @@ class ServerAssistantAgent implements Agent, Conversational, HasStructuredOutput
             new UpdateVariant($this->update),
             new AddProductSpecifications($this->update),
             new ManageSearchSettings($this->update),
+            new ManageStorefrontShowcase($this->update),
             new ManageCharacteristicDictionary($this->update),
             new ReviewProductDraft($this->update, app(ProductDraftWorkflow::class)),
             new ManageDraftPhotos($this->update),

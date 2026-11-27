@@ -891,5 +891,18 @@
     "Вид не выбран": "Druh nevybrán",
     "Перенести в категорию": "Přesunout do kategorie",
     "Товары встанут в выбранную категорию; тип товара станет её типом. Характеристики и фото не меняются.": "Produkty se přesunou do vybrané kategorie a převezmou její typ. Parametry a fotky se nemění.",
-    "Товары перенесены": "Produkty přesunuty"
+    "Товары перенесены": "Produkty přesunuty",
+    "Витрина": "Výloha",
+    "Главная страница сайта": "Úvodní stránka webu",
+    "Товары на главной": "Produkty na úvodní stránce",
+    "Название, бренд, модель или код": "Název, značka, model nebo kód",
+    "Таких товаров нет": "Žádné takové produkty",
+    "Первые три — карточки на первом экране сайта; все выбранные идут первыми в ряду новых товаров, в этом порядке. Товар, снятый с продажи или без фото, на сайте пропускается. Если ничего не выбрано, главная сама берёт новые товары с фото.": "První tři jsou karty na první obrazovce webu; všechny vybrané produkty jdou v tomto pořadí jako první v řadě nových produktů. Produkt stažený z prodeje nebo bez fotografie web přeskočí. Když není vybráno nic, úvodní stránka sama vezme nejnovější produkty s fotografiemi.",
+    "Сохранить витрину": "Uložit výlohu",
+    "Витрина сохранена": "Výloha uložena",
+    "без цены": "bez ceny",
+    "в продаже": "v prodeji",
+    "снят с продажи": "stažen z prodeje",
+    "с фото": "s fotografií",
+    "без фото": "bez fotografie"
 }

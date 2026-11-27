@@ -891,5 +891,18 @@
     "Вид не выбран": "Kind not chosen",
     "Перенести в категорию": "Move to category",
     "Товары встанут в выбранную категорию; тип товара станет её типом. Характеристики и фото не меняются.": "The products move to the chosen category and take its product type. Characteristics and photos stay as they are.",
-    "Товары перенесены": "Products moved"
+    "Товары перенесены": "Products moved",
+    "Витрина": "Showcase",
+    "Главная страница сайта": "The site's start page",
+    "Товары на главной": "Products on the start page",
+    "Название, бренд, модель или код": "Title, brand, model or code",
+    "Таких товаров нет": "No such products",
+    "Первые три — карточки на первом экране сайта; все выбранные идут первыми в ряду новых товаров, в этом порядке. Товар, снятый с продажи или без фото, на сайте пропускается. Если ничего не выбрано, главная сама берёт новые товары с фото.": "The first three are the cards on the first screen of the site; all chosen products lead the row of new products, in this order. A product taken off sale or without a photo is skipped on the site. With nothing chosen, the start page takes the newest products with photos by itself.",
+    "Сохранить витрину": "Save the showcase",
+    "Витрина сохранена": "Showcase saved",
+    "без цены": "no price",
+    "в продаже": "on sale",
+    "снят с продажи": "off sale",
+    "с фото": "with a photo",
+    "без фото": "no photo"
 }
