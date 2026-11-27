@@ -23,8 +23,11 @@ final class ProductTranslations
                 Textarea::make("translations.$locale.description")->label(__('Описание'))->rows(6)->maxLength(5000)
                     ->helperText(__('product-assistant.translation_fields_help')),
                 ...($configuration ? [
-                    TextInput::make("translations.$locale.name")->label(__('Название конфигурации'))->maxLength(255),
-                    TextInput::make("translations.$locale.color")->label(__('Цвет'))->maxLength(255),
+                    // An empty field is not written: a configuration without its own words keeps no empty keys.
+                    TextInput::make("translations.$locale.name")->label(__('Название конфигурации'))->maxLength(255)
+                        ->dehydrated(fn ($state): bool => filled($state)),
+                    TextInput::make("translations.$locale.color")->label(__('Цвет'))->maxLength(255)
+                        ->dehydrated(fn ($state): bool => filled($state)),
                 ] : []),
             ]), array_keys(CatalogLocales::contentTranslations()), array_values(CatalogLocales::contentTranslations()),
         ))->columnSpanFull();
